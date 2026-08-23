@@ -14,7 +14,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import cortex
-from cortex_runtime import attempt_facade, attempt_protocol, ledger_db
+from cortex_runtime import attempt_facade, attempt_protocol, ledger_db, worker_identity
 
 
 class PlannerCompletionPersistenceTests(unittest.TestCase):
@@ -59,6 +59,19 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self._host_store_env.stop()
         self.temporary.cleanup()
 
+    def _complete(self, params: dict[str, object], attempt: dict[str, object] | None = None) -> dict:
+        """Call the worker facade through its server-bound semantic channel."""
+        source = attempt or self.attempt
+        binding = {
+            "project_root": str(self.project),
+            "task_id": self.task_id,
+            "attempt_id": str(params.get("attempt_id") or source.get("attempt_id") or "plan-01"),
+            "profile": str(params.get("profile") or source.get("profile") or "planner"),
+        }
+        semantic = {key: value for key, value in params.items() if key not in worker_identity.SERVER_OWNED_FIELDS}
+        with worker_identity.worker_binding(binding):
+            return attempt_facade.complete_attempt(semantic)
+
     @staticmethod
     def planning() -> dict[str, object]:
         return {
@@ -102,10 +115,9 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
 
     def test_schema_has_a_patch_only_repair_variant(self) -> None:
         schema = cortex.PUBLIC_SCHEMA_REGISTRY["complete_attempt"]
-        self.assertEqual(
-            schema["required"],
-            ["project_root", "task_id", "attempt_id", "profile"],
-        )
+        # Worker identity is injected by the server-bound transport and is
+        # intentionally absent from the public semantic schema.
+        self.assertEqual(schema["required"], [])
         repair = next(
             branch for branch in schema["oneOf"]
             if set(branch["required"]) == {"base_payload_digest", "patches"}
@@ -165,7 +177,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         attempt = {"attempt_id": "implementation-01", "gate": "implementation", "profile": "backend_dev", "status": "running"}
         with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "backend_dev")), \
              mock.patch.object(attempt_protocol, "complete_attempt") as complete:
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"])
         self.assertIn("only for planner attempts", response["diagnostics"][0]["message"])
         complete.assert_not_called()
@@ -183,7 +195,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         }
         with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
              mock.patch.object(attempt_protocol, "complete_attempt") as complete:
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"])
         self.assertIn("planning payload", response["diagnostics"][0]["message"])
         complete.assert_not_called()
@@ -203,7 +215,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         }
         with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
              mock.patch.object(attempt_protocol, "complete_attempt") as complete:
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"])
         self.assertIn("verification", response["diagnostics"][0]["message"])
         complete.assert_not_called()
@@ -219,10 +231,12 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
                 {"id": "two", "title": "x", "objective": "y", "microtasks": "not-an-array"},
             ],
         }
-        params = {"project_root": str(self.project), "task_id": self.task_id, "attempt_id": "plan-01", "profile": "planner", "status": "completed", "summary": "ready", "findings": [], "decisions_needed": [], "unresolved": [], "planning": malformed}
-        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
+        params = {"status": "completed", "summary": "ready", "findings": [], "decisions_needed": [], "unresolved": [], "planning": malformed}
+        binding = {"project_root": str(self.project), "task_id": self.task_id, "attempt_id": "plan-01", "profile": "planner"}
+        with worker_identity.worker_binding(binding), \
+             mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
              mock.patch.object(attempt_protocol, "complete_attempt") as complete:
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"])
         self.assertGreaterEqual(len(response["diagnostics"]), 4)
         self.assertTrue(any("recommendation" in item["message"] for item in response["diagnostics"]))
@@ -242,6 +256,36 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertEqual(
             rejected["base_payload_digest"], response["base_payload_digest"],
         )
+        self.assertIsNone(attempt_protocol.get_attempt_result(
+            self.root, task_id=self.task_id, attempt_id="plan-01",
+        ))
+
+    def test_top_level_planning_fields_are_rejected_without_legacy_alias_recovery(self) -> None:
+        """Planning is accepted only under the canonical nested sibling."""
+        attempt = {
+            "attempt_id": "plan-01", "gate": "plan", "profile": "planner",
+            "status": "running", "dispatch_ref": "dispatch-plan-01",
+        }
+        raw = self.planning()
+        # This is the exact planner mistake seen in the runtime receipt: the
+        # planning siblings are emitted at complete_attempt's root.
+        params = {
+            "status": "completed", "summary": "ready", "findings": [],
+            "decisions_needed": [], "unresolved": [], "claims": [], **raw,
+        }
+        binding = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner",
+        }
+        with worker_identity.worker_binding(binding), \
+             mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
+             mock.patch.object(attempt_protocol, "complete_attempt") as complete:
+            response = self._complete(params)
+        self.assertFalse(response["ok"], response)
+        self.assertTrue(any(item.get("path") == "$.overview" for item in response["diagnostics"]))
+        self.assertFalse(any("canonical_path" in item for item in response["diagnostics"]))
+        self.assertNotIn("planning_repair", response)
+        complete.assert_not_called()
         self.assertIsNone(attempt_protocol.get_attempt_result(
             self.root, task_id=self.task_id, attempt_id="plan-01",
         ))
@@ -289,12 +333,15 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         }
         with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
              mock.patch.object(attempt_protocol, "complete_attempt") as complete:
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"])
         self.assertEqual(response["code"], "repair_planning_invalid")
         self.assertIn("patches", response["next_action"])
         complete.assert_not_called()
         persisted = ledger_db.get_task_document(self.root, self.task_id, "planning_rejected_draft:plan-01")
+        self.assertEqual(persisted["schema"], "cortex/planning-rejected-draft/v1")
+        self.assertEqual(persisted["attempt_id"], "plan-01")
+        self.assertEqual(persisted["base_payload_digest"], draft["base_payload_digest"])
         self.assertEqual(persisted["planning"]["overview"], self.planning()["overview"])
 
     def test_planner_repair_applies_patch_then_finalizes_same_attempt(self) -> None:
@@ -312,10 +359,12 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
             {"status": "completed", "summary": "draft", "findings": [], "decisions_needed": [], "unresolved": [], "claims": []},
         )
         params = {
-            "project_root": str(self.project), "task_id": self.task_id,
-            "attempt_id": "plan-01", "profile": "planner",
             "base_payload_digest": draft["base_payload_digest"],
             "patches": [{"op": "replace", "path": "/work_packages/0/gates", "value": ["implementation"]}],
+        }
+        binding = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner",
         }
         canonical = {
             "result_ref": "attempt-result-repaired", "status": "completed",
@@ -323,7 +372,8 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
             "lifecycle_status": attempt_protocol.LIFECYCLE_WORK_COMPLETED,
         }
         finalized = {**canonical, "lifecycle_status": attempt_protocol.LIFECYCLE_COMPLETED}
-        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
+        with worker_identity.worker_binding(binding), \
+             mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
              mock.patch.object(attempt_facade, "_receipt_guard", return_value={}), \
              mock.patch.object(attempt_facade, "_workspace_observation", return_value={}), \
              mock.patch.object(attempt_facade, "_mark_attempt"), \
@@ -332,7 +382,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
              mock.patch.object(attempt_protocol, "begin_attempt_finalization"), \
              mock.patch.object(attempt_protocol, "build_attempt_result_view", return_value={"projection_ref": "view-repaired"}), \
              mock.patch.object(attempt_protocol, "finalize_attempt", return_value={"result": finalized}):
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertTrue(response["ok"], response)
         self.assertEqual(response["attempt_result_ref"], "attempt-result-repaired")
         manifest = cortex.current_planning_manifest(self.task_dir)
@@ -355,15 +405,15 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         regenerated = self.planning()
         regenerated["overview"] = "the model regenerated everything"
         params = {
-            "project_root": str(self.project), "task_id": self.task_id,
-            "attempt_id": "plan-01", "profile": "planner",
             "status": "completed", "summary": "draft", "findings": [],
             "decisions_needed": [], "unresolved": [], "claims": [],
             "planning": regenerated,
         }
-        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
+        binding = {"project_root": str(self.project), "task_id": self.task_id, "attempt_id": "plan-01", "profile": "planner"}
+        with worker_identity.worker_binding(binding), \
+             mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
              mock.patch.object(attempt_protocol, "complete_attempt") as complete:
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"])
         self.assertEqual(response["base_payload_digest"], draft["base_payload_digest"])
         self.assertEqual(response["planning_repair"]["mode"], "same_attempt_patch")
@@ -450,7 +500,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
              mock.patch.object(attempt_protocol, "begin_attempt_finalization"), \
              mock.patch.object(attempt_protocol, "build_attempt_result_view", return_value={"projection_ref": "view-existing"}), \
              mock.patch.object(attempt_protocol, "finalize_attempt", return_value={"result": finalized}):
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"], response)
         self.assertEqual(response["code"], "attempt_canonical_result_conflict")
         self.assertFalse(response["retryable"])
@@ -472,7 +522,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         }
         with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
              mock.patch.object(attempt_protocol, "complete_attempt") as complete:
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertFalse(response["ok"], response)
         self.assertIn("verification", response["diagnostics"][0]["message"])
         complete.assert_not_called()
@@ -516,7 +566,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
              mock.patch.object(attempt_protocol, "begin_attempt_finalization"), \
              mock.patch.object(attempt_protocol, "build_attempt_result_view", return_value={"projection_ref": "view-03"}), \
              mock.patch.object(attempt_protocol, "finalize_attempt", return_value={"result": finalized}):
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
         self.assertTrue(response["ok"], response)
         self.assertIsNotNone(cortex.current_planning_manifest(self.task_dir))
         self.assertEqual(

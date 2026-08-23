@@ -29,21 +29,44 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
+    def test_plan_approval_next_action_uses_only_canonical_operation(self) -> None:
+        response = orchestration_engine._orchestrate_response(
+            "advance",
+            {
+                "task_id": "canonical-plan-approval",
+                "status": "awaiting_plan_approval",
+                "revision": 1,
+                "pipeline_contract_version": control.PIPELINE_CONTRACT_VERSION,
+                "attempts": [],
+                "completed_gates": [],
+                "skipped_gates": [],
+                "current_pipeline": [],
+                "plan_approval": {
+                    "policy": "required",
+                    "status": "awaiting_user",
+                    "user_requested": True,
+                },
+            },
+        )
+
+        self.assertIn("canonical plan_approval operation", response["next_action"])
+
     def test_internal_blocked_state_projects_to_server_recovery_not_manual_blocker(self) -> None:
         response = orchestration_engine._orchestrate_response(
             "advance",
             {
                 "task_id": "blocked-projection",
                 "status": "blocked",
-                "revision": 1,
-                "attempts": [],
+            "revision": 1,
+            "pipeline_contract_version": control.PIPELINE_CONTRACT_VERSION,
+            "attempts": [],
                 "completed_gates": [],
                 "skipped_gates": [],
                 "current_pipeline": [],
             },
         )
         self.assertEqual(response["state"], "recovery_pending")
-        self.assertEqual(response["internal_ledger_state"], "blocked")
+        self.assertEqual(response["internal"]["ledger_state"], "blocked")
         self.assertIn("server-derived corrective dispatch", response["next_action"])
         self.assertNotIn("COORDINATOR LOCK", response["next_action"])
         self.assertNotIn("resolve the blocker", response["next_action"])
@@ -54,7 +77,7 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
     def test_advance_rejects_uncompilable_context_before_any_gate_or_attempt_mutation(self) -> None:
         """A compiler failure must retain the exact active source wave for retry.
 
-        This is deliberately an adversarial legacy-shaped record: one
+        This is deliberately an adversarial malformed record: one
         requirement has the wrong type.  The test exercises the same canonical
         ContextCompiler boundary that dispatch uses, while proving that
         ``advance`` does not first complete the worker or record its gate.
@@ -84,9 +107,9 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         }
         task = {
             "user_request": "Continue the active discovery attempt safely.",
-            # A historical row can be malformed even though fresh task input
-            # rejects it.  Compiler validation must not discover it after the
-            # active worker result has been consumed.
+            # A durable task row can be malformed even though current task
+            # input rejects it. Compiler validation must not discover it after
+            # the active worker result has been consumed.
             "requirements": ["Retain the valid requirement.", 42],
         }
         request = {
@@ -121,7 +144,7 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         # render a misleading Question message.
         self.assertEqual(rejected["state"], "error")
         self.assertEqual(rejected["phase"], "started")
-        self.assertIn("canonical requirements must be an array of strings", rejected["diagnostics"][0]["message"])
+        self.assertIn("canonical requirements must be normalized non-empty strings", rejected["diagnostics"][0]["message"])
         completed.assert_not_called()
         recorded_gate.assert_not_called()
         self.assertEqual(state["attempts"][0]["status"], "running")

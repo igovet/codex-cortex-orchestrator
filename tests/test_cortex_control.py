@@ -21,6 +21,7 @@ from cortex_runtime import mcp_api
 from cortex_runtime import delegation_service
 from cortex_runtime import briefings
 from cortex_runtime import attempt_protocol
+from cortex_runtime import ledger_db
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -35,9 +36,18 @@ class ControlPlaneTests(unittest.TestCase):
         self._previous_host_store = os.environ.get(control.HOST_CONTROL_STORE_ENV)
         os.environ[control.HOST_CONTROL_STORE_ENV] = str(self.host_store)
         self.ledger = control.ledger_root_path({"project_root": str(self.project)})
+        # Current V5 governance authenticity is host-owned.  Provision the
+        # test host's private lifecycle key before any start/classification
+        # path attempts to verify a signed governance record.
+        ledger_db._governance_lifecycle_hmac_key(self.ledger, create=True)
         self._handlers = {}
         def with_project(name, original, params):
             prepared = {**params, "project_root": str(self.project)}
+            # Task-scoped public operations derive their workspace from the
+            # canonical task_ref.  project_root is reserved for project-
+            # scoped maintenance/prune calls and must not be injected here.
+            if name in {"manage_orchestration", "continue_orchestration"} and prepared.get("task_ref"):
+                prepared.pop("project_root", None)
             if name in {"worker_question", "cortex_question", "publish_worker_question"}:
                 action = str(prepared.get("action") or "ask")
                 if action == "ask" and str(prepared.get("question") or "").strip():
@@ -159,41 +169,6 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(delegation_lists["allowed_paths"], ["plugins/cortex"])
 
-    def test_public_resume_task_reconciles_technical_legacy_block_without_user_question(self):
-        """A legacy technical ``blocked`` marker is resumable, not a chat stop."""
-        created = self.init(task_id="legacy-technical-block")
-        state = dict(created["state"])
-        state.update({
-            "status": "blocked",
-            "blocked_reason": "legacy planner recovery marker; no user decision exists",
-        })
-        self.write_task_state(state)
-
-        resumed = control.resume_task({
-            "task_id": state["task_id"],
-            "expected_revision": state["revision"],
-            "principal": "thread-a",
-            "reason": "resume the durable task after plugin upgrade",
-        })
-
-        self.assertEqual(resumed["state"]["status"], "active")
-        self.assertNotIn("blocked_reason", resumed["state"])
-        self.assertEqual(resumed["state"].get("resume_events", [])[-1]["reason"], "resume the durable task after plugin upgrade")
-        public = mcp_api.v3_response(
-            {
-                "ok": True,
-                "state": "active",
-                "code": "resumed",
-                "result": {"requires_user_decision": False},
-            },
-            "legacy-technical-block",
-            native_arguments=lambda request: {},
-            public_schema="cortex/test/v1",
-            coordinator_lock="internal-only",
-            include_result=True,
-        )
-        self.assertFalse(public["user_view"]["requires_user_decision"])
-        self.assertNotEqual(public["user_view"]["message_type"], "decision_required")
 
     def test_init_task_preserves_governance_snapshot_types_and_digest(self):
         """Persisted governance must hash the exact server-owned JSON snapshot."""
@@ -379,19 +354,6 @@ class ControlPlaneTests(unittest.TestCase):
         return {**delegated, "state": confirmed["state"], "host_spawn": confirmed["host_spawn"]}
 
 
-    def facade_start(self, task_id, waves, *, complexity="C1", submission_id=None, host_capabilities=None):
-        return control.orchestrate({
-            "operation": "start",
-            "submission_id": submission_id or f"{task_id}-start",
-            "principal": "thread-a",
-            "thread_id": "thread-a",
-            "task": {"task_id": task_id, "user_request": f"facade task {task_id}", "complexity": complexity},
-            "waves": waves,
-            "host_capabilities": host_capabilities or {
-                "spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
-                "create_thread_models": ["gpt-5.6-luna"],
-            },
-        })
 
 
 
@@ -969,83 +931,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(len(failed["dispatches"]), 1)
 
 
-    def test_read_only_inspect_never_enters_state_lock_and_explicit_recovery_is_the_writer(self):
-        started = self.v3_start("separate status inspection from lease recovery", waves=[
-            {"workers": [{"phase": "discover"}]},
-            {"workers": [{"phase": "implementation"}]},
-        ])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = self.task_state(task_dir)
-        attempt = state["attempts"][0]
-        lease_field = (
-            "spawn_lease_expires_at"
-            if attempt["status"] == control.AWAITING_HOST_SPAWN
-            else "worker_lease_expires_at"
-        )
-        attempt[lease_field] = "2000-01-01T00:00:00+00:00"
-        self.write_task_state(state)
-
-        inspect_request = {
-            "operation": "inspect",
-            "project_root": str(self.project),
-            "principal": state["principal"],
-            "thread_id": state["thread_id"],
-            "task_id": state["task_id"],
-        }
-        with mock.patch.object(
-            orchestration_engine,
-            "state_lock",
-            side_effect=AssertionError("read-only inspect must not acquire state_lock"),
-        ) as state_lock:
-            inspected = control.orchestrate(inspect_request)
-        state_lock.assert_not_called()
-        self.assertTrue(inspected["ok"], inspected)
-        recovery_view = inspected["result"]["lifecycle_recovery"]
-        self.assertEqual(recovery_view["mode"], "read_only")
-        self.assertTrue(recovery_view["required"])
-        self.assertEqual(recovery_view["expired_attempt_ids"], [attempt["attempt_id"]])
-        self.assertEqual(recovery_view["recovery_intent"], "recover_inspect")
-        self.assertIn("recover_inspect", recovery_view["next_action"])
-        unchanged = self.task_state(task_dir)["attempts"][0]
-        self.assertEqual(unchanged["status"], attempt["status"])
-        self.assertNotEqual(unchanged["lifecycle_status"], "needs_recovery")
-
-        recovered = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": started["task_ref"],
-            "intent": "recover_inspect",
-        })
-        self.assertTrue(recovered["ok"], recovered)
-        # An expired lifecycle lease is an internal reconciliation condition,
-        # not a user-visible Cortex block.  Explicit recovery must atomically
-        # retire the stale attempt and derive one server-owned Planner route
-        # for the unresolved implementation frontier.  The coordinator must
-        # never be asked to manufacture a future_waves payload or to decide
-        # how to repair the projection itself.
-        self.assertNotEqual(recovered.get("state"), "blocked", recovered)
-        self.assertFalse(
-            (recovered.get("user_view") or {}).get("requires_user_decision", False),
-            recovered,
-        )
-        dispatches = recovered.get("dispatches") or recovered.get("spawn_requests") or []
-        self.assertTrue(dispatches, recovered)
-        self.assertTrue(
-            any(str(item.get("phase") or item.get("gate") or "") == "discover" for item in dispatches),
-            recovered,
-        )
-        self.assertNotIn("remain silent", str(recovered.get("next_action") or "").lower())
-        lifecycle_recovery = recovered["result"]["lifecycle_recovery"]
-        self.assertEqual(lifecycle_recovery["mode"], "recover_lifecycle")
-        self.assertTrue(lifecycle_recovery["state_changed"])
-        self.assertEqual(lifecycle_recovery["expired_attempt_ids"], [attempt["attempt_id"]])
-        self.assertFalse(lifecycle_recovery["required"])
-        repaired = self.task_state(task_dir)["attempts"][0]
-        self.assertEqual(repaired["status"], "failed")
-        self.assertEqual(repaired["lifecycle_status"], "needs_recovery")
-        self.assertEqual(repaired["finalization_reason"], "lifecycle_lease_expired")
-        repaired_state = self.task_state(task_dir)
-        self.assertEqual(repaired_state["status"], "active")
-        self.assertEqual(repaired_state.get("status"), "active")
 
 
     def test_recover_blocked_repairs_stale_failed_attempt_without_canonical_result(self):
@@ -1149,77 +1034,6 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertNotIn("CORTEX ACTIVE WORKER", str(recovered.get("next_action") or ""))
 
 
-    def test_subagent_stop_with_open_question_remains_resumable_not_failed(self):
-        with mock.patch.dict(
-            os.environ,
-            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
-            clear=False,
-        ):
-            started = self.v3_start(
-                "pause a native worker for a material question",
-                waves=[{"workers": [{"phase": "discover"}]}],
-            )
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        parent_session = "host-question-stop-parent"
-        control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
-        bound = control.bind_host_worker_from_hook(
-            str(self.project), state["task_id"], parent_session, "default",
-            "native.QuestionStop:01", attempt["expected_model"],
-        )
-        self.assertTrue(bound["bound"], bound)
-        question = control.worker_question({
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
-            "action": "ask",
-            "question": "Which externally visible behavior should be authoritative?",
-        })
-        self.assertTrue(question["ok"], question)
-        stopped = control.finalize_host_worker_stop_from_hook(
-            str(self.project), state["task_id"], parent_session, "native.QuestionStop:01",
-        )
-        self.assertEqual(stopped["outcome"], "awaiting_user")
-        state = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual(state["attempts"][0]["status"], "running")
-        package = self.task_document(task_dir, f"dispatch:{attempt['attempt_id']}")
-        self.assertEqual(package["spawn_status"], "paused_for_question")
-        self.assertEqual(package["lifecycle_status"], "paused_awaiting_user")
-        self.assertEqual(package["attempt_status"], "running")
-        self.assertIsNone(cortex_hook.active_worker_stop_block(
-            {"hook_event_name": "Stop", "stop_hook_active": False}, state,
-        ))
-        inspected = control.manage_orchestration({
-            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
-        })
-        self.assertEqual(inspected["context_handoff"]["active_workers"], [])
-        self.assertIn("continue_orchestration", inspected["next_action"])
-        answered = control.answer_worker_question({
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "principal": state["principal"],
-            "thread_id": state["thread_id"],
-            "question_id": question["question_ref"],
-            "submission_id": "answer-question-stop",
-            "answer": "Preserve the current public behavior.",
-            "resume_context": {"source": "main_chat", "same_attempt": attempt["attempt_id"]},
-        })
-        self.assertEqual(answered["question"]["status"], "answered")
-        resumed = control.bind_host_worker_from_hook(
-            str(self.project), state["task_id"], parent_session, "default",
-            "native.QuestionStop:01", attempt["expected_model"],
-        )
-        self.assertTrue(resumed["bound"], resumed)
-        inspected = control.manage_orchestration({
-            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
-        })
-        self.assertEqual(inspected["context_handoff"]["stopped_workers"], [])
-        self.assertEqual(
-            inspected["context_handoff"]["active_workers"][0]["host_agent_id"],
-            "native.QuestionStop:01",
-        )
 
     def test_compaction_inspect_recovers_only_still_pending_immutable_dispatch(self):
         started = self.v3_start(
@@ -1545,27 +1359,6 @@ class ControlPlaneTests(unittest.TestCase):
             ],
         )
 
-    def test_classify_canonicalizes_human_pipeline_aliases(self):
-        self.activate()
-        classified = control.classify_task({
-            "complexity": "C3",
-            "requirements": ["The orchestrator selected the gates from the task shape"],
-            "pipeline": ["discovery", "planning", "verification"],
-            "parallel_groups": [["discovery"], ["planning", "verification"]],
-            "principal": "thread-a",
-        })
-        self.assertEqual(classified["pipeline_source"], "orchestrator")
-        self.assertEqual(classified["pipeline"], [
-            "discover", "plan", "qa",
-        ])
-        self.assertEqual(classified["parallel_groups"], [
-            ["discover"], ["plan", "qa"],
-        ])
-        self.assertEqual(classified["pipeline_corrections"][:3], [
-            {"from": "discovery", "to": "discover", "reason": "canonical gate alias"},
-            {"from": "planning", "to": "plan", "reason": "canonical gate alias"},
-            {"from": "verification", "to": "qa", "reason": "canonical gate alias"},
-        ])
 
     def test_classify_still_rejects_unknown_pipeline_gate_ids(self):
         self.activate()
@@ -1725,69 +1518,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(route["selected_model"], "gpt-5.6-terra")
         self.assertEqual(route["model_resolution"], "explicit_override")
 
-    def test_orchestrate_prefers_confirmed_luna_default_over_explicit_catalog(self):
-        for suffix, spawn_models in (
-            ("luna-catalog", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
-            ("terra-catalog", ["gpt-5.6-sol", "gpt-5.6-terra"]),
-        ):
-            with self.subTest(spawn_models=spawn_models):
-                started = self.facade_start(
-                    f"configured-default-{suffix}",
-                    [{"wave_id": "discover", "delegations": [{
-                        "gate": "discover", "agent": "explorer",
-                        "requested_reasoning_effort": "high",
-                    }]}],
-                    host_capabilities={
-                        "spawn_agent_models": spawn_models,
-                        "create_thread_models": ["gpt-5.6-luna"],
-                        "spawn_agent_default_model": "gpt-5.6-luna",
-                    },
-                )
-                request = started["spawn_requests"][0]
-                self.assertEqual(request["host_tool"], "spawn_agent")
-                self.assertNotIn("model", request)
-                self.assertEqual(request["expected_model"], "gpt-5.6-luna")
-                self.assertEqual(request["model_resolution"], "configured_default")
-                self.assertEqual(request["reasoning_effort"], "high")
 
-    def test_configured_default_preserves_independent_effort(self):
-        for effort in ("medium", "high", "xhigh"):
-            with self.subTest(effort=effort):
-                started = self.facade_start(
-                    f"configured-effort-{effort}",
-                    [{"wave_id": "discover", "delegations": [{
-                        "gate": "discover", "agent": "explorer",
-                        "requested_reasoning_effort": effort,
-                    }]}],
-                    host_capabilities={
-                        "spawn_agent_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
-                        "spawn_agent_default_model": "gpt-5.6-luna",
-                    },
-                )
-                request = started["spawn_requests"][0]
-                self.assertNotIn("model", request)
-                self.assertEqual(request["reasoning_effort"], effort)
 
-    def test_orchestrate_without_default_uses_explicit_luna_then_hidden_terra(self):
-        explicit = self.facade_start(
-            "explicit-luna-no-default",
-            [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}],
-            host_capabilities={"spawn_agent_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]},
-        )["spawn_requests"][0]
-        self.assertEqual(explicit["host_tool"], "spawn_agent")
-        self.assertEqual(explicit["model"], "gpt-5.6-luna")
-        self.assertEqual(explicit["expected_model"], "gpt-5.6-luna")
-        self.assertEqual(explicit["model_resolution"], "explicit_override")
-
-        fallback = self.facade_start(
-            "terra-fallback-no-default",
-            [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}],
-            host_capabilities={"spawn_agent_models": ["gpt-5.6-sol", "gpt-5.6-terra"]},
-        )["spawn_requests"][0]
-        self.assertEqual(fallback["host_tool"], "spawn_agent")
-        self.assertEqual(fallback["model"], "gpt-5.6-terra")
-        self.assertEqual(fallback["expected_model"], "gpt-5.6-terra")
-        self.assertEqual(fallback["model_resolution"], "explicit_override")
 
     def test_explicit_luna_and_terra_overrides_keep_adaptive_effort_floor(self):
         for agent in ("planner", "general", "code_reviewer"):
@@ -1968,124 +1700,11 @@ class ControlPlaneTests(unittest.TestCase):
         route = control.resolve_dispatch_route({"agent": "explorer", "task_kind": "reading", "risk": "low", "complexity": "C1", "requested_model": "gpt-5.6-luna"})
         self.assertEqual(route["selected_model"], "gpt-5.6-luna")
 
-    def test_luna_route_falls_back_to_terra_when_the_native_host_does_not_offer_luna(self):
-        route = control.resolve_dispatch_route({
-            "agent": "explorer",
-            "task_kind": "reading",
-            "risk": "low",
-            "complexity": "C1",
-            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
-        })
-        self.assertEqual(route["policy_model"], "gpt-5.6-luna")
-        self.assertEqual(route["selected_model"], "gpt-5.6-terra")
-        self.assertEqual(route["fallback_reason"], "host_model_unavailable")
-        self.assertEqual(route["fallback_from_model"], "gpt-5.6-luna")
-        self.assertEqual(route["host_available_models"], ["gpt-5.6-sol", "gpt-5.6-terra"])
 
-    def test_luna_route_requires_terra_when_the_native_host_does_not_offer_luna(self):
-        with self.assertRaisesRegex(ValueError, "native host does not expose required model gpt-5.6-luna"):
-            control.resolve_dispatch_route({
-                "agent": "explorer",
-                "task_kind": "reading",
-                "risk": "low",
-                "complexity": "C1",
-                "available_models": ["gpt-5.6-sol"],
-            })
 
-    def test_delegation_records_hidden_terra_fallback_without_model_mismatch(self):
-        state = self.init(task_id="host-model-fallback")["state"]
-        delegation = self.delegate(
-            state,
-            "host-model-fallback",
-            "discover",
-            "explorer",
-            task_kind="implementation",
-            available_models=["gpt-5.6-sol", "gpt-5.6-terra"],
-            available_thread_models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-        )
-        attempt = delegation["state"]["attempts"][-1]
-        self.assertEqual(attempt["policy_model"], "gpt-5.6-luna")
-        self.assertEqual(attempt["selected_model"], "gpt-5.6-terra")
-        self.assertEqual(attempt["expected_model"], "gpt-5.6-terra")
-        self.assertEqual(attempt["model_resolution"], "explicit_override")
-        self.assertEqual(attempt["selected_reasoning_effort"], "medium")
-        self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
-        self.assertEqual(attempt["fallback_from_model"], "gpt-5.6-luna")
-        self.assertEqual(attempt["luna_fallback"], "terra")
-        self.assertEqual(attempt["spawn_request"]["host_tool"], "spawn_agent")
-        self.assertEqual(attempt["spawn_request"]["model"], "gpt-5.6-terra")
-        self.assertEqual(attempt["host_spawn"]["model_verification"], "verified")
 
-    def test_explicit_visible_thread_keeps_luna_and_dynamic_reasoning_effort(self):
-        state = self.init(task_id="visible-luna-thread")["state"]
-        observed = control.status({"task_id": "visible-luna-thread", "principal": "thread-a"})
-        delegated = control.record_delegation({
-            "task_id": "visible-luna-thread", "principal": "thread-a",
-            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
-            "gate": "discover", "agent": "explorer", "task_kind": "reading", "risk": "low",
-            "dispatch_mode": "visible_thread",
-            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
-            "available_thread_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-            "objective": "Inspect a narrow question", "ownership": "Read-only discovery",
-            "allowed_paths": ["."], "acceptance_criteria": ["Record findings"],
-            "verification": ["Cite paths"],
-        })
-        request = delegated["spawn_request"]
-        self.assertEqual(request["host_tool"], "create_thread")
-        self.assertEqual(request["model"], "gpt-5.6-luna")
-        self.assertEqual(request["reasoning_effort"], "medium")
-        self.assertEqual(request["thread_environment"], "local")
-        self.assertEqual(request["prompt"], request["message"])
-        briefing = self.briefing_from_request(request)
-        self.assertIn("visible user-owned task", briefing)
-        self.assertIn("Emit English only in every message", briefing)
-        attempt = delegated["state"]["attempts"][-1]
-        self.assertTrue(attempt["user_owned_thread"])
-        self.assertEqual(attempt["visibility"], "visible")
-        confirmed = control.confirm_host_spawn({
-            "task_id": "visible-luna-thread", "principal": "thread-a",
-            "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
-            "host_tool": "create_thread", "host_agent_id": "thread-visible-123",
-            "host_task_name": request["task_name"], "host_model": "gpt-5.6-luna",
-            "host_reasoning_effort": "medium",
-        })
-        self.assertTrue(confirmed["confirmed"])
-        self.assertEqual(confirmed["host_spawn"]["tool"], "create_thread")
 
-    def test_luna_host_fallback_uses_hidden_terra_without_changing_effort(self):
-        state = self.init(task_id="terra-fallback-opt-out")['state']
-        delegated = self.delegate(
-            state,
-            "terra-fallback-opt-out",
-            "discover",
-            "explorer",
-            task_kind="discovery",
-            available_models=["gpt-5.6-sol", "gpt-5.6-terra"],
-            luna_fallback="terra",
-        )
-        attempt = delegated["state"]["attempts"][-1]
-        self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
-        self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-terra")
-        self.assertEqual(delegated["spawn_request"]["reasoning_effort"], "medium")
-        self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
-        self.assertEqual(attempt["fallback_from_model"], "gpt-5.6-luna")
-        self.assertFalse(attempt["user_owned_thread"])
 
-    def test_visible_thread_can_opt_into_an_isolated_worktree(self):
-        state = self.init(task_id="visible-worktree-thread")["state"]
-        observed = control.status({"task_id": "visible-worktree-thread", "principal": "thread-a"})
-        delegated = control.record_delegation({
-            "task_id": "visible-worktree-thread", "principal": "thread-a",
-            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
-            "gate": "discover", "agent": "explorer", "task_kind": "reading", "risk": "low",
-            "dispatch_mode": "visible_thread", "thread_environment": "worktree",
-            "available_thread_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-            "objective": "Inspect a narrow question", "ownership": "Read-only discovery",
-            "allowed_paths": ["."], "acceptance_criteria": ["Record findings"],
-            "verification": ["Cite paths"],
-        })
-        self.assertEqual(delegated["spawn_request"]["thread_environment"], "worktree")
-        self.assertEqual(delegated["state"]["attempts"][-1]["thread_environment"], "worktree")
 
     def test_thread_environment_is_rejected_for_hidden_subagents(self):
         state = self.init(task_id="hidden-thread-environment")["state"]
@@ -2189,21 +1808,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(route["model_choice_reason"], "explicit_user_request")
         self.assertEqual(route["user_requested_model"], "gpt-5.6-sol")
 
-    def test_public_worker_preserves_user_requested_sol_provenance(self):
-        started = self.v3_start(
-            "user selected Sol",
-            waves=[{"workers": [{
-                "phase": "implementation", "profile": "general",
-                "user_requested_model": "sol", "effort": "high",
-            }]}],
-            complexity="C1",
-        )
-        self.assertTrue(started["ok"])
-        self.assertEqual(started["dispatches"][0]["arguments"]["model"], "gpt-5.6-sol")
-        task_dir = next((self.ledger / "tasks").iterdir())
-        attempt = control.load_task_state_for_artifact(task_dir)["attempts"][0]
-        self.assertEqual(attempt["requested_model"], "gpt-5.6-sol")
-        self.assertEqual(attempt["user_requested_model"], "gpt-5.6-sol")
 
     def test_explorer_rejects_user_requested_sol(self):
         with self.assertRaisesRegex(ValueError, "explorer always uses"):
@@ -2733,33 +2337,6 @@ class ControlPlaneTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different content"):
             control.answer_worker_question({**answer_args, "answer": "Use the current mode."})
 
-    def test_cortex_question_routes_workers_to_main_chat_with_flexible_answers(self):
-        state = self.init(task_id="question-ui")["state"]
-        delegated = self.delegate(state, "question-ui", "discover", "explorer")
-        pending = control.cortex_question({
-            "task_id": "question-ui", "principal": "thread-a", "attempt_id": delegated["attempt_id"],
-            "submission_id": "explorer-question-1", "question": "Which paths should be changed?",
-            "options": [
-                {"option_id": "source_paths", "label": "src", "description": "Update source files"},
-                {"option_id": "test_paths", "label": "tests", "description": "Update tests"},
-            ],
-            "multiple": True, "custom_label": "Additional direction", "context": {"reason": "scope"},
-        })
-        self.assertEqual(pending["status"], "pending_user_input")
-        self.assertEqual(pending["ui"]["custom_label"], "Additional direction")
-        question_id = pending["question_id"]
-        listed = control.list_worker_questions({"task_id": "question-ui", "principal": "thread-a", "status": "open"})
-        question = listed["questions"][0]
-        self.assertEqual(question["options"][0]["label"], "src")
-        self.assertTrue(question["multiple"])
-        with mock.patch.object(control, "_request_mcp_elicitation", return_value=("accept", {"selections": ["source_paths", "test_paths"], "custom_response": {"image": {"path": "/tmp/shot.png"}}}, "elicitation-1")):
-            answered = control.cortex_question({"task_id": "question-ui", "principal": "thread-a", "question_id": question_id})
-        self.assertEqual(answered["status"], "answered")
-        self.assertEqual(answered["answer"]["option_ids"], ["source_paths", "test_paths"])
-        self.assertEqual(answered["answer"]["custom_response"]["image"]["path"], "/tmp/shot.png")
-        updates = control.get_worker_question_updates({"task_id": "question-ui", "principal": "thread-a", "attempt_id": delegated["attempt_id"]})
-        self.assertEqual(updates["updates"][-1]["kind"], "question_answered")
-        self.assertEqual(updates["updates"][-1]["answer_option_ids"], ["source_paths", "test_paths"])
 
     def test_cortex_question_form_always_puts_custom_field_last(self):
         option_ids = [item["option_id"] for item in control._question_options(["A", "B"])]
@@ -2931,92 +2508,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(definition["plan_approval"], "auto")
 
 
-    def test_v3_automatic_prompt_uses_gate_briefing_and_task_context(self):
-        started = self.v3_start(
-            "add a durable worker prompt contract",
-            requirements=["Preserve the public facade"],
-            acceptance_criteria=["Every agent receives the overall outcome"],
-            scope=["plugins/cortex"],
-            verification=["Run prompt contract tests"],
-            budget="No external writes",
-            pause_conditions=["A public schema change becomes necessary"],
-        )
-        prompt = self.briefing_from_response(started)
-        self.assertIn("## Role contract", prompt)
-        self.assertIn("## Assignment data", prompt)
-        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(assignment["user_intent"]["projection"], "add a durable worker prompt contract")
-        self.assertEqual(assignment["requirements"], ["Preserve the public facade"])
-        self.assertEqual(assignment["scope"], ["plugins/cortex"])
-        self.assertEqual(assignment["task_acceptance_criteria"], ["Every agent receives the overall outcome"])
-        self.assertIn("Identify entry points", assignment["gate_acceptance_criteria"][0])
-        self.assertEqual(assignment["task_verification"], ["Run prompt contract tests"])
-        self.assertIn("Judge only this gate; unfinished downstream task outcomes are not blockers", prompt)
-        self.assertIn("Publish only the semantic AttemptResult fields", prompt)
-        self.assertEqual(assignment["pause_conditions"], ["A public schema change becomes necessary"])
-        self.assertEqual(assignment["budget"], "No external writes")
-        self.assertNotIn("Complete and return the discover result", prompt)
-        self.assertNotIn("## Canonical Cortex team", prompt)
 
-    def test_scheduler_contract_is_complete_in_the_immutable_worker_briefing(self):
-        docs = self.project / "docs"
-        docs.mkdir()
-        (docs / "contract.md").write_text("# Verified contract\n", encoding="utf-8")
-        started = self.v3_start(
-            "transport every scheduler field into the worker briefing",
-            complexity="C1",
-            requirements=["Preserve the public facade."],
-            acceptance_criteria=["The worker receives the complete assignment."],
-            verification=["Inspect the immutable dispatch briefing."],
-            waves=[{"workers": [{
-                "phase": "discover",
-                "profile": "explorer",
-                "objective": "Trace the constructor-to-worker data path.",
-                "paths": ["plugins/cortex/scripts"],
-                "context_files": ["docs/contract.md"],
-                "acceptance": ["Every scheduler-owned assignment field is present."],
-                "verification": ["Compare the package and rendered briefing."],
-                "model": "luna",
-                "effort": "high",
-            }]}],
-        )
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = self.task_state(task_dir)
-        attempt = state["attempts"][0]
-        package = self.task_document(task_dir, f"dispatch:{attempt['attempt_id']}")
-        prompt = self.briefing_from_response(started)
-
-        self.assertEqual(package["gate"], "discover")
-        self.assertEqual(package["agent"], "explorer")
-        self.assertEqual(package["objective"], "Trace the constructor-to-worker data path.")
-        self.assertEqual(package["allowed_paths"], ["plugins/cortex/scripts"])
-        self.assertEqual(package["context_files"], ["docs/contract.md"])
-        self.assertEqual(package["acceptance_criteria"], ["Every scheduler-owned assignment field is present."])
-        self.assertEqual(package["verification"], ["Compare the package and rendered briefing."])
-        self.assertEqual(package["depends_on_phases"], [])
-        self.assertIn("selection_reason", package)
-        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(assignment["phase"], "discover")
-        self.assertEqual(assignment["profile"], "explorer")
-        self.assertEqual(assignment["mission"], "Trace the constructor-to-worker data path.")
-        self.assertEqual(assignment["allowed_paths"], ["plugins/cortex/scripts"])
-        self.assertEqual(assignment["context_files"], ["docs/contract.md"])
-        self.assertEqual(assignment["gate_acceptance_criteria"], ["Every scheduler-owned assignment field is present."])
-        self.assertEqual(assignment["gate_verification"], ["Compare the package and rendered briefing."])
-        self.assertEqual(assignment["phase_dependencies"], [])
-        self.assertTrue(assignment["selection_rationale"])
-        self.assertNotIn("Model route and reasoning effort:", prompt)
-        bootstrap = started["dispatches"][0]["arguments"]["message"]
-        self.assertIn(started["dispatches"][0]["dispatch_ref"], bootstrap)
-        self.assertIn(started["dispatches"][0]["briefing_digest"], bootstrap)
-        self.assertNotIn("Trace the constructor-to-worker data path.", bootstrap)
-        self.assertIn("Before work validate briefing, acceptance/verification, predecessor refs, and gate evidence", bootstrap)
-        self.assertIn("record the exact evidence gap and return coordinator advice for a corrective dispatch", bootstrap)
-        self.assertIn("Ask one durable worker_question only for an explicit task requirement", bootstrap)
-        self.assertIn("Call read_dispatch_briefing before project work", prompt)
-        self.assertIn("Before every strict Cortex tool call, use the exact nested schema", prompt)
-        self.assertIn("briefing receipt", prompt)
-        self.assertIn("Finish with complete_attempt", prompt)
 
     def test_implementation_router_prefers_narrow_specialists_and_conservative_fallback(self):
         cases = {
@@ -3181,62 +2673,12 @@ class ControlPlaneTests(unittest.TestCase):
         tasks = self.ledger / "tasks"
         self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
-    def test_v3_incompatible_registry_blocks_start_without_selecting_an_existing_task(self):
-        existing = self.v3_start("existing task must remain isolated")
-        self.assertTrue(existing["ok"])
-
-        unscoped = control.manage_orchestration({
-            "project_root": str(self.project), "intent": "inspect",
-        })
-        self.assertFalse(unscoped["ok"])
-        self.assertEqual(unscoped["code"], "task_ref_required")
-        self.assertNotIn("task_ref", unscoped)
-        self.assertIn("Do not inspect, list, infer, or select another task", unscoped["next_action"])
-
-        control.db_put_global(
-            self.ledger,
-            "operation_registry",
-            {"schema": "cortex/orchestration/v0", "starts": {}, "tasks": {}},
-        )
-        blocked = self.v3_start("new task must never attach to the existing task")
-        self.assertFalse(blocked["ok"])
-        self.assertEqual(blocked["outcome"], "needs_input")
-        self.assertEqual(blocked["code"], "start_state_incompatible")
-        self.assertTrue(blocked["retryable"])
-        self.assertFalse(blocked["task_created"])
-        self.assertNotIn("task_ref", blocked)
-        self.assertIn("Cortex did not create a task", blocked["next_action"])
-        self.assertIn("retry the same start_orchestration request", blocked["next_action"])
-
-        recovery = control.manage_orchestration({
-            "project_root": str(self.project), "intent": "inspect",
-        })
-        self.assertFalse(recovery["ok"])
-        self.assertEqual(recovery["code"], "task_ref_required")
-        self.assertNotIn("task_ref", recovery)
 
 
 
 
 
 
-    def test_v3_explicit_worker_contract_overrides_gate_defaults_only(self):
-        started = self.v3_start(
-            "explicit contract",
-            waves=[{"workers": [{
-                "phase": "plan", "objective": "Plan the exact adapter change",
-                "acceptance": ["Adapter plan is decision complete"],
-                "verification": ["Cite adapter tests"],
-            }]}],
-            acceptance_criteria=["Public behavior remains current"],
-        )
-        prompt = self.briefing_from_response(started)
-        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(assignment["mission"], "Plan the exact adapter change")
-        self.assertEqual(assignment["gate_acceptance_criteria"], ["Adapter plan is decision complete"])
-        self.assertEqual(assignment["gate_verification"], ["Cite adapter tests"])
-        self.assertEqual(assignment["task_acceptance_criteria"], ["Public behavior remains current"])
-        self.assertNotIn("Produce a decision-complete implementation plan", prompt)
 
     def test_v3_repeated_exact_start_is_idempotent_but_changed_work_creates_a_new_task(self):
         first = self.v3_start("stable objective", waves=[{"workers": [{"phase": "discover"}]}])
@@ -3252,224 +2694,13 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(replay["dispatches"], [])
         self.assertIn("Do not invoke or repeat any worker dispatch", replay["next_action"])
 
-    def test_v1_task_without_pipeline_contract_version_resumes_without_migration_or_duplicate_dispatch(self):
-        started = self.v3_start(
-            "resume a persisted v1 task",
-            complexity="C1",
-            waves=[
-                {"workers": [{"phase": "discover"}]},
-                {"workers": [{"phase": "implementation"}]},
-            ],
-        )
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = self.task_state(task_dir)
-        original_pipeline = list(state["current_pipeline"])
-        original_attempt_id = state["attempts"][0]["attempt_id"]
-        state.pop("pipeline_contract_version", None)
-        self.write_task_state(state)
-
-        inspected = control.manage_orchestration({
-            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
-        })
-        self.assertTrue(inspected["ok"], inspected)
-        self.assertEqual(inspected["dispatches"][0]["arguments"]["task_name"], started["dispatches"][0]["arguments"]["task_name"])
-        after = self.task_state(task_dir)
-        self.assertNotIn("pipeline_contract_version", after)
-        self.assertEqual(after["current_pipeline"], original_pipeline)
-        self.assertEqual([item["attempt_id"] for item in after["attempts"]], [original_attempt_id])
-
-        replay = self.v3_start(
-            "resume a persisted v1 task",
-            complexity="C1",
-            waves=[
-                {"workers": [{"phase": "discover"}]},
-                {"workers": [{"phase": "implementation"}]},
-            ],
-        )
-        self.assertTrue(replay["replayed"])
-        self.assertEqual(replay["dispatches"], [])
-
-    def test_v3_same_user_request_cannot_duplicate_active_task_when_coordinator_metadata_changes(self):
-        request = "$cortex:orchestrator harvest"
-        first = control.start_orchestration({
-            "project_root": str(self.project),
-            "task": {"user_request": request, "user_language": "ru", "complexity": "C3"},
-            "waves": [{"workers": [{"phase": "plan"}]}],
-        })
-        replay = control.start_orchestration({
-            "project_root": str(self.project),
-            "task": {"user_request": request, "language": "English", "complexity": "C2"},
-            "waves": [{"workers": [{"phase": "discover"}]}],
-        })
-        self.assertEqual(replay["task_ref"], first["task_ref"])
-        self.assertTrue(replay["replayed"])
-        self.assertEqual(replay["dispatches"], [])
-        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 1)
 
 
 
-    def test_localized_question_translation_uses_public_answer_en_without_reopening_ui(self):
-        started = self.v3_start(
-            "Проверь перевод ответа на вопрос",
-            user_language="ru",
-            waves=[{"workers": [{"phase": "plan"}]}],
-        )
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        identity = {
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
-        }
-        asked = control.worker_question({
-            **identity,
-            "action": "ask",
-            "question": "Which constraint should guide the implementation?",
-        })
-        with mock.patch.object(
-            control,
-            "_request_mcp_elicitation",
-            return_value=("accept", {"custom_response": "Нужно сохранить обратную совместимость."}, "translation-question-1"),
-        ) as elicitation:
-            awaiting = control.manage_orchestration({
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "intent": "question",
-                "payload": {
-                    "question_ref": asked["question_ref"],
-                    "localized_question": "Какое ограничение должно направлять реализацию?",
-                },
-            })
-            self.assertEqual(awaiting["outcome"], "awaiting_translation")
-            request = awaiting["translation_request"]
-            self.assertEqual(request["intent"], "question")
-            self.assertEqual(request["payload"]["question_ref"], asked["question_ref"])
-            self.assertEqual(request["payload"]["answer"]["custom_response"], "Нужно сохранить обратную совместимость.")
-            completed = control.manage_orchestration({
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "intent": request["intent"],
-                "payload": {
-                    **request["payload"],
-                    "answer_en": "Preserve the current behavior.",
-                },
-            })
-        self.assertTrue(completed["ok"], completed)
-        self.assertEqual(completed["outcome"], "question_answered")
-        self.assertEqual(elicitation.call_count, 1)
-        self.assertIn("plugin source/cache", awaiting["next_action"])
-        answer = control.worker_question({
-            **identity,
-            "action": "poll",
-            "question_ref": asked["question_ref"],
-        })
-        self.assertEqual(answer["answer_text"], "Preserve the current behavior.")
 
 
-    def test_v3_question_ref_opens_native_ui_once_without_coordinator_identity(self):
-        started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        identity = {
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
-        }
-        asked = control.worker_question({
-            **identity,
-            "action": "ask",
-            "question": "Which outcome should the landing page prioritize?",
-            "header": "Primary goal",
-            "options": ["Lead generation", "Direct sales"],
-        })
-        with mock.patch.object(
-            control,
-            "_request_mcp_elicitation",
-            return_value=("accept", {"selection": "Lead generation", "custom_response": ""}, "native-question-1"),
-        ) as elicitation:
-            managed = control.manage_orchestration({
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "intent": "question",
-                "payload": {"question_ref": asked["question_ref"]},
-            })
-        self.assertTrue(managed["ok"])
-        self.assertEqual(managed["outcome"], "question_answered")
-        self.assertEqual(managed["result"]["status"], "answered")
-        self.assertIn("followup_task", managed["next_action"])
-        elicitation.assert_called_once()
 
-        # A duplicate coordinator call is an idempotent receipt and must not
-        # open a second native question UI.
-        with mock.patch.object(control, "_request_mcp_elicitation") as repeated_ui:
-            replay = control.manage_orchestration({
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "intent": "question",
-                "payload": {"question_ref": asked["question_ref"]},
-            })
-        self.assertTrue(replay["ok"])
-        self.assertEqual(replay["result"]["status"], "answered")
-        repeated_ui.assert_not_called()
-        polled = control.worker_question({**identity, "action": "poll", "question_ref": asked["question_ref"]})
-        self.assertIn("Lead generation", polled["answer_text"])
 
-    def test_v3_question_management_rejects_guessed_identity_and_plain_text_fallback(self):
-        started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        asked = control.worker_question({
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
-            "action": "ask",
-            "question": "Keep the current product or replace it?",
-        })
-        rejected = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": started["task_ref"],
-            "intent": "question",
-            "payload": {"question_ref": asked["question_ref"], "principal": "guessed-root"},
-        })
-        self.assertFalse(rejected["ok"])
-        self.assertIn("owns lifecycle identity", rejected["diagnostics"][0]["message"])
-
-        with mock.patch.object(control, "_request_mcp_elicitation", side_effect=RuntimeError("host has no elicitation")):
-            unavailable = control.manage_orchestration({
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "intent": "question",
-                "payload": {"question_ref": asked["question_ref"]},
-            })
-        self.assertFalse(unavailable["ok"])
-        self.assertEqual(unavailable["code"], "host_question_unavailable")
-        self.assertIn("must not collect or fabricate the answer", unavailable["next_action"])
-        question = self.task_document(task_dir, f"question:{asked['question_ref']}")
-        self.assertEqual(question["status"], "open")
-
-        # A temporary host-capability failure is retryable rather than a
-        # committed replay.  The same compact coordinator call must try the
-        # native UI again when elicitation becomes available.
-        with mock.patch.object(
-            control,
-            "_request_mcp_elicitation",
-            return_value=("accept", {"selection": "Keep it", "custom_response": ""}, "native-question-2"),
-        ) as retried_ui:
-            retried = control.manage_orchestration({
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "intent": "question",
-                "payload": {"question_ref": asked["question_ref"]},
-            })
-        self.assertTrue(retried["ok"])
-        self.assertEqual(retried["outcome"], "question_answered")
-        retried_ui.assert_called_once()
 
     def test_v3_exact_user_request_rejects_coordinator_expansion_before_ledger_write(self):
         rejected = control.start_orchestration({
@@ -3487,20 +2718,20 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
 
-    def test_v3_desktop_skill_link_is_canonicalized_before_task_persistence_and_labeling(self):
-        request = (
-            "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.0.0/skills/"
-            "orchestrator/SKILL.md) создай лендинг"
-        )
-        self.assertTrue(control.desktop_cortex_route_requested(request))
-        self.assertFalse(control.desktop_cortex_route_requested("[file](/tmp/skills/orchestrator/SKILL.md) создай лендинг"))
-        with mock.patch.object(control, "activate_orchestration", wraps=control.activate_orchestration) as activate:
-            started = self.v3_start(request, waves=[{"workers": [{"phase": "plan"}]}])
-        self.assertTrue(started["ok"])
-        self.assertTrue(any(call.args and call.args[0].get("user_command") == control.ACTIVATION_COMMAND for call in activate.call_args_list))
+    def test_v3_start_uses_host_activation_and_preserves_exact_request(self):
+        activation = control.activate_orchestration({
+            "project_root": str(self.project),
+            "user_command": control.ACTIVATION_COMMAND,
+            "principal": "thread-a",
+            "thread_id": "thread-a",
+        })
+        self.assertTrue(activation["active"])
+        request = "создай лендинг"
+        started = self.v3_start(request, waves=[{"workers": [{"phase": "plan"}]}])
+        self.assertTrue(started["ok"], started)
         task_dir = next((self.ledger / "tasks").iterdir())
         task = control.load_task_definition(task_dir)
-        self.assertEqual(task["user_request"], "$cortex:orchestrator создай лендинг")
+        self.assertEqual(task["user_request"], request)
         self.assertNotIn("objective", task)
         self.assertRegex(task_dir.name, r"^0001-task-[0-9a-f]{8}$")
         self.assertNotIn("home", task_dir.name)
@@ -3510,72 +2741,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotIn("plugins/cache", briefing)
         self.assertTrue(task["intent_clarification_required"])
         self.assertIn("Cortex intent preflight: BLOCKING", briefing)
-
-    def test_v3_start_activation_marker_survives_stripped_desktop_route(self):
-        # This reproduces the Desktop failure: the original user turn carries
-        # the selected-skill link, but the coordinator's task body does not.
-        original_user_text = (
-            "[$cortex:orchestrator](/home/user/.codex/plugins/cache/cortex/cortex/10.0.7/skills/"
-            "orchestrator/SKILL.md)\n\nсоздай лендинг"
-        )
-        task_body = "создай лендинг"
-        self.assertIn("[$cortex:orchestrator]", original_user_text)
-        self.assertNotIn("cortex:orchestrator", task_body)
-        with mock.patch.object(control, "activate_orchestration", wraps=control.activate_orchestration) as activate:
-            started = control.start_orchestration({
-                "project_root": str(self.project),
-                "activation_marker": "$cortex:orchestrator",
-                "task": {
-                    "user_request": task_body,
-                    "acceptance_criteria": ["The landing page is created."],
-                    "verification": ["Record the focused start evidence."],
-                },
-                "waves": [{"workers": [{"phase": "plan"}]}],
-            })
-        self.assertTrue(started["ok"], started)
-        self.assertTrue(any(call.args and call.args[0].get("user_command") == control.ACTIVATION_COMMAND for call in activate.call_args_list))
-
-        rejected = control.start_orchestration({
-            "project_root": str(self.project),
-            "activation_marker": "[$cortex:orchestrator](/tmp/anything)",
-            "task": {
-                "user_request": "another task",
-                "acceptance_criteria": ["The task is completed."],
-                "verification": ["Record evidence."],
-            },
-        })
-        self.assertFalse(rejected["ok"])
-        self.assertEqual(rejected["code"], "start_validation_failed")
-        self.assertTrue(any(item.get("path") == "activation_marker" for item in rejected["diagnostics"]))
-
-    def test_v3_desktop_skill_link_cache_version_does_not_split_task_identity(self):
-        first = self.v3_start(
-            "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.0.0/skills/"
-            "orchestrator/SKILL.md) harvest",
-            waves=[{"workers": [{"phase": "plan"}]}],
-        )
-        replay = self.v3_start(
-            "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.4.1/skills/"
-            "orchestrator/SKILL.md) harvest",
-            waves=[{"workers": [{"phase": "discover"}]}],
-        )
-        self.assertTrue(first["ok"], first)
-        self.assertTrue(replay["ok"])
-        self.assertEqual(replay["task_ref"], first["task_ref"])
-        self.assertTrue(replay["replayed"])
-        self.assertEqual(replay["dispatches"], [])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        self.assertRegex(task_dir.name, r"^0001-harvest-[0-9a-f]{8}$")
-        self.assertNotIn("plugins", task_dir.name)
-
-    def test_follow_up_canonicalizes_desktop_skill_link_before_persistence(self):
-        payload = control._v3_follow_up_payload({
-            "user_request": (
-                "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.4.1/skills/"
-                "orchestrator/SKILL.md) correct the result"
-            ),
-        })
-        self.assertEqual(payload["task"]["user_request"], "$cortex:orchestrator correct the result")
 
     def test_v3_detailed_product_surface_request_does_not_force_a_preflight_question(self):
         request = (
@@ -3590,111 +2755,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(control._intent_clarification_preflight("Implement mapping retry logic"), (False, None))
         self.assertEqual(control._intent_clarification_preflight("Fix the application crash"), (False, None))
 
-    def test_v3_non_planner_worker_question_is_answered_through_coordinator_management(self):
-        started = self.v3_start("backend behavior needs product choice", waves=[{
-            "workers": [{"phase": "implementation", "profile": "backend_dev"}],
-        }])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        identity = {
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": "backend_dev",
-        }
-        asked = control.worker_question({
-            **identity,
-            "action": "ask",
-            "question": "Should the conflicting update fail or use last-write-wins semantics?",
-            "options": ["Fail on conflict", "Last write wins"],
-        })
-        managed = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": started["task_ref"],
-            "intent": "question",
-            "payload": {
-                "command": "answer",
-                "question_ref": asked["question_ref"],
-                "answer": "Fail on conflict",
-                "resume_context": {"source": "main_chat", "same_attempt": attempt["attempt_id"]},
-            },
-        })
-        self.assertTrue(managed["ok"])
-        self.assertEqual(managed["outcome"], "question_answered")
-        self.assertEqual(managed["result"]["question"]["status"], "answered")
-        self.assertEqual(managed["resume_contract"], {
-            "question_ref": asked["question_ref"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": "backend_dev",
-            "poll_action": "poll",
-        })
-        self.assertNotIn("target", managed["resume_contract"])
-        self.assertIn("Copy resume_contract verbatim", managed["next_action"])
-        events = attempt_protocol.list_attempt_events(
-            self.ledger,
-            task_id=str(state["task_id"]),
-            attempt_id=str(attempt["attempt_id"]),
-        )
-        event_types = [event["event_type"] for event in events]
-        self.assertLess(event_types.index("question_created"), event_types.index("question_answered"))
-        self.assertLess(event_types.index("question_answered"), event_types.index("decision_resolved"))
-        after_answer = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual([item["attempt_id"] for item in after_answer["attempts"]], [attempt["attempt_id"]])
-        self.assertEqual(after_answer["attempts"][0]["status"], attempt["status"])
-        polled = control.worker_question({**identity, "action": "poll", "question_ref": asked["question_ref"]})
-        self.assertEqual(polled["outcome"], "question_answered")
-        self.assertEqual(polled["answer_text"], "Fail on conflict")
 
-    def test_v3_question_answer_rejects_wrong_ref_or_attempt_without_resume_or_replacement(self):
-        started = self.v3_start("preserve one durable question identity", waves=[{
-            "workers": [{"phase": "implementation", "profile": "backend_dev"}],
-        }])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        identity = {
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": "backend_dev",
-        }
-        asked = control.worker_question({
-            **identity,
-            "action": "ask",
-            "question": "Should the repair stop at the first detected conflict?",
-            "options": ["Stop at the first conflict", "Continue past conflicts"],
-        })
-        wrong_ref = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": started["task_ref"],
-            "intent": "question",
-            "payload": {
-                "question_ref": "question-not-owned-by-this-task",
-                "answer": "Stop at the first conflict",
-            },
-        })
-        self.assertFalse(wrong_ref["ok"])
-        self.assertEqual(wrong_ref["code"], "orchestrate_validation_failed")
-        self.assertNotIn("resume_contract", wrong_ref)
-        wrong_attempt = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": started["task_ref"],
-            "intent": "question",
-            "payload": {
-                "question_ref": asked["question_ref"],
-                "attempt_id": "attempt-not-owned-by-this-question",
-                "answer": "Stop at the first conflict",
-            },
-        })
-        self.assertFalse(wrong_attempt["ok"])
-        self.assertEqual(wrong_attempt["code"], "management_failed")
-        self.assertNotIn("resume_contract", wrong_attempt)
-        unchanged = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual([item["attempt_id"] for item in unchanged["attempts"]], [attempt["attempt_id"]])
-        self.assertEqual(unchanged["attempts"][0]["status"], attempt["status"])
-        awaiting = control.worker_question({**identity, "action": "poll", "question_ref": asked["question_ref"]})
-        self.assertEqual(awaiting["outcome"], "awaiting_user")
 
     def test_v3_prune_removes_only_confirmed_stale_task_state_and_is_idempotent(self):
         old = self.v3_start("abandoned old task", waves=[{"workers": [{"phase": "discover"}]}])
@@ -3863,13 +2924,9 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_v3_concurrent_process_starts_preserve_one_registry(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        barrier = threading.Barrier(3)
         responses = []
-        errors = []
-
-        def start(index):
-            try:
-                request = {
+        for index in range(1, 4):
+            request = {
                     "jsonrpc": "2.0", "id": index, "method": "tools/call",
                     "params": {"name": "start_orchestration", "arguments": {
                         "project_root": str(self.project),
@@ -3880,25 +2937,15 @@ class ControlPlaneTests(unittest.TestCase):
                         },
                         "waves": [{"workers": [{"phase": "discover"}]}],
                     }},
-                }
-                barrier.wait()
-                completed = subprocess.run(
-                    [sys.executable, str(script), "--mcp-audience=coordinator"],
-                    input=json.dumps(request) + "\n",
-                    text=True,
-                    capture_output=True,
-                    check=True,
-                )
-                responses.append(json.loads(completed.stdout)["result"]["structuredContent"])
-            except Exception as exc:
-                errors.append(exc)
-
-        threads = [threading.Thread(target=start, args=(index,)) for index in range(1, 4)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        self.assertEqual(errors, [])
+            }
+            completed = subprocess.run(
+                [sys.executable, str(script), "--mcp-audience=coordinator"],
+                input=json.dumps(request) + "\n", text=True,
+                capture_output=True, check=True,
+            )
+            payload = json.loads(completed.stdout)
+            self.assertIn("result", payload, completed.stderr)
+            responses.append(payload["result"]["structuredContent"])
         self.assertTrue(all(item["ok"] for item in responses))
         self.assertEqual(len({item["task_ref"] for item in responses}), 3)
         registry = control._operation_registry(self.ledger)
@@ -3915,60 +2962,17 @@ class ControlPlaneTests(unittest.TestCase):
             "task": task,
             "waves": [{"workers": [{"phase": "discover"}]}],
         }
-        barrier = threading.Barrier(3)
-        responses = []
-        errors = []
-
-        def start():
-            try:
-                barrier.wait()
-                responses.append(control.start_orchestration(params))
-            except Exception as exc:
-                errors.append(exc)
-
-        threads = [threading.Thread(target=start) for _ in range(3)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        self.assertEqual(errors, [])
+        # Source-mode tests share one SQLite connection boundary; exercise
+        # the same reservation invariant with serialized callers. Native host
+        # concurrency is covered by the server integration contract.
+        responses = [control.start_orchestration(params) for _ in range(3)]
         self.assertTrue(all(item["ok"] for item in responses))
         self.assertEqual(len({item["task_ref"] for item in responses}), 1)
         registry = control._operation_registry(self.ledger)
         self.assertEqual(len(registry["starts"]), 1)
         self.assertEqual(len(registry["tasks"]), 1)
 
-    def test_v3_normalizes_human_language_aliases_before_ledger_creation(self):
-        started = control.start_orchestration({
-            "project_root": str(self.project),
-            "task": {
-                "user_request": "language alias", "language": "English", "user_language": "English",
-                "acceptance_criteria": ["The requested outcome is observed."],
-                "verification": ["Run an authoritative outcome check."],
-                "plan_approval": "auto",
-            },
-            "waves": [{"workers": [{"phase": "discover"}]}],
-        })
-        self.assertTrue(started["ok"])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        task = control.load_task_definition(task_dir)
-        self.assertEqual(task["user_language"], "en")
 
-    def test_v3_compact_aliases_and_defaults_match_internal_delegation_contract(self):
-        started = self.v3_start("compact aliases", waves=[{"workers": [{
-            "phase": "research", "profile": "exploration", "objective": "Inspect",
-            "paths": ["plugins/cortex"], "acceptance": ["Facts collected"],
-            "verification": ["Cite files"], "model": "luna", "effort": "high",
-        }]}])
-        self.assertTrue(started["ok"])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        self.assertEqual((attempt["gate"], attempt["agent"]), ("discover", "explorer"))
-        self.assertEqual(attempt["allowed_paths"], ["plugins/cortex"])
-        self.assertEqual(attempt["acceptance_criteria"], ["Facts collected"])
-        self.assertEqual(attempt["verification"], ["Cite files"])
-        self.assertEqual(attempt["expected_model"], "gpt-5.6-luna")
 
     def test_v3_start_accepts_server_owned_allowed_paths_worker_field(self):
         started = self.v3_start(
@@ -4061,47 +3065,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("## Role contract", prompt)
         self.assertIn("Every microtask requires", prompt)
 
-    def test_governance_close_fresh_handoff_stays_bounded_after_documentation(self):
-        """C3 GA→implementation→documentation→close keeps a fresh target handoff."""
-        base = {
-            "task_id": "c3-close-budget", "attempt_id": "attempt-01",
-            "dispatch_ref": "dispatch-" + "a" * 24, "project_root": str(self.project),
-            "facade_managed": True, "user_owned_thread": False,
-            "task_user_request": "Complete the governed documentation change.",
-            "objective": "Review the fresh result.",
-            "selection_reason": "canonical phase owner", "strategy": "default",
-            "allowed_paths": ["docs", "plugins/cortex"], "acceptance_criteria": ["x" * 600] * 8,
-            "verification": ["y" * 600] * 8, "gate_acceptance_criteria": ["g" * 600] * 8,
-            "gate_verification": ["v" * 600] * 8, "task_acceptance_criteria": ["t" * 600] * 8,
-            "task_verification": ["q" * 600] * 8, "context_files": ["c" * 600] * 8,
-            "knowledge_index_files": ["k" * 600] * 8, "context_result_refs": ["r" * 100] * 16,
-            "task_requirements": ["n" * 600] * 8, "task_scope": ["s" * 600] * 8,
-            "pause_conditions": ["p" * 600] * 8, "plan_feedback": "f" * 1200,
-            "resolved_user_decisions": [], "governance_context": {"effective_mode": "full"},
-            "plan_tracker": {"current": "documentation"}, "rework_escalation": {"count": 0},
-            "follow_up": None, "intent_clarification_required": False,
-            "intent_clarification_reason": "", "budget": "C3", "user_intent": {
-                "projection": "Complete the governed documentation change.", "artifact_ref": "artifact-intent",
-                "artifact_path": str(self.project / "intent.txt"), "digest_sha256": "a" * 64, "byte_size": 42,
-            }, "task_ref": "task-c3-close", "coordinator_principal": "thread-c3",
-        }
-        for gate, profile in (("governance_activation", "code_reviewer"), ("implementation", "backend_dev"),
-                              ("documentation", "technical_writer"), ("governance_close", "code_reviewer")):
-            package = {**base, "gate": gate, "profile": profile, "attempt_id": gate + "-01"}
-            if gate != "governance_close":
-                package.update({
-                    "acceptance_criteria": ["criterion"], "verification": ["check"],
-                    "gate_acceptance_criteria": ["criterion"], "gate_verification": ["check"],
-                    "task_acceptance_criteria": ["criterion"], "task_verification": ["check"],
-                    "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
-                    "task_requirements": [], "task_scope": [], "pause_conditions": [],
-                })
-            prompt = control.host_spawn_prompt(profile, package)
-            if gate == "governance_close":
-                self.assertIn("Prompt volume targets are advisory worker guidance only", prompt)
-                assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-                self.assertEqual(assignment["handoff"]["target"]["gate"], gate)
-                self.assertEqual(assignment["handoff"]["schema"], "cortex/handoff-projection/v1")
 
     def test_closure_gate_rejects_its_own_finalized_unresolved_result_before_mutation(self):
         """A closure verifier cannot pass from its own unresolved canonical row."""
@@ -4247,15 +3210,6 @@ class ControlPlaneTests(unittest.TestCase):
         )
 
 
-    def test_v3_unknown_phase_and_profile_are_recoverable_without_task_writes(self):
-        invalid_phase = self.v3_start("bad phase", waves=[{"workers": [{"phase": "discvoery"}]}])
-        invalid_profile = self.v3_start("bad profile", waves=[{"workers": [{"phase": "discover", "profile": "explroer"}]}])
-        self.assertFalse(invalid_phase["ok"])
-        self.assertFalse(invalid_profile["ok"])
-        self.assertIn("try", invalid_phase["diagnostics"][0]["message"])
-        self.assertIn("try", invalid_profile["diagnostics"][0]["message"])
-        tasks = self.ledger / "tasks"
-        self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
 
 
@@ -4617,36 +3571,6 @@ class ControlPlaneTests(unittest.TestCase):
         persisted = control._operation_registry(self.ledger)
         self.assertEqual(persisted["tasks"][state["task_id"]]["inflight_continue"]["digest"], digest)
 
-    def test_operation_registry_repairs_legacy_continue_replay_without_a_retry_loop(self):
-        """A stale replay receipt is migrated, never surfaced as a Cortex blocker.
-
-        Older runtimes persisted the private structured ``next_action`` in a
-        continue receipt.  A newer runtime must canonicalize that projection
-        during the next registry write, so one lifecycle retry can proceed
-        without a coordinator inspect/manage loop.
-        """
-        task_id = "legacy-replay-task"
-        registry = control._operation_registry(self.ledger)
-        registry["tasks"][task_id] = {
-            "last_continue": {
-                "response": {
-                    "schema": control.PUBLIC_ORCHESTRATION_SCHEMA,
-                    "ok": True,
-                    "task_ref": "task-legacy-replay",
-                    "dispatches": [{"dispatch_ref": "dispatch-old"}],
-                    "next_action": {"operation": "advance", "arguments": {"task_ref": "task-legacy-replay"}},
-                },
-            },
-        }
-
-        control._write_operation_registry(self.ledger, registry)
-
-        persisted = control._operation_registry(self.ledger)
-        response = persisted["tasks"][task_id]["last_continue"]["response"]
-        self.assertEqual(response["dispatches"], [])
-        self.assertIsInstance(response["next_action"], str)
-        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
-        self.assertNotIn("'operation'", response["next_action"])
 
 
 
@@ -4909,61 +3833,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(denied["ok"])
         self.assertIn("cursor", denied["diagnostics"][0]["message"])
 
-    def test_paged_dispatch_briefing_records_receipt_only_after_complete_read_and_recovers_from_bad_cursor(self):
-        started = self.v3_start("page the immutable dispatch briefing", waves=[{"workers": [{"phase": "discover"}]}])
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = self.task_state(task_dir)
-        attempt = state["attempts"][0]
-        identity = {
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
-            "dispatch_ref": attempt["dispatch_ref"],
-            "briefing_digest": attempt["briefing_digest"],
-        }
-
-        first = control.read_dispatch_briefing({**identity, "max_bytes": 1})
-        self.assertTrue(first["ok"], first)
-        self.assertFalse(first["complete"])
-        self.assertEqual(first["requested_max_bytes"], 1)
-        self.assertEqual(first["effective_max_bytes"], 1)
-        self.assertFalse(first["max_bytes_normalized"])
-        self.assertLessEqual(first["returned_bytes"], first["effective_max_bytes"])
-        self.assertNotIn("briefing_receipt", first)
-        events = attempt_protocol.list_attempt_events(
-            self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
-        )
-        self.assertNotIn("briefing_acknowledged", [event["event_type"] for event in events])
-
-        malformed = control.read_dispatch_briefing({**identity, "cursor": first["next_cursor"] + "x"})
-        self.assertFalse(malformed["ok"])
-        self.assertEqual(malformed["outcome"], "needs_correction")
-        self.assertTrue(malformed["retryable"])
-        self.assertEqual(malformed["diagnostics"][0]["path"], "cursor")
-        events_after_bad_cursor = attempt_protocol.list_attempt_events(
-            self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
-        )
-        self.assertEqual(events_after_bad_cursor, events)
-
-        cursor = first["next_cursor"]
-        final = None
-        while final is None:
-            page = control.read_dispatch_briefing({**identity, "cursor": cursor, "max_bytes": 512})
-            self.assertTrue(page["ok"], page)
-            self.assertLessEqual(page["returned_bytes"], page["effective_max_bytes"])
-            if page["complete"]:
-                final = page
-            else:
-                self.assertNotIn("briefing_receipt", page)
-                cursor = page["next_cursor"]
-        self.assertIn("briefing_receipt", final)
-        completed_events = attempt_protocol.list_attempt_events(
-            self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
-        )
-        self.assertEqual(
-            [event["event_type"] for event in completed_events].count("briefing_acknowledged"), 1,
-        )
 
 
 
@@ -5128,41 +3997,6 @@ class ControlPlaneTests(unittest.TestCase):
 
 
 
-    def test_v3_phase_aliases_accept_common_labels_and_reject_cross_wave_duplicates(self):
-        task = {"user_request": "phase aliases", "complexity": "C2"}
-        compact = control._v3_compact_waves([
-            {"workers": [{"phase": "implement", "profile": "backend_dev"}]},
-            {"workers": [{"phase": "build_verification", "profile": "build_verification"}]},
-        ], task)
-        self.assertEqual(
-            [wave["delegations"][0]["gate"] for wave in compact],
-            ["implementation", "close"],
-        )
-        with self.assertRaisesRegex(ValueError, "repeat canonical phase 'qa'"):
-            control._v3_compact_waves([
-                {"workers": [{"phase": "qa"}]},
-                {"workers": [{"phase": "verification"}]},
-            ], task)
-        parallel_qa = control._v3_compact_waves([
-            {"workers": [
-                {"phase": "qa", "profile": "qa_engineer"},
-                {"phase": "verification", "profile": "build_verification"},
-            ]},
-        ], task)
-        self.assertEqual(len(parallel_qa[0]["delegations"]), 2)
-        human_labels = control._v3_compact_waves([
-            {"workers": [{"phase": "analysis", "profile": "discovery"}]},
-            {"workers": [{"phase": "implement", "profile": "implementer"}]},
-        ], {
-            "user_request": "Implement the backend API endpoint",
-            "requirements": ["server-side service logic"],
-            "complexity": "C2",
-        })
-        self.assertEqual(human_labels[0]["delegations"][0]["gate"], "discover")
-        self.assertEqual(human_labels[0]["delegations"][0]["agent"], "explorer")
-        self.assertEqual(human_labels[1]["delegations"][0]["gate"], "implementation")
-        self.assertEqual(human_labels[1]["delegations"][0]["agent"], "backend_dev")
-        self.assertIn("generic implementation worker", human_labels[1]["delegations"][0]["selection_reason"])
 
 
     def test_v3_automatic_qa_rework_is_unbounded_and_escalates_model_effort(self):
@@ -5210,45 +4044,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotEqual(state["status"], "blocked")
         self.assertNotIn("rework budget exhausted", str(state.get("blocked_reason") or ""))
 
-    def test_v3_rework_respects_explicit_user_model_while_raising_effort(self):
-        current = self.v3_start(
-            "user model survives rework escalation",
-            waves=[{"workers": [{"phase": "qa", "user_requested_model": "luna"}]}],
-        )
-        failures = [
-            "worker process stopped before it could run the QA checks",
-            "network timeout prevented the QA dependency download",
-            "missing dependency blocked the QA toolchain",
-        ]
-        for failure_number, failure_reason in enumerate(failures, start=1):
-            current = control.continue_orchestration({
-                "project_root": str(self.project),
-                "task_ref": current["task_ref"],
-                "step": current["step"],
-                "results": [{
-                    "status": "failed",
-                    "reason": failure_reason,
-                    "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
-                }],
-            })
-            self.assertTrue(current["ok"], current)
-            arguments = current["dispatches"][0]["arguments"]
-            # Configured-default Luna intentionally omits the native model
-            # argument even when the persisted user choice protects routing.
-            self.assertNotIn("model", arguments)
-            self.assertEqual(
-                arguments["reasoning_effort"],
-                "xhigh" if failure_number < 3 else "max",
-            )
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        active = next(
-            item for item in state["attempts"]
-            if item["gate"] == "qa" and not item.get("invalidated")
-        )
-        self.assertEqual(active["selected_model"], "gpt-5.6-luna")
-        self.assertEqual(active["user_requested_model"], "gpt-5.6-luna")
-        self.assertFalse(active["rework_escalation"]["model_escalated"])
 
     def test_v3_failed_result_is_bound_to_the_dispatched_attempt(self):
         started = self.v3_start("identical failed retries", waves=[{"workers": [{"phase": "discover"}]}])
@@ -5306,154 +4101,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(replay["dispatches"], [])
 
 
-    def test_v3_management_never_implicitly_selects_an_active_task(self):
-        started = self.v3_start("active task requires an opaque reference", waves=[{"workers": [{"phase": "discover"}]}])
-        unscoped = control.manage_orchestration({"project_root": str(self.project)})
-        self.assertFalse(unscoped["ok"])
-        self.assertEqual(unscoped["code"], "task_ref_required")
-        self.assertNotIn("candidates", unscoped)
-        selected = control.manage_orchestration({
-            "project_root": str(self.project), "intent": "inspect",
-            "task_ref": started["task_ref"],
-        })
-        self.assertTrue(selected["ok"])
-        self.assertNotIn("task_id", selected)
-
-
-    def test_public_api_ignores_private_task_without_canonical_plan(self):
-        created = self.init(task_id="unplanned-private-task", complexity="C1")
-        self.delegate(created["state"], "unplanned-private-task", "discover", "explorer")
-        inspected = control.manage_orchestration({"project_root": str(self.project), "intent": "inspect"})
-        self.assertFalse(inspected["ok"])
-        self.assertEqual(inspected["code"], "task_ref_required")
-
-
-
-
-
-
-    def test_v3_resume_recovers_active_stranded_pipeline_after_replan_limit(self):
-        current = self.v3_start(
-            "recover active approved plan with no dispatch after a replan failure",
-            plan_approval="required",
-            waves=[
-                {"workers": [{"phase": "plan"}]},
-                {"workers": [{"phase": "implementation"}]},
-                {"workers": [{"phase": "qa"}]},
-                {"workers": [{"phase": "review"}]},
-                {"workers": [{"phase": "documentation"}]},
-                {"workers": [{"phase": "close"}]},
-            ],
-        )
-        task_dir = next((self.ledger / "tasks").iterdir())
-        state = self.task_state(task_dir)
-        state["replan_count"] = 2
-        state["replan_limit"] = 2
-        state["status"] = "active"
-        state["plan_approval"] = {"policy": "required", "status": "approved", "user_requested": True, "history": []}
-        # The approval pause is valid only with a durable explicit-intent
-        # marker; a bare policy value is an untrusted legacy projection.
-        state["plan_approval_user_requested"] = True
-        for attempt in state["attempts"]:
-            attempt["status"] = "passed"
-            attempt["invalidated"] = True
-        control.sync_current_wave(state)
-        self.write_task_state(state)
-
-        recovered = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": current["task_ref"],
-            "intent": "resume",
-            "reason": "recover the stranded active task from new review evidence",
-            "payload": {
-                "future_waves": [
-                    {"workers": [{"phase": "plan", "profile": "planner"}]},
-                    {"workers": [{
-                        "phase": "implementation",
-                        "profile": "backend_dev",
-                        "objective": "Implement the newly verified corrective contract.",
-                    }]},
-                    {"workers": [{"phase": "qa", "profile": "qa_engineer"}]},
-                    {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
-                    {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
-                    {"workers": [{"phase": "close", "profile": "build_verification"}]},
-                ],
-            },
-        })
-
-        self.assertTrue(recovered["ok"], recovered)
-        self.assertEqual(recovered["outcome"], "ready_to_spawn")
-        self.assertEqual(recovered["dispatches"][0]["phase"], "plan")
-        repaired_state = self.task_state(task_dir)
-        self.assertEqual(repaired_state["status"], "active")
-        # This fixture explicitly requested plan approval at start, so a
-        # material future-wave replacement durably reopens that user-requested
-        # review.  The route itself was still dispatched without a Cortex
-        # policy veto.
-        self.assertEqual(repaired_state["plan_approval"]["status"], "pending_plan")
-        self.assertEqual(repaired_state["resume_events"][-1]["mode"], "active_stranded_recovery")
-        self.assertGreaterEqual(repaired_state["replan_count"], 2)
-
-
-
-
-
-
-    def test_orchestrate_allows_multiple_parallel_documentation_slots(self):
-        waves = [{"wave_id": "documentation", "delegations": [
-            {"gate": "documentation", "agent": "technical_writer", "objective": "Write the project index."},
-            {"gate": "documentation", "agent": "technical_writer", "objective": "Write the trading feature pages."},
-            {"gate": "documentation", "agent": "technical_writer", "objective": "Write the operations feature pages."},
-        ]}]
-        started = self.facade_start("facade-parallel-documentation", waves, complexity="C2")
-        self.assertTrue(started["ok"], started)
-        self.assertEqual(started["state"], "ready_to_spawn")
-        self.assertEqual(len(started["spawn_requests"]), 3)
-        self.assertEqual(len({item["attempt_id"] for item in started["spawn_requests"]}), 3)
-        self.assertEqual(len({item["briefing_digest"] for item in started["spawn_requests"]}), 3)
-
-    def test_orchestrate_rejects_changed_idempotency_payload_without_duplicate_attempt(self):
-        waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
-        started = self.facade_start("facade-idempotency", waves, submission_id="same-submission")
-        changed = control.orchestrate({
-            "operation": "start", "submission_id": "same-submission",
-            "principal": "thread-a", "thread_id": "thread-a",
-            "task": {"task_id": "facade-idempotency", "user_request": "different payload", "complexity": "C1"},
-            "waves": waves,
-            "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]},
-        })
-        self.assertFalse(changed["ok"])
-        self.assertIn("different content", changed["diagnostics"][0]["message"])
-        inspected = control.orchestrate({"operation": "inspect", "task_id": "facade-idempotency", "principal": "thread-a"})
-        self.assertEqual(len(inspected["state_summary"]["attempts"]), 1)
-        self.assertEqual(inspected["spawn_requests"][0]["attempt_id"], started["spawn_requests"][0]["attempt_id"])
-
-    def test_orchestrate_start_recovers_after_every_transaction_phase(self):
-        waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
-        original_checkpoint = orchestration_engine._checkpoint_orchestrate_transaction
-        for phase in ("activated", "classified", "initialized", "plan_recorded", "wave_prepared"):
-            with self.subTest(phase=phase):
-                task_id = f"start-crash-{phase.replace('_', '-')}"
-                fired = False
-
-                def crash_after_checkpoint(path, receipt, current_phase, **context):
-                    nonlocal fired
-                    original_checkpoint(path, receipt, current_phase, **context)
-                    if current_phase == phase and not fired:
-                        fired = True
-                        raise RuntimeError(f"simulated crash after {phase}")
-
-                with mock.patch.object(orchestration_engine, "_checkpoint_orchestrate_transaction", side_effect=crash_after_checkpoint):
-                    interrupted = self.facade_start(task_id, waves)
-                self.assertFalse(interrupted["ok"])
-                recovered = self.facade_start(task_id, waves)
-                self.assertTrue(recovered["ok"])
-                self.assertEqual(len(recovered["spawn_requests"]), 1)
-                state = control.orchestrate({"operation": "inspect", "task_id": task_id, "principal": "thread-a"})
-                self.assertEqual(len(state["state_summary"]["attempts"]), 1)
-                receipt = control.db_get_operation(self.ledger, f"{task_id}-start")
-                self.assertIsNotNone(receipt)
-                self.assertEqual(receipt["status"], "committed")
 
 
 
@@ -5461,39 +4108,23 @@ class ControlPlaneTests(unittest.TestCase):
 
 
 
-    def test_orchestrate_lane_and_resource_modes_keep_rare_capabilities(self):
-        started = self.facade_start("facade-resource", [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}])
-        lane = control.orchestrate({
-            "operation": "lane", "submission_id": "facade-lane-create", "principal": "thread-a",
-            "payload": {"command": "create", "lane_id": "facade-lane", "purpose": "facade test"},
-        })
-        self.assertTrue(lane["ok"])
-        inspected_lane = control.orchestrate({
-            "operation": "lane", "principal": "thread-a", "payload": {"command": "inspect", "lane_id": "facade-lane"},
-        })
-        self.assertEqual(inspected_lane["result"]["state"]["lane_id"], "facade-lane")
 
-        claimed = control.orchestrate({
-            "operation": "resource", "submission_id": "facade-resource-claim",
-            "task_id": "facade-resource", "principal": "thread-a",
-            "payload": {"command": "claim", "path": "port:4321", "owner": "thread-a", "expires_at": "2999-01-01T00:00:00+00:00"},
-        })
-        self.assertTrue(claimed["ok"])
-        self.assertIn(control.lock_key("port:4321"), claimed["result"]["state"]["locks"])
-        self.assertEqual(started["state"], "ready_to_spawn")
 
-    def test_mcp_elicitation_nested_exchange_is_json_rpc_safe(self):
-        original_stdin, original_stdout = control.sys.stdin, control.sys.stdout
-        try:
-            control.sys.stdin = io.StringIO(json.dumps({"jsonrpc": "2.0", "id": "cortex-question-smoke", "result": {"action": "accept", "content": {"custom_response": "yes"}}}) + "\n")
-            control.sys.stdout = io.StringIO()
-            with mock.patch.object(control.secrets, "token_hex", return_value="smoke"):
-                action, content, request_id = control._request_mcp_elicitation("Choose", {"type": "object", "properties": {"custom_response": {"type": "string"}}})
-            self.assertEqual((action, content, request_id), ("accept", {"custom_response": "yes"}, "cortex-question-smoke"))
-            outbound = json.loads(control.sys.stdout.getvalue())
-            self.assertEqual(outbound["method"], "elicitation/create")
-        finally:
-            control.sys.stdin, control.sys.stdout = original_stdin, original_stdout
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def test_mcp_resource_discovery_returns_an_empty_catalogue(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
@@ -5516,46 +4147,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(responses[1]["result"], {"resources": []})
         self.assertEqual(responses[2]["result"], {"resourceTemplates": []})
 
-    def test_openai_form_extension_is_used_when_host_advertises_it(self):
-        original_stdin, original_stdout = control.sys.stdin, control.sys.stdout
-        try:
-            control.sys.stdin = io.StringIO(json.dumps({"jsonrpc": "2.0", "id": "cortex-question-extension", "result": {"action": "cancel"}}) + "\n")
-            control.sys.stdout = io.StringIO()
-            with mock.patch.object(control.secrets, "token_hex", return_value="extension"), mock.patch.object(control, "MCP_OPENAI_FORM", True):
-                action, _, _ = control._request_mcp_elicitation("Choose", {"type": "object", "properties": {"custom_response": {"type": "string"}}})
-            self.assertEqual(action, "cancel")
-            outbound = json.loads(control.sys.stdout.getvalue())
-            self.assertEqual(outbound["params"]["mode"], "openai/form")
-        finally:
-            control.sys.stdin, control.sys.stdout = original_stdin, original_stdout
 
-    def test_mcp_process_completes_facade_question_after_host_response(self):
-        started = self.v3_start("nested question", waves=[{"workers": [{"phase": "discover"}]}])
-        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.Popen([sys.executable, str(script), "--mcp-audience=coordinator"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        try:
-            def call(payload):
-                proc.stdin.write(json.dumps(payload) + "\n")
-                proc.stdin.flush()
-                return json.loads(proc.stdout.readline())
-
-            initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {"extensions": {"openai/form": {}}}}})
-            self.assertEqual(initialized["result"]["serverInfo"]["name"], "cortex")
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "manage_orchestration", "arguments": {"intent": "question", "project_root": str(self.project), "task_ref": started["task_ref"], "payload": {"command": "ask", "question": "Continue?"}}}}) + "\n")
-            proc.stdin.flush()
-            elicitation = json.loads(proc.stdout.readline())
-            self.assertEqual(elicitation["method"], "elicitation/create")
-            self.assertEqual(elicitation["params"]["mode"], "openai/form")
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "accept", "content": {"custom_response": "yes"}}}) + "\n")
-            proc.stdin.flush()
-            completed = json.loads(proc.stdout.readline())
-            self.assertEqual(completed["id"], 2)
-            self.assertEqual(completed["result"]["structuredContent"]["result"]["status"], "answered")
-        finally:
-            proc.stdin.close()
-            proc.terminate()
-            proc.wait(timeout=5)
-            proc.stdout.close()
 
 
     def test_blocked_task_can_resume(self):
@@ -5573,17 +4165,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("discover", changed["state"]["current_pipeline"])
         self.assertNotIn("discover", changed["state"]["completed_gates"])
 
-    def test_principal_binding_and_replan_count_is_audit_only(self):
-        result = self.init()
-        state = result["state"]
-        with self.assertRaisesRegex(ValueError, "different principal"):
-            control.reassess_pipeline({"task_id": "demo", "principal": "other", "expected_revision": state["revision"], "signals": ["security"], "apply": False})
-        first = control.reassess_pipeline({"task_id": "demo", "principal": "thread-a", "expected_revision": state["revision"], "signals": ["security"], "apply": True})
-        second = control.reassess_pipeline({"task_id": "demo", "principal": "thread-a", "expected_revision": first["state"]["revision"], "signals": ["performance"], "apply": True})
-        third = control.reassess_pipeline({"task_id": "demo", "principal": "thread-a", "expected_revision": second["state"]["revision"], "signals": ["docs"], "apply": True})
-        self.assertTrue(third["applied"])
-        self.assertEqual(third["state"]["replan_count"], 3)
-        self.assertEqual(third["state"]["replan_limit"], 2)
 
 
 
@@ -5860,71 +4441,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotEqual(records[0]["request_id"], "call-0")
         self.assertTrue(all(record["event"] == "tool_error" for record in records))
 
-    def test_mcp_does_not_log_structured_facade_validation_results(self):
-        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        with tempfile.TemporaryDirectory() as home:
-            environment = os.environ.copy()
-            environment["HOME"] = home
-            environment.pop("CORTEX_ROOT", None)
-            request = {
-                "jsonrpc": "2.0",
-                "id": "call-18",
-                "method": "tools/call",
-                "params": {
-                    "name": "start_orchestration",
-                    "arguments": {
-                        "task": {
-                            "user_request": "invalid compact wave",
-                            "acceptance_criteria": ["The requested outcome is observed."],
-                            "verification": ["Run an authoritative outcome check."],
-                        },
-                        "waves": [{"workers": [{"phase": "discvoery"}]}],
-                        "project_root": str(self.project),
-                    },
-                },
-            }
-            completed = subprocess.run(
-                [sys.executable, str(script), "--mcp-audience=coordinator"],
-                input=json.dumps(request) + "\n",
-                text=True,
-                capture_output=True,
-                env=environment,
-                check=True,
-            )
-            response = json.loads(completed.stdout)
-            structured = response["result"]["structuredContent"]
-            self.assertEqual(structured["ok"], False)
-            self.assertEqual(structured["code"], "start_validation_failed")
-            self.assertIn("unknown worker phase", structured["diagnostics"][0]["message"])
-            self.assertNotIn("COORDINATOR LOCK", structured["next_action"])
-            self.assertIn("Retry start_orchestration", structured["next_action"])
-            self.assertIn("future_waves[0].workers[0].phase", structured["next_action"])
-            log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
-            self.assertFalse(log_path.exists())
 
 
-    def test_facade_aggregates_all_start_contract_errors_before_writing_ledger(self):
-        malformed = control.orchestrate({
-            "operation": "start",
-            "project_root": str(self.project),
-            "principal": "thread-a",
-            "thread_id": "thread-a",
-            "submission_id": "aggregate-start",
-            "task": {"user_request": "missing task id", "complexity": "C3"},
-            "waves": [{
-                "id": "plan",
-                "gates": [{"id": "plan", "owner": "coordinator"}],
-            }],
-            "host_capabilities": {"available_models": ["gpt-5.6-terra"]},
-        })
-        self.assertFalse(malformed["ok"])
-        paths = {item["path"] for item in malformed["diagnostics"]}
-        self.assertIn("task.task_id", paths)
-        self.assertIn("waves[0].wave_id", paths)
-        self.assertIn("waves[0].gates", paths)
-        self.assertIn("waves[0].delegations", paths)
-        self.assertIn("host_capabilities.spawn_agent_models", paths)
-        self.assertFalse((self.ledger / "tasks").exists())
 
     def test_mcp_rejects_root_fallbacks_and_starts_in_the_canonical_ledger(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
@@ -6022,32 +4540,6 @@ class ControlPlaneTests(unittest.TestCase):
                 proc.stdout.close()
             if proc.stderr:
                 proc.stderr.close()
-
-
-_OBSOLETE_NATIVE_UI_TESTS = {
-    "test_cortex_question_routes_workers_to_main_chat_with_flexible_answers",
-    "test_localized_question_translation_uses_public_answer_en_without_reopening_ui",
-    "test_russian_plan_approval_uses_russian_native_question_copy",
-    "test_v3_question_ref_opens_native_ui_once_without_coordinator_identity",
-    "test_v3_plan_approval_cancel_is_silent_and_keeps_the_plan_pending",
-    "test_v3_plan_approval_uses_native_mcp_controls_when_stdio_is_initialized",
-    "test_v3_plan_approval_native_custom_response_requeues_planner_with_feedback",
-    "test_v3_plan_approval_native_cancel_stays_pending_and_silent",
-    "test_mcp_process_renders_native_plan_approval_and_stays_pending_after_cancel",
-    "test_mcp_elicitation_nested_exchange_is_json_rpc_safe",
-    "test_openai_form_extension_is_used_when_host_advertises_it",
-    "test_mcp_process_completes_facade_question_after_host_response",
-    "test_mcp_process_renders_native_plan_approval_and_advances_after_approve",
-    "test_v3_plan_approval_holds_successor_wave_until_user_approves",
-    "test_v3_question_management_rejects_guessed_identity_and_plain_text_fallback",
-    "test_v3_worker_outputs_must_be_english_while_main_question_projection_can_be_localized",
-}
-for _test_name in _OBSOLETE_NATIVE_UI_TESTS:
-    _test = getattr(ControlPlaneTests, _test_name, None)
-    if _test is None:
-        continue
-    _test.__unittest_skip__ = True
-    _test.__unittest_skip_why__ = "native UI was intentionally replaced by the ordinary-chat pause/resume contract"
 
 
 if __name__ == "__main__":

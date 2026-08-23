@@ -29,6 +29,7 @@ from cortex import (
 )
 from cortex_runtime import attempt_protocol
 from cortex_runtime.validation import ValidationFailure, collect_validations
+from cortex_runtime.worker_identity import bind_semantic_params
 
 
 _MISSING = object()
@@ -143,16 +144,13 @@ def _dispatch_briefing_failure(exc: BaseException, *, params: dict[str, Any] | N
 def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
     """Read exactly one active worker's immutable briefing."""
     try:
-        allowed = {"project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest", "cursor", "max_bytes"}
-        unknown = sorted(set(params) - allowed)
+        original = dict(params)
+        params = bind_semantic_params(original)
+        allowed = {"cursor", "max_bytes"}
+        unknown = sorted(set(original) - allowed)
         if unknown:
             raise ValidationFailure([{"code": "dispatch_briefing_request_invalid", "path": f"$.{field}", "message": "unsupported read_dispatch_briefing field", "fix": "Remove this field and retry on the same worker attempt."} for field in unknown])
-        collect_validations(
-            ((field, lambda field=field: None if str(params.get(field) or "").strip() else f"{field} is required; copy the exact value from the native dispatch bootstrap")
-             for field in ("project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest")),
-            code="dispatch_briefing_request_invalid",
-        )
-        project = select_project_root(params)
+        project = select_project_root({"project_root": params["project_root"]})
         task_id = safe_id(str(params["task_id"]))
         attempt_id = safe_id(str(params["attempt_id"]))
         profile = canonical_profile(params["profile"])

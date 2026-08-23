@@ -37,7 +37,7 @@
     "attempt_result_schema": "cortex/attempt-result/v1",
     "attempt_event_schema": "cortex/attempt-event/v1",
     "attempt_result_ref_schema": "cortex/attempt-result-ref/v1",
-    "question_schema": "cortex/question/v2",
+    "question_schema": "cortex/question/v3",
     "question_route": "worker_publish_main_chat_ui_worker_poll",
     "question_resume_contract": "accepted worker_question(action=ask) returns only QUESTION_RECORDED with the exact ref and pauses the same attempt; coordinator records the answer then followup_task resumes the same child; first resumed call uses worker_question(action=poll) with the same ref, answered decisions are recorded with record_attempt_event, affected checks rerun, and complete_attempt is mandatory; pending poll returns QUESTION_RECORDED; no OTHER_TERMINAL, freeform terminal, or replacement worker",
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
@@ -62,6 +62,37 @@
     "worker_result_fields": ["status", "summary", "findings", "decisions_needed", "unresolved"],
     "worker_result_unresolved_semantics": "ordinary status=completed may use unresolved only for concrete material open items required by a successor handoff; closure verifier gates review, governance_activation, governance_close, and close that pass require unresolved=[]; non-success results may use unresolved only for concrete material findings or unanswered required decisions; internal governance/evidence findings are routed through findings and corrective dispatch, never a user question or lifecycle pause; residual risk, omitted or environment checks, retrospective notes, uncertainty, and placeholder none belong in summary, claims, or AttemptEvents",
     "worker_result_optional_data": "typed_gate_payloads_are_allowed_when_applicable_but_do_not_make_server_observed_facts_worker_authoritative",
+    "server_bound_fields": ["project_root", "task_id", "task_ref", "attempt_id", "profile", "phase", "dispatch_ref", "briefing_digest", "timestamps", "receipts", "changed_files", "verification_metadata"],
+    "semantic_only_rule": "Workers author semantic facts only. The active worker session already binds task and attempt identity; omit server_bound_fields from every worker operation and never copy them from the briefing.",
+    "operation_cards": {
+      "read_dispatch_briefing": {
+        "input": "{} or the returned cursor only",
+        "purpose": "Read the one server-bound immutable briefing before project work; continue until complete=true."
+      },
+      "read_worker_result": {
+        "input": "{attempt_result_ref}",
+        "purpose": "Read only a predecessor ref explicitly supplied by the dispatch; identity and project scope are server-bound."
+      },
+      "record_attempt_event": {
+        "input": "{event_type, payload, event_key?}",
+        "purpose": "Checkpoint semantic evidence; the server supplies actor, attempt, timestamps, and receipts."
+      },
+      "complete_attempt": {
+        "input": "{status, summary, findings, decisions_needed, unresolved, claims?, planning?}",
+        "purpose": "Close one attempt with semantic facts. Planner plans use one nested planning object; never put overview or work_packages at the root."
+      },
+      "repair_planning": {
+        "input": "{base_payload_digest, patches}",
+        "purpose": "Repair only returned diagnostic paths on the same rejected planner attempt; never resend the full planning object."
+      },
+      "worker_question": {
+        "input": "{action, question fields when asking, ref when polling}",
+        "purpose": "Pause only for a material task decision; server binds the question to this attempt."
+      }
+    },
+    "planner_completion_shape": "The complete_attempt root remains the semantic AttemptResult. planning is the only structured planner sibling and requires overview plus work_packages; optional planning siblings are requirement_coverage, recommendation, recommendation_rationale, recommendation_actions, resolved_questions, and risks.",
+    "attachment_preflight": "Before start_orchestration, materialize any referenced attachment or pasted text through the host attachment surface and place its exact content in task.user_request; never send an attachment path as a placeholder, duplicate a path, or paraphrase material task text.",
+    "activation_context": "Activation is host-owned context. The model selects the Cortex route, but does not copy activation markers or skill links into worker payloads; start_orchestration receives activation context from the host and rejects inactive launches with a structured correction.",
     "caller_correctable_tool_errors": "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable",
     "read_only_workspace_delta": "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified",
     "repository_intelligence": "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
@@ -160,8 +191,8 @@
     },
     "planner": {
       "inputs": "Read supplied knowledge indexes and relevant pages, then current entry points, contracts, configuration, tests, requirements, acceptance, and predecessor result projections.",
-      "project_artifacts": "Result-only: Planner Scope publishes the separate structured scoping object and Planner Plan publishes the separate structured planning object as semantic attempt results through complete_attempt; never create scoping, planning, or ledger files directly.",
-      "completion": "For scope, produce a non-solution discovery brief with context and all validated non-overlapping discovery domains. For plan, consume every supplied predecessor result projection and produce a decision-complete work breakdown with paths, profile ownership, dependencies, acceptance, verification, risk gates, and no unresolved material decision."
+      "project_artifacts": "Result-only: Planner Scope and Planner Plan publish semantic AttemptResults through complete_attempt; Planner Plan places its structured work breakdown under the nested planning sibling. Never create planning or ledger files directly.",
+      "completion": "For scope, publish a non-solution discovery brief with context and validated non-overlapping domains in the semantic result and events. For plan, consume every supplied predecessor result projection and publish nested planning with overview, work packages, requirement coverage, recommendation, dependencies, acceptance, verification, risk gates, and no unresolved material decision."
     },
     "qa_engineer": {
       "inputs": "Read every delegated acceptance criterion, changed contract, implementation path, existing test layer, fixtures, and predecessor evidence.",
@@ -192,7 +223,7 @@
   "gate_briefings": {
     "scope": {
       "objective": "Define the evidence-gathering scope required before solution design for: {task_user_request}",
-      "ownership": "Own early discovery scoping only; identify relevant context and non-overlapping discovery domains without designing or implementing the solution.",
+      "ownership": "Own early discovery only; identify relevant context and non-overlapping discovery domains without designing or implementing the solution.",
       "acceptance": [
         "Separate known repository context from unknowns and define no more than eight non-overlapping discovery domains with explicit boundaries and dependencies.",
         "Name relevant context files and give each domain a bounded objective, paths, acceptance criteria, and verification method without making solution decisions.",
@@ -469,7 +500,7 @@
     {"name":"explorer","filename":"explorer.toml","sandbox":"read-only","route_category":"automatic","gates":["discover"],"description":"Read-only codebase investigator that maps execution paths, ownership, dependencies, and relevant files.","select_when":"Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.","avoid_when":"The task requires design decisions or source changes."},
     {"name":"frontend_dev","filename":"frontend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.","select_when":"A browser UI, component, client state, styling, or frontend test change must be implemented.","avoid_when":"The task spans material server ownership or is only interaction design."},
     {"name":"fullstack_dev","filename":"fullstack-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.","select_when":"One coherent change spans both browser-facing and server-facing contracts.","avoid_when":"The work can be cleanly owned by one narrower frontend or backend specialist."},
-    {"name":"general","filename":"general.toml","sandbox":"workspace-write","route_category":"automatic","gates":["implementation"],"description":"General-purpose fallback agent for bounded research, analysis, or implementation when no specialty fits.","select_when":"The work is bounded but no specialist profile has a justified capability match.","avoid_when":"A narrower supported specialist clearly owns the task."},
+    {"name":"general","filename":"general.toml","sandbox":"workspace-write","route_category":"automatic","gates":["implementation"],"description":"General-purpose agent for bounded research, analysis, or implementation when no specialty fits.","select_when":"The work is bounded but no specialist profile has a justified capability match.","avoid_when":"A narrower supported specialist clearly owns the task."},
     {"name":"mobile_dev","filename":"mobile-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.","select_when":"An iOS, Android, React Native, Flutter, or native mobile change must be implemented.","avoid_when":"The task is browser web UI or a platform-neutral backend."},
     {"name":"performance_engineer","filename":"performance-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["performance"],"description":"Read-only performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.","select_when":"Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis.","avoid_when":"The bottleneck is already proven and only an approved implementation remains."},
     {"name":"planner","filename":"planner.toml","sandbox":"read-only","route_category":"automatic","gates":["scope","plan"],"description":"Read-only scope and final-plan specialist for discovery partitioning, evidence synthesis, implementation decomposition, requirement coverage, dependencies, risks, and delegation.","select_when":"Early discovery domains or a decision-complete final plan, dependency order, ownership map, or acceptance matrix is needed.","avoid_when":"The task is a simple bounded execution step or requires editing project files."},

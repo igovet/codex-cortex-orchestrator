@@ -17,6 +17,7 @@ class JsonRpcHarness:
         host_state_dir: Path,
         *,
         audience: str | None = None,
+        worker_binding: dict[str, Any] | None = None,
         elicitation_responder: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         environment = os.environ.copy()
@@ -26,6 +27,8 @@ class JsonRpcHarness:
         # The black-box server must use its host-private per-project mapping,
         # never a test/workspace-local ``.codex/cortex`` path.
         environment["CORTEX_HOST_STATE_DIR"] = str(host_state_dir)
+        if worker_binding is not None:
+            environment["CORTEX_WORKER_BINDING_JSON"] = json.dumps(worker_binding, sort_keys=True)
         command = [sys.executable, str(server)]
         if audience is not None:
             command.append(f"--mcp-audience={audience}")
@@ -38,6 +41,7 @@ class JsonRpcHarness:
             env=environment,
         )
         self.elicitation_responder = elicitation_responder
+        self.audience = audience
         self.next_id = 1
         self._closed = False
         initialized = self.request("initialize", {"protocolVersion": "2025-06-18"})
@@ -82,7 +86,20 @@ class JsonRpcHarness:
         self.process.stdin.flush()
 
     def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return self.request("tools/call", {"name": name, "arguments": {**arguments, "project_root": str(self.project_root)}})["structuredContent"]
+        task_scoped = (
+            name in {"continue_orchestration", "read_worker_result"}
+            or (
+                name == "manage_orchestration"
+                and str(arguments.get("intent") or "") not in {"prune", "maintenance"}
+                and bool(str(arguments.get("task_ref") or "").strip())
+            )
+        )
+        # Worker and task-scoped coordinator forms derive identity from the
+        # launch/session binding and reject caller-supplied project_root.
+        payload = dict(arguments)
+        if self.audience != "worker" and not task_scoped:
+            payload["project_root"] = str(self.project_root)
+        return self.request("tools/call", {"name": name, "arguments": payload})["structuredContent"]
 
     def close(self) -> None:
         if self._closed:

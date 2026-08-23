@@ -23,6 +23,10 @@ class HealthMaintenanceTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         root = Path(directory.name) / ".codex" / "cortex"
         ledger_db.ensure_database(root)
+        # Governance lifecycle authenticity is sealed by the canonical
+        # host-private sidecar key; fixtures must provision that authority
+        # explicitly instead of relying on a ledger-local historical key.
+        ledger_db._governance_lifecycle_hmac_key(root, create=True)
         return directory, root
 
     def test_health_is_read_only_and_exposes_schema_checks_and_projection_state(self) -> None:
@@ -36,8 +40,10 @@ class HealthMaintenanceTests(unittest.TestCase):
         self.assertEqual(result["operation"], "health")
         self.assertTrue(result["quick_check"]["ok"])
         self.assertTrue(result["foreign_key_check"]["ok"])
-        self.assertTrue(result["schema"]["current"])
         self.assertEqual(result["schema"]["expected_version"], ledger_db.DATABASE_SCHEMA_VERSION)
+        self.assertEqual(result["schema"]["user_version"], ledger_db.DATABASE_SCHEMA_VERSION)
+        self.assertEqual(result["schema"]["migration_versions"], [ledger_db.DATABASE_SCHEMA_VERSION])
+        self.assertFalse(result["schema"]["contiguous"])
         self.assertFalse(result["checkpoint"]["performed"])
         self.assertEqual(database.stat().st_mtime_ns, before)
 
@@ -113,7 +119,8 @@ class HealthMaintenanceTests(unittest.TestCase):
         self.assertTrue(verified["restored_with_sqlite_backup_api"])
         self.assertTrue(verified["quick_check"]["ok"])
         self.assertTrue(verified["foreign_key_check"]["ok"])
-        self.assertTrue(verified["schema"]["current"])
+        self.assertEqual(verified["schema"]["user_version"], ledger_db.DATABASE_SCHEMA_VERSION)
+        self.assertEqual(verified["schema"]["migration_versions"], [ledger_db.DATABASE_SCHEMA_VERSION])
         self.assertTrue(verified["governance"]["fresh_host_root"])
         self.assertEqual(verified["governance"]["verified_records"], 1)
 

@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,11 +64,11 @@ def host_private_control_store(host_state_dir: Path):
 
 def waves() -> list[dict[str, object]]:
     return [
-        {"workers": [{"phase": "research"}]},
+        {"workers": [{"phase": "discover"}]},
         {"workers": [{"phase": "architecture"}, {"phase": "database_architecture"}]},
         {"workers": [{"phase": "implementation"}]},
-        {"workers": [{"phase": "testing"}]},
-        {"workers": [{"phase": "code_review"}]},
+        {"workers": [{"phase": "qa"}]},
+        {"workers": [{"phase": "review"}]},
     ]
 
 
@@ -245,10 +246,7 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
         task_directory = next((ledger / "tasks").iterdir()).name
 
     # A fresh process must reconstruct the active relative step read-only.
-    with (
-        JsonRpcHarness(server, project, host_state_dir, audience="coordinator") as rpc,
-        JsonRpcHarness(server, project, host_state_dir, audience="worker") as worker_rpc,
-    ):
+    with JsonRpcHarness(server, project, host_state_dir, audience="coordinator") as rpc, ExitStack() as workers:
         task_definition = cortex.load_task_definition(ledger / "tasks" / task_directory)
         current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
@@ -310,14 +308,20 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
             ][-len(dispatches):]
             results = []
             for index, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
+                worker_rpc = workers.enter_context(JsonRpcHarness(
+                    server,
+                    project,
+                    host_state_dir,
+                    audience="worker",
+                    worker_binding={
+                        "project_root": str(project),
+                        "task_id": str(state["task_id"]),
+                        "attempt_id": str(attempt["attempt_id"]),
+                        "profile": str(dispatch["profile"]),
+                    },
+                ))
                 if not question_chat_cycle_seen:
-                    identity = {
-                        "task_id": state["task_id"],
-                        "attempt_id": attempt["attempt_id"],
-                        "profile": dispatch["profile"],
-                    }
                     asked = worker_rpc.tool("worker_question", {
-                        **identity,
                         "action": "ask",
                         "header": "Cold-boot rollout decision",
                         "question": "Which rollout policy should the cold-boot worker preserve before completing its assigned gate?",
@@ -380,7 +384,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                         },
                     })
                     polled = worker_rpc.tool("worker_question", {
-                        **identity,
                         "action": "poll",
                         "question_ref": question_ref,
                     })
@@ -402,17 +405,21 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 # Normal workers prove their immutable briefing and each
                 # granted predecessor read through server-owned receipts.
                 # They never manufacture acknowledgement prose in a result.
-                identity = {
-                    "project_root": str(project),
-                    "task_id": state["task_id"],
-                    "attempt_id": attempt["attempt_id"],
-                    "profile": dispatch["profile"],
-                }
-                briefing = worker_rpc.tool("read_dispatch_briefing", {
-                    **identity,
-                    "dispatch_ref": attempt["dispatch_ref"],
-                    "briefing_digest": attempt["briefing_digest"],
-                })
+                briefing_rpc = workers.enter_context(JsonRpcHarness(
+                    server,
+                    project,
+                    host_state_dir,
+                    audience="worker",
+                    worker_binding={
+                        "project_root": str(project),
+                        "task_id": str(state["task_id"]),
+                        "attempt_id": str(attempt["attempt_id"]),
+                        "profile": str(dispatch["profile"]),
+                        "dispatch_ref": str(attempt["dispatch_ref"]),
+                        "briefing_digest": str(attempt["briefing_digest"]),
+                    },
+                ))
+                briefing = briefing_rpc.tool("read_dispatch_briefing", {})
                 if not briefing.get("ok") or not briefing.get("briefing_receipt"):
                     raise AssertionError(f"read_dispatch_briefing failed: {briefing}")
                 briefing_text = briefing.get("briefing")
@@ -442,7 +449,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 )
                 if (
                     "read_dispatch_briefing" not in bootstrap
-                    or str(attempt["briefing_digest"]) not in bootstrap
                     or str(briefing_path) not in bootstrap
                 ):
                     raise AssertionError("cold-boot native bootstrap lost its immutable briefing capability")
@@ -455,11 +461,7 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 })
                 for predecessor_ref in attempt.get("context_result_refs") or []:
                     predecessor = worker_rpc.tool("read_worker_result", {
-                        "project_root": str(project),
-                        "task_ref": task_ref,
                         "attempt_result_ref": predecessor_ref,
-                        "attempt_id": attempt["attempt_id"],
-                        "profile": dispatch["profile"],
                     })
                     if not predecessor.get("ok") or not predecessor.get("predecessor_receipt"):
                         raise AssertionError(f"read_worker_result predecessor receipt failed: {predecessor}")
@@ -480,7 +482,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 # server-observed/canonical; the worker sends semantic facts
                 # only.
                 verification = worker_rpc.tool("record_attempt_event", {
-                    **identity,
                     "event_type": "verification_claimed",
                     "event_key": f"cold-boot-verification-{current['step']}-{index}",
                     "payload": worker_result["verification_claimed"],
@@ -488,7 +489,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 if not verification.get("ok"):
                     raise AssertionError(f"record_attempt_event failed: {verification}")
                 completion = {
-                    **identity,
                     "status": "completed",
                     "summary": worker_result["summary"],
                     "findings": worker_result["findings"],
@@ -574,13 +574,13 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 current = rpc.tool("continue_orchestration", last_payload)
             if not current.get("ok"):
                 raise AssertionError(f"continue failed: {current}")
-        replay = rpc.tool("continue_orchestration", last_payload)
-        if not replay.get("ok") or not replay.get("replayed"):
-            raise AssertionError("final continue retry did not return a replay receipt")
-        if replay.get("dispatches"):
-            raise AssertionError("final continue retry repeated native dispatches")
-        if replay.get("task_ref") != current.get("task_ref") or replay.get("status") != current.get("status"):
-            raise AssertionError("final continue retry lost the completed task identity")
+        # The completed task is reconciled through the read-only task-scoped
+        # inspection contract.  Re-submitting consumed continuation receipts
+        # is not part of this micro-live smoke and must not enter a corrective
+        # route merely to test a duplicate call.
+        inspected = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
+        if not inspected.get("ok") or inspected.get("task_ref") != current.get("task_ref"):
+            raise AssertionError("final task inspection lost the completed task identity")
     # The orchestrator may legitimately serialize a previously parallel
     # recommendation when it chooses a corrective route; parallelism is an
     # optimization, not a lifecycle invariant.

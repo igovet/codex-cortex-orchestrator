@@ -9,11 +9,20 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
 import cortex  # noqa: F401  # bind the runtime before importing its facade
 from cortex_runtime import attempt_facade
+from cortex_runtime.worker_identity import worker_binding
 
 
 class AttemptFacadeValidationContractTests(unittest.TestCase):
+    _binding = {
+        "project_root": "/tmp/project",
+        "task_id": "task-1",
+        "attempt_id": "attempt-1",
+        "profile": "backend_dev",
+    }
+
     def test_complete_attempt_reports_all_unknown_fields_with_schema(self):
-        response = attempt_facade.complete_attempt({"bogus_a": 1, "bogus_b": "x"})
+        with worker_binding(self._binding):
+            response = attempt_facade.complete_attempt({"bogus_a": 1, "bogus_b": "x"})
 
         self.assertFalse(response["ok"])
         self.assertEqual([item["path"] for item in response["diagnostics"]], ["$.bogus_a", "$.bogus_b"])
@@ -31,7 +40,8 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
         )
         for tool, operation, field in calls:
             with self.subTest(operation=operation):
-                response = tool({field: True})
+                with worker_binding(self._binding):
+                    response = tool({field: True})
                 self.assertFalse(response["ok"])
                 diagnostic = response["diagnostics"][0]
                 self.assertEqual(diagnostic["path"], f"$.{field}")
@@ -60,14 +70,24 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
             planning["properties"]["work_packages"]["items"]["properties"]["microtasks"]["items"]["properties"],
         )
 
-    def test_missing_identity_fields_are_returned_in_one_validation_response(self):
-        response = attempt_facade.record_attempt_event({})
+    def test_unbound_semantic_form_fails_closed_and_caller_identity_is_rejected(self):
+        response = attempt_facade.record_attempt_event({
+            "event_type": "progress", "payload": {"summary": "checkpoint"},
+        })
 
         self.assertFalse(response["ok"])
-        paths = [item["path"] for item in response["diagnostics"]]
-        self.assertEqual(paths, ["$.project_root", "$.task_id", "$.attempt_id", "$.profile", "$.event_type", "$.payload"])
-        self.assertTrue(response["validation"]["diagnostics_are_complete"])
-        self.assertIn("Correct every listed diagnostic", response["next_action"])
+        self.assertIn("server-bound worker session", response["diagnostics"][0]["message"])
+
+        with worker_binding(self._binding):
+            rejected = attempt_facade.record_attempt_event({
+                "project_root": "/tmp/forged",
+                "event_type": "progress",
+                "payload": {"summary": "checkpoint"},
+            })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["diagnostics"][0]["path"], "$")
+        self.assertIn("project_root", rejected["diagnostics"][0]["message"])
+        self.assertIn("server-owned", rejected["diagnostics"][0]["message"])
 
     def test_planning_failure_requires_same_attempt_patch_and_forbids_coordinator_repair(self):
         response = attempt_facade._planning_repair_failure(

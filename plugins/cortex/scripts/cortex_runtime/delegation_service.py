@@ -75,22 +75,13 @@ def _canonical_text_items(
     value: object,
     *,
     field: str,
-    limit: int,
-    item_chars: int,
 ) -> list[str]:
-    """Validate a current canonical task text-array field without rewriting it.
-
-    ``limit`` and ``item_chars`` are retained at this call boundary for
-    compatibility with its former prompt-projection role.  A delegation
-    package is not the canonical task definition, but silently shortening it
-    before the immutable task-contract artifact is made would lose a valid
-    fact.  Rendering owns byte limits and always marks a reduced projection.
-    """
+    """Validate one canonical task text-array field without rewriting it."""
     if value is None:
         return []
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{field} must be a current canonical text array")
-    del field, limit, item_chars
+    del field
     return list(value)
 
 
@@ -257,7 +248,7 @@ def _bounded_predecessor_results(
             "profile": redact(identity.get("profile") or attempt.get("profile") or "", 120),
             "summary": redact(canonical.get("summary") or "", 1200),
             "changed_files": _canonical_text_items(
-                canonical.get("changed_files"), field="AttemptResult changed_files", limit=24, item_chars=300,
+            canonical.get("changed_files"), field="AttemptResult changed_files",
             ),
             "checks": _canonical_verification_checks(root, task_id, attempt_id),
             "unresolved_findings": [item for item in findings if item],
@@ -645,13 +636,13 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         revision_history = task_definition.get("active_steers")
         if not isinstance(revision_history, list):
             revision_history = []
-        task_requirements = _canonical_text_items(task_definition.get("requirements"), field="requirements", limit=100, item_chars=1000)
-        task_constraints = _canonical_text_items(task_definition.get("constraints"), field="constraints", limit=100, item_chars=1000)
-        task_scope = _canonical_text_items(task_definition.get("scope"), field="scope", limit=100, item_chars=500)
-        task_acceptance = _canonical_text_items(task_definition.get("acceptance_criteria"), field="acceptance_criteria", limit=100, item_chars=1000)
-        task_verification = _canonical_text_items(task_definition.get("verification"), field="verification", limit=100, item_chars=1000)
-        pause_conditions = _canonical_text_items(task_definition.get("pause_conditions"), field="pause_conditions", limit=100, item_chars=1000)
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "task_requirements": task_requirements, "task_constraints": task_constraints, "task_scope": task_scope, "task_acceptance_criteria": task_acceptance, "task_verification": task_verification, "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or state.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs)}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": False, "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]], "verification": [redact(item, 1000) for item in required_lists["verification"]], "governance_context": governance_context, "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        requirements = _canonical_text_items(task_definition.get("requirements"), field="requirements")
+        constraints = _canonical_text_items(task_definition.get("constraints"), field="constraints")
+        scope = _canonical_text_items(task_definition.get("scope"), field="scope")
+        acceptance_criteria = _canonical_text_items(task_definition.get("acceptance_criteria"), field="acceptance_criteria")
+        verification = _canonical_text_items(task_definition.get("verification"), field="verification")
+        pause_conditions = _canonical_text_items(task_definition.get("pause_conditions"), field="pause_conditions")
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "requirements": requirements, "constraints": constraints, "scope": scope, "acceptance_criteria": acceptance_criteria, "verification": verification, "user_request": redact(task_definition.get("user_request", ""), 4000), "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or state.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs)}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": False, "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]], "governance_context": governance_context, "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = pause_conditions
@@ -674,12 +665,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         if isinstance(task_definition.get("follow_up"), dict):
             package["follow_up"] = sanitize_structured(task_definition["follow_up"])
         package["user_intent"] = {
-            "projection": redact(
-                task_definition.get("user_request_projection")
-                or task_definition.get("user_request")
-                or task_definition.get("user_request", ""),
-                1600,
-            ),
+            "projection": redact(task_definition.get("user_request", ""), 1600),
             "artifact_ref": task_definition.get("user_intent_artifact_ref"),
             "artifact_path": str(
                 _contained_path(

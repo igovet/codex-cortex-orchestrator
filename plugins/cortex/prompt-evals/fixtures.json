@@ -28,7 +28,7 @@
       ],
       "must_contain": ["assignment-boundary=json", "__fixture_hostile_marker__"],
       "must_not_contain": ["## Mode delta"],
-      "golden_sha256": "ebbc2ea667fa263f07c60367c667d9b350a552e584c8603731753957f315a905",
+      "golden_sha256": "49a3b01f6517cf4ec7307fb7523c71cf1aaa3ec47b56a5e6b67c0d4c69ea6b67",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 9,
@@ -64,7 +64,7 @@
       ],
       "must_contain": ["Mode fixture."],
       "must_not_contain": [],
-      "golden_sha256": "b6ea4dfd070ef086362858a093ead120e76455673f7e5fa093bd45c0edc05670",
+      "golden_sha256": "d0e2c95514e25c46480bab7ddbc39801496218d88da885501d465183f089c482",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 10,
@@ -97,7 +97,7 @@
       ],
       "must_contain": ["minimal-assignment-only"],
       "must_not_contain": ["## Mode delta", "## Gate delta", "## Context delta"],
-      "golden_sha256": "f1308eff29eb94ec89e78bb0c86661ef53ea38c4ebeb196d1cca839a4ce10f41",
+      "golden_sha256": "b7b4bcf0a36a9b045aa915260763b52aef5303601a680b0d861d4da9a5b051ae",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 7,

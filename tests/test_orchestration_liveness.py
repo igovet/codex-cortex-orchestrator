@@ -92,8 +92,8 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertNotIn("private-question-ref", visible)
         self.assertNotIn("private-task-ref", visible)
         self.assertNotIn("next_action", visible)
-        self.assertEqual(response["internal"]["result"]["outcome"], "awaiting_user")
-        self.assertEqual(response["internal"]["result"]["question_ref"], "private-question-ref")
+        self.assertEqual(response["result"]["outcome"], "awaiting_user")
+        self.assertEqual(response["result"]["question_ref"], "private-question-ref")
 
     def test_remediation_heuristic_ignores_negated_action_but_accepts_later_clause(self) -> None:
         self.assertFalse(
@@ -169,7 +169,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
             "current_pipeline": ["plan", "implementation"],
             "parallel_groups": [["plan"], ["implementation"]],
             "completed_gates": ["plan"], "skipped_gates": [], "attempts": [],
-            "pipeline_contract_version": 1,
+            "pipeline_contract_version": control.PIPELINE_CONTRACT_VERSION,
             "plan_approval": {"policy": "auto", "status": "not_required", "history": []},
             "evidence": [], "pipeline_changes": [],
         }
@@ -182,7 +182,6 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         patches = [
             mock.patch.object(orchestration_engine, "load_task_definition", return_value=task),
             mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})),
-            mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"),
             mock.patch.object(orchestration_engine, "save_state"),
             mock.patch.object(orchestration_engine, "_write_orchestrate_plan"),
         ]
@@ -194,7 +193,6 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
             with mock.patch.object(orchestration_engine, "reassess_pipeline"):
                 with mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "rework loop"}), \
                      mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})), \
-                     mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"), \
                      mock.patch.object(orchestration_engine, "save_state"), \
                      mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
                     with self.assertRaises(orchestration_engine.ReworkRequestIdempotent) as caught:
@@ -214,7 +212,6 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
              mock.patch.object(orchestration_engine, "reassess_pipeline", return_value={"state": updated}), \
              mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "rework loop", "complexity": "C1"}), \
              mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})), \
-             mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"), \
              mock.patch.object(orchestration_engine, "save_state"), \
              mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
             result_state, _ = orchestration_engine._replace_future_orchestrate_waves(
@@ -236,7 +233,6 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         with mock.patch.object(orchestration_engine, "update_pipeline") as update_pipeline, \
              mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "rework loop", "complexity": "C1"}), \
              mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})), \
-             mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"), \
              mock.patch.object(orchestration_engine, "save_state"), \
              mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
             result_state, result_plan = orchestration_engine._replace_future_orchestrate_waves(
@@ -249,39 +245,10 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertEqual(result_state["rework_history"][-1]["outcome"], "idempotent_replay")
         self.assertFalse(update_pipeline.called)
 
-    def test_missing_terminal_route_gets_one_server_owned_planner_diagnostic_recovery(self):
-        state = {
-            "task_id": "diagnostic-recovery", "revision": 7, "status": "blocked",
-            "blocked_reason": "stale worker projection has no canonical result",
-            "current_pipeline": ["implementation"], "completed_gates": [], "skipped_gates": [],
-            "attempts": [], "parallel_groups": [["implementation"]],
-        }
-        plan = {
-            "schema": "cortex/orchestration-plan/v3", "task_id": state["task_id"],
-            "host_capabilities": {}, "waves": [
-                {"wave_id": "wave-implementation", "gates": ["implementation"], "status": "pending",
-                 "delegations": [{"gate": "implementation", "agent": "general", "objective": "Implement the task."}]},
-            ],
-        }
-        updated = {**state, "current_pipeline": ["plan", "implementation"], "status": "active", "revision": 8}
-        diagnostic_plan = {
-            **plan,
-            "waves": [
-                {"wave_id": "wave-plan", "gates": ["plan"], "status": "pending",
-                 "delegations": [{"gate": "plan", "agent": "planner", "objective": "Repair the plan."}]},
-                *plan["waves"],
-            ],
-        }
-        with mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "recover", "complexity": "C1"}), \
-             mock.patch.object(orchestration_engine, "update_pipeline", return_value={"state": updated}), \
-             mock.patch.object(orchestration_engine, "load_state", return_value=(None, self.project, updated)), \
-             mock.patch.object(orchestration_engine, "_load_orchestrate_plan", return_value=diagnostic_plan), \
-             mock.patch.object(orchestration_engine, "save_state"), \
-             mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
-            recovered = orchestration_engine._server_owned_diagnostic_recovery(
-                {"project_root": str(self.project)}, self.project, state, plan,
-            )
-        self.assertIsNone(recovered)
+    def test_retired_recovery_seams_are_not_part_of_the_current_runtime(self):
+        """Recovery follows the selected pipeline; old planner seams are absent."""
+        self.assertFalse(hasattr(orchestration_engine, "_terminal_blocked_recovery"))
+        self.assertFalse(hasattr(orchestration_engine, "_server_owned_diagnostic_recovery"))
 
     def test_commit_gate_retry_budget_records_diagnostic_without_blocking_task(self):
         state = {
@@ -325,7 +292,6 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         if next_strategy:
             result["next_strategy"] = next_strategy
         return control.continue_orchestration({
-            "project_root": str(self.project),
             "task_ref": current["task_ref"],
             "step": current["step"],
             "results": [result],
@@ -393,6 +359,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
             "attempts": [{"gate": "implementation", "status": "blocked", "invalidated": False}],
             "completed_gates": [],
             "skipped_gates": [],
+            "chosen_pipeline": ["implementation"],
         }
         plan = {
             "history": [{
@@ -410,7 +377,6 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
             task_dir,
             state,
             plan,
-            required_gates=["qa", "review"],
         )
 
         # Recovery retries the durable failed frontier.  It must not inject a
@@ -486,7 +452,6 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         current = self._start_parallel()
         for _ in range(3):
             current = control.continue_orchestration({
-                "project_root": str(self.project),
                 "task_ref": current["task_ref"], "step": current["step"],
                 "results": [
                     {

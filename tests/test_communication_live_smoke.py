@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
 import cortex as control
 from cortex_runtime.communication import render_lifecycle, select_profile
+from cortex_runtime import worker_identity
 
 
 class CommunicationLiveSmokeTests(unittest.TestCase):
@@ -63,8 +64,7 @@ class CommunicationLiveSmokeTests(unittest.TestCase):
         self.assertIsNotNone(assignment_match)
         assignment = json.loads(assignment_match.group(1))
         required_lists = (
-            "scope", "allowed_paths", "task_acceptance_criteria",
-            "gate_acceptance_criteria", "task_verification", "gate_verification",
+            "allowed_paths", "acceptance_criteria", "verification",
         )
         for field in required_lists:
             with self.subTest(field=field):
@@ -76,26 +76,18 @@ class CommunicationLiveSmokeTests(unittest.TestCase):
         state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         task = control.load_task_definition(task_dir, state)
-        briefing_read = control.read_dispatch_briefing({
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
-            "dispatch_ref": attempt["dispatch_ref"],
-            "briefing_digest": attempt["briefing_digest"],
-        })
+        binding = {"project_root": str(self.project), "task_id": state["task_id"], "attempt_id": attempt["attempt_id"], "profile": attempt["profile"], "dispatch_ref": attempt["dispatch_ref"], "briefing_digest": attempt["briefing_digest"]}
+        with worker_identity.worker_binding(binding):
+            briefing_read = control.read_dispatch_briefing({})
         self.assertTrue(briefing_read.get("ok"), briefing_read)
-        recorded = control.complete_worker_attempt({
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
+        with worker_identity.worker_binding(binding):
+            recorded = control.complete_worker_attempt({
             "status": "completed",
             "summary": "Smoke check completed and persisted.",
             "findings": [],
             "decisions_needed": [],
             "unresolved": [],
-        })
+            })
         self.assertTrue(recorded.get("ok"), recorded)
         self.assertEqual(recorded.get("outcome"), "attempt_completed")
         self.assertNotEqual(recorded.get("code"), "attempt_validation_failed")

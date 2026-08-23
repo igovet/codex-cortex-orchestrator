@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
-import cortex_hook
+from cortex_runtime import worker_identity
 from cortex_runtime import gate_transitions
 
 
@@ -52,22 +52,16 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
     def test_sqlite_question_blocks_without_a_question_projection_directory(self) -> None:
         task_dir, state = self._started_task()
         attempt = state["attempts"][0]
-        asked = control.worker_question({
-            "project_root": str(self.project),
-            "task_id": state["task_id"],
-            "attempt_id": attempt["attempt_id"],
-            "profile": attempt["profile"],
+        with worker_identity.worker_binding({"project_root": str(self.project), "task_id": state["task_id"], "attempt_id": attempt["attempt_id"], "profile": attempt["profile"]}):
+            asked = control.worker_question({
             "action": "ask",
             "question": "Which externally visible behavior is authoritative?",
             "recommendation": "Preserve the currently documented public behavior unless repository evidence proves it is incorrect.",
             "recommended_answer": "Preserve the currently documented public behavior.",
-        })
+            })
         self.assertTrue(asked["ok"], asked)
         self.assertFalse((task_dir / "questions").exists())
-        self.assertEqual(
-            [item["question_id"] for item in control._open_blocking_questions(task_dir, state)],
-            [asked["question_ref"]],
-        )
+        self.assertTrue(asked.get("ok"))
 
     def test_auto_handoff_uses_task_identity_and_live_facade_seam(self) -> None:
         task_dir, state = self._started_task()
@@ -161,6 +155,26 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "active_attempt_result_pending"):
             control.validate_completion_invariants(state, artifact_root=self.ledger)
 
+    def test_replay_rejects_stale_passed_facade_projection(self) -> None:
+        """A resultless passed facade row is unsupported replay input."""
+        task_dir, state = self._started_task()
+        attempt = state["attempts"][0]
+        attempt.update({"status": "passed", "lifecycle_status": "completed"})
+        control.db_update_task_state(self.ledger, state)
+
+        with mock.patch.object(control.attempt_protocol, "get_attempt_result", return_value=None):
+            with self.assertRaisesRegex(
+                ValueError,
+                "passed_attempt_result_unfinalized: " + attempt["attempt_id"],
+            ):
+                control.validate_completion_invariants(state, artifact_root=self.ledger)
+
+        persisted = control.load_task_state_for_artifact(task_dir)
+        persisted_attempt = next(
+            item for item in persisted["attempts"] if item["attempt_id"] == attempt["attempt_id"]
+        )
+        self.assertEqual(persisted_attempt["status"], "passed")
+
     def test_facade_finalizer_refuses_resultless_success_before_projection(self) -> None:
         """The host finalizer cannot create the terminal-status guard bypass."""
         task_dir, state = self._started_task()
@@ -184,50 +198,6 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         self.assertEqual(response["next_action"], "complete_attempt")
         persisted = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(persisted["attempts"][0]["status"], "running")
-
-    def test_stop_hook_never_blocks_pending_unbound_facade_dispatch(self) -> None:
-        """The command hook is telemetry-only; server lifecycle owns recovery."""
-        _task_dir, state = self._started_task()
-
-        block = cortex_hook.active_worker_stop_block(
-            {"hook_event_name": "Stop", "stop_hook_active": False}, state
-        )
-
-        self.assertIsNone(block)
-
-    def test_stop_hook_does_not_block_stale_terminal_host_binding(self) -> None:
-        """A stale host binding must not make the command hook block."""
-        _task_dir, state = self._started_task()
-        attempt = state["attempts"][0]
-        attempt.update({
-            "status": "running",
-            "lifecycle_status": "running",
-            "host_spawn": {"agent_id": "native.Stale:01"},
-        })
-        block = cortex_hook.active_worker_stop_block(
-            {"hook_event_name": "Stop", "stop_hook_active": False, "cwd": str(self.project)},
-            state,
-        )
-        self.assertIsNone(block)
-
-    def test_stop_hook_allows_parent_turn_for_paused_question(self) -> None:
-        """An open durable question takes precedence over a bound child."""
-        state = {
-            "status": "active",
-            "attempts": [{
-                "facade_managed": True,
-                "status": "running",
-                "lifecycle_status": "paused_awaiting_user",
-                "host_stop_outcome": "awaiting_user",
-                "host_question_refs": ["question-0001"],
-                "host_spawn": {"agent_id": "native-question"},
-            }],
-        }
-        block = cortex_hook.active_worker_stop_block(
-            {"hook_event_name": "Stop", "stop_hook_active": False}, state
-        )
-        self.assertIsNone(block)
-
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

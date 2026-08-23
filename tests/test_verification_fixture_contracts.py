@@ -59,7 +59,7 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             "rep" + "ort_" + "ids",
             "rep" + "ort_" + "id",
             "documentation_" + "rep" + "ort",
-            "legacy-" + "v2",
+            "noncurrent-" + "format",
             "run_prompt_" + "ab",
             "render_prompt_" + "ab",
             "rep" + "ort-first",
@@ -134,6 +134,51 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             invalid_path.write_text(json.dumps(contract), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "coordinator completion contract"):
                 prompt_compiler.load_prompt_contract(invalid_path)
+
+    def test_worker_prompt_cards_are_nested_and_server_bound(self) -> None:
+        contract = json.loads((ROOT / "plugins/cortex/prompt-contracts.json").read_text(encoding="utf-8"))
+        profiles = json.loads((ROOT / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
+        shared = profiles["shared_worker_contract"]
+        cards = shared["operation_cards"]
+        self.assertEqual(
+            contract["lint"]["source_ownership"]["worker_operation_cards"],
+            "profiles.json.shared_worker_contract.operation_cards",
+        )
+        self.assertIn("project_root", shared["server_bound_fields"])
+        self.assertIn("planning", cards["complete_attempt"]["input"])
+        self.assertIn("nested planning", cards["complete_attempt"]["purpose"])
+        self.assertIn("predecessor ref explicitly supplied", cards["read_worker_result"]["purpose"])
+        self.assertIn("attachment path as a placeholder", shared["attachment_preflight"])
+
+        self.assertEqual(prompt_compiler.lint_prompt_sources(ROOT), [])
+
+    def test_fresh_prompt_surface_has_no_retired_tool_contract_routes(self) -> None:
+        forbidden = (
+            "activation_marker",
+            "scoping",
+            "question-schema/noncurrent",
+            "obsolete aliases",
+            "non-current public",
+            "sol_escalation",
+            "model/effort remapping",
+            "latest aliases",
+            "phase aliases",
+            "private component API",
+            "bare `/cortex`",
+            "bare `/normal`",
+            "retryable=true",
+        )
+        targets = [
+            ROOT / "plugins/cortex/profiles.json",
+            ROOT / "plugins/cortex/prompt-contracts.json",
+            ROOT / "plugins/cortex/scripts/cortex_runtime/briefings.py",
+            *sorted((ROOT / "plugins/cortex/agents").glob("*.toml")),
+            *sorted((ROOT / "plugins/cortex/skills").rglob("*.md")),
+        ]
+        for path in targets:
+            content = path.read_text(encoding="utf-8").lower()
+            found = [term for term in forbidden if term.lower() in content]
+            self.assertEqual(found, [], f"retired tool-contract vocabulary in {path}: {found}")
 
     def test_bundled_skills_require_server_audit_before_presentation_or_close(self) -> None:
         plugin = ROOT / "plugins/cortex"
@@ -217,7 +262,7 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             records = LUNA_EVAL.canonical_attempt_result_records(ledger, state)
 
         self.assertEqual(started["requested_mode"], "auto")
-        self.assertEqual(started["effective_mode"], "full")
+        self.assertIsNone(started["effective_mode"])
         self.assertEqual(started["step"], 1)
         self.assertEqual(completed["outcome"], "completed")
         self.assertEqual(state["status"], "completed")
@@ -452,7 +497,7 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("The terminal close count must equal the native spawn count", prompt)
         self.assertIn("projection_ref: it is a generated view identifier, never a result lookup token", prompt)
         self.assertIn("copy only the bare value of the attempt_result_ref field into read_worker_result", prompt)
-        self.assertIn("do not add gate-specific compatibility envelopes", prompt)
+        self.assertIn("do not add gate-specific noncanonical envelopes", prompt)
         self.assertIn(
             "close_agent, or any management operation for a child from an earlier wave after a later wave has been dispatched",
             prompt,

@@ -117,6 +117,14 @@ class ContextCompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requirements"):
             context_domain_from_canonical(malformed)
 
+    def test_requirements_reject_noncurrent_boundary_whitespace(self) -> None:
+        stale = {
+            **self.canonical,
+            "task": {**self.canonical["task"], "requirements": [" noncurrent row text "]},
+        }
+        with self.assertRaisesRegex(ValueError, "normalized"):
+            context_domain_from_canonical(stale)
+
     def test_all_large_task_fields_compile_without_backend_projection_loss(self) -> None:
         """Valid durable facts never become a late dispatch validation error."""
         huge = "界" * 2_000
@@ -213,7 +221,6 @@ class ContextCompilerTests(unittest.TestCase):
             self.canonical,
             target_profile="qa_engineer",
             target_gate="qa",
-            compact=True,
         )
         self.assertEqual(handoff["predecessor_selection"]["selected"], 1)
         self.assertFalse(handoff["predecessor_selection"]["truncated"])

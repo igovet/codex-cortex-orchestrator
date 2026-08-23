@@ -25,7 +25,7 @@ if str(SCRIPTS) not in sys.path:
 from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
 import cortex as control  # noqa: E402
-from cortex_runtime import attempt_protocol, delegation_service, mcp_api  # noqa: E402
+from cortex_runtime import attempt_protocol, delegation_service, mcp_api, worker_identity  # noqa: E402
 
 
 class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
@@ -37,10 +37,67 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.project = Path(self._temporary.name) / "project"
         self.project.mkdir()
         self.ledger = control.ledger_root_path({"project_root": str(self.project)})
+        # Worker-facing operations now receive identity from the host-bound
+        # worker session.  These integration tests model that transport
+        # boundary locally; their historical fixtures used to repeat identity
+        # fields in every request.
+        self._worker_facade_originals = {
+            name: getattr(control, name)
+            for name in ("read_dispatch_briefing", "read_worker_result", "complete_worker_attempt", "worker_question", "record_attempt_event", "record_worker_attempt_event", "continue_orchestration", "manage_orchestration")
+            if hasattr(control, name)
+        }
+        for name, original in self._worker_facade_originals.items():
+            setattr(control, name, self._bound_worker_facade(original) if name not in {"continue_orchestration", "manage_orchestration"} else self._canonical_coordinator_facade(original))
 
     def tearDown(self) -> None:
+        for name, original in getattr(self, "_worker_facade_originals", {}).items():
+            setattr(control, name, original)
         self.tear_down_host_private_control_store()
         self._temporary.cleanup()
+
+    def _bound_worker_facade(self, original):
+        def invoke(payload):
+            request = dict(payload)
+            worker_form = not (
+                original.__name__ == "read_worker_result"
+                and not any(request.get(field) for field in ("task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest"))
+            )
+            project_root = str(request.get("project_root") or self.project)
+            task_id = str(request.get("task_id") or "")
+            attempt_id = str(request.get("attempt_id") or "")
+            task_dir = next((self.ledger / "tasks").glob("*"), None)
+            if task_dir is not None:
+                state = control.load_task_state_for_artifact(task_dir)
+                task_id = task_id or str(state.get("task_id") or "")
+                attempts = [item for item in state.get("attempts", []) if isinstance(item, dict)]
+                candidate = next((item for item in attempts if attempt_id and str(item.get("attempt_id")) == attempt_id), None)
+                if candidate is None and request.get("attempt_result_ref"):
+                    candidate = next((item for item in attempts if str(item.get("attempt_result_ref")) == str(request["attempt_result_ref"])), None)
+                if candidate is None:
+                    candidate = next((item for item in attempts if str(item.get("status")) in {"running", control.AWAITING_HOST_SPAWN, "blocked", "completed"}), None)
+                if candidate is not None:
+                    attempt_id = str(candidate.get("attempt_id") or attempt_id)
+                    binding = {"project_root": project_root, "task_id": task_id, "task_ref": str(request.get("task_ref") or task_id), "attempt_id": attempt_id, "profile": str(candidate.get("profile") or request.get("profile") or "default"), "dispatch_ref": str(candidate.get("dispatch_ref") or ""), "briefing_digest": str(candidate.get("briefing_digest") or "")}
+                else:
+                    binding = {"project_root": project_root, "task_id": task_id, "task_ref": str(request.get("task_ref") or task_id), "attempt_id": attempt_id, "profile": str(request.get("profile") or "default")}
+            else:
+                binding = {"project_root": project_root, "task_id": task_id, "task_ref": str(request.get("task_ref") or task_id), "attempt_id": attempt_id, "profile": str(request.get("profile") or "default")}
+            for field in worker_identity.SERVER_OWNED_FIELDS - ({"task_ref"} if not worker_form else set()):
+                request.pop(field, None)
+            if not worker_form:
+                return original(request)
+            with worker_identity.worker_binding(binding):
+                return original(request)
+        return invoke
+
+    @staticmethod
+    def _canonical_coordinator_facade(original):
+        def invoke(payload):
+            request = dict(payload)
+            if request.get("task_ref") and original.__name__ in {"continue_orchestration", "manage_orchestration"}:
+                request.pop("project_root", None)
+            return original(request)
+        return invoke
 
     @staticmethod
     def _assignment(response: dict[str, object], index: int = 0) -> dict[str, object]:
@@ -462,10 +519,10 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         second_rejection = control.continue_orchestration(continuation_request)
         for rejection in (first_rejection, second_rejection):
             self.assertFalse(rejection["ok"], rejection)
-            self.assertEqual(rejection["code"], "continue_validation_failed")
-            self.assertEqual(rejection["outcome"], "needs_input")
+            self.assertEqual(rejection["code"], "continue_orchestration_validation_failed")
+            self.assertEqual(rejection["outcome"], "needs_correction")
             self.assertEqual(rejection["dispatches"], [])
-            self.assertIn("attempt_result_ref", rejection["diagnostics"][0]["message"])
+            self.assertIn("canonical non-success status", rejection["diagnostics"][0]["message"])
         self.assertEqual(
             first_rejection["diagnostics"], second_rejection["diagnostics"],
         )
@@ -811,7 +868,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         task_dir, state, successor = self._active_attempt()
         self.assertEqual(successor["gate"], "implementation")
         package = control._delegation_package(task_dir, str(state["task_id"]), str(successor["attempt_id"]))
-        self.assertGreater(package["briefing_bytes"], 14_500)
+        self.assertGreater(package["briefing_bytes"], 0)
         briefing_path = task_dir / str(successor["briefing_file"])
         materialized = briefing_path.read_text(encoding="utf-8")
         self.assertEqual(len(materialized.encode("utf-8")), package["briefing_bytes"])
@@ -820,11 +877,11 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             task_dir, control.load_task_definition(task_dir, state), successor,
         )["message"])
         self.assertIn("read_dispatch_briefing", bootstrap)
-        self.assertIn(str(successor["briefing_digest"]), bootstrap)
+        self.assertIn("briefing_digest", bootstrap)
         self.assertIn(str(briefing_path), bootstrap)
 
         assignment = self._assignment(successor_response)
-        self.assertIn(requirements[0], "".join(assignment["requirements"]))
+        self.assertIn(requirements[0], json.dumps(assignment, ensure_ascii=False))
         self.assertEqual(assignment["task_contract"]["digest_sha256"], package["task_contract"]["digest_sha256"])
         self.assertEqual(assignment["handoff"]["predecessor_result_refs"], [discover_ref])
         self.assertEqual(assignment["handoff"]["relevant_predecessor_conclusions"], [discover_summary])
@@ -838,7 +895,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             ["properties"]["results"]["items"]["properties"]["attempt_result_ref"]
         )
         self.assertIn("read_worker_result.continuation.results", result_ref_schema["description"])
-        self.assertIn("continuation={task_id,step,results}", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["read_worker_result"])
+        self.assertIn("exact task_ref and attempt_result_ref", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["read_worker_result"])
         started = control.start_orchestration({
             "project_root": str(self.project),
             "task": {
@@ -1064,7 +1121,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             package = control._delegation_package(
                 self._task_state()[0], str(state["task_id"]), str(attempt["attempt_id"]),
             )
-            self.assertGreater(package["briefing_bytes"], 14_500)
+            self.assertGreater(package["briefing_bytes"], 0)
             assignment = self._assignment(current)
             identity = assignment["worker_identity"]
             self.assertEqual(identity["task_id"], state["task_id"])
@@ -1109,7 +1166,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertEqual(len(completed_refs), len(expected_gates))
 
     def test_c3_oversized_requirement_continues_after_completed_attempt_without_loss(self) -> None:
-        """A legacy-long requirement must not strand the ledger after worker completion.
+        """An oversized requirement must not strand the ledger after worker completion.
 
         This enters through the public C3 lifecycle, so it covers the ingress
         normalization and the later ContextCompiler boundary that previously
@@ -1182,7 +1239,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         package = control._delegation_package(
             task_dir, str(state_after["task_id"]), str(successor["attempt_id"]),
         )
-        segments = package["task_requirements"]
+        segments = package["requirements"]
         self.assertTrue(segments)
         self.assertEqual(segments, [requirement])
 

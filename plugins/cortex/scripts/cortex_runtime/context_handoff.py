@@ -155,7 +155,7 @@ def _context_handoff(
     else:
         next_action = "Follow the current canonical lifecycle state; use only attempt_result_ref values for completed predecessors."
     return {
-        "schema": "cortex/context-handoff/v2",
+        "schema": "cortex/context-handoff/v3",
         # ``task_ref`` is the opaque public identity derived from the exact
         # task id.  Passing the whole state projection here hashes its string
         # representation and manufactures a different reference after every

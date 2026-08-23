@@ -485,8 +485,6 @@ def manage_health_maintenance(root: Path, payload: object) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("maintenance management requires payload")
     action = str(payload.get("action") or "health").strip().lower().replace("-", "_")
-    aliases = {"inspect": "health", "check": "health", "wal_checkpoint": "checkpoint", "verify_backup": "verify_backup_restore", "reconcile": "reconcile_projections"}
-    action = aliases.get(action, action)
     if action == "health":
         return inspect_health(root)
     if action == "checkpoint":

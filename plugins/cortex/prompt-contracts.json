@@ -38,7 +38,7 @@
     "mode": {"source": "profiles.json.mode_overlays", "task_data": false, "conditional": true},
     "gate": {"source": "profiles.json.gate_briefings + compiler.gate_contracts", "task_data": false, "conditional": true},
     "context": {"source": "compiler.context_contracts", "task_data": false, "conditional": true},
-    "tool_protocol": {"source": "profiles.json.shared_worker_contract + runtime MCP schema", "task_data": false},
+    "tool_protocol": {"source": "profiles.json.shared_worker_contract.operation_cards + runtime MCP schema", "task_data": false},
     "output_contract": {"source": "profiles.json.shared_worker_contract + AttemptResult/Event schemas + result and human projections", "task_data": false},
     "stopping": {"source": "compiler.stopping_contract", "task_data": false}
   },
@@ -48,7 +48,8 @@
     "gate_delta": "profiles.json.gate_briefings",
     "mode_delta": "profiles.json.mode_overlays",
     "task_data": "generated assignment JSON",
-    "tool_schema": "runtime MCP schema"
+    "tool_schema": "runtime MCP schema",
+    "operation_cards": "profiles.json.shared_worker_contract.operation_cards"
   },
   "v3": {
     "title": "Cortex Worker Briefing v3 (artifact-backed, attempt-result protocol)",
@@ -77,7 +78,7 @@
     "orchestrator": ["## Invocation and routes", "## Runtime protocol handoff"],
     "cortex-control": ["## Coordinator state machine", "## Dispatch and evidence policy"],
     "context-compaction": ["## Cortex recovery after context reset or compaction"],
-    "knowledge-harvest": ["## Modes", "## Required pipeline"],
+    "knowledge-harvest": ["## Modes", "## Required pipeline", "## Worker result shape"],
     "output-validation": []
   },
   "prompt_guidance_semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
@@ -107,7 +108,20 @@
       "complete_attempt",
       "worker_question",
       "read_worker_result"
-    ]
+    ],
+    "forbidden_role_protocol_phrases": [
+      "Question resume:",
+      "Completion: End only with complete_attempt",
+      "worker_question(action=",
+      "record_attempt_event"
+    ],
+    "source_ownership": {
+      "worker_operation_cards": "profiles.json.shared_worker_contract.operation_cards",
+      "worker_identity_binding": "runtime server-bound dispatch session",
+      "planner_shape": "profiles.json.shared_worker_contract.planner_completion_shape",
+      "attachment_preflight": "profiles.json.shared_worker_contract.attachment_preflight",
+      "activation_context": "profiles.json.shared_worker_contract.activation_context"
+    }
   },
   "prompt_eval": {
     "schema": "cortex/prompt-eval/v1",

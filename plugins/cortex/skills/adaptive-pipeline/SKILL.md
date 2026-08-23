@@ -22,7 +22,7 @@ Typical adaptations:
 - New schema or data migration: add `database_architect` before a writer.
 - Discovered UI surface: add `ux_designer` or `accessibility_engineer` before review.
 - High-risk auth, payments, or sensitive-data change: add `security_auditor` and require explicit verification.
-- QA proves the plan wrong: preserve the previous plan in history and let the
+- QA proves the plan wrong: preserve the existing plan in history and let the
   orchestrator choose whether to re-plan, add a specialist, or correct the
   current owner. A stale plan revision, predecessor digest, or semantic
   pipeline digest is advisory evidence for the next corrective dispatch; it

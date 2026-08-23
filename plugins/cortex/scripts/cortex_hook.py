@@ -1168,17 +1168,6 @@ def stopped_worker_after_wait_context(
     )
 
 
-def active_worker_stop_block(event: dict, state: dict) -> str | None:
-    """Compatibility shim: Stop never blocks a coordinator turn.
-
-    Native child identity, AttemptResult finalization, and recovery remain
-    server-owned lifecycle facts.  The command hook is deliberately
-    telemetry-only: it must not inject ``CORTEX ACTIVE WORKER`` text, emit a
-    ``decision=block`` response, or make a stale binding look live.
-    """
-    return None
-
-
 def append_lifecycle_event(task_dir: Path, event: dict) -> None:
     """Append bounded telemetry, materializing only the task-local export.
 

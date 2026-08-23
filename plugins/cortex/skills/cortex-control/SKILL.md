@@ -15,18 +15,16 @@ The public registry exposes nine MCP operations. The ordinary Desktop launch can
 `read_worker_result` to evaluate a persisted AttemptResult, and
 `manage_orchestration` only for recovery or rare subsystems. A worker whose
 host filesystem read cannot open its exact briefing may call
-`read_dispatch_briefing` with the complete identity/digest tuple from its
-bootstrap. If a bounded response is incomplete, it may continue only with the
-returned opaque cursor until `complete=true`. Any worker-tool caller/input/schema
-diagnostic or `retryable=true` result is corrected and retried on the same
-attempt without consuming the recovery budget; it never ends the worker. A
-blocked/failed result is terminal evidence for server-owned corrective
-recovery, not a Cortex stop. Only a genuinely unavailable exact identity after
-recovery is routed to a server-owned diagnostic worker. A successor worker may also use `read_worker_result` with its exact attempt/profile only
-for predecessor refs explicitly supplied in its dispatch. Workers must not call lifecycle
-operations. The private component API and retired public `orchestrate` facade
-must never be called by a coordinator or worker. Cortex remains explicitly
-opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
+`read_dispatch_briefing` through its bound worker session. If a bounded response
+is incomplete, it may continue only with the returned opaque cursor until
+`complete=true`. Any worker-tool caller/input/schema diagnostic is corrected and
+retried on the same attempt without consuming the recovery budget; it never
+ends the worker. A blocked/failed result is terminal evidence for server-owned
+corrective recovery, not a Cortex stop. Only an unavailable exact identity after
+recovery is routed to a server-owned diagnostic worker. A successor worker may
+also use `read_worker_result` only for predecessor refs explicitly supplied in
+its dispatch. Workers must not call coordinator lifecycle operations. Cortex
+remains explicitly opt-in through a selected `cortex:orchestrator` route.
 
 The stdio MCP process has one immutable launch-time audience. An unspecified
 or unknown transport audience uses the public nine-operation projection, so an
@@ -38,13 +36,11 @@ the explicit `coordinator` projection, and requires the exact
 active task, principal, thread, and non-durable recovery proof returned with
 the original successful authorization response. A lost recovery response is
 retried with that proof; Cortex redelivers one HMAC-derived replacement pair.
-Call `acknowledge_coordinator_recovery` with the prior proof and both returned
-replacement values before the old pair is retired. Only opaque delivery
-metadata and SHA-256 verifiers are durable. A lost initial start response
-remains fail-closed without host attestation, and workers never receive either
-secret. The worker prompt/profile remains worker-only; hosts that require
-transport-enforced separation must use a strict `worker` or `coordinator`
-projection at process launch.
+Only opaque delivery metadata and SHA-256 verifiers are durable. A lost initial
+start response remains fail-closed without host attestation, and workers never
+receive coordinator secrets. The worker prompt/profile remains worker-only;
+hosts that require transport-enforced separation use a strict `worker` or
+`coordinator` projection at process launch.
 
 ## Coordinator state machine
 
@@ -131,7 +127,7 @@ one concrete question and keep the task resumable.
 
 Before every Cortex tool call, read the exact schema advertised for that tool by
 the active MCP `tools/list` surface and construct one complete request from that
-schema. Do not infer field names, enum values, nested paths, or phase aliases
+schema. Do not infer field names, enum values, or nested paths
 from a prior response or from prose. A validation response is a form receipt:
 apply every returned diagnostic to its named path, preserve all fields that
 already passed validation, and retry the same operation only after the whole
@@ -154,7 +150,13 @@ paths forbidden above.
 
 ## Normal flow
 
-1. Call `start_orchestration` once with the exact absolute `project_root` and
+1. Before calling `start_orchestration`, materialize attachments. If the user
+   supplied an attachment or pasted-text reference, read it through the host
+   attachment surface and place its exact content in `task.user_request`. Never
+   send an attachment path as a placeholder, duplicate the path, or paraphrase
+   material task text. If the host cannot read it, ask one task-level question
+   before starting. Keep route activation separate from task text.
+   Then call `start_orchestration` once with the exact absolute `project_root` and
    the user's exact, unexpanded text in `task.user_request`. Add requirements, acceptance criteria,
    scope, allowed paths, verification, budget, pause conditions, language, or
    complexity only when the user supplied them or they are established facts.
@@ -164,7 +166,7 @@ paths forbidden above.
    schema: Cortex rejects unknown task fields before creating a task.
    Do not make an abstract request look decision-complete by inventing product
    intent, audience, design direction, behavior, or acceptance. Complexity
-   defaults to C2 and accepts aliases. Before the one start call, verify that
+   defaults to C2. Before the one start call, verify that
    ordinary tasks have non-empty `task.acceptance_criteria` and
    `task.verification`, derived only from the exact request or verified
    authority. If either list cannot be grounded without inventing material
@@ -191,8 +193,7 @@ paths forbidden above.
    concurrently; correlate each `SubagentStart` by the exact returned
    `task_name`/`dispatch_ref` (and the host child id), never by a guessed
    ordinal or a display label. If the host cannot batch calls, issue them in
-   the returned order as a transport fallback, but preserve the same exact
-   correlation contract.
+   the returned order while preserving the same exact correlation contract.
    Before invoking it, check the sibling `phase`, `profile`, `capability`,
    `sandbox`, `selection_reason`, `dispatch_ref`, `briefing_path`, and
    `briefing_digest` against the latest worker evidence and
@@ -236,13 +237,14 @@ paths forbidden above.
    the directory, mutable state, baselines, delegation packages, another
    briefing, or result artifacts. If the
    host filesystem read says this exact path is missing or unreadable, the
-   worker may call `read_dispatch_briefing` with the exact project root,
-   task id, attempt id, profile, dispatch ref, and digest from the bootstrap.
+   worker may call `read_dispatch_briefing` without repeating identity fields;
+   the bound worker session supplies project root, task, attempt, profile,
+   dispatch, and digest.
    An incomplete bounded response may continue only with its returned cursor.
-   That scoped fallback returns only the same validated briefing and grants no
-   directory or ledger access. Values above the chunk bound are normalized and
+   That scoped continuation returns only the same validated briefing and grants
+   no directory or ledger access. Values above the chunk bound are normalized and
    continued with the returned cursor. If it returns a caller/schema diagnostic
-   or `retryable=true`, correct the named field and retry the same tool on this
+   or a retryable caller/schema result, correct the named field and retry the same tool on this
    attempt. A blocked/failed result is durable evidence for server-owned corrective recovery, never a Cortex stop.
    After reviewing it, the worker relies on the server-owned briefing receipt;
    it does not author a digest or evidence marker.
@@ -315,8 +317,9 @@ calls `worker_question(action="poll")` with the same attempt and ref before
 continuing. Never replace the worker or advance the wave for a question.
    During work, checkpoint material facts with `record_attempt_event` and
    finish exactly one attempt with `complete_attempt`. The payload contains
-   only semantic `status`, `summary`, `findings`, `decisions_needed`, and
-   `unresolved`. Invalid payloads are
+   only semantic `status`, `summary`, `findings`, `decisions_needed`,
+   `unresolved`, optional `claims`, and (for a planner on the plan gate) one
+   nested `planning` object. Invalid payloads are
    corrected and retried on the same attempt; finalization/projection errors
    never authorize a replacement worker. Cortex derives identity, timestamps,
    changed files, checks, receipts, and evidence from canonical state and
@@ -327,8 +330,9 @@ continuing. Never replace the worker or advance the wave for a question.
    not worker-authored authority. When predecessor handoffs are supplied, a
    successful scoped `read_worker_result` creates the server-owned receipt.
    A successor worker reads each supplied predecessor ref before repository
-   work through `read_worker_result`, passing the exact project root, task ref,
-   attempt id, profile, and supplied result ref from its generated briefing.
+   work through `read_worker_result`, passing only the supplied result ref from
+   its generated briefing. The server binds project root, task ref, attempt,
+   profile, and dispatch to the active worker session.
    Cortex rejects attempts to read an ungranted result. This scoped read does
    not authorize coordinator lifecycle calls or user-facing projection links.
    An ordinary completed semantic result may use `unresolved` only for
@@ -497,9 +501,14 @@ Planner then reruns before another approval hold. Silence never approves. This g
 separate from `worker_question`: material questions are resolved through that
 lifecycle during planning rather than through a duplicate approval question.
 
-The Planner may attach a separate `planning` object to its semantic
-`complete_attempt` payload. It contains exactly `overview` and `work_packages`; the
-strict AttemptResult contract remains unchanged. Each package
+The Planner may attach one nested `planning` object to its semantic
+`complete_attempt` payload. The strict AttemptResult contract remains unchanged.
+`planning` requires `overview` and `work_packages` and may include the optional
+siblings `requirement_coverage`, `recommendation`, `recommendation_rationale`,
+`recommendation_actions`, `resolved_questions`, and `risks`. Valid:
+`{planning:{overview:...,work_packages:[...]}}`. Invalid:
+`{overview:...,work_packages:[...]}`; root-level planning fields are rejected.
+Scope uses the semantic result. Each package
 has `id`, `title`, `objective`, optional `allowed_paths`/`depends_on`, and
 non-empty microtasks; `profile` is forbidden at package level. Each microtask
 requires `id`, `title`, `objective`, an explicit `profile`, narrow non-broad
@@ -520,8 +529,7 @@ It enforces 32 packages, 32 microtasks per package, and 128 total microtasks.
 The Planner remains read-only; Cortex materializes immutable, revision-scoped
 host-private `tasks/<task>/planning/revisions/plan-<result-ref>/overview.md`
 and `packages/<id>.json` artifacts. The SQLite task document
-`planning_current` is the sole current-plan pointer; there are no
-`planning/manifest.json` or `planning/overview.md` latest aliases.
+`planning_current` is the sole current-plan pointer.
 `plan_review` exposes compact
 `planning_artifacts` for approval. Treat this as a durable catalog for
 ownership/dependency-aware scheduling. After approval, Cortex topologically
@@ -542,8 +550,7 @@ rejected atomically and does not mutate the draft or create an AttemptResult.
 ### Active steer and correcting a completed task
 
 While a task is active or blocked, a material user correction uses
-`manage_orchestration(intent="steer")` (aliases `amend` and
-`revise_active_task`) with `payload.user_message`. English worker delivery is
+`manage_orchestration(intent="steer")` with `payload.user_message`. English worker delivery is
 required; for another user language the coordinator supplies canonical
 English `message_en`. Cortex appends a task revision, retains the original and
 canonical messages, computes a bounded impact summary, and returns
@@ -634,7 +641,7 @@ include a concise `reason`; reason prose is audit-only and cannot authorize a
 recovery or release a liveness pause. Planner and explorer ownership recommendations are
 advisory routing evidence, not an automatic rewrite command. Prefer the
 narrowest supported profile and replace a stale route only after that explicit
-   decision. `general` is a conservative fallback, not the preferred universal
+   decision. `general` is a conservative non-specialist owner, not the preferred universal
    writer. The public facade infers rework when `future_waves` reintroduces a
    current or completed phase; the optional `rework` field is only a hint. A
    pending implementation phase is retained as an evidence obligation, while
@@ -697,8 +704,7 @@ or reconstruct canonical `question_key` or `option_id` values. Cortex maps
 each projection by its exact canonical key only when the complete batch
 preserves all keys; otherwise it maps positions and ignores display IDs. Each
 projection uses `localized_question`, `localized_header`, `localized_options`,
-and optional `localized_custom_label`; the obsolete aliases `question`,
-`header`, `options`, and `custom_label` mean the same thing. Every localized
+and optional `localized_custom_label`. Every localized
 question must state the concrete decision, and every option must name its
 outcome or trade-off; generic numbered or recommended/alternative placeholders
 are rejected. Every question also requires `recommendation` plus exact
@@ -754,8 +760,7 @@ state, never project source or documentation.
 
 Use the adaptive model policy defined in `profiles.json`. `explorer` always
 selects Luna; the coordinator chooses its effort, with the risk-based default
-used when omitted, and Terra is permitted only as the hidden host-unavailable
-fallback. Security context, the security gate, and `security_auditor` always
+used when omitted. Security context, the security gate, and `security_auditor` always
 select Sol, with minimum effort `medium` for C1, `high` for C2, and `xhigh` for
 C3. Ordinary profiles are divided into efficient, adaptive, and deep classes.
 Efficient work uses Luna. Deep profiles use Terra. Adaptive work stays on Luna
@@ -772,14 +777,11 @@ Non-security Sol is accepted only when the user explicitly selected it.
 Set compact `user_requested_model: sol`; omit `model` or also set it to `sol`.
 Cortex records matching `user_requested_model` and `requested_model`.
 Coordinator preference, an earlier Terra failure, and auditable-extreme labels
-do not authorize Sol;
-the retired `sol_escalation` and model/effort remapping contracts must not be
-used.
+do not authorize Sol.
 
 Configured-default Luna routes carry explicit effort but omit native `model`;
-explicit Luna/Terra/Sol selections retain it. If Luna is unavailable to the
-host, Cortex may use a hidden Terra fallback while preserving the selected
-effort. Expected routes are metadata, not proof of the effective host model.
+explicit Luna/Terra/Sol selections retain it. Expected routes are metadata, not
+proof of the effective host model.
 Only host-observed runtime metadata may attest actual models. The original
 user language is held by the main coordinator only. Workers emit English in
 every message, tool argument, result, durable question, handoff, and native
@@ -798,11 +800,11 @@ bytes, collapse repeated dashes/dots, trim invalid edges, use `root` when
 empty, and cap at 200 bytes with an eight-hex FNV-1a suffix. Workers use that
 key directly and must not call `list_projects` before the first indexed query.
 Only direct not-found, ambiguity, or apparent key drift/collision permits one
-`list_projects` fallback, whose entry must match the exact canonical root;
+`list_projects` query, whose entry must match the exact canonical root;
 basename matching is forbidden. Workers prefer graph, architecture, trace, and
 impact tools for non-trivial discovery and confirm consequential facts in
 current source or tests. Designated read-only discovery
-profiles may refresh one missing or stale index; other profiles fall back to
+profiles may refresh one missing or stale index; other profiles use
 repository-native tools. One failed MCP attempt is enough: record the
 limitation and do not loop. The coordinator never calls repository-intelligence
 tools itself because the root lock still applies.
@@ -840,13 +842,15 @@ evidence.
 
 ## Durable artifacts
 
-Every call supplies its exact absolute `project_root`. Runtime state stays in
+The initial coordinator start binds the exact absolute `project_root`; worker
+operations and task-scoped follow-ups derive it from the server-owned binding.
+Runtime state stays in
 the host-private default `~/.codex/cortex/projects/p-<sha256>/` root (or a
 private, outside-workspace `CORTEX_HOST_STATE_DIR` override) using the
-canonical `cortex/v8` ledger. `CORTEX_ROOT`, `/tmp` fallback, and symlink
-traversal remain forbidden. A old project-local `.codex/cortex` database is
+canonical `cortex/v8` ledger. `CORTEX_ROOT`, `/tmp`, and symlink
+traversal remain forbidden. A project-local `.codex/cortex` database is
 moved only by same-filesystem atomic rename after secure database/split-state
-validation; unsafe or cross-filesystem old state fails closed.
+validation; unsafe or cross-filesystem state fails closed.
 Initial and per-attempt project manifests are immutable, content-addressed
 SQLite records referenced from state by compact
 `manifest-<sha256>` refs. Identical state deduplicates, but every dispatch
@@ -879,7 +883,7 @@ configuration outrank generated documentation.
 
 ## Private tool-error diagnostics
 
-Cortex appends raised MCP exceptions and obsolete error-shaped tool results as
+Cortex appends raised MCP exceptions and tool-error records as
 JSONL to `~/.codex/logs/cortex-tool-errors.jsonl`, where `~` is the home of the
 user running the MCP process. This is private per-user diagnostic data, not the
 project ledger. The writer keeps the file at or below 10 MiB by dropping the

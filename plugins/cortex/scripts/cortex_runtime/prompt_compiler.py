@@ -99,6 +99,20 @@ def _validate_contract(payload: object) -> dict[str, Any]:
     sources = payload.get("sources")
     if not isinstance(sources, dict) or not all(isinstance(value, str) and value.strip() for value in sources.values()):
         raise RuntimeError("bundled Cortex prompt sources are invalid")
+    if sources.get("operation_cards") != "profiles.json.shared_worker_contract.operation_cards":
+        raise RuntimeError("bundled Cortex operation-card source is invalid")
+    lint_contract = payload.get("lint")
+    if not isinstance(lint_contract, dict) or not isinstance(lint_contract.get("source_ownership"), dict):
+        raise RuntimeError("bundled Cortex prompt source ownership is invalid")
+    required_source_owners = {
+        "worker_operation_cards": "profiles.json.shared_worker_contract.operation_cards",
+        "worker_identity_binding": "runtime server-bound dispatch session",
+        "planner_shape": "profiles.json.shared_worker_contract.planner_completion_shape",
+        "attachment_preflight": "profiles.json.shared_worker_contract.attachment_preflight",
+        "activation_context": "profiles.json.shared_worker_contract.activation_context",
+    }
+    if lint_contract["source_ownership"] != required_source_owners:
+        raise RuntimeError("bundled Cortex prompt source ownership is invalid")
     v3 = payload.get("v3")
     if (
         not isinstance(v3, dict)
@@ -330,6 +344,9 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
         for literal in contract["lint"]["forbidden_model_literals"]:
             if literal.lower() in prompt.lower():
                 issues.append(f"{path.name}: prompt contains forbidden model literal {literal}")
+        for phrase in contract["lint"].get("forbidden_role_protocol_phrases", []):
+            if phrase.lower() in prompt.lower():
+                issues.append(f"{path.name}: role prompt duplicates shared protocol phrase {phrase!r}")
     if seen_names != set(profiles_by_name):
         issues.append("agent TOML/profile contract sets differ")
     gate_briefings = profile_contract.get("gate_briefings")

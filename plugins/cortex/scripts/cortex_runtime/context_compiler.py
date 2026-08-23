@@ -81,18 +81,12 @@ class ContextDomain:
     findings: tuple[Finding, ...]
 
 
-def _domain_text(value: object, *, label: str, limit: int | None = None) -> str:
+def _domain_text(value: object, *, label: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"canonical {label} must be a string")
     text = value.strip()
     if not text:
         raise ValueError(f"canonical {label} must not be empty")
-    # ``limit`` used to reject a valid durable fact here.  That meant a task
-    # could run successfully and only then become impossible to continue when
-    # a successor briefing was compiled.  Size is a transport concern, not a
-    # canonical-state validity concern.  Keep the argument for source
-    # compatibility; byte-bounded rendering happens in ``_project_text``.
-    del limit
     return text
 
 
@@ -105,29 +99,19 @@ def _domain_values(value: object, *, label: str, limit: int, item_limit: int) ->
     # Do not use a prompt cardinality limit as a ledger validity limit.  The
     # returned domain is projected later with a source reference.
     del limit
-    return tuple(_domain_text(raw, label=label, limit=item_limit) for raw in values)
+    return tuple(_domain_text(raw, label=label) for raw in values)
 
 
 def _validated_requirement(value: object) -> str:
-    """Validate one durable requirement without changing its text.
+    """Validate one current canonical requirement record.
 
-    Old task rows predate the requirement item bound.  Their text is still
-    canonical task state, so rejecting it at dispatch time can strand a task
-    after a prior attempt has already completed.  In particular, an earlier
-    ingress atomizer can deliberately retain a boundary space in the preceding
-    record, so even whitespace must remain byte-for-byte intact here.
+    Requirement records are accepted only in the current normalized string
+    shape.  In particular, this boundary does not preserve or reinterpret
+    pre-canonical row text (including boundary whitespace) as a migration.
     """
-    if not isinstance(value, str):
-        raise ValueError("canonical requirements must be an array of strings")
-    if not value.strip():
-        raise ValueError("canonical requirements must not be empty")
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("canonical requirements must be normalized non-empty strings")
     return value
-
-
-def _requirement_segments(text: str, *, item_limit: int = MAX_REQUIREMENT_ITEM) -> tuple[str, ...]:
-    """Keep one canonical requirement as one complete semantic record."""
-    del item_limit
-    return (text,)
 
 
 def _domain_requirements(value: object) -> tuple[str, ...]:
@@ -160,8 +144,8 @@ def _domain_decisions(value: object) -> tuple[Decision, ...]:
         # display values are never compiler input.
         question_value = raw.get("question_en")
         answer_value = raw.get("answer_en")
-        question = _domain_text(question_value, label="decision question", limit=500)
-        answer = _domain_text(answer_value, label="decision answer", limit=800)
+        question = _domain_text(question_value, label="decision question")
+        answer = _domain_text(answer_value, label="decision answer")
         decisions.append(Decision(question=question, answer=answer))
     return tuple(decisions)
 
@@ -197,16 +181,16 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
         raise ValueError("canonical context must be an object")
     task = _mapping(canonical.get("task"))
     state = _mapping(canonical.get("state"))
-    user_request_value = task.get("user_request_projection") or task.get("user_request")
-    intent = TaskIntent(_domain_text(user_request_value, label="task intent", limit=MAX_OBJECTIVE))
+    user_request_value = task.get("user_request")
+    intent = TaskIntent(_domain_text(user_request_value, label="task intent"))
     requirements = tuple(
         Requirement(text) for text in _domain_requirements(
-            task.get("requirements") or task.get("task_requirements")
+            task.get("requirements")
         )
     )
     constraints = tuple(
         Constraint(text) for text in _domain_values(
-            task.get("constraints") or task.get("task_constraints"),
+            task.get("constraints"),
             label="constraints", limit=MAX_ITEMS, item_limit=700,
         )
     )
@@ -222,14 +206,14 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
         )
     )
     decisions = list(_domain_decisions(
-        canonical.get("resolved_user_decisions") or state.get("resolved_user_decisions") or state.get("decisions")
+        canonical.get("resolved_user_decisions")
     ))
     for event in _compiler_visible_events(canonical):
         if event.get("event_type") != "decision_resolved":
             continue
         decisions.append(Decision(
-            question=_domain_text(event.get("question"), label="decision question", limit=500),
-            answer=_domain_text(event.get("answer"), label="decision answer", limit=800),
+            question=_domain_text(event.get("question"), label="decision question"),
+            answer=_domain_text(event.get("answer"), label="decision answer"),
         ))
     finding_texts: list[str] = []
     for predecessor in _sequence(canonical.get("predecessor_results")):
@@ -411,17 +395,6 @@ class ContextCompiler:
             }
             for item in decision_values
         ]
-        decisions_truncated = False
-        if decisions_truncated:
-            decision_projection: dict[str, Any] = {
-                "total_items": len(domain.decisions), "selected_items": len(rendered_decisions),
-                "question_byte_limit": 500, "answer_byte_limit": 800, "truncated": True,
-            }
-            for key in ("artifact_ref", "digest_sha256", "artifact_path", "byte_size"):
-                if contract.get(key) not in (None, ""):
-                    decision_projection[key] = contract[key]
-        else:
-            decision_projection = {}
 
         context = {
             "schema": CONTEXT_SCHEMA,
@@ -437,7 +410,7 @@ class ContextCompiler:
                 "attempt_id": _text(attempt.get("attempt_id"), 128) or None,
                 "phase": gate or None,
                 "profile": profile or None,
-                "scope": _strings(attempt.get("task_scope") or task.get("scope") or task.get("task_scope"), limit=MAX_ITEMS, item_limit=500),
+                "scope": _strings(attempt.get("scope") or task.get("scope"), limit=MAX_ITEMS, item_limit=500),
                 "allowed_paths": _strings(attempt.get("allowed_paths") or task.get("allowed_paths"), limit=MAX_PATHS, item_limit=300),
             },
             "decisions": rendered_decisions,
@@ -454,12 +427,6 @@ class ContextCompiler:
                 "predecessor_result_refs_read": receipt_refs,
             },
         }
-        # Unlike the task-level projection key (which is part of the stable
-        # compiled-context shape), this optional diagnostic was historically
-        # absent when no decision projection was needed.  Keep that shape
-        # without using it to omit any decision content.
-        if decision_projection:
-            context["decisions_projection"] = decision_projection
         return _drop_empty(context)
 
 
@@ -471,12 +438,12 @@ def dispatch_canonical_state(package: Mapping[str, Any], profile: str) -> dict[s
     and accepts no obsolete result-registry fallback.
     """
     task = {
-        "user_request_projection": _mapping(package.get("user_intent")).get("projection") or package.get("task_user_request"),
-        "requirements": package.get("task_requirements"),
-        "constraints": package.get("task_constraints") or package.get("constraints"),
-        "acceptance_criteria": package.get("task_acceptance_criteria") or package.get("acceptance_criteria"),
-        "verification": package.get("task_verification") or package.get("verification"),
-        "scope": package.get("task_scope"),
+        "user_request": package.get("user_request"),
+        "requirements": package.get("requirements"),
+        "constraints": package.get("constraints"),
+        "acceptance_criteria": package.get("acceptance_criteria"),
+        "verification": package.get("verification"),
+        "scope": package.get("scope"),
         "allowed_paths": package.get("allowed_paths"),
         # This descriptor is deliberately metadata only.  The complete task
         # contract is an immutable artifact; compilers must never recover it
@@ -488,7 +455,7 @@ def dispatch_canonical_state(package: Mapping[str, Any], profile: str) -> dict[s
         "gate": package.get("gate"),
         "profile": profile,
         "allowed_paths": package.get("allowed_paths"),
-        "task_scope": package.get("task_scope"),
+        "scope": package.get("scope"),
     }
     return {
         "task": task,

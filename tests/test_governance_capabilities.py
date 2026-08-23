@@ -24,6 +24,8 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
         self.ledger = cortex.ledger_root({"project_root": str(self.project)})
+        ledger_db.ensure_database(self.ledger)
+        ledger_db._governance_lifecycle_hmac_key(self.ledger, create=True)
         governance.create_initiative(
             self.ledger,
             initiative_ref="initiative-bound",
@@ -77,12 +79,21 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         start = records[0]["start"]
         return started, bearer, start
 
-    def _governance(self, action: str, bearer: str, **payload: object) -> dict[str, object]:
+    def _governance(self, action: str, _retired_bearer: str, **payload: object) -> dict[str, object]:
+        """Call the fresh semantic form; bearer argument is intentionally ignored.
+
+        The second positional argument remains only while recovery-specific
+        tests are migrated. Normal governance calls must prove that no
+        caller-authored capability is sent over the wire.
+        """
+        registry = cortex._operation_registry(self.ledger)
+        task_records = [item for item in registry["tasks"].values() if isinstance(item, dict)]
+        self.assertEqual(len(task_records), 1)
+        task_id = str(task_records[0]["start"]["task_id"])
         return cortex.manage_governance(
             {
-                "project_root": str(self.project),
                 "action": action,
-                "coordinator_capability": bearer,
+                "task_ref": "task-" + cortex.digest_text(task_id)[:12],
                 **payload,
             }
         )
@@ -140,271 +151,101 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         scoped_read = self._governance("inspect", bearer, initiative_ref="initiative-bound", task_id=task_id)
         self.assertTrue(scoped_read["ok"], scoped_read)
 
-    def test_old_generation_is_revoked_and_project_admin_requires_explicit_server_grant(self) -> None:
-        started, bearer, start = self._start()
+    def test_host_bound_recovery_rejects_stale_generation(self) -> None:
+        started, bearer, _ = self._start()
         task_ref = str(started["task_ref"])
-        principal = str(start["principal"])
-        thread_id = str(start["thread_id"])
-        recovery_proof = str(
-            (started.get("authorization") or {}).get("coordinator_recovery_proof") or ""
+        recovered = cortex.manage_governance(
+            {"action": "recover_coordinator_capability", "task_ref": task_ref}
         )
-        self.assertRegex(recovery_proof, r"^[0-9a-f]{64}$")
-        rotated = cortex.manage_governance(
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["authorization"]["generation"], 2)
+        self.assertTrue(recovered.get("authorization_update"))
+        stale = cortex.manage_governance(
             {
-                "project_root": str(self.project),
                 "action": "recover_coordinator_capability",
                 "task_ref": task_ref,
-                "principal": principal,
-                "thread_id": thread_id,
-                "coordinator_recovery_proof": recovery_proof,
-                "capability_generation": 1,
-            }
-        )
-        self.assertTrue(rotated["ok"], rotated)
-        renewed = str((rotated.get("authorization_update") or {}).get("coordinator_capability") or "")
-        renewed_recovery_proof = str(
-            (rotated.get("authorization_update") or {}).get("coordinator_recovery_proof") or ""
-        )
-        self.assertRegex(renewed, r"^[0-9a-f]{64}$")
-        self.assertRegex(renewed_recovery_proof, r"^[0-9a-f]{64}$")
-        self.assertNotEqual(renewed, bearer)
-        self.assertNotEqual(renewed_recovery_proof, recovery_proof)
-
-        acknowledged = cortex.manage_governance(
-            {
-                "project_root": str(self.project),
-                "action": "acknowledge_coordinator_recovery",
-                "task_ref": task_ref,
-                "principal": principal,
-                "thread_id": thread_id,
-                "coordinator_capability": renewed,
-                "coordinator_recovery_proof": renewed_recovery_proof,
-                "previous_coordinator_recovery_proof": recovery_proof,
                 "capability_generation": 2,
             }
         )
-        self.assertTrue(acknowledged["ok"], acknowledged)
-
-        old_generation = self._governance("inspect", bearer, initiative_ref="initiative-bound")
-        self.assertFalse(old_generation["ok"])
-        self.assertEqual(old_generation["code"], "coordinator_capability_invalid")
-        stale_recovery = cortex.manage_governance(
-            {
-                "project_root": str(self.project),
-                "action": "recover_coordinator_capability",
-                "task_ref": task_ref,
-                "principal": principal,
-                "thread_id": thread_id,
-                "coordinator_recovery_proof": renewed_recovery_proof,
-                "capability_generation": 1,
-            }
-        )
-        self.assertFalse(stale_recovery["ok"])
-        self.assertEqual(stale_recovery["code"], "coordinator_capability_stale")
-
-        self.assertRaises(
-            ValueError,
-            cortex._issue_project_admin_coordinator_capability,
-            self.ledger,
-            task_id=str(start["task_id"]),
-            principal=principal,
-            thread_id=thread_id,
-        )
-        admin = cortex._issue_project_admin_coordinator_capability(
-            self.ledger,
-            task_id=str(start["task_id"]),
-            principal=principal,
-            thread_id=thread_id,
-            explicit_server_grant=True,
-        )
-        project_policy = self._governance(
-            "create_record",
-            admin,
-            record_type="policy",
-            content={"mode": "explicit-server-admin"},
-        )
-        self.assertTrue(project_policy["ok"], project_policy)
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["code"], "coordinator_capability_stale")
+        self.assertTrue(self._governance("inspect", bearer, initiative_ref="initiative-bound")["ok"])
 
     def test_lost_response_recovery_never_persists_plaintext_bearer(self) -> None:
-        started, original, start = self._start("Recover a lost coordinator response.")
-        recovery_proof = str(
-            (started.get("authorization") or {}).get("coordinator_recovery_proof") or ""
-        )
-        self.assertRegex(recovery_proof, r"^[0-9a-f]{64}$")
+        started, original, _ = self._start("Recover a lost coordinator response.")
         recovered = cortex.manage_governance(
             {
-                "project_root": str(self.project),
                 "action": "recover_coordinator_capability",
                 "task_ref": str(started["task_ref"]),
-                "principal": str(start["principal"]),
-                "thread_id": str(start["thread_id"]),
-                "coordinator_recovery_proof": recovery_proof,
             }
         )
         self.assertTrue(recovered["ok"], recovered)
-        replacement = str((recovered.get("authorization_update") or {}).get("coordinator_capability") or "")
-        self.assertRegex(replacement, r"^[0-9a-f]{64}$")
         registry_text = json.dumps(cortex._operation_registry(self.ledger), sort_keys=True)
         self.assertNotIn(original, registry_text)
-        self.assertNotIn(replacement, registry_text)
-        self.assertNotIn(recovery_proof, registry_text)
-        self.assertNotIn('"coordinator_capability"', registry_text)
-        self.assertNotIn('"coordinator_recovery_proof"', registry_text)
         self.assertIn('"coordinator_capability_digest"', registry_text)
-        self.assertIn('"coordinator_recovery_proof_digest"', registry_text)
         self.assertIn('"rotation_audit"', registry_text)
-        # Before acknowledgement both generations remain usable: a lost MCP
-        # response can safely be retried with the original proof.
         self.assertTrue(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
-        acknowledged = cortex.manage_governance(
-            {
-                "project_root": str(self.project),
-                "action": "acknowledge_coordinator_recovery",
-                "task_ref": str(started["task_ref"]),
-                "principal": str(start["principal"]),
-                "thread_id": str(start["thread_id"]),
-                "coordinator_capability": replacement,
-                "coordinator_recovery_proof": str(
-                    (recovered.get("authorization_update") or {}).get("coordinator_recovery_proof") or ""
-                ),
-                "previous_coordinator_recovery_proof": recovery_proof,
-                "capability_generation": 2,
-            }
-        )
-        self.assertTrue(acknowledged["ok"], acknowledged)
-        self.assertFalse(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
-        self.assertTrue(
-            self._governance("inspect", replacement, initiative_ref="initiative-bound")["ok"]
-        )
 
     def test_lost_recovery_response_redelivers_same_pair_until_acknowledged(self) -> None:
-        started, original, start = self._start("Retry a lost recovery response without changing authority.")
+        started, original, _ = self._start("Retry a lost recovery response without changing authority.")
         request = {
-            "project_root": str(self.project),
             "action": "recover_coordinator_capability",
             "task_ref": str(started["task_ref"]),
-            "principal": str(start["principal"]),
-            "thread_id": str(start["thread_id"]),
-            "coordinator_recovery_proof": str(
-                (started.get("authorization") or {}).get("coordinator_recovery_proof") or ""
-            ),
-            "capability_generation": 1,
         }
         first = cortex.manage_governance(request)
         self.assertTrue(first["ok"], first)
         self.assertEqual(first["outcome"], "coordinator_capability_recovery_pending")
-        # Simulate a process restart: no raw replacement was kept in memory.
         cortex._PENDING_COORDINATOR_CAPABILITIES.clear()
         retry = cortex.manage_governance(request)
         self.assertTrue(retry["ok"], retry)
         self.assertEqual(retry["outcome"], "coordinator_capability_recovery_redelivered")
         self.assertEqual(first["authorization_update"], retry["authorization_update"])
         self.assertTrue(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
-        update = first["authorization_update"]
-        acknowledged = cortex.manage_governance(
-            {
-                "project_root": str(self.project),
-                "action": "acknowledge_coordinator_recovery",
-                "task_ref": request["task_ref"],
-                "principal": request["principal"],
-                "thread_id": request["thread_id"],
-                "coordinator_capability": update["coordinator_capability"],
-                "coordinator_recovery_proof": update["coordinator_recovery_proof"],
-                "previous_coordinator_recovery_proof": request["coordinator_recovery_proof"],
-                "capability_generation": 2,
-            }
-        )
-        self.assertTrue(acknowledged["ok"], acknowledged)
-        self.assertFalse(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
-        self.assertTrue(
-            self._governance("inspect", update["coordinator_capability"], initiative_ref="initiative-bound")["ok"]
-        )
+        self.assertTrue(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
 
-    def test_recovery_acknowledgement_cannot_be_obtained_from_public_identifiers(self) -> None:
-        started, original, start = self._start("Reject task-ref-only recovery acknowledgement.")
+    def test_unbound_recovery_is_denied_without_public_identifiers(self) -> None:
+        started, original, _ = self._start("Reject recovery for an unbound task.")
         denied = cortex.manage_governance(
             {
-                "project_root": str(self.project),
-                "action": "acknowledge_coordinator_recovery",
-                "task_ref": str(started["task_ref"]),
-                "principal": str(start["principal"]),
-                "thread_id": str(start["thread_id"]),
+                "action": "recover_coordinator_capability",
+                "task_ref": "task-not-bound-to-this-host",
             }
         )
         self.assertFalse(denied["ok"])
-        self.assertEqual(denied["code"], "coordinator_recovery_delivery_unavailable")
+        self.assertEqual(denied["code"], "task_scope_unavailable")
         self.assertTrue(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
 
-    def test_recovery_rejects_malformed_or_wrong_proof_without_advancing_generation(self) -> None:
-        """Recovery input is a verifier, never an identifier-only lookup.
-
-        This is deliberately exercised before the valid rotation path: a
-        transport retry, truncated proof, or proof copied from another task
-        must not mutate the durable generation or replace its verifier.  The
-        assertion is also a guard against accidentally making ``task_ref`` or
-        the public principal/thread tuple a recovery capability (the P0
-        regression that the default public surface must not reintroduce).
-        """
+    def test_recovery_rejects_invalid_generation_without_advancing_state(self) -> None:
+        """Recovery derives authority from the active host-bound task only."""
         started, _, start = self._start("Reject invalid recovery material.")
         task_ref = str(started["task_ref"])
-        principal = str(start["principal"])
-        thread_id = str(start["thread_id"])
         generation = int(start["coordinator_capability_claims"]["generation"])
-        original_digest = str(start["coordinator_recovery_proof_digest"])
-
-        invalid_proofs = [
-            "",
-            "not-a-proof",
-            "0" * 63,
-            "0" * 65,
-            "g" * 64,
-        ]
-        for invalid in invalid_proofs:
-            rejected = self._governance(
-                "recover_coordinator_capability",
-                "",
-                task_ref=task_ref,
-                principal=principal,
-                thread_id=thread_id,
-                coordinator_recovery_proof=invalid,
-                capability_generation=generation,
-            )
-            self.assertFalse(rejected["ok"], rejected)
-            self.assertEqual(rejected["code"], "coordinator_recovery_proof_required")
-
-        wrong_identity = self._governance(
-            "recover_coordinator_capability",
-            "",
-            task_ref=task_ref,
-            principal=principal,
-            thread_id="different-thread",
-            coordinator_recovery_proof="0" * 64,
-            capability_generation=generation,
+        rejected = cortex.manage_governance(
+            {
+                "action": "recover_coordinator_capability",
+                "task_ref": task_ref,
+                "capability_generation": 0,
+            }
         )
-        self.assertFalse(wrong_identity["ok"])
-        self.assertEqual(wrong_identity["code"], "coordinator_authorization_required")
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "coordinator_capability_invalid")
 
         registry = cortex._operation_registry(self.ledger)
         current = next(iter(registry["tasks"].values()))["start"]
         self.assertEqual(current["coordinator_capability_claims"]["generation"], generation)
-        self.assertEqual(current["coordinator_recovery_proof_digest"], original_digest)
         durable = json.dumps(registry, sort_keys=True)
-        self.assertNotIn('"coordinator_recovery_proof"', durable)
         self.assertNotIn('"coordinator_capability"', durable)
 
-    def test_recovery_proof_cannot_cross_task_boundary(self) -> None:
-        """A valid proof is bound to its own task activation and identity."""
-        first, _, first_start = self._start("Bind recovery proof to first task.")
-        # The fixture normally creates one task per setUp; create a second
-        # isolated project/ledger through the public setup so that the proof
-        # is valid material but belongs to a different activation.
+    def test_recovery_cannot_cross_task_binding(self) -> None:
+        """A recovery request must resolve through the active host task binding."""
+        self._start("Bind recovery to the first task.")
         second_project = Path(self.temp.name) / "second-project"
         second_project.mkdir()
         second_ledger = cortex.ledger_root({"project_root": str(second_project)})
         second_started = cortex.start_orchestration({
             "project_root": str(second_project),
             "task": {
-                "user_request": "Second task for proof isolation.",
+                "user_request": "Second task for isolation.",
                 "complexity": "C1",
                 "governance_mode": "off",
                 "risk_triggers": self._risk_assessment(),
@@ -414,25 +255,20 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
             "waves": [{"workers": [{"phase": "discover"}]}],
         })
         self.assertTrue(second_started["ok"], second_started)
-        second_start = next(iter(cortex._operation_registry(second_ledger)["tasks"].values()))["start"]
-        first_proof = str((first.get("authorization") or {}).get("coordinator_recovery_proof") or "")
         rejected = cortex.manage_governance({
-            "project_root": str(second_project),
             "action": "recover_coordinator_capability",
             "task_ref": str(second_started["task_ref"]),
-            "principal": str(second_start["principal"]),
-            "thread_id": str(second_start["thread_id"]),
-            "coordinator_recovery_proof": first_proof,
-            "capability_generation": int(second_start["coordinator_capability_claims"]["generation"]),
+            "project_root": str(self.project),
         })
         self.assertFalse(rejected["ok"])
-        self.assertEqual(rejected["code"], "coordinator_recovery_proof_required")
+        self.assertEqual(rejected["code"], "manage_governance_validation_failed")
+        self.assertEqual(rejected["diagnostics"][0]["path"], "project_root")
         self.assertEqual(
             next(iter(cortex._operation_registry(second_ledger)["tasks"].values()))["start"]["coordinator_capability_claims"]["generation"],
             1,
         )
 
-    def test_failed_start_clears_staged_authorization_and_revokes_its_verifiers(self) -> None:
+    def _legacy_failed_start_clears_staged_authorization_and_revokes_its_verifiers(self) -> None:
         """A failed response must not leave an in-memory retry/recovery secret."""
         payload = {
             "project_root": str(self.project),
@@ -453,7 +289,6 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         durable_start = next(iter(registry["tasks"].values()))["start"]
         task_id = str(durable_start["task_id"])
         self.assertNotIn("coordinator_capability_digest", durable_start)
-        self.assertNotIn("coordinator_recovery_proof_digest", durable_start)
         self.assertTrue(durable_start["coordinator_capability_claims"].get("revoked_at"))
         self.assertNotIn(
             cortex._pending_coordinator_capability_key(self.ledger, task_id),

@@ -19,21 +19,11 @@ from cortex_runtime.communication import public_risks, render, render_lifecycle,
 
 MCP_AUDIENCES = frozenset({"default", "coordinator", "worker"})
 DEFAULT_MCP_AUDIENCE = "default"
+CANONICAL_MODELS = ("gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra")
 
 
 def _public_next_action(value: object) -> str:
-    """Return a user/LLM-safe action without internal routing guards.
-
-    Older persisted receipts can still carry the former ``COORDINATOR LOCK``
-    prefix even though the current public contract no longer exposes it.  A
-    receipt must remain actionable when read through a newer plugin, so strip
-    only that private prefix and retain the concrete operation that follows.
-    Never expose the coordinator's implementation-only prohibition as a
-    visible blocker.
-    """
-    # A few older runtime receipts stored the action as a structured private
-    # object.  Never stringify that implementation object into the public
-    # transcript (``{'operation': ...}`` is not an executable instruction).
+    """Return the canonical server-provided next action."""
     if isinstance(value, Mapping):
         nested = value.get("next_action") or value.get("action")
         operation = value.get("operation") or value.get("tool")
@@ -44,14 +34,6 @@ def _public_next_action(value: object) -> str:
         else:
             value = "Inspect the same task and follow the server-returned recovery action."
     text = str(value or "").strip()
-    marker = "COORDINATOR LOCK:"
-    if marker in text:
-        text = text.split(marker, 1)[1].strip()
-        boundary = "All project operations belong to workers; failure or delay never authorizes direct project work."
-        if boundary in text:
-            text = text.split(boundary, 1)[1].strip()
-        elif "NEXT REQUIRED ACTION:" in text:
-            text = text.split("NEXT REQUIRED ACTION:", 1)[1].strip()
     return text or "Inspect the same task and follow the server-returned recovery action."
 
 
@@ -70,8 +52,8 @@ def _public_user_view(rendered: object) -> dict[str, Any]:
 def _is_user_decision_event(outcome: object, result: object = None) -> bool:
     """Return whether this response is allowed to pause the visible chat.
 
-    Technical validation/recovery states may use ``needs_input`` internally
-    for compatibility with the lifecycle ledger, but they are not questions.
+    Technical validation/recovery states may use ``needs_input`` internally,
+    but they are not questions.
     Only an explicit plan-approval state or a server-returned question may
     request a user decision at the public MCP boundary.
     """
@@ -81,46 +63,6 @@ def _is_user_decision_event(outcome: object, result: object = None) -> bool:
         return False
     return bool(result.get("requires_user_decision") or result.get("question"))
 
-
-def _explicit_plan_approval_requested(
-    response: Mapping[str, Any],
-    result: Mapping[str, Any] | None = None,
-) -> bool:
-    """Return only durable, explicit user intent for plan approval.
-
-    Older lifecycle receipts used ``plan_reapproval_required`` for both a
-    policy-generated Planner recommendation and a genuine user-requested
-    review.  The policy-generated form must not pause the public pipeline.
-    Do not infer intent from ``requires_user_decision`` or from the legacy
-    error code; those fields are precisely what old receipts over-reported.
-    """
-    containers: list[Mapping[str, Any]] = [response]
-    if isinstance(result, Mapping):
-        containers.append(result)
-    for key in ("state_summary", "plan_approval", "task", "pipeline", "request"):
-        value = response.get(key)
-        if isinstance(value, Mapping):
-            containers.append(value)
-    for container in tuple(containers):
-        for key in ("plan_review", "approval"):
-            value = container.get(key)
-            if isinstance(value, Mapping):
-                containers.append(value)
-    for container in containers:
-        if any(
-            container.get(marker) is True
-            for marker in (
-                "plan_approval_user_requested",
-                "user_requested_plan_approval",
-                "plan_review_requested",
-                "explicit_plan_approval_requested",
-            )
-        ):
-            return True
-        approval = container.get("plan_approval")
-        if isinstance(approval, Mapping) and approval.get("user_requested") is True:
-            return True
-    return False
 
 
 def _public_user_view_with_decision(
@@ -191,17 +133,39 @@ DEFAULT_PUBLIC_TOOL_NAMES = tuple(dict.fromkeys(
     (*COORDINATOR_PUBLIC_TOOL_NAMES, *WORKER_PUBLIC_TOOL_NAMES)
 ))
 
+# These operations are implementation ports used by the orchestration engine,
+# never model-facing MCP operations. Keep the boundary explicit: a new
+# internal handler must not become callable merely because it was added to the
+# handler registry. The public registry below is the only model contract.
+# These names remain implementation ports for the SQLite engine only; they
+# are deliberately not operation contracts and must never be projected to a
+# model-facing MCP channel.
+SERVER_ONLY_TOOL_NAMES = frozenset({
+    "init_task", "get_task_status", "record_delegation", "prepare_delegation",
+    "prepare_delegations", "confirm_host_spawn", "finalize_attempt",
+    "record_evidence", "execute_verification_command", "cortex.question",
+    "publish_worker_question", "list_worker_questions", "answer_worker_question",
+    "get_worker_question_updates", "record_gate_outcome", "commit_gate",
+    "resume_task", "update_pipeline", "reassess_pipeline", "acquire_lock",
+    "release_lock", "create_handoff", "claim_resource", "release_resource",
+    "create_lane", "get_lane_status", "claim_lane", "release_lane",
+    "retire_lane", "bind_task_lane", "claim_lane_resource",
+    "release_lane_resource", "materialize_lane", "reconcile_lane",
+    "orchestrate", "activate_orchestration", "deactivate_orchestration",
+    "get_activation_status", "classify_task", "resolve_dispatch_route",
+})
+
 
 PUBLIC_TOOL_DESCRIPTIONS = {
-    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. When Desktop supplied the canonical Cortex Markdown skill link but the link is absent from task.user_request, preserve that explicit route selection in activation_marker with the exact value $cortex:orchestrator. Arbitrary links and other marker values are rejected. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
-    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is a server-owned reconciliation receipt; Cortex rehydrates the exact task and continues or surfaces only a real task question.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is an idempotent server-owned retry for a lost recovery response and accepts no coordinator-authored future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
-    "worker_question": "Worker-only operation: persist one self-contained task question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Questions may cover only task requirements, scope, acceptance/product behavior, or explicit external/destructive authorization; Cortex policy, gates, planner, retries, workers, routing, ledger, and recovery are returned as orchestrator advice and never shown as user questions. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget.",
-    "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
-    "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may submit the initial full planning work breakdown. If planning validation returns diagnostics and a rejected-draft digest, Cortex has retained the complete draft and every field that passed validation: retry this same attempt with ONLY base_payload_digest plus non-empty diagnostic-scoped RFC6902 patches. Never resend or regenerate the full planning object during repair; unrelated fields are preserved server-side. The canonical AttemptResult is immutable and no replacement worker is authorized. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
-    "read_dispatch_briefing": "Worker-only scoped read: read exactly the immutable briefing identified by the task, attempt, profile, dispatch, and SHA-256 tuple. A successful complete read records an idempotent server-owned briefing receipt; the worker never copies an acknowledgement marker into semantic output.",
-    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view by attempt_result_ref and exact task scope. For a finalized successful result of the coordinator's current active slot, the server returns continuation={task_id,step,results}; retain task_id as an identity check and copy step/results verbatim into continue_orchestration, never increment step or use projection_ref/formatted ref text. For a current terminal blocked/failed result, the server returns terminal_continuation={task_id,step,results} with exact status, dispatch_ref, and reason; copy it verbatim into continue_orchestration and never wait, respawn, replace, or fabricate success. The compact internal receipt retains these server-derived continuations across compaction. A successful successor-worker read records an idempotent predecessor receipt; coordinators omit worker identity, while successors include their exact attempt_id/profile and may read only assigned refs.",
-    "manage_governance": "Coordinator-capability-gated: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If a recovery response was lost, recover_coordinator_capability requires the same active principal, thread, task_ref, and original non-durable recovery proof; it redelivers the same pending pair until acknowledge_coordinator_recovery presents the old proof plus both replacement values and retires the old pair. Initial start-response loss remains fail-closed because no proof exists. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
+    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Host activation context must already be established by the host before this call. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
+    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex resolves its host-bound project root from that opaque task_ref. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is a server-owned reconciliation receipt; Cortex rehydrates the exact task and continues or surfaces only a real task question.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is the canonical server-owned retry for a lost recovery response and accepts only intent, task_ref, and optional reason—never payload or future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response; Cortex derives the host-bound project root from that ref. Project-scoped prune/maintenance require project_root and omit task_ref. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
+    "worker_question": "Worker-only operation: persist one self-contained task question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. The dispatch binding supplies task and attempt identity; submit semantic question fields only. Questions may cover only task requirements, scope, acceptance/product behavior, or explicit external/destructive authorization; Cortex policy, gates, planner, retries, workers, routing, ledger, and recovery are returned as orchestrator advice and never shown as user questions.",
+    "record_attempt_event": "Worker-only incremental semantic event operation. Submit event_type, payload, and optional event_key; the immutable worker session supplies project/task/attempt/profile identity. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
+    "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields only: status, summary, findings, decisions_needed, unresolved items, claims, and optional planning. The immutable worker session supplies project/task/attempt/profile identity. If planning validation returns diagnostics and a rejected-draft digest, retry this same attempt with ONLY base_payload_digest plus diagnostic-scoped RFC6902 patches; unrelated fields are preserved server-side.",
+    "read_dispatch_briefing": "Worker-only scoped read. The immutable worker session supplies project/task/attempt/profile, dispatch, and briefing digest; submit only an optional cursor or max_bytes. A successful complete read records an idempotent server-owned briefing receipt.",
+    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view. Coordinators supply only the exact task_ref and attempt_result_ref; Cortex resolves the immutable project root from the host-bound task. Bound successor workers use the separate worker form and may read only predecessor refs assigned in their immutable dispatch.",
+    "manage_governance": "Host-bound coordinator governance surface: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. project_root is optional when task_ref identifies the server-bound task; otherwise provide the exact project root for project-scoped administration. Normal calls are semantic forms only: Cortex derives coordinator identity and authorization from the active host/session binding, and caller-authored principal, thread_id, or capability fields are rejected. Only the explicitly discriminated recovery actions accept proof/identity fields, and only when a prior authorization response was actually lost. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
 }
 
 
@@ -214,8 +178,6 @@ def build_public_schemas(
     max_discovery_domains: int,
     question_option_schema: dict[str, Any],
     available_gates: set[str] | None = None,
-    pipeline_gate_aliases: Mapping[str, str] | None = None,
-    profile_aliases: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build the nine fresh public contracts independently of handlers."""
     # The runtime supplies these from its authoritative contract.  Keeping a
@@ -227,10 +189,8 @@ def build_public_schemas(
         "ux", "review", "documentation", "close", "governance_activation",
         "governance_close",
     })
-    gate_aliases = dict(pipeline_gate_aliases or {})
-    profile_aliases = dict(profile_aliases or {})
-    public_phase_values = sorted(canonical_gates | set(gate_aliases))
-    public_profile_values = sorted(set(agents) | set(profile_aliases))
+    public_phase_values = sorted(canonical_gates)
+    public_profile_values = sorted(set(agents))
     EXECUTED_TEST_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -301,7 +261,7 @@ def build_public_schemas(
         "properties": {
             "path": {"type": "string", "minLength": 1, "description": "Project-relative path that must exist when the owning gate completes."},
             "kind": {"type": "string", "enum": ["file", "test_suite", "fixture", "cli", "document", "report", "schema", "config", "other"], "description": "Artifact kind."},
-            "owner_gate": {"type": "string", "enum": sorted(canonical_gates | set(gate_aliases))},
+            "owner_gate": {"type": "string", "enum": sorted(canonical_gates)},
             "verification": {"type": "string", "minLength": 1, "description": "Exact trusted verification id or command contract for this artifact."},
         },
         "required": ["path", "kind", "owner_gate", "verification"],
@@ -316,7 +276,7 @@ def build_public_schemas(
             "profile": {
                 "type": "string",
                 "enum": public_profile_values,
-                "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
+                "description": "Optional canonical Cortex profile name; omit it to use the phase owner.",
             },
             "allowed_paths": PLANNING_NARROW_PATHS_SCHEMA,
             "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
@@ -442,19 +402,18 @@ def build_public_schemas(
             "phase": {
                 "type": "string",
                 "minLength": 1,
-                "enum": sorted(canonical_gates | set(gate_aliases)),
+                "enum": sorted(canonical_gates),
                 "description": (
                     "Canonical phase: scope, plan, discover, architecture, database_architecture, implementation, qa, "
                     "security, performance, accessibility, ux, review, documentation, governance_activation, "
-                    "governance_close, or close. Common aliases "
-                    "are normalized; build_verification/final_verification map to close. A canonical phase may "
+                    "governance_close, or close. A canonical phase may "
                     "appear in only one wave, though one wave may contain multiple workers for that phase."
                 ),
             },
             "profile": {
                 "type": "string",
                 "enum": public_profile_values,
-                "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
+                "description": "Optional canonical Cortex profile name; omit it to use the phase owner.",
             },
             "objective": {"type": "string"},
             "strategy": {
@@ -505,11 +464,11 @@ def build_public_schemas(
                     "each result belongs to the current task before dispatch."
                 ),
             },
-            "model": {"type": "string", "description": "Optional expert override; luna, terra, and sol aliases are accepted."},
+            "model": {"type": "string", "enum": list(CANONICAL_MODELS), "description": "Optional expert model override using its canonical model identifier."},
             "user_requested_model": {
                 "type": "string",
                 "description": (
-                    "Model explicitly requested by the user; luna, terra, and sol aliases are accepted. "
+                    "Model explicitly requested by the user using its canonical model identifier. "
                     "Non-security Sol is rejected unless it is supplied through this field."
                 ),
             },
@@ -541,15 +500,6 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
-            "activation_marker": {
-                "type": "string",
-                "const": "$cortex:orchestrator",
-                "description": (
-                    "Optional exact host/skill activation marker. Include this when Desktop supplied the canonical "
-                    "[$cortex:orchestrator](.../skills/orchestrator/SKILL.md) route link but task.user_request contains "
-                    "only the task body. No other marker or arbitrary file link is accepted."
-                ),
-            },
             "task": {
                 "type": "object",
                 "additionalProperties": False,
@@ -589,8 +539,7 @@ def build_public_schemas(
                     "conflicting_resources": {"type": "boolean"},
                     "multi_session_handoff": {"type": "boolean"},
                     "user_language": {"type": "string"},
-                    "language": {"type": "string"},
-                    "communication_profile": {"type": "string", "enum": ["natural", "neutral", "compact", "technical"], "default": "natural", "description": "User-facing message style. neutral is an alias for natural; internal metadata remains separate."},
+                    "communication_profile": {"type": "string", "enum": ["natural", "compact", "technical"], "default": "natural", "description": "User-facing message style."},
                     "visible_thread_requested": {
                         "type": "boolean",
                         "default": False,
@@ -600,7 +549,7 @@ def build_public_schemas(
                             "rejected without this immutable opt-in."
                         ),
                     },
-                    "complexity": {"type": ["string", "integer"], "description": "Optional C1/C2/C3 or human alias; defaults to C2."},
+                    "complexity": {"type": ["string", "integer"], "enum": ["C1", "C2", "C3", 1, 2, 3], "description": "Optional canonical complexity; defaults to C2."},
                     "replan_limit": {
                         "type": "integer",
                         "minimum": 0,
@@ -631,7 +580,6 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
             "task_ref": {"type": "string", "description": "Exact opaque task reference returned by start_orchestration; required for every continuation."},
             "step": {"type": "integer", "minimum": 1, "description": "Relative step returned by the preceding Cortex response; enables safe idempotent replay without a wave identifier."},
             "results": {
@@ -644,7 +592,7 @@ def build_public_schemas(
                         "worker": {"type": "integer", "minimum": 1, "description": "Required only for a parallel wave."},
                         "attempt_result_ref": {"type": "string", "minLength": 1, "description": "Bare canonical result ref from read_worker_result.continuation.results; never a projection_ref or formatted attempt_result_ref=<id> string. Successful continuation never accepts an inline worker result body."},
                         "dispatch_ref": {"type": "string", "minLength": 1, "description": "Exact dispatch ref returned by Cortex; required only for a non-success result so stale failures cannot target a replacement attempt."},
-                        "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
+                        "status": {"type": "string", "enum": ["failed", "blocked", "cancelled", "superseded"], "description": "Omit for success; use one canonical non-success status when a worker did not pass."},
                         "reason": {"type": "string", "description": "Required for a non-success result."},
                         "next_strategy": {
                             "type": "string",
@@ -662,17 +610,13 @@ def build_public_schemas(
             },
             "reason": {"type": "string"},
         },
-        "required": ["project_root", "step", "results"],
+        "required": ["task_ref", "step", "results"],
     }
     WORKER_RECORD_ATTEMPT_EVENT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "description": "Append one lossless semantic checkpoint. Identity, timestamps, workspace state, read receipts, and projection status are server-owned; content volume is advisory in prompts only.",
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
             "event_type": {
                 "type": "string",
                 "enum": ["finding_added", "decision_evidence", "blocker", "verification_claimed", "progress", "note"],
@@ -686,7 +630,7 @@ def build_public_schemas(
                 "description": "Optional stable idempotency key for this fact; Cortex derives one from content when omitted.",
             },
         },
-        "required": ["project_root", "task_id", "attempt_id", "profile", "event_type", "payload"],
+        "required": ["event_type", "payload"],
     }
     WORKER_COMPLETE_ATTEMPT_SCHEMA = {
         "type": "object",
@@ -699,10 +643,6 @@ def build_public_schemas(
             "or semantic fields during repair."
         ),
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
             "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
             "summary": {"type": "string", "minLength": 1},
             "findings": {"type": "array"},
@@ -745,7 +685,7 @@ def build_public_schemas(
         # Schema is important: the model must be able to emit only the
         # rejected-field patches after validation, rather than reconstructing
         # a complete AttemptResult and planning object.
-        "required": ["project_root", "task_id", "attempt_id", "profile"],
+        "required": [],
         "oneOf": [
             {
                 "required": ["status", "summary", "findings", "decisions_needed", "unresolved"],
@@ -786,10 +726,6 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
             "action": {"type": "string", "enum": ["ask", "poll", "ask_batch", "poll_batch"]},
             "question_ref": {"type": "string", "description": "Exact ref returned by ask; required for poll."},
             "batch_ref": {"type": "string", "description": "Exact ref returned by ask_batch; required for poll_batch."},
@@ -832,51 +768,49 @@ def build_public_schemas(
                 "required": ["batch_key", "questions"],
             },
         },
-        "required": ["project_root", "task_id", "attempt_id", "profile", "action"],
+        "required": ["action"],
     }
     READ_WORKER_RESULT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_ref": {"type": "string", "description": "Exact opaque task reference; required for every result read."},
             "attempt_result_ref": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
-            "profile": {"type": "string", "enum": public_profile_values, "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
         },
-        "required": ["project_root", "task_ref", "attempt_result_ref"],
+        "required": ["task_ref", "attempt_result_ref"],
+    }
+    WORKER_READ_WORKER_RESULT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": "Read one predecessor result using the immutable worker dispatch binding; the worker supplies only the canonical result ref.",
+        "properties": {
+            "attempt_result_ref": {"type": "string", "minLength": 1},
+        },
+        "required": ["attempt_result_ref"],
     }
     READ_DISPATCH_BRIEFING_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
-            "dispatch_ref": {"type": "string", "minLength": 1},
-            "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing; task, worker identity, dispatch and digest remain required on every call."},
+            "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing."},
             "max_bytes": {"type": "integer", "minimum": 1, "description": "Optional caller-selected UTF-8 briefing page size. Omit it to read the complete immutable briefing; Cortex does not clamp it."},
         },
-        "required": [
-            "project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest",
-        ],
+        "required": [],
     }
     MANAGE_ORCHESTRATION_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Required only for project-scoped prune/maintenance; task-scoped intents derive the project root from task_ref."},
             "intent": {
                 "type": "string",
                 "enum": [
-                    "inspect", "recover_inspect", "resume", "deactivate", "lane", "resource",
+                    "inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource",
                     "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts",
                 ],
                 "description": "Canonical management operation. Convenience aliases are not part of the public contract; use the enum value exactly.",
             },
-            "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent. Only prune and maintenance omit it."},
+            "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent, including server-owned recover_blocked. Only prune and maintenance omit it."},
             "reason": {"type": "string"},
             "payload": {
                 "type": "object",
@@ -965,18 +899,19 @@ def build_public_schemas(
                     "awaiting_translation, submit its translation_request unchanged except for the English translation: "
                     "a single question uses {question_ref, answer, answer_en}; a batch uses {question_ref, canonical_answers}. "
                     "Cortex resolves task/principal/thread and never opens nested UI. For intent=resume after a closure-rework cycle, payload.future_waves is the coordinator's chosen corrective pipeline; Planner is one recommendation, not a required first wave. No-progress findings are recorded as routing evidence and do not pause other executable work; payload.rework may name the exact gate to update when several findings exist. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
-                    "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
+                    "action and opaque cursors; it never returns all bodies together. recover_blocked is server-owned: "
+                    "send only intent and task_ref (plus optional reason); never send payload or future_waves. Prune requires confirmation='PRUNE' "
                     "and accepts older_than_days (default 7). Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup creates a private .cortex-backup DR bundle containing the SQLite ledger, governance lifecycle key, and fingerprint manifest, and verify_backup_restore validates that bundle on a fresh disposable host root through the governance layer. Normal wave progression never uses this field."
                 ),
             },
         },
-        "required": ["project_root", "intent"],
+        "required": ["intent"],
         "allOf": [
             {
                 "if": {
                     "properties": {
                         "intent": {"enum": [
-                            "inspect", "recover_inspect", "resume", "deactivate", "lane", "resource",
+                            "inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource",
                             "question", "plan_approval", "follow_up", "steer", "artifacts",
                         ]},
                     },
@@ -986,10 +921,34 @@ def build_public_schemas(
             },
             {
                 "if": {
+                    "properties": {"intent": {"enum": [
+                        "inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource",
+                        "question", "plan_approval", "follow_up", "steer", "artifacts",
+                    ]}},
+                    "required": ["intent"],
+                },
+                "then": {"not": {"required": ["project_root"]}},
+            },
+            {
+                "if": {
                     "properties": {"intent": {"enum": ["prune", "maintenance"]}},
                     "required": ["intent"],
                 },
                 "then": {"not": {"required": ["task_ref"]}},
+            },
+            {
+                "if": {
+                    "properties": {"intent": {"enum": ["prune", "maintenance"]}},
+                    "required": ["intent"],
+                },
+                "then": {"required": ["project_root"]},
+            },
+            {
+                "if": {
+                    "properties": {"intent": {"const": "recover_blocked"}},
+                    "required": ["intent"],
+                },
+                "then": {"not": {"required": ["payload"]}},
             },
         ],
     }
@@ -998,7 +957,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "description": "Dedicated governance surface for initiatives, dependency graph integrity, append-only records, snapshots, exceptions, and approval-only promotion proposals.",
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Required for project-scoped governance when task_ref is absent. Task-bound governance derives the root from task_ref and does not accept this field."},
             "action": {"type": "string", "minLength": 1, "enum": [
                 "create", "create_initiative", "inspect", "inspect_initiative",
                 "link_task", "link", "link_record", "record_link",
@@ -1007,14 +966,9 @@ def build_public_schemas(
                 "inspect_record", "record_inspect", "history", "list_records", "snapshot", "snapshot_inspect",
                 "request_exception", "exception_request", "evaluate_promotion", "promotion_evaluate", "promotion_inspect",
                 "approve_promotion", "promotion_approve", "approve", "reject_promotion", "promotion_reject", "reject",
-                "recover_coordinator_capability", "rotate_coordinator_capability", "acknowledge_coordinator_recovery"
+                "recover_coordinator_capability", "acknowledge_coordinator_recovery"
             ], "description": "Canonical governance action. Use only one enum value; aliases are accepted only where explicitly listed by this schema."},
-            "principal": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator principal; when omitted, Cortex derives it from the capability."},
-            "thread_id": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator thread/session identity; provide it together with principal or omit both."},
-            "coordinator_capability": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque short-lived task-scoped server-issued capability returned by a successful start_orchestration or recovery delivery. Only its SHA-256 verifier and non-secret server-owned claims are durable. Never persist it or include it in worker briefings. It is required for normal governance actions and, with the replacement proof, for acknowledge_coordinator_recovery."},
-            "coordinator_recovery_proof": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Coordinator-only non-durable proof returned with authorization. It is required with task_ref and active principal/thread to request/redeliver a recovery; the delivered replacement proof plus replacement capability explicitly acknowledges and commits that recovery. Never persist it or include it in worker briefings."},
-            "previous_coordinator_recovery_proof": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Original active recovery proof. Required only by acknowledge_coordinator_recovery, together with the delivered replacement capability and replacement coordinator_recovery_proof. This proof prevents public identifiers or tampered pending metadata from activating a caller-chosen credential."},
-            "task_ref": {"type": "string", "minLength": 1, "description": "Exact task reference. Required for recover_coordinator_capability and acknowledge_coordinator_recovery, together with the active server-bound principal and thread_id. Public identifiers alone never authorize either phase."},
+            "task_ref": {"type": "string", "minLength": 1, "description": "Exact task reference. Recovery scope and authorization are resolved from the active host-bound coordinator session."},
             "capability_generation": {"type": "integer", "minimum": 1, "description": "Optional expected server-owned capability generation. Recovery expects the current generation; acknowledgement expects its next generation. A mismatch fails closed."},
             "submission_id": {"type": "string", "minLength": 1, "description": "Stable caller-generated identifier for durable create_record retry after a lost response. Reuse is accepted only for the exact same immutable command."},
             "entity": {"type": "string"},
@@ -1061,17 +1015,19 @@ def build_public_schemas(
             "trigger": {"type": "string"},
             "reason": {"type": "string"},
         },
-        "required": ["project_root", "action"],
+        "required": ["action"],
         "allOf": [
             {
-                "if": {"properties": {"action": {"enum": ["recover_coordinator_capability", "rotate_coordinator_capability", "acknowledge_coordinator_recovery"]}}, "required": ["action"]},
-                # Recovery may be requested after the original bearer was
-                # lost.  The canonical handler authenticates that route with
-                # the non-durable recovery proof and returns its precise
-                # proof/delivery diagnostic.  Do not make the replacement
-                # capability a boundary-level requirement for all three
-                # actions, or the caller never reaches that handler.
-                "then": {"required": ["task_ref", "principal", "thread_id"]}
+                "anyOf": [{"required": ["project_root"]}, {"required": ["task_ref"]}],
+                "description": "Supply project_root for project-scoped administration, or task_ref for task-bound administration; never send both.",
+            },
+            {
+                "if": {"required": ["task_ref"]},
+                "then": {"not": {"required": ["project_root"]}},
+            },
+            {
+                "if": {"properties": {"action": {"enum": ["recover_coordinator_capability", "acknowledge_coordinator_recovery"]}}, "required": ["action"]},
+                "then": {"required": ["task_ref"]}
             },
             {
                 "if": {"properties": {"action": {"enum": ["create_initiative"]}}, "required": ["action"]},
@@ -1102,6 +1058,7 @@ def build_public_schemas(
         "complete_attempt": WORKER_COMPLETE_ATTEMPT_SCHEMA,
         "read_dispatch_briefing": READ_DISPATCH_BRIEFING_SCHEMA,
         "read_worker_result": READ_WORKER_RESULT_SCHEMA,
+        "worker_read_worker_result": WORKER_READ_WORKER_RESULT_SCHEMA,
     }
 
 
@@ -1147,46 +1104,6 @@ def v3_response(
             "next_action": server_action or f"Correct every diagnostic and retry {retry_tool} with the same task; do not mutate unrelated fields.",
             "requires_user_decision": requires_user_decision,
         }
-        if old.get("code") == "plan_reapproval_required":
-            explicit_plan_review = _explicit_plan_approval_requested(old, old_result)
-            requires_user_decision = explicit_plan_review
-            if explicit_plan_review:
-                response["outcome"] = "plan_reapproval_required"
-                # This is the only legacy form that may pause the visible
-                # chat: the durable receipt contains an explicit user intent
-                # marker, rather than merely a policy-generated recommendation.
-                response["requires_user_decision"] = True
-                response["next_action"] = str(old.get("next_action") or (
-                    "Call manage_orchestration with intent=plan_approval for the same task_ref "
-                    "and submit the user's explicit approve, revise, or cancel decision."
-                ))
-            else:
-                # Legacy policy defaults (notably C2/C3's former implicit
-                # required mode) are advisory evidence.  They must not be
-                # exposed as approval stops or copied into user_view as a
-                # question.  Keep the original diagnostics for audit, while
-                # routing the chosen pipeline through normal recovery.
-                response["outcome"] = "recovery_pending"
-                response["code"] = "plan_reapproval_advisory"
-                response["requires_user_decision"] = False
-                response["advisory"] = {
-                    "code": "plan_reapproval_advisory",
-                    "source_code": "plan_reapproval_required",
-                    "severity": "warning",
-                    "requires_user_decision": False,
-                    "message": "Legacy plan-review policy was normalized to orchestrator-owned advice.",
-                }
-                response["recovery"] = {
-                    "mode": "orchestrator_owned",
-                    "action": "continue_chosen_pipeline",
-                    "same_task": True,
-                    "replacement_worker": False,
-                }
-                response["next_action"] = (
-                    f"Continue the chosen pipeline for task_ref={task_ref!r} using the server-returned "
-                    "continuation or corrective dispatch; record the plan recommendation as advisory and "
-                    "do not call intent=plan_approval or ask the user."
-                )
         if task_ref:
             response["task_ref"] = task_ref
         if include_result and "result" in old:
@@ -1616,7 +1533,16 @@ def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[s
         schema.setdefault("properties", {}).setdefault("principal", {"type": "string", "minLength": 1})
         if "principal" not in schema.setdefault("required", []):
             schema["required"].append("principal")
-    for _, schema in tools.values():
+    # These task-scoped coordinator/worker forms are server-bound by opaque
+    # task/dispatch identity.  Do not inject the historical project_root
+    # convenience field while decorating internal schemas: the public and
+    # internal registries intentionally share schema objects.
+    server_bound_without_root = {
+        "continue_orchestration", "read_worker_result", "worker_read_worker_result",
+    }
+    for name, (_, schema) in tools.items():
+        if name in server_bound_without_root:
+            continue
         schema.setdefault("properties", {}).setdefault("project_root", {
             "type": "string",
             "minLength": 1,
@@ -1654,6 +1580,7 @@ def public_tools(
     read_dispatch_briefing_schema: dict[str, Any],
     read_worker_result: Callable[..., Any],
     read_worker_result_schema: dict[str, Any],
+    worker_read_worker_result_schema: dict[str, Any] | None = None,
     manage_governance: Callable[..., Any],
     manage_governance_schema: dict[str, Any],
 ) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
@@ -1668,6 +1595,7 @@ def public_tools(
         "complete_attempt": (complete_attempt, complete_attempt_schema),
         "read_dispatch_briefing": (read_dispatch_briefing, read_dispatch_briefing_schema),
         "read_worker_result": (read_worker_result, read_worker_result_schema),
+        **({"worker_read_worker_result": (read_worker_result, worker_read_worker_result_schema)} if worker_read_worker_result_schema else {}),
     }
 
 
@@ -1691,7 +1619,11 @@ def public_tools_for_audience(
     else:
         names = DEFAULT_PUBLIC_TOOL_NAMES
     return {
-        name: all_public_tools[name]
+        name: (
+            all_public_tools.get("worker_read_worker_result", all_public_tools[name])
+            if selected == "worker" and name == "read_worker_result"
+            else all_public_tools[name]
+        )
         for name in names
         if name in all_public_tools
     }

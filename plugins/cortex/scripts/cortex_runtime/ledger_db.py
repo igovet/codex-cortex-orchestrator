@@ -48,11 +48,7 @@ ARTIFACT_CURSOR_MAX_CHARS = 4096
 # Mutable documents are coordination metadata, never an artifact transport.
 # Strict JSON and atomic writes preserve integrity without a size quota.
 MAX_DURABLE_DOCUMENT_KEY_BYTES = 160
-MAX_TOOL_OBSERVATION_NAME_BYTES = 128
-MAX_TOOL_OBSERVATION_GENERATION_BYTES = 256
 _LOCAL = threading.local()
-_MIGRATION_GUARD = threading.Lock()
-_MIGRATION_LOCKS: dict[str, threading.RLock] = {}
 _DATABASE_READINESS_GUARD = threading.RLock()
 _DATABASE_READINESS_CACHE_LIMIT = 128
 _HOOK_METRICS_GUARD = threading.Lock()
@@ -145,12 +141,9 @@ def _bounded_document_key(value: Any, *, label: str) -> str:
     return value
 
 
-def _bounded_observation_text(value: Any, *, label: str, maximum: int | None = None) -> str:
+def _bounded_observation_text(value: Any, *, label: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError(f"tool observation {label} is invalid")
-    # Observation metadata is canonical SQLite content too. ``maximum`` is
-    # retained only for adapter-call compatibility; it never rejects text.
-    del maximum
     return value
 
 
@@ -167,8 +160,8 @@ def governance_lifecycle_binding(
     Governance records retain a small mutable projection (their current
     lifecycle status and approval basis) so active-snapshot queries remain
     cheap.  The canonical authority is an append-only lifecycle chain.  Keep
-    this digest helper in the database package so both the v11 backfill and
-    the governance service use *exactly* the same serialization.
+    this digest helper in the database package so the governance service uses
+    *exactly* the same serialization.
     """
     return hashlib.sha256(_canonical_json({
         "schema": "cortex/governance-lifecycle/v1",
@@ -199,7 +192,7 @@ def _governance_lifecycle_key_path(root: Path) -> Path:
 
 
 def _governance_lifecycle_hmac_key(root: Path, *, create: bool) -> bytes:
-    """Load a non-ledger key, creating it only during an authorized upgrade.
+    """Load a non-ledger key, creating it only during an authorized write.
 
     The key is intentionally never represented in SQLite, lifecycle rows,
     responses, logs, or fixtures.  Losing it makes lifecycle authority
@@ -267,7 +260,7 @@ def governance_lifecycle_envelope_hmac(
     whose key lives outside the project ledger.
     """
     payload = _canonical_json({
-        "schema": "cortex/governance-lifecycle-envelope/v2",
+        "schema": "cortex/governance-lifecycle-envelope/v3",
         "lifecycle_ref": str(lifecycle_ref),
         "record_ref": str(record_ref),
         "lifecycle_sequence": int(lifecycle_sequence),
@@ -338,6 +331,16 @@ def _assert_private_regular(path: Path, label: str, *, allow_missing: bool = Fal
 def _connect(root: Path) -> sqlite3.Connection:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     db_path = database_path(root)
+    # Create a fresh database inode with its private mode before another
+    # thread/process can observe the path.  SQLite's transaction lock then
+    # serializes the actual canonical bootstrap; no advisory migration lock
+    # artifact is needed.
+    try:
+        fd = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(fd)
     _assert_private_regular(db_path, "Cortex database", allow_missing=True)
     connection = sqlite3.connect(str(db_path), timeout=15, isolation_level=None)
     try:
@@ -366,42 +369,6 @@ def _active_connections() -> dict[str, sqlite3.Connection]:
 
 def _root_key(root: Path) -> str:
     return str(root.resolve())
-
-
-@contextlib.contextmanager
-def _migration_lock(root: Path) -> Iterator[None]:
-    """Serialize schema checks/upgrades across threads and MCP processes.
-
-    A fresh Marketplace installation can receive several first calls at once.
-    SQLite handles the durable transaction, while this advisory lock prevents
-    concurrent connections from racing through the initial WAL/schema setup
-    before the normal state lock has been reached.
-    """
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        root.chmod(0o700)
-    except OSError:
-        pass
-    key = _root_key(root)
-    with _MIGRATION_GUARD:
-        local_lock = _MIGRATION_LOCKS.setdefault(key, threading.RLock())
-    with local_lock:
-        # Reuse the ledger's existing advisory lock artifact.  It has no
-        # durable state semantics and avoids adding another visible runtime
-        # file to every project solely for first-boot migration serialization.
-        lock_path = root / ".state.lock"
-        with lock_path.open("a+", encoding="utf-8") as stream:
-            try:
-                os.chmod(lock_path, 0o600)
-            except OSError:
-                pass
-            if fcntl is not None:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 @contextlib.contextmanager
@@ -809,11 +776,8 @@ def _text_chunk_boundaries(data: bytes) -> list[bytes]:
 def _artifact_ref(task_id: str, kind: str, title: str, digest: str) -> str:
     """Return an id for a *logical* artifact, not for its bytes alone.
 
-    The v2 catalog used ``task/kind/digest`` as its identity.  That made two
-    equally-sized reports with identical contents indistinguishable, even
-    where they intentionally had different titles or export destinations.
-    New ids include the logical title.  Existing v2 ids are retained verbatim
-    by the v7 backfill.
+    Artifact identity is logical: the title is part of the identity, so two
+    exports with identical bytes remain distinct canonical artifacts.
     """
     return "artifact-" + hashlib.sha256(
         f"{task_id}\0{kind}\0{title}\0{digest}".encode("utf-8")
@@ -822,10 +786,9 @@ def _artifact_ref(task_id: str, kind: str, title: str, digest: str) -> str:
 
 def _blob_ref(digest: str, mime_type: str, byte_size: int) -> str:
     """Return the content-addressed identifier for one canonical blob."""
-    # Keep this exactly representable by the append-only SQLite migration,
-    # which uses ``lower(hex(mime_type))`` to backfill pre-v7 rows without a
-    # Python callback.  The actual identity remains the unique
-    # digest/mime/size tuple, while this is its deterministic key.
+    # Keep this exactly representable by the append-only SQLite schema.  The
+    # actual identity remains the unique digest/mime/size tuple, while this is
+    # its deterministic key.
     return f"blob-{digest}-{mime_type.encode('utf-8').hex()}-{byte_size}"
 
 
@@ -926,24 +889,22 @@ _BASE_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS task_documents_updated_idx ON task_documents(task_id, updated_at)",
 )
 _ARTIFACT_SCHEMA_STATEMENTS = (
-    "CREATE TABLE IF NOT EXISTS artifacts(artifact_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, kind TEXT NOT NULL, title TEXT NOT NULL, mime_type TEXT NOT NULL, digest_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), immutable INTEGER NOT NULL CHECK(immutable IN (0, 1)), export_path TEXT, created_at TEXT NOT NULL, UNIQUE(task_id, kind, digest_sha256))",
-    "CREATE TABLE IF NOT EXISTS artifact_chunks(artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id) ON DELETE CASCADE, chunk_no INTEGER NOT NULL CHECK(chunk_no >= 0), text_content TEXT, blob_content BLOB, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), digest_sha256 TEXT NOT NULL, PRIMARY KEY(artifact_id, chunk_no), CHECK((text_content IS NOT NULL AND blob_content IS NULL) OR (text_content IS NULL AND blob_content IS NOT NULL)))",
+    "CREATE TABLE IF NOT EXISTS artifact_blobs(blob_id TEXT PRIMARY KEY, digest_sha256 TEXT NOT NULL, mime_type TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), encoding TEXT NOT NULL CHECK(encoding IN ('utf-8', 'binary')), created_at TEXT NOT NULL, UNIQUE(digest_sha256, mime_type, byte_size))",
+    "CREATE TABLE IF NOT EXISTS artifact_blob_chunks(blob_id TEXT NOT NULL REFERENCES artifact_blobs(blob_id) ON DELETE CASCADE, chunk_no INTEGER NOT NULL CHECK(chunk_no >= 0), text_content TEXT, blob_content BLOB, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), digest_sha256 TEXT NOT NULL, PRIMARY KEY(blob_id, chunk_no), CHECK((text_content IS NOT NULL AND blob_content IS NULL) OR (text_content IS NULL AND blob_content IS NOT NULL)))",
+    "CREATE TABLE IF NOT EXISTS logical_artifacts(artifact_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, kind TEXT NOT NULL, title TEXT NOT NULL, mime_type TEXT NOT NULL, digest_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), immutable INTEGER NOT NULL CHECK(immutable IN (0, 1)), blob_id TEXT NOT NULL REFERENCES artifact_blobs(blob_id), export_path TEXT, created_at TEXT NOT NULL, UNIQUE(task_id, kind, title, digest_sha256))",
+    "CREATE TABLE IF NOT EXISTS artifact_exports(artifact_id TEXT NOT NULL REFERENCES logical_artifacts(artifact_id) ON DELETE CASCADE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, export_path TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(artifact_id, export_path), UNIQUE(task_id, export_path))",
     "CREATE INDEX IF NOT EXISTS tasks_created_at_idx ON tasks(created_at)",
-    "CREATE INDEX IF NOT EXISTS artifacts_task_kind_created_idx ON artifacts(task_id, kind, created_at DESC, artifact_id)",
-    "CREATE INDEX IF NOT EXISTS artifacts_task_created_idx ON artifacts(task_id, created_at DESC, artifact_id)",
-    "CREATE INDEX IF NOT EXISTS artifacts_digest_idx ON artifacts(digest_sha256)",
+    "CREATE INDEX IF NOT EXISTS logical_artifacts_task_kind_created_idx ON logical_artifacts(task_id, kind, created_at DESC, artifact_id)",
+    "CREATE INDEX IF NOT EXISTS logical_artifacts_task_created_idx ON logical_artifacts(task_id, created_at DESC, artifact_id)",
+    "CREATE INDEX IF NOT EXISTS logical_artifacts_blob_idx ON logical_artifacts(blob_id)",
+    "CREATE INDEX IF NOT EXISTS artifact_exports_task_path_idx ON artifact_exports(task_id, export_path)",
     "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('artifact_cursor_hmac_key', '<runtime-token>')",
 )
 _CLOSURE_SCHEMA_STATEMENTS = (
-    "CREATE TABLE IF NOT EXISTS task_findings(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, fingerprint TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL, blocking INTEGER NOT NULL CHECK(blocking IN (0, 1)), summary TEXT NOT NULL, details TEXT, next_action_json TEXT, source_evidence_json TEXT NOT NULL, first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(task_id, fingerprint))",
+    "CREATE TABLE IF NOT EXISTS task_findings(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, fingerprint TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL, blocking INTEGER NOT NULL CHECK(blocking IN (0, 1)), summary TEXT NOT NULL, details TEXT, next_action_json TEXT, source_evidence_json TEXT NOT NULL, first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL, waiver_reason TEXT, waived_by TEXT, waived_at TEXT, resolved_at TEXT, PRIMARY KEY(task_id, fingerprint))",
     "CREATE INDEX IF NOT EXISTS task_findings_task_status_idx ON task_findings(task_id, status, severity, blocking)",
 )
-_FINDING_METADATA_SCHEMA_STATEMENTS = (
-    "ALTER TABLE task_findings ADD COLUMN waiver_reason TEXT",
-    "ALTER TABLE task_findings ADD COLUMN waived_by TEXT",
-    "ALTER TABLE task_findings ADD COLUMN waived_at TEXT",
-    "ALTER TABLE task_findings ADD COLUMN resolved_at TEXT",
-)
+_FINDING_METADATA_SCHEMA_STATEMENTS: tuple[str, ...] = ()
 
 # These definitions are intentionally append-only.  Projection state is an
 # outbox: it is committed with canonical state, and filesystem materializers
@@ -959,26 +920,10 @@ _PRUNE_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS prune_tombstones_status_idx ON prune_tombstones(status, lease_expires_at, updated_at)",
 )
 
-# v7 deliberately leaves the v2 ``artifacts`` and ``artifact_chunks`` tables
-# intact.  They are migration evidence and preserve every historic artifact id
-# while this migration backfills an explicitly split logical/blob model.  New
-# writes and all reads use the tables below; a later, separately-versioned
-# retention migration may reclaim prior-release duplicate chunks only after it has a
-# safe export/projection retention policy.
-_ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS = (
-    "CREATE TABLE IF NOT EXISTS artifact_blobs(blob_id TEXT PRIMARY KEY, digest_sha256 TEXT NOT NULL, mime_type TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), encoding TEXT NOT NULL CHECK(encoding IN ('utf-8', 'binary')), created_at TEXT NOT NULL, UNIQUE(digest_sha256, mime_type, byte_size))",
-    "CREATE TABLE IF NOT EXISTS artifact_blob_chunks(blob_id TEXT NOT NULL REFERENCES artifact_blobs(blob_id) ON DELETE CASCADE, chunk_no INTEGER NOT NULL CHECK(chunk_no >= 0), text_content TEXT, blob_content BLOB, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), digest_sha256 TEXT NOT NULL, PRIMARY KEY(blob_id, chunk_no), CHECK((text_content IS NOT NULL AND blob_content IS NULL) OR (text_content IS NULL AND blob_content IS NOT NULL)))",
-    "CREATE TABLE IF NOT EXISTS logical_artifacts(artifact_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, kind TEXT NOT NULL, title TEXT NOT NULL, mime_type TEXT NOT NULL, digest_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), immutable INTEGER NOT NULL CHECK(immutable IN (0, 1)), blob_id TEXT NOT NULL REFERENCES artifact_blobs(blob_id), export_path TEXT, created_at TEXT NOT NULL, UNIQUE(task_id, kind, title, digest_sha256))",
-    "CREATE TABLE IF NOT EXISTS artifact_exports(artifact_id TEXT NOT NULL REFERENCES logical_artifacts(artifact_id) ON DELETE CASCADE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, export_path TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(artifact_id, export_path), UNIQUE(task_id, export_path))",
-    "CREATE INDEX IF NOT EXISTS logical_artifacts_task_kind_created_idx ON logical_artifacts(task_id, kind, created_at DESC, artifact_id)",
-    "CREATE INDEX IF NOT EXISTS logical_artifacts_task_created_idx ON logical_artifacts(task_id, created_at DESC, artifact_id)",
-    "CREATE INDEX IF NOT EXISTS logical_artifacts_blob_idx ON logical_artifacts(blob_id)",
-    "CREATE INDEX IF NOT EXISTS artifact_exports_task_path_idx ON artifact_exports(task_id, export_path)",
-    "INSERT OR IGNORE INTO artifact_blobs(blob_id, digest_sha256, mime_type, byte_size, chunk_count, encoding, created_at) SELECT 'blob-' || digest_sha256 || '-' || lower(hex(mime_type)) || '-' || CAST(byte_size AS TEXT), digest_sha256, mime_type, byte_size, chunk_count, CASE WHEN EXISTS(SELECT 1 FROM artifact_chunks c WHERE c.artifact_id = artifacts.artifact_id AND c.text_content IS NOT NULL) THEN 'utf-8' ELSE 'binary' END, created_at FROM artifacts",
-    "INSERT OR IGNORE INTO artifact_blob_chunks(blob_id, chunk_no, text_content, blob_content, byte_size, digest_sha256) SELECT 'blob-' || a.digest_sha256 || '-' || lower(hex(a.mime_type)) || '-' || CAST(a.byte_size AS TEXT), c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256 FROM artifacts a JOIN artifact_chunks c ON c.artifact_id = a.artifact_id WHERE a.artifact_id = (SELECT MIN(source.artifact_id) FROM artifacts source WHERE source.digest_sha256 = a.digest_sha256 AND source.mime_type = a.mime_type AND source.byte_size = a.byte_size)",
-    "INSERT OR IGNORE INTO logical_artifacts(artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, blob_id, export_path, created_at) SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, 'blob-' || digest_sha256 || '-' || lower(hex(mime_type)) || '-' || CAST(byte_size AS TEXT), export_path, created_at FROM artifacts",
-    "INSERT OR IGNORE INTO artifact_exports(artifact_id, task_id, export_path, created_at) SELECT artifact_id, task_id, export_path, created_at FROM artifacts WHERE export_path IS NOT NULL",
-)
+# Kept as a numbered no-op so the current fresh schema remains monotonic.  It
+# deliberately contains no upgrade logic: an existing incompatible database
+# fails the immutable checksum/schema checks instead of being read.
+_ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS: tuple[str, ...] = ()
 
 _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS task_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), base_revision INTEGER, source TEXT NOT NULL CHECK(source IN ('initial','user_steer','recovery','system')), message_original TEXT NOT NULL, message_language TEXT NOT NULL, message_en TEXT, translation_status TEXT NOT NULL DEFAULT 'not_required' CHECK(translation_status IN ('not_required','pending','translated')), created_at TEXT NOT NULL, PRIMARY KEY(task_id, task_revision))",
@@ -999,12 +944,10 @@ _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS tool_observations_attempt_idx ON tool_observations(task_id, attempt_id, context_epoch, last_seen_at)",
 )
 
-# Governance is deliberately appended to the existing ledger rather than
-# creating a second database or rewriting any v1-v8 tables.  Bodies are kept
-# as canonical JSON plus a digest in the append-only record table; callers
+# Governance is part of the one current canonical ledger schema. Bodies are
+# kept as canonical JSON plus a digest in the append-only record table; callers
 # may additionally associate an immutable artifact from the normal artifact
-# catalog when the record is task-scoped.  This keeps migration v9 safe for
-# existing active tasks and preserves the v8 transaction/lock boundary.
+# catalog when the record is task-scoped.
 _GOVERNANCE_SCHEMA_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS initiatives(initiative_ref TEXT PRIMARY KEY, parent_ref TEXT REFERENCES initiatives(initiative_ref) ON DELETE RESTRICT, title TEXT NOT NULL, goal TEXT NOT NULL, owner TEXT NOT NULL, risk TEXT NOT NULL CHECK(risk IN ('low','moderate','high','critical')), acceptance_oracle_artifact_ref TEXT, status TEXT NOT NULL CHECK(status IN ('proposed','active','blocked','completed','closed','cancelled')), revision INTEGER NOT NULL CHECK(revision >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(parent_ref, title))",
     "CREATE INDEX IF NOT EXISTS initiatives_parent_idx ON initiatives(parent_ref, status, updated_at)",
@@ -1014,7 +957,7 @@ _GOVERNANCE_SCHEMA_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS initiative_dependencies(dependency_ref TEXT PRIMARY KEY, source_type TEXT NOT NULL CHECK(source_type IN ('initiative','task')), source_ref TEXT NOT NULL, target_type TEXT NOT NULL CHECK(target_type IN ('initiative','task')), target_ref TEXT NOT NULL, dependency_type TEXT NOT NULL CHECK(dependency_type IN ('blocks','requires','relates_to','follows')), created_at TEXT NOT NULL, UNIQUE(source_type, source_ref, target_type, target_ref, dependency_type), CHECK(NOT(source_type = target_type AND source_ref = target_ref)))",
     "CREATE INDEX IF NOT EXISTS initiative_dependencies_source_idx ON initiative_dependencies(source_type, source_ref)",
     "CREATE INDEX IF NOT EXISTS initiative_dependencies_target_idx ON initiative_dependencies(target_type, target_ref)",
-    "CREATE TABLE IF NOT EXISTS governance_records(record_ref TEXT PRIMARY KEY, initiative_ref TEXT REFERENCES initiatives(initiative_ref) ON DELETE SET NULL, task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL, record_type TEXT NOT NULL CHECK(record_type IN ('policy','decision','ruling','preference','assumption','risk','learning','reflection','exception','promotion')), revision INTEGER NOT NULL CHECK(revision >= 1), supersedes TEXT REFERENCES governance_records(record_ref) ON DELETE RESTRICT, status TEXT NOT NULL CHECK(status IN ('pending','active','approved','rejected','superseded','expired')), content_json TEXT NOT NULL, content_digest TEXT NOT NULL, content_artifact_ref TEXT, approval_basis_json TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT, UNIQUE(initiative_ref, task_id, record_type, revision))",
+    "CREATE TABLE IF NOT EXISTS governance_records(record_ref TEXT PRIMARY KEY, initiative_ref TEXT REFERENCES initiatives(initiative_ref) ON DELETE SET NULL, task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL, record_type TEXT NOT NULL CHECK(record_type IN ('policy','decision','ruling','preference','assumption','risk','learning','reflection','exception','promotion')), revision INTEGER NOT NULL CHECK(revision >= 1), supersedes TEXT REFERENCES governance_records(record_ref) ON DELETE RESTRICT, status TEXT NOT NULL CHECK(status IN ('pending','active','approved','rejected','superseded','expired')), content_json TEXT NOT NULL, content_digest TEXT NOT NULL, content_artifact_ref TEXT, approval_basis_json TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT, scope_key TEXT NOT NULL, lifecycle_sequence INTEGER NOT NULL DEFAULT 0 CHECK(lifecycle_sequence >= 0), lifecycle_binding TEXT NOT NULL DEFAULT '', UNIQUE(initiative_ref, task_id, record_type, revision))",
     "CREATE INDEX IF NOT EXISTS governance_records_scope_idx ON governance_records(initiative_ref, task_id, record_type, revision DESC)",
     "CREATE INDEX IF NOT EXISTS governance_records_active_idx ON governance_records(status, record_type, expires_at)",
     "CREATE TABLE IF NOT EXISTS governance_links(link_ref TEXT PRIMARY KEY, record_ref TEXT NOT NULL REFERENCES governance_records(record_ref) ON DELETE CASCADE, initiative_ref TEXT REFERENCES initiatives(initiative_ref) ON DELETE CASCADE, task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE, lane_id TEXT REFERENCES lanes(lane_id) ON DELETE CASCADE, finding_fingerprint TEXT, evidence_ref TEXT, relationship TEXT NOT NULL CHECK(relationship IN ('initiative','task','lane','finding','evidence')), created_at TEXT NOT NULL, CHECK(initiative_ref IS NOT NULL OR task_id IS NOT NULL OR lane_id IS NOT NULL OR finding_fingerprint IS NOT NULL OR evidence_ref IS NOT NULL))",
@@ -1022,19 +965,8 @@ _GOVERNANCE_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS governance_links_target_idx ON governance_links(initiative_ref, task_id, lane_id, finding_fingerprint)",
 )
 
-# v9 intentionally introduced governance without rewriting active task data.
-# v10 is the follow-up integrity migration: a scope is made explicit and
-# non-null, every revision chain is made linear, and database triggers prevent
-# direct SQL from turning an initiative/task record into a broader record.  We
-# retain the v9 table rather than rebuilding it so upgrades remain atomic and
-# preserve record identifiers and artifact references.
+# Governance integrity is enforced directly on the current canonical tables.
 _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS = (
-    "ALTER TABLE governance_records ADD COLUMN scope_key TEXT NOT NULL DEFAULT ''",
-    "UPDATE governance_records SET scope_key = CASE "
-    "WHEN initiative_ref IS NOT NULL AND task_id IS NOT NULL THEN 'initiative-task:' || length(initiative_ref) || ':' || initiative_ref || ':' || length(task_id) || ':' || task_id "
-    "WHEN initiative_ref IS NOT NULL THEN 'initiative:' || length(initiative_ref) || ':' || initiative_ref "
-    "WHEN task_id IS NOT NULL THEN 'task:' || length(task_id) || ':' || task_id "
-    "ELSE 'project:' END",
     "CREATE TRIGGER governance_records_scope_integrity_insert BEFORE INSERT ON governance_records FOR EACH ROW "
     "WHEN NEW.scope_key != CASE "
     "WHEN NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL THEN 'initiative-task:' || length(NEW.initiative_ref) || ':' || NEW.initiative_ref || ':' || length(NEW.task_id) || ':' || NEW.task_id "
@@ -1053,10 +985,6 @@ _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS = (
     "OR (NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL AND NOT EXISTS "
     "(SELECT 1 FROM initiative_task_links WHERE initiative_ref=NEW.initiative_ref AND task_id=NEW.task_id)) "
     "BEGIN SELECT RAISE(ABORT, 'governance scope integrity violation'); END",
-    # Re-evaluate prior-release v9 rows through the just-installed trigger.  A
-    # prior-release record with a cross-initiative task link must fail closed instead
-    # of silently becoming valid in a wider scope after upgrade.
-    "UPDATE governance_records SET scope_key = scope_key",
     "CREATE UNIQUE INDEX governance_records_scope_revision_unique ON governance_records(scope_key, record_type, revision)",
     "CREATE UNIQUE INDEX governance_records_supersedes_unique ON governance_records(supersedes) WHERE supersedes IS NOT NULL",
     "CREATE TABLE governance_submissions(submission_id TEXT PRIMARY KEY, command_digest TEXT NOT NULL, record_ref TEXT NOT NULL REFERENCES governance_records(record_ref) ON DELETE RESTRICT, created_at TEXT NOT NULL)",
@@ -1076,16 +1004,15 @@ _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS = (
     "BEGIN SELECT RAISE(ABORT, 'governance records prevent initiative deletion'); END",
 )
 
-# v11 binds the mutable lifecycle projection in ``governance_records`` to an
-# append-only transition chain.  A record body was already immutable in v10,
+# Lifecycle integrity binds the mutable lifecycle projection in
+# ``governance_records`` to an append-only transition chain. A record body is
+# immutable,
 # but a raw SQL writer could still rewrite its current status or approval
 # basis.  The lifecycle row carries the exact predecessor binding, current
 # status and approval basis, while the record keeps only the indexed current
 # projection.  Reads verify the cryptographic chain in governance.py.
 _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS = (
-    "ALTER TABLE governance_records ADD COLUMN lifecycle_sequence INTEGER NOT NULL DEFAULT 0 CHECK(lifecycle_sequence >= 0)",
-    "ALTER TABLE governance_records ADD COLUMN lifecycle_binding TEXT NOT NULL DEFAULT ''",
-    "CREATE TABLE governance_record_lifecycle(lifecycle_ref TEXT PRIMARY KEY, record_ref TEXT NOT NULL REFERENCES governance_records(record_ref) ON DELETE RESTRICT, lifecycle_sequence INTEGER NOT NULL CHECK(lifecycle_sequence >= 0), previous_binding TEXT, status TEXT NOT NULL CHECK(status IN ('pending','active','approved','rejected','superseded','expired')), approval_basis_json TEXT, binding TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('created','transition','migration_baseline')), actor_role TEXT NOT NULL CHECK(actor_role IN ('coordinator','worker','reviewer','system')), created_at TEXT NOT NULL, UNIQUE(record_ref,lifecycle_sequence))",
+    "CREATE TABLE governance_record_lifecycle(lifecycle_ref TEXT PRIMARY KEY, record_ref TEXT NOT NULL REFERENCES governance_records(record_ref) ON DELETE RESTRICT, lifecycle_sequence INTEGER NOT NULL CHECK(lifecycle_sequence >= 0), previous_binding TEXT, status TEXT NOT NULL CHECK(status IN ('pending','active','approved','rejected','superseded','expired')), approval_basis_json TEXT, binding TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('created','transition')), actor_role TEXT NOT NULL CHECK(actor_role IN ('coordinator','worker','reviewer','system')), created_at TEXT NOT NULL, UNIQUE(record_ref,lifecycle_sequence))",
     "CREATE INDEX governance_record_lifecycle_record_idx ON governance_record_lifecycle(record_ref,lifecycle_sequence)",
     "CREATE TRIGGER governance_record_lifecycle_insert_integrity BEFORE INSERT ON governance_record_lifecycle FOR EACH ROW "
     "WHEN NEW.lifecycle_sequence < 0 OR length(NEW.binding) != 64 "
@@ -1137,10 +1064,8 @@ _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS = (
     "BEGIN SELECT RAISE(ABORT, 'terminal initiative requires linked task terminal success'); END",
 )
 
-# v12 seals the *complete* lifecycle event envelope with a host-private HMAC.
-# The v11 SHA-256 chain remains intact and readable; a separate append-only
-# authentication projection avoids rewriting a released migration checksum or
-# mutating historical lifecycle rows during upgrade.
+# Seal the complete lifecycle event envelope with a host-private HMAC. The
+# public SHA-256 chain and its authentication projection are append-only.
 _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS = (
     "CREATE TABLE governance_record_lifecycle_auth(lifecycle_ref TEXT PRIMARY KEY REFERENCES governance_record_lifecycle(lifecycle_ref) ON DELETE RESTRICT, envelope_hmac TEXT NOT NULL)",
     "CREATE TRIGGER governance_record_lifecycle_auth_insert_integrity BEFORE INSERT ON governance_record_lifecycle_auth FOR EACH ROW "
@@ -1196,248 +1121,6 @@ _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS = (
 )
 
 
-def _v9_scope_key(initiative_ref: object, task_id: object) -> str:
-    """Mirror v10's collision-free scope key before the v10 columns exist."""
-    initiative = str(initiative_ref or "")
-    task = str(task_id or "")
-    if initiative and task:
-        return f"initiative-task:{len(initiative)}:{initiative}:{len(task)}:{task}"
-    if initiative:
-        return f"initiative:{len(initiative)}:{initiative}"
-    if task:
-        return f"task:{len(task)}:{task}"
-    return "project:"
-
-
-def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> None:
-    """Reconcile only deterministic v9 conflicts before the v10 indexes exist.
-
-    SQLite's old nullable scope uniqueness let project-/task-scoped records
-    reuse a revision number, and it allowed more than one successor for a
-    predecessor.  v10 intentionally rejects both states.  Rather than leave
-    a partially explained ``CREATE UNIQUE INDEX`` failure, this preflight
-    deterministically linearises *only* affected scope/type groups using
-    created-at/record-ref order.  Historical v9 rows can also contain an
-    incomplete predecessor graph.  Those edges are detached at the smallest
-    deterministic boundary, retained as immutable audit metadata, and the
-    migration continues.  A malformed historical row must never strand the
-    current Cortex pipeline behind a raw migration error: the old edge is
-    preserved in the migration audit record and the canonical v10 graph is
-    made executable.
-    """
-    anomalies: list[dict[str, str]] = []
-    rows = [dict(row) for row in connection.execute(
-        "SELECT record_ref,initiative_ref,task_id,record_type,revision,supersedes,created_at FROM governance_records ORDER BY created_at,record_ref"
-    )]
-    if not rows:
-        return
-    by_ref = {str(row["record_ref"]): row for row in rows}
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        initiative = str(row["initiative_ref"] or "") or None
-        task = str(row["task_id"] or "") or None
-        if initiative and task and connection.execute(
-            "SELECT 1 FROM initiative_task_links WHERE initiative_ref=? AND task_id=? LIMIT 1",
-            (initiative, task),
-        ).fetchone() is None:
-            anomalies.append({
-                "code": "v9_scope_link_missing",
-                "record_ref": str(row["record_ref"]),
-            })
-        row["_scope_key"] = _v9_scope_key(initiative, task)
-        groups.setdefault((str(row["_scope_key"]), str(row["record_type"])), []).append(row)
-
-    reconciled_groups = 0
-    duplicate_groups = 0
-    sibling_groups = 0
-    for group_rows in groups.values():
-        children: dict[str | None, list[dict[str, Any]]] = {}
-        duplicate_revisions: set[int] = set()
-        seen_revisions: set[int] = set()
-        for row in group_rows:
-            revision = int(row["revision"])
-            if revision in seen_revisions:
-                duplicate_revisions.add(revision)
-            seen_revisions.add(revision)
-            predecessor = str(row["supersedes"] or "") or None
-            if predecessor:
-                parent = by_ref.get(predecessor)
-                if parent is None:
-                    anomalies.append({
-                        "code": "v9_supersedes_missing",
-                        "record_ref": str(row["record_ref"]),
-                        "supersedes": predecessor,
-                    })
-                    row["supersedes"] = None
-                    connection.execute(
-                        "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
-                        (row["record_ref"],),
-                    )
-                    predecessor = None
-                if (
-                    parent is not None
-                    and (
-                        str(parent["record_type"]) != str(row["record_type"])
-                        or str(parent["_scope_key"]) != str(row["_scope_key"])
-                    )
-                ):
-                    anomalies.append({
-                        "code": "v9_supersedes_scope_mismatch",
-                        "record_ref": str(row["record_ref"]),
-                        "supersedes": predecessor,
-                    })
-                    row["supersedes"] = None
-                    connection.execute(
-                        "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
-                        (row["record_ref"],),
-                    )
-                    predecessor = None
-            children.setdefault(predecessor, []).append(row)
-        # A predecessor chain must already be acyclic.  A deterministic sort
-        # cannot safely infer a meaning for a cyclic historical graph.
-        for row in group_rows:
-            visited: set[str] = set()
-            current = row
-            previous: dict[str, Any] | None = None
-            while True:
-                current_ref = str(current["record_ref"])
-                if current_ref in visited:
-                    # Detach the newest edge that closes the cycle.  This is
-                    # deterministic, preserves every record, and allows the
-                    # normal linearization below to retain an auditable root.
-                    if previous is not None and previous.get("supersedes"):
-                        anomalies.append({
-                            "code": "v9_supersedes_cycle",
-                            "record_ref": str(previous["record_ref"]),
-                            "supersedes": str(previous["supersedes"]),
-                        })
-                        previous["supersedes"] = None
-                        connection.execute(
-                            "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
-                            (previous["record_ref"],),
-                        )
-                    break
-                visited.add(current_ref)
-                parent_ref = str(current["supersedes"] or "") or None
-                if not parent_ref:
-                    break
-                parent = by_ref.get(parent_ref)
-                if parent is None:
-                    break
-                previous = current
-                current = parent
-        # Rebuild the child map after non-canonical edges were detached.
-        children = {}
-        for row in group_rows:
-            children.setdefault(str(row["supersedes"] or "") or None, []).append(row)
-        sibling_parents = [parent for parent, items in children.items() if parent is not None and len(items) > 1]
-        if not duplicate_revisions and not sibling_parents:
-            continue
-        duplicate_groups += int(bool(duplicate_revisions))
-        sibling_groups += int(bool(sibling_parents))
-        reconciled_groups += 1
-        ordered: list[dict[str, Any]] = []
-
-        def visit(item: dict[str, Any]) -> None:
-            ordered.append(item)
-            for child in sorted(children.get(str(item["record_ref"]), []), key=lambda value: (str(value["created_at"]), str(value["record_ref"]))):
-                visit(child)
-
-        roots = sorted(children.get(None, []), key=lambda value: (str(value["created_at"]), str(value["record_ref"])))
-        for root in roots:
-            visit(root)
-        if len(ordered) != len(group_rows):
-            # A malformed graph can leave a disconnected component without a
-            # root even after cycle repair.  Promote its oldest row to a root
-            # and retain the anomaly instead of aborting the whole database.
-            for item in sorted(
-                (candidate for candidate in group_rows if candidate not in ordered),
-                key=lambda value: (str(value["created_at"]), str(value["record_ref"])),
-            ):
-                anomalies.append({
-                    "code": "v9_supersedes_graph_incomplete",
-                    "record_ref": str(item["record_ref"]),
-                    "supersedes": str(item.get("supersedes") or ""),
-                })
-                item["supersedes"] = None
-                connection.execute(
-                    "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
-                    (item["record_ref"],),
-                )
-                visit(item)
-        # Move every revision out of the old range before assigning its
-        # canonical number, avoiding transient uniqueness conflicts for
-        # non-null prior-release scopes.
-        offset = max([int(item["revision"]) for item in group_rows] + [0]) + len(group_rows) + 1
-        for item in group_rows:
-            connection.execute("UPDATE governance_records SET revision=revision+? WHERE record_ref=?", (offset, item["record_ref"]))
-        for revision, item in enumerate(ordered, start=1):
-            connection.execute(
-                "UPDATE governance_records SET revision=? WHERE record_ref=?",
-                (revision, item["record_ref"]),
-            )
-        # The depth-first order makes descendants immediately follow their
-        # predecessor before a former sibling branch is appended.  Independent
-        # roots remain independent, while each affected branch becomes linear.
-        root_previous: str | None = None
-        root_of: dict[str, str] = {}
-        for root in roots:
-            stack = [root]
-            while stack:
-                item = stack.pop()
-                root_of[str(item["record_ref"])] = str(root["record_ref"])
-                stack.extend(children.get(str(item["record_ref"]), []))
-        last_by_root: dict[str, str | None] = {}
-        for item in ordered:
-            ref = str(item["record_ref"])
-            root_ref = root_of.get(ref)
-            predecessor = last_by_root.get(root_ref) if root_ref else None
-            connection.execute("UPDATE governance_records SET supersedes=? WHERE record_ref=?", (predecessor, ref))
-            if root_ref:
-                last_by_root[root_ref] = ref
-    if reconciled_groups or anomalies:
-        connection.execute(
-            "INSERT INTO ledger_meta(key,value) VALUES('governance_v10_reconciliation',?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (_canonical_json({
-                "schema": "cortex/governance-v10-reconciliation/v1",
-                "reconciled_scope_type_groups": reconciled_groups,
-                "duplicate_scope_revision_groups": duplicate_groups,
-                "sibling_successor_groups": sibling_groups,
-                "ambiguous_edges_detached": anomalies,
-            }),),
-        )
-
-
-def _finalize_governance_lifecycle_migration(connection: sqlite3.Connection) -> None:
-    """Attach one genesis lifecycle event to every pre-v11 governance row."""
-    rows = connection.execute(
-        "SELECT record_ref,status,approval_basis_json,lifecycle_sequence,lifecycle_binding FROM governance_records ORDER BY record_ref"
-    ).fetchall()
-    for row in rows:
-        if int(row["lifecycle_sequence"]) != 0 or str(row["lifecycle_binding"] or ""):
-            raise ValueError("Cortex governance lifecycle migration state is inconsistent")
-        record_ref = str(row["record_ref"])
-        status = str(row["status"])
-        approval_basis_json = str(row["approval_basis_json"]) if row["approval_basis_json"] is not None else None
-        binding = governance_lifecycle_binding(
-            record_ref=record_ref,
-            sequence=0,
-            previous_binding=None,
-            status=status,
-            approval_basis_json=approval_basis_json,
-        )
-        lifecycle_ref = "lifecycle-" + hashlib.sha256(f"{record_ref}:0:{binding}".encode("utf-8")).hexdigest()[:32]
-        connection.execute(
-            "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (lifecycle_ref, record_ref, 0, None, status, approval_basis_json, binding, "migration_baseline", "system", _now()),
-        )
-        connection.execute(
-            "UPDATE governance_records SET lifecycle_binding=? WHERE record_ref=?",
-            (binding, record_ref),
-        )
-
-
 def insert_governance_lifecycle_auth(
     root: Path,
     connection: sqlite3.Connection,
@@ -1475,51 +1158,27 @@ def insert_governance_lifecycle_auth(
     )
 
 
-def _finalize_governance_lifecycle_envelope_auth_migration(root: Path, connection: sqlite3.Connection) -> None:
-    """Seal each released v11 event without rewriting its public chain."""
-    # Initialize the host key even for a fresh ledger with no governance
-    # events.  Later runtime writes must never recreate a missing key, since
-    # that would turn key deletion into an undetectable reseal opportunity.
-    _governance_lifecycle_hmac_key(root, create=True)
-    rows = connection.execute(
-        "SELECT lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at "
-        "FROM governance_record_lifecycle ORDER BY record_ref,lifecycle_sequence"
-    ).fetchall()
-    for row in rows:
-        insert_governance_lifecycle_auth(
-            root,
-            connection,
-            lifecycle_ref=str(row["lifecycle_ref"]),
-            record_ref=str(row["record_ref"]),
-            lifecycle_sequence=int(row["lifecycle_sequence"]),
-            previous_binding=str(row["previous_binding"] or "") or None,
-            status=str(row["status"]),
-            approval_basis_json=(str(row["approval_basis_json"]) if row["approval_basis_json"] is not None else None),
-            binding=str(row["binding"]),
-            action=str(row["action"]),
-            actor_role=str(row["actor_role"]),
-            created_at=str(row["created_at"]),
-        )
-
-
 def _migration_plan() -> tuple[_Migration, ...]:
-    return (
-        _Migration(1, "sqlite-ledger-base", _BASE_SCHEMA_STATEMENTS),
-        _Migration(2, "immutable-artifact-catalog-and-chunks", _ARTIFACT_SCHEMA_STATEMENTS),
-        _Migration(3, "canonical-task-findings", _CLOSURE_SCHEMA_STATEMENTS),
-        _Migration(4, "finding-waiver-and-resolution-metadata", _FINDING_METADATA_SCHEMA_STATEMENTS),
-        _Migration(5, "projection-jobs", _PROJECTION_SCHEMA_STATEMENTS),
-        _Migration(6, "crash-safe-prune-tombstones", _PRUNE_SCHEMA_STATEMENTS),
-        _Migration(7, "canonical-content-blobs-and-logical-artifacts", _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS),
-        _Migration(8, "revision-aware-orchestration", _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS),
-        _Migration(9, "governance-ledger", _GOVERNANCE_SCHEMA_STATEMENTS),
-        _Migration(10, "governance-integrity-hardening", _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS),
-        _Migration(11, "governance-lifecycle-authority", _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS),
-        _Migration(12, "governance-lifecycle-envelope-authentication", _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS),
-        _Migration(13, "attempt-result-event-protocol", _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS),
-        _Migration(14, "attempt-verification-authority", _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS),
-        _Migration(15, "attempt-question-decision-events", _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS),
-    )
+    # Fresh installations have one current schema.  There is deliberately no
+    # upgrade path from an earlier ledger: an existing database is accepted
+    # only when it already carries this exact canonical record.
+    return (_Migration(
+        DATABASE_SCHEMA_VERSION,
+        "canonical-current-ledger",
+        _BASE_SCHEMA_STATEMENTS
+        + _ARTIFACT_SCHEMA_STATEMENTS
+        + _CLOSURE_SCHEMA_STATEMENTS
+        + _PROJECTION_SCHEMA_STATEMENTS
+        + _PRUNE_SCHEMA_STATEMENTS
+        + _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
+        + _GOVERNANCE_SCHEMA_STATEMENTS
+        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
+        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
+        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
+        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS,
+    ),)
 
 
 def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> None:
@@ -1529,7 +1188,7 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "manifest_snapshots", "global_documents", "operations", "ledger_events",
             "task_documents",
         },
-        2: {"artifacts", "artifact_chunks"},
+        2: {"artifact_blobs", "artifact_blob_chunks", "logical_artifacts", "artifact_exports"},
         3: {"task_findings"},
         4: {"task_findings"},
         5: {"projection_jobs", "projection_jobs_status_idx", "projection_jobs_task_idx"},
@@ -1612,8 +1271,10 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "task_documents": {"task_id", "document_key", "payload_json", "updated_at"},
         },
         2: {
-            "artifacts": {"artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256", "byte_size", "chunk_count", "immutable", "export_path", "created_at"},
-            "artifact_chunks": {"artifact_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256"},
+            "artifact_blobs": {"blob_id", "digest_sha256", "mime_type", "byte_size", "chunk_count", "encoding", "created_at"},
+            "artifact_blob_chunks": {"blob_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256"},
+            "logical_artifacts": {"artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256", "byte_size", "chunk_count", "immutable", "blob_id", "export_path", "created_at"},
+            "artifact_exports": {"artifact_id", "task_id", "export_path", "created_at"},
         },
         3: {
             "task_findings": {"task_id", "fingerprint", "severity", "status", "blocking", "summary", "details", "next_action_json", "source_evidence_json", "first_seen_at", "updated_at"},
@@ -1835,63 +1496,35 @@ def _database_readiness_is_current(root: Path, migrations: tuple[_Migration, ...
 
 
 def ensure_database(root: Path) -> None:
-    """Open/upgrade one project ledger and apply each migration exactly once."""
+    """Open a fresh canonical ledger; reject every pre-canonical database."""
     if _root_key(root) in _active_connections():
         _assert_current_migration_history(_active_connections()[_root_key(root)])
         return
     migrations = _migration_plan()
     if _database_readiness_is_current(root, migrations):
         return
-    with _migration_lock(root):
-        with _connection(root, write=True) as connection:
-            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            has_history = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
-            ).fetchone() is not None
-            applied = _applied_migrations(connection) if has_history else {}
-            expected_versions = {migration.version for migration in migrations}
-            if any(version not in expected_versions for version in applied):
-                raise ValueError("Cortex database migration history is inconsistent")
-            ordered_versions = sorted(applied)
-            if ordered_versions != list(range(1, len(ordered_versions) + 1)):
-                raise ValueError("Cortex database migration history is inconsistent")
-            if user_version != max(applied, default=0):
-                raise ValueError("Cortex database user_version is inconsistent")
-            for version in applied:
-                _assert_migration_schema(connection, version)
-            for migration in migrations:
-                known = applied.get(migration.version)
-                checksum = _migration_checksum(migration)
-                if known is not None:
-                    if known == (migration.name, checksum):
-                        continue
-                    # Databases from the pre-atomic release used a prior-release
-                    # name-only checksum. Upgrade it only after confirming
-                    # the migration's known schema is actually present.
-                    if known == (migration.name, _migration_checksum(migration.name)):
-                        _assert_migration_schema(connection, migration.version)
-                        connection.execute(
-                            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
-                            (checksum, migration.version),
-                        )
-                        continue
-                    raise ValueError("Cortex database migration history is inconsistent")
-                if migration.version != (max(applied, default=0) + 1):
-                    raise ValueError("Cortex database migration history is inconsistent")
-                if migration.version == 10 and max(applied, default=0) == 9:
-                    _prepare_v9_governance_integrity_upgrade(connection)
-                _execute_migration_statements(connection, migration.statements)
-                if migration.version == 11:
-                    _finalize_governance_lifecycle_migration(connection)
-                if migration.version == 12:
-                    _finalize_governance_lifecycle_envelope_auth_migration(root, connection)
-                _record_migration(connection, migration)
-                applied[migration.version] = (migration.name, checksum)
-            # Keep SQLite's schema marker coupled to the immutable plan that
-            # was actually validated/applied.  This matters both for an
-            # interrupted upgrade and for deterministic migration tests that
-            # intentionally stop at an earlier released plan.
-            connection.execute(f"PRAGMA user_version = {migrations[-1].version if migrations else 0}")
+    with _connection(root, write=True) as connection:
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        has_history = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone() is not None
+        applied = _applied_migrations(connection) if has_history else {}
+        user_objects = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','index','trigger','view') "
+            "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+        ).fetchone() is not None
+        if user_objects and not has_history:
+            raise ValueError("Cortex database is an unsupported pre-canonical ledger")
+        migration = migrations[0]
+        expected = (migration.name, _migration_checksum(migration))
+        if applied:
+            if applied != {migration.version: expected} or user_version != migration.version:
+                raise ValueError("Cortex database is an unsupported pre-canonical ledger")
+            _assert_migration_schema(connection, migration.version)
+        else:
+            _execute_migration_statements(connection, migration.statements)
+            _record_migration(connection, migration)
+            connection.execute(f"PRAGMA user_version = {migration.version}")
     _cache_database_readiness(root, migrations)
 
 
@@ -3597,13 +3230,9 @@ def record_tool_observation(
         raise ValueError("tool observation arguments are invalid") from exc
     if not isinstance(parsed_arguments, dict):
         raise ValueError("tool observation arguments are invalid")
-    tool_name = _bounded_observation_text(
-        tool_name, label="tool_name", maximum=MAX_TOOL_OBSERVATION_NAME_BYTES,
-    )
+    tool_name = _bounded_observation_text(tool_name, label="tool_name")
     workspace_generation = _bounded_observation_text(
-        workspace_generation,
-        label="workspace_generation",
-        maximum=MAX_TOOL_OBSERVATION_GENERATION_BYTES,
+        workspace_generation, label="workspace_generation"
     )
     if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
         raise ValueError("tool observation status is invalid")
@@ -3679,13 +3308,9 @@ def hook_record_tool_observation(
         parsed_arguments = json.loads(normalized_arguments)
         if not isinstance(parsed_arguments, dict):
             raise ValueError("tool observation arguments are invalid")
-        tool_name = _bounded_observation_text(
-            tool_name, label="tool_name", maximum=MAX_TOOL_OBSERVATION_NAME_BYTES,
-        )
+        tool_name = _bounded_observation_text(tool_name, label="tool_name")
         workspace_generation = _bounded_observation_text(
-            workspace_generation,
-            label="workspace_generation",
-            maximum=MAX_TOOL_OBSERVATION_GENERATION_BYTES,
+            workspace_generation, label="workspace_generation"
         )
         if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
             raise ValueError("tool observation status is invalid")

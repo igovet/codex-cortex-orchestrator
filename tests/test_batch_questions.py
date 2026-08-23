@@ -7,11 +7,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
-from cortex_runtime import attempt_protocol
+from cortex_runtime import attempt_protocol, questions, worker_identity
 
 
 class BatchQuestionTests(unittest.TestCase):
     """Regression coverage for the ordinary-chat durable question boundary."""
+
+    def test_question_records_use_only_current_schema(self):
+        self.assertEqual(control.QUESTION_SCHEMA, "cortex/question/v3")
+        self.assertEqual(questions.QUESTION_SCHEMA, "cortex/question/v3")
+        with self.assertRaisesRegex(ValueError, "schema is not supported"):
+            questions._question_record_view({"schema": "cortex/question/not-current"})
+        self.assertEqual(
+            questions._question_record_view({"schema": "cortex/question/v3", "question_id": "q-1"})["schema"],
+            "cortex/question/v3",
+        )
 
     def setUp(self):
         self.original_cwd = Path.cwd()
@@ -57,6 +67,21 @@ class BatchQuestionTests(unittest.TestCase):
             "profile": attempt["profile"],
         }
 
+    def _worker_question(self, state, attempt, params):
+        """Invoke the worker surface through its trusted dispatch binding."""
+        # Scope is semantic task input; the server-bound channel supplies only
+        # identity.  Keep the fixture explicit so the question firewall does
+        # not classify these decisions as internal orchestration advice.
+        params = dict(params)
+        if params.get("action") == "ask":
+            context = params.get("context")
+            params["context"] = {
+                "decision_scope": "task_decision",
+                **(context if isinstance(context, dict) else {}),
+            }
+        with worker_identity.worker_binding(self._identity(state, attempt)):
+            return control.worker_question(params)
+
     @staticmethod
     def _batch():
         return {
@@ -67,7 +92,7 @@ class BatchQuestionTests(unittest.TestCase):
                     "question": "Which storage strategy should the implementation use?",
                     "type": "single_select",
                     "header": "Storage migration strategy",
-                    "context": "A new schema increases migration risk; the existing schema preserves required behavior.",
+                    "context": {"decision_scope": "task_decision", "detail": "A new schema increases migration risk; the existing schema preserves required behavior."},
                     "options": [
                         {"option_id": "existing_schema", "label_en": "Keep the existing schema", "description": "Lowest migration risk and preserves deployed readers."},
                         {"option_id": "new_schema", "label_en": "Create a new schema", "description": "Cleaner structure but requires a coordinated migration."},
@@ -80,7 +105,7 @@ class BatchQuestionTests(unittest.TestCase):
                     "question": "What migration constraint should be treated as non-negotiable?",
                     "type": "text",
                     "header": "Required migration constraint",
-                    "context": "The worker needs an explicit boundary before finalizing its plan.",
+                    "context": {"decision_scope": "task_decision", "detail": "The worker needs an explicit boundary before finalizing its plan."},
                     "recommended_answer": "Preserve all existing public API behavior.",
                     "recommendation": "Use this wording because it is concrete and directly verifiable.",
                 },
@@ -89,8 +114,7 @@ class BatchQuestionTests(unittest.TestCase):
 
     def test_question_without_llm_recommendation_is_rejected_before_persistence(self):
         _, state, attempt = self._start()
-        rejected = control.worker_question({
-            **self._identity(state, attempt),
+        rejected = self._worker_question(state, attempt, {
             "action": "ask",
             "question": "Which storage strategy should be used?",
             "header": "Storage strategy",
@@ -121,7 +145,8 @@ class BatchQuestionTests(unittest.TestCase):
             "question": "🙂" * 4_001,
             "context": {str(index): "🙂" * 2_000 for index in range(10)},
         }
-        asked = control.worker_question(complete_question)
+        complete_question = {key: value for key, value in complete_question.items() if key not in self._identity(state, attempt)}
+        asked = self._worker_question(state, attempt, complete_question)
         self.assertTrue(asked["ok"], asked)
         question_ref = asked["question_ref"]
         answered_large = control.answer_worker_question({
@@ -144,15 +169,13 @@ class BatchQuestionTests(unittest.TestCase):
 
     def test_batch_is_rendered_in_chat_with_explicit_recommendations_and_resumes(self):
         started, state, attempt = self._start()
-        asked = control.worker_question({
-            **self._identity(state, attempt),
+        asked = self._worker_question(state, attempt, {
             "action": "ask_batch",
             "batch": self._batch(),
         })
         self.assertEqual(asked["outcome"], "batch_recorded")
         batch_ref = asked["batch_ref"]
         surfaced = control.manage_orchestration({
-            "project_root": str(self.project),
             "task_ref": started["task_ref"],
             "intent": "question",
             "payload": {"question_ref": batch_ref},
@@ -169,7 +192,6 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertTrue(choice["rationale"])
         self.assertEqual(interaction["questions"][1]["llm_recommendation"]["recommended_answer"], "Preserve all existing public API behavior.")
         answered = control.manage_orchestration({
-            "project_root": str(self.project),
             "task_ref": started["task_ref"],
             "intent": "question",
             "payload": {
@@ -188,7 +210,7 @@ class BatchQuestionTests(unittest.TestCase):
             "poll_action": "poll_batch",
         })
         self.assertNotIn("target", answered["resume_contract"])
-        polled = control.worker_question({**self._identity(state, attempt), "action": "poll_batch", "batch_ref": batch_ref})
+        polled = self._worker_question(state, attempt, {"action": "poll_batch", "batch_ref": batch_ref})
         self.assertEqual(polled["outcome"], "batch_answered")
         self.assertEqual(polled["answers"]["storage_strategy"]["answer_option_ids"], ["existing_schema"])
         events = attempt_protocol.list_attempt_events(
@@ -203,8 +225,7 @@ class BatchQuestionTests(unittest.TestCase):
 
     def test_single_question_next_chat_message_is_recorded_on_same_ref(self):
         started, state, attempt = self._start()
-        asked = control.worker_question({
-            **self._identity(state, attempt),
+        asked = self._worker_question(state, attempt, {
             "action": "ask",
             "question": "Which rollout policy should the implementation follow?",
             "header": "Rollout policy",
@@ -218,7 +239,6 @@ class BatchQuestionTests(unittest.TestCase):
         })
         question_ref = asked["question_ref"]
         surfaced = control.manage_orchestration({
-            "project_root": str(self.project),
             "task_ref": started["task_ref"],
             "intent": "question",
             "payload": {"question_ref": question_ref},
@@ -228,7 +248,6 @@ class BatchQuestionTests(unittest.TestCase):
         recommended = surfaced["chat_interaction"]["questions"][0]["llm_recommendation"]
         self.assertEqual(recommended["recommended_options"][0]["option_id"], "gradual")
         answered = control.manage_orchestration({
-            "project_root": str(self.project),
             "task_ref": started["task_ref"],
             "intent": "question",
             "payload": {
@@ -243,7 +262,7 @@ class BatchQuestionTests(unittest.TestCase):
             "profile": attempt["profile"],
             "poll_action": "poll",
         })
-        polled = control.worker_question({**self._identity(state, attempt), "action": "poll", "question_ref": question_ref})
+        polled = self._worker_question(state, attempt, {"action": "poll", "question_ref": question_ref})
         self.assertEqual(polled["outcome"], "question_answered")
         self.assertEqual(polled["answer_option_ids"], ["gradual"])
         self.assertIn("five minutes", polled["answer_text"])

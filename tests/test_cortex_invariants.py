@@ -549,11 +549,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertFalse({"argv", "cwd", "env", "shell", "executable"} & set(verification_properties))
 
 
-    def test_planner_briefing_requires_top_level_planning_sibling(self):
+    def test_planner_briefing_requires_nested_planning_sibling(self):
         package = {
             "task_id": "task", "gate": "plan", "attempt_id": "plan-01", "dispatch_ref": "dispatch-plan-000000000000",
             "project_root": "/workspace/project", "facade_managed": True, "user_owned_thread": False,
-            "task_user_request": "Plan the fixture.", "objective": "Plan.",
+            "user_request": "Plan the fixture.", "task_user_request": "Plan the fixture.", "objective": "Plan.",
             "ownership": "Own planning", "allowed_paths": ["."], "acceptance_criteria": ["Plan complete"],
             "verification": ["Verify plan"], "task_acceptance_criteria": [], "task_verification": [],
             "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
@@ -562,10 +562,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "intent_clarification_required": False, "intent_clarification_reason": None,
         }
         prompt = control.host_spawn_prompt("planner", package)
-        self.assertIn(
-            "REQUIRED top-level planning siblings={overview,work_packages,recommendation,recommendation_rationale,recommendation_actions}",
-            prompt,
-        )
+        self.assertIn("PLANNER COMPLETION SHAPE", prompt)
+        self.assertIn("`planning` object", prompt)
+        self.assertIn("Valid: `{planning:{overview:...,work_packages:[...]}}`", prompt)
+        self.assertIn("Invalid: `{overview:...,work_packages:[...]}`", prompt)
+        self.assertNotIn("REQUIRED top-level planning siblings", prompt)
 
     def test_installable_orchestrator_releases_completed_native_agent_slots(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
@@ -1290,8 +1291,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("Coordinators use\n`start_orchestration`", skill)
         self.assertIn("`start_orchestration` and `continue_orchestration` for normal work", skill)
         self.assertIn("Invoke every returned dispatch", skill)
-        self.assertIn("Expected routes are metadata, not proof", skill)
-        self.assertIn("Workers do not call lifecycle operations", skill)
+        self.assertIn("Expected routes are metadata, not\nproof", skill)
+        self.assertIn("Workers must not call coordinator lifecycle operations", skill)
         self.assertIn("`record_attempt_event`", skill)
         self.assertIn("`complete_attempt`", skill)
         self.assertIn("`read_worker_result`", skill)
@@ -1332,15 +1333,20 @@ class OrchestrationInvariantTests(unittest.TestCase):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
         markers = [
             "## Normal flow",
-            "Call `start_orchestration` once",
+            "Then call `start_orchestration` once",
             "Invoke every returned dispatch",
             "Workers do not call lifecycle operations",
             "After all workers finish",
-            "then call `continue_orchestration` exactly",
+            "then call `continue_orchestration` exactly\n   once with",
             "Repeat one continue per completed wave",
         ]
-        positions = [skill.index(marker) for marker in markers]
-        self.assertEqual(positions, sorted(positions))
+        positions = []
+        cursor = 0
+        for marker in markers:
+            position = skill.find(marker, cursor)
+            self.assertGreaterEqual(position, cursor, marker)
+            positions.append(position)
+            cursor = position + len(marker)
 
     def test_all_installable_sources_are_plugin_bundled(self):
         repository = Path(__file__).parents[1]
@@ -1420,7 +1426,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             payload = tomllib.loads(path.read_text(encoding="utf-8"))
             prompt = payload["developer_instructions"]
             prompts[payload["name"]] = prompt
-            for marker in ("Role and mission:", "Operating workflow:", "Quality bar:", "Completion:", "Escalate"):
+            for marker in ("Role and mission:", "Operating workflow:", "Quality bar:", "Complete the", "Escalate"):
                 self.assertIn(marker, prompt, f"{marker!r} missing from {path.name}")
             self.assertGreaterEqual(len(prompt.split()), 180, path.name)
             self.assertNotIn("gpt-", prompt.lower())
@@ -1443,7 +1449,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "task_id": "task-prompt-injection", "task_ref": "task-ref-prompt-injection",
             "gate": "documentation", "attempt_id": "documentation-01",
             "dispatch_ref": "dispatch-" + "a" * 24, "project_root": "/workspace/prompt-injection",
-            "facade_managed": True, "user_owned_thread": False, "task_user_request": hostile,
+            "facade_managed": True, "user_owned_thread": False, "user_request": hostile, "task_user_request": hostile,
             "objective": hostile,
             "ownership": "Own documentation only.", "task_requirements": [hostile],
             "task_scope": ["docs"], "allowed_paths": ["docs"], "context_files": [],
@@ -1477,7 +1483,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "task_id": "task-mode-overlay", "task_ref": "task-ref-mode-overlay",
             "gate": "documentation", "attempt_id": "documentation-01",
             "dispatch_ref": "dispatch-" + "b" * 24, "project_root": "/workspace/mode-overlay",
-            "facade_managed": True, "user_owned_thread": False, "task_user_request": "Update docs.",
+            "facade_managed": True, "user_owned_thread": False, "user_request": "Update docs.", "task_user_request": "Update docs.",
             "objective": "Update docs.",
             "ownership": "Own docs.", "task_requirements": [], "task_scope": ["docs"],
             "allowed_paths": ["docs"], "context_files": [], "knowledge_index_files": [],
@@ -1501,7 +1507,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "gate": "governance_close", "attempt_id": "governance_close-01",
             "dispatch_ref": "dispatch-" + "c" * 24, "project_root": "/workspace/unresolved-semantics",
             "facade_managed": True, "user_owned_thread": False,
-            "task_user_request": "Verify the governed completion.",
+            "user_request": "Verify the governed completion.", "task_user_request": "Verify the governed completion.",
             "objective": "Verify completion.",
             "task_requirements": [], "task_scope": ["plugins/cortex"], "allowed_paths": ["plugins/cortex"],
             "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
@@ -1525,7 +1531,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "gate": "governance_close", "attempt_id": "governance_close-01",
             "dispatch_ref": "dispatch-" + "d" * 24, "project_root": "/workspace/auto-governance-policy",
             "facade_managed": True, "user_owned_thread": False,
-            "task_user_request": "Verify the automatic governed completion.",
+            "user_request": "Verify the automatic governed completion.", "task_user_request": "Verify the automatic governed completion.",
             "objective": "Verify completion.",
             "task_requirements": [], "task_scope": ["plugins/cortex"], "allowed_paths": ["plugins/cortex"],
             "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
@@ -1605,7 +1611,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
             content = path.read_text(encoding="utf-8")
             self.assertNotIn("ATTEMPT_COMPLETED result_ref=", content, str(path))
             if path.name.endswith(".toml"):
-                self.assertIn("Question resume:", content, str(path))
+                self.assertNotIn("Question resume:", content, str(path))
+                self.assertNotIn("Completion: End only with complete_attempt", content, str(path))
             markers = (
                 "server exposes result_ref",
                 "compact_generated_result_ref",
@@ -1627,7 +1634,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             {
                 "task_id": "task-wire-token", "task_ref": "task-ref-wire-token",
                 "gate": "governance_activation", "attempt_id": "governance_activation-01",
-                "dispatch_ref": "dispatch-" + "d" * 24, "project_root": "/workspace/wire-token",
+                "dispatch_ref": "dispatch-" + "d" * 24, "project_root": "/workspace/wire-token", "user_request": "Verify the governed activation.",
                 "facade_managed": True, "user_owned_thread": False,
                 "task_user_request": "Verify the governed activation.",
                 "objective": "Verify activation.",
@@ -1672,7 +1679,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 "task_id": "task-worst-case", "task_ref": "task-ref-worst-case",
                 "gate": gate, "attempt_id": f"{gate}-06", "dispatch_ref": "dispatch-" + "a" * 24,
                 "project_root": "/workspace/worst-case", "facade_managed": True, "user_owned_thread": False,
-                "task_user_request": unit[:1600], "objective": unit[:2400],
+                "user_request": unit[:1600], "task_user_request": unit[:1600], "objective": unit[:2400],
                 "selection_reason": unit[:1000], "strategy": unit[:500],
                 "task_requirements": [unit[:600] for _ in range(8)], "task_constraints": [unit[:700] for _ in range(8)],
                 "task_scope": [unit[:500] for _ in range(8)],

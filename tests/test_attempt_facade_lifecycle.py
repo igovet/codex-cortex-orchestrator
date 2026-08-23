@@ -52,6 +52,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
             "context_result_refs": [],
         }
         self.state = {
+            "pipeline_contract_version": 2,
             "task_id": self.task_id,
             "task_number": 1,
             "principal": "coordinator",
@@ -120,11 +121,24 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
         ))
         return patches
 
+    def _complete(self, params):
+        """Submit semantic completion through the server-bound worker channel."""
+        from cortex_runtime import worker_identity
+        binding = {
+            "project_root": str(self.project),
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "profile": "backend_dev",
+        }
+        semantic = {key: value for key, value in params.items() if key not in worker_identity.SERVER_OWNED_FIELDS}
+        with worker_identity.worker_binding(binding):
+            return attempt_facade.complete_attempt(semantic)
+
     def test_public_complete_attempt_keeps_semantic_result_through_projection_retry(self) -> None:
         """The second call finalizes the original result rather than a new worker."""
         failed_projection = mock.Mock(side_effect=RuntimeError("injected result-view failure"))
         with self._facade_patches(failed_projection):
-            pending = attempt_facade.complete_attempt(dict(self.params))
+            pending = self._complete(dict(self.params))
 
         self.assertFalse(pending["ok"])
         self.assertEqual(pending["outcome"], "finalization_pending")
@@ -149,7 +163,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
 
         recorded_projection = mock.Mock(return_value={"projection_ref": "attempt-result-view-implementation-01"})
         with self._facade_patches(recorded_projection):
-            completed = attempt_facade.complete_attempt(dict(self.params))
+            completed = self._complete(dict(self.params))
 
         self.assertTrue(completed["ok"])
         self.assertEqual(completed["outcome"], "attempt_completed")
@@ -176,7 +190,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
         params = dict(self.params)
         params["unresolved"] = [{"summary": "Governance close must resolve the inherited risk."}]
         with self._facade_patches(mock.Mock(return_value={"projection_ref": "attempt-result-view-implementation-01"})):
-            response = attempt_facade.complete_attempt(params)
+            response = self._complete(params)
 
         self.assertTrue(response["ok"])
         stored = attempt_protocol.get_attempt_result(
@@ -393,6 +407,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
     def test_context_handoff_keeps_finalization_pending_out_of_failure_recovery(self) -> None:
         """Compaction must not turn the hook's exact pending tag into a failed receipt."""
         state = {
+            "pipeline_contract_version": 2,
             "task_id": "finalization-context-task",
             "status": "active",
             "current_gates": ["implementation"],

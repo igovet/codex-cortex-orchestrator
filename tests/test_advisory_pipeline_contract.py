@@ -28,6 +28,7 @@ class AdvisoryPipelineContractTests(unittest.TestCase):
             "task_id": "task-advisory-contract",
             "status": "active",
             "revision": 3,
+            "pipeline_contract_version": control.PIPELINE_CONTRACT_VERSION,
             "current_pipeline": ["implementation", "documentation", "close"],
             "completed_gates": [],
             "skipped_gates": [],
@@ -65,29 +66,6 @@ class AdvisoryPipelineContractTests(unittest.TestCase):
         self.assertEqual(recommendation["recommended_pipeline"], [
             "governance_activation", "implementation", "governance_close", "close",
         ])
-
-    def test_approved_plan_delivery_gap_is_advisory_only(self) -> None:
-        state = self._state(
-            completed_gates=["plan"],
-            plan_approval={"policy": "auto", "status": "approved"},
-            attempts=[],
-        )
-        manifest = {"work_packages": [{"artifact_path": "planning/package.json"}]}
-        package = {
-            "package": {
-                "microtasks": [{"profile": "backend_dev"}],
-                "allowed_paths": ["plugins/cortex"],
-            }
-        }
-        with mock.patch.object(orchestration_engine, "current_planning_manifest", return_value=manifest), \
-             mock.patch.object(orchestration_engine, "read_immutable_json_artifact", return_value=(package, {})):
-            required, missing = orchestration_engine._approved_plan_delivery_gap(
-                Path("/tmp/advisory-task"), state, {"waves": []}
-            )
-        self.assertEqual(required, [])
-        self.assertEqual(missing, ["implementation", "qa", "review", "documentation", "close"])
-        advice = state.get("pipeline_advice") or []
-        self.assertTrue(any(item.get("code") == "approved_plan_delivery_coverage_advisory" for item in advice))
 
     def test_missing_documentation_is_advisory_and_does_not_require_user(self) -> None:
         decision = gate_transitions._validate_skip(
@@ -227,31 +205,6 @@ class AdvisoryPipelineContractTests(unittest.TestCase):
         )
         summary = orchestration_engine._orchestrate_summary(state)
         self.assertTrue(summary["plan_approval"]["user_requested"])
-        self.assertFalse(mcp_api._explicit_plan_approval_requested({
-            "task": {"user_request": "show me the plan first", "plan_approval": "required"},
-        }))
-        self.assertTrue(mcp_api._explicit_plan_approval_requested({
-            "task": {
-                "user_request": "show me the plan first",
-                "plan_approval": "required",
-                "plan_approval_user_requested": True,
-            },
-        }))
-
-        # A legacy policy projection without the user-authored task field is
-        # advisory and must not be promoted into a visible approval request.
-        self.assertFalse(mcp_api._explicit_plan_approval_requested({
-            "state_summary": {"plan_approval": {"policy": "required", "status": "pending_plan"}},
-        }))
-
-    def test_legacy_plan_pause_and_non_terminal_completion_are_recoverable(self) -> None:
-        legacy = self._state(
-            plan_approval={"policy": "required", "status": "awaiting_user"},
-        )
-        self.assertFalse(control._plan_approval_is_pending(legacy))
-        self.assertTrue(control._reconcile_legacy_plan_approval(legacy))
-        self.assertEqual(legacy["plan_approval"]["status"], "not_required")
-        self.assertTrue(any(item["code"] == "legacy_plan_approval_ignored" for item in legacy["pipeline_advice"]))
 
         lifecycle = self._state(
             status="completed",

@@ -39,12 +39,20 @@ class QuestionFirewallTests(unittest.TestCase):
         self.assertTrue(decision["allowed"])
         self.assertEqual(decision["category"], "task_decision")
 
-    def test_legacy_task_marker_allows_product_question_with_retry_word(self):
+    def test_canonical_scope_allows_product_question(self):
+        decision = questions._question_firewall_scope({
+            "question": "Which retry behavior should the product expose to customers?",
+            "context": {"decision_scope": "acceptance"},
+        })
+        self.assertTrue(decision["allowed"])
+
+    def test_missing_decision_scope_is_not_inferred_from_text(self):
         decision = questions._question_firewall_scope({
             "question": "Which retry behavior should the product expose to customers?",
             "context": {},
         })
-        self.assertTrue(decision["allowed"])
+        self.assertFalse(decision["allowed"])
+        self.assertEqual(decision["internal"][0]["scope"], "missing_decision_scope")
 
     def test_internal_batch_does_not_become_a_user_question(self):
         decision = questions._question_firewall_scope({

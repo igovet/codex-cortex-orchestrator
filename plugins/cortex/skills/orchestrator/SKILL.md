@@ -9,19 +9,18 @@ description: Explicit opt-in Cortex coordinator. Use only when the user directly
 
 In Codex Desktop use the Skills picker to select `cortex:orchestrator` or
 mention `$cortex:orchestrator`. In CLI use `$cortex:orchestrator` or `/skills`.
-Bare `/cortex` and `/normal` are textual shorthand, not registered native slash
-commands. Do not use obsolete prompt aliases.
+The textual shorthand is a skill invocation, not registered native slash
+command: `/cortex` is not a registered native slash route.
 
 When Desktop supplies the selected route as the canonical Markdown link
-`[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` and the link is not
-present in the task body, preserve the activation in the first
-`start_orchestration` call with the top-level field
-`activation_marker: "$cortex:orchestrator"`. This is the only accepted marker;
-arbitrary links and other values are not activation.
+`[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)`, the host carries that
+activation as trusted context for the first `start_orchestration` call. Do not
+copy an activation marker, skill path, or arbitrary link into task JSON. If the
+host reports `activation_required`, preserve the structured correction and
+re-enter through the Skills picker or `$cortex:orchestrator`; do not fabricate a
+marker in a worker payload.
 
-Never present a bare `/cortex` or `/normal` token as a required next step or
-ask the user to send it as a recovery command. Those tokens are not native
-host commands. If activation is needed, use the Skills picker to select
+If activation is needed, use the Skills picker to select
 `cortex:orchestrator` or mention `$cortex:orchestrator`; to leave the route,
 use `$cortex:orchestrator normal`. A Cortex lifecycle response that says a
 task is complete is terminal: result the verified handoff and limitations
@@ -103,7 +102,7 @@ Both routes start with the canonical phases `scope`, `discover`, `architecture`,
 `plan`, `documentation`, `review`, and `close`. Planner Scope first publishes a
 discovery brief, relevant context, and all validated non-overlapping domains; the
 final Planner consumes all predecessor result projections after architecture.
-After reading the scoping projection, the
+After reading the scope result, the
 coordinator must decide whether the repository is large enough to split the
 single discovery placeholder into 2–8 parallel `explorer` workers with
 non-overlapping domain ownership. A repository with several applications,
@@ -354,7 +353,7 @@ After compaction or uncertain host state, use the Cortex Control recovery rule:
 inspect once, reconcile `pending_dispatches` and `active_workers`, and never
 reconstruct lifecycle state from chat. The coordinator must remain idle while a
 worker is active and may never use patch, shell, or project-inspection tools as
-a fallback.
+   direct project operation.
 
 Native worker-slot cleanup, all wait behavior, result-link publication,
 `next_strategy` retry handling, and terminal completion are defined only in

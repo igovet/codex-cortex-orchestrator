@@ -55,7 +55,7 @@ is mandatory merely because this route is a harvest.
    state, persistence, configuration, integrations, failure paths, and tests.
    Give each explorer the available scope AttemptResult projection through
    `depends_on: ["scope"]` when that projection exists.
-3. **Architecture synthesis:** Dispatch `architect` with the scoping,
+3. **Architecture synthesis:** Dispatch `architect` with the scope,
    discovery, and all domain handoffs. It deduplicates features, defines stable
    feature boundaries, maps cross-domain flows and shared infrastructure,
    identifies ADR-worthy decisions, and emits the canonical documentation
@@ -88,8 +88,8 @@ selects both: scope partitions evidence, while planning can inform the
 implementation/documentation decision. Worker
 completion uses the small `cortex/attempt-result/v1` semantic result with
 `status`, `summary`, `findings`, `decisions_needed`, and `unresolved`; typed
-gate payloads are allowed when applicable. Scope may add only the top-level
-`scoping` sibling and Plan may add only `planning`. AttemptResult and
+gate payloads are allowed when applicable. Plan may add only one nested
+`planning` sibling. AttemptResult and
 AttemptEvent are the worker transport; result refs and complete handoff
 projections are derived server outputs.
 
@@ -131,6 +131,23 @@ features into focused pages for workflows, state/data, interfaces,
 configuration, operations, or verification while keeping `index.md` as the
 canonical entry point.
 
+## Worker result shape
+
+Harvest workers publish semantic facts only. The active worker session already
+binds project root, task, attempt, profile, phase, dispatch, receipts, and
+timestamps. Do not repeat those fields in worker calls. A normal completion is
+the semantic AttemptResult; a Plan completion uses
+`{planning:{overview,work_packages,...}}`, never root-level `overview` or
+`work_packages`. Scope records its discovery brief, context paths, and domain
+boundaries in the semantic result and events.
+
+Use the short worker operation cards from the shared contract: briefing read
+with `{}` or its returned cursor, predecessor read with only the supplied
+`attempt_result_ref`, semantic event checkpoint, semantic completion, and
+diagnostic-scoped planner repair. The server binds identity and project scope;
+workers never copy `project_root`, `task_id`, `attempt_id`, or `profile` from a
+briefing.
+
 ## Evidence and preservation
 
 Source, tests, executable configuration, schemas/migrations, and deployment
@@ -156,17 +173,17 @@ the semantic AttemptResult/Event protocol.
 
 The worker reviews only the exact immutable briefing issued by its compact
 dispatch bootstrap and verifies its supplied SHA-256. If the host file reader
-cannot open that exact file, it calls `read_dispatch_briefing` with the complete
-identity and digest tuple from the bootstrap; an incomplete bounded response
+cannot open that exact file, it calls `read_dispatch_briefing` with the returned
+cursor from the bound session; an incomplete bounded response
 may continue only with its returned cursor. A successful full briefing read
 creates a server-side receipt. A successor reads each supplied handoff through
-`read_worker_result` with the exact identity and result reference from its
-generated briefing; a successful scoped predecessor read creates a server-side
+`read_worker_result` with the supplied result reference from its generated
+briefing; a successful scoped predecessor read creates a server-side
 receipt. Workers do not emit digest strings, predecessor markers, changed-file
 lists, timestamps, identity, or evidence markers as authoritative data. Cortex
 derives those facts from the AttemptRecord, workspace observations, hooks, and
 read receipts, then exposes result refs and complete human projections for
-coordinators. Caller/input/schema diagnostics and `retryable=true` results are
+coordinators. Caller/input/schema diagnostics and retryable results are
 corrected and retried on the same attempt without consuming recovery budget.
 Explicit integrity/storage failures are recorded as internal recovery evidence;
 none grants permission to browse or substitute another artifact. The coordinator

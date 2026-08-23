@@ -7,6 +7,7 @@ from typing import Any
 
 from cortex_runtime import attempt_protocol, canonical_json, communication
 from cortex_runtime.validation import ValidationFailure, collect_validations
+from cortex_runtime.worker_identity import WorkerBindingError, bind_semantic_params, current_binding
 
 from cortex_runtime.core.runtime_bindings import bind_symbols
 
@@ -78,8 +79,8 @@ _GENERIC_NUMBERED_QUESTION = re.compile(
 # A worker question is a user-facing pause only when the worker needs an
 # actual task decision.  Cortex's own mechanics are coordinator concerns and
 # must be returned as internal advice, never persisted as a question.  The
-# explicit ``context.decision_scope`` marker is the authoritative classifier;
-# the conservative text fallback protects older workers that do not send it.
+# explicit ``context.decision_scope`` marker is the only classifier. Missing
+# markers are rejected rather than inferred from worker-authored prose.
 _QUESTION_TASK_SCOPES = {
     "task", "task_decision", "requirement", "requirements", "scope", "product",
     "acceptance", "acceptance_criteria", "external_authorization",
@@ -89,17 +90,6 @@ _QUESTION_INTERNAL_SCOPES = {
     "internal", "cortex", "policy", "governance", "routing", "recovery",
     "ledger", "lifecycle", "worker", "profile", "gate", "technical",
 }
-_QUESTION_INTERNAL_MARKERS = (
-    "cortex", "ledger", "mcp", "attempt", "dispatch", "worker", "profile",
-    "recovery", "replay", "receipt", "gate", "governance", "planner",
-    "retry", "retries", "orchestrator", "orchestration", "pipeline",
-)
-_QUESTION_TASK_MARKERS = (
-    "requirement", "scope", "acceptance", "product", "customer", "user-visible",
-    "user visible", "feature", "behavior", "behaviour", "api", "interface",
-    "output", "deploy", "deployment", "production", "external", "delete",
-    "destructive", "publish", "send", "release", "data", "security",
-)
 
 # Keep boundary diagnostics aligned with the public MCP form.  These are
 # intentionally small field schemas: the response contains only the fields
@@ -168,31 +158,17 @@ def _question_firewall_scope(params: dict[str, Any]) -> dict[str, Any]:
 
     internal: list[dict[str, Any]] = []
     for path, raw_question, raw_context in candidates:
-        question = str(raw_question or "").strip().casefold()
         context = raw_context if isinstance(raw_context, dict) else {}
-        declared = str(
-            context.get("decision_scope")
-            or context.get("question_scope")
-            or context.get("classification")
-            or ""
-        ).strip().casefold().replace("-", "_").replace(" ", "_")
+        declared_raw = context.get("decision_scope")
+        if not isinstance(declared_raw, str) or not declared_raw.strip():
+            internal.append({"path": path, "scope": "missing_decision_scope"})
+            continue
+        declared = declared_raw.strip().casefold().replace("-", "_").replace(" ", "_")
         if declared in _QUESTION_TASK_SCOPES:
             continue
         if declared in _QUESTION_INTERNAL_SCOPES:
             internal.append({"path": path, "scope": declared or "internal"})
             continue
-        haystack = " ".join((question, json.dumps(context, ensure_ascii=False, sort_keys=True))).casefold()
-        matched_internal = [marker for marker in _QUESTION_INTERNAL_MARKERS if marker in haystack]
-        matched_task = [marker for marker in _QUESTION_TASK_MARKERS if marker in haystack]
-        # A task marker gives legacy workers a compatibility escape hatch for
-        # questions whose product behavior happens to mention retries, gates,
-        # or deployment.  Internal-only wording remains coordinator advice.
-        if matched_internal and not matched_task:
-            internal.append({
-                "path": path,
-                "scope": "internal",
-                "matched_terms": matched_internal[:8],
-            })
     return {
         "allowed": not internal,
         "category": "task_decision" if not internal else "internal_cortex",
@@ -545,11 +521,8 @@ def _batch_is_stale(record: dict[str, Any], state: dict[str, Any]) -> bool:
 def _attempt_generation(attempt: dict[str, Any]) -> int:
     """Return the durable corrective generation for one worker attempt.
 
-    Attempts created before the revision-aware retry work do not carry an
-    explicit generation.  Their retry escalation already records the number
-    of preceding failed attempts, so use that as a current
-    generation projection instead of treating every prior attempt as the
-    same lifetime quota bucket.
+    The generation is explicit in the current attempt contract.  Missing
+    values use the initial generation for newly-created state only.
     """
     raw = attempt.get("attempt_generation")
     try:
@@ -557,12 +530,6 @@ def _attempt_generation(attempt: dict[str, Any]) -> int:
             return max(1, int(raw))
     except (TypeError, ValueError):
         pass
-    escalation = attempt.get("rework_escalation")
-    if isinstance(escalation, dict):
-        try:
-            return max(1, int(escalation.get("prior_failure_count") or 0) + 1)
-        except (TypeError, ValueError):
-            pass
     return 1
 
 
@@ -570,8 +537,7 @@ def _current_plan_revision(state: dict[str, Any], attempt: dict[str, Any]) -> ob
     """Project the current approved/pending planner revision when present.
 
     The first non-planning wave intentionally has no plan revision.  Keeping
-    an explicit ``None`` in the question envelope is preferable to inventing
-    a revision number and makes old task ledgers readable without migration.
+    an explicit ``None`` in the question envelope avoids inventing a revision.
     """
     for value in (
         attempt.get("plan_revision"),
@@ -1121,6 +1087,11 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
         attempt = _attempt(state, attempt_id)
         if not attempt.get("facade_managed") or attempt.get("profile") != profile:
             raise ValueError("worker question identity does not match an active facade-managed attempt")
+        binding = current_binding() or {}
+        if binding.get("dispatch_ref") and str(attempt.get("dispatch_ref") or "") != binding["dispatch_ref"]:
+            raise ValueError("worker binding dispatch_ref does not match the exact dispatched worker")
+        if binding.get("briefing_digest") and str(attempt.get("briefing_digest") or "").lower() != binding["briefing_digest"].lower():
+            raise ValueError("worker binding briefing_digest does not match the exact dispatched worker")
         if action == "poll_batch":
             if any(params.get(field) not in (None, "", [], {}) for field in (
                 "question_ref", "question", "header", "options", "multiple", "custom_label", "context", "batch",
@@ -1273,10 +1244,29 @@ def _worker_question_error_path(message: str) -> str:
 def worker_question(params: dict[str, Any]) -> dict[str, Any]:
     """Run durable ask/poll while keeping caller mistakes on the same attempt."""
     try:
-        return _worker_question_impl(params)
+        return _worker_question_impl(bind_semantic_params(params))
     except (ValueError, OSError) as exc:
         message = redact(str(exc), 1000)
         lowered = message.lower()
+        if isinstance(exc, WorkerBindingError):
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": False,
+                "outcome": "needs_input",
+                "code": "worker_question_unavailable",
+                "diagnostics": [{
+                    "code": "worker_question_unavailable",
+                    "path": "$",
+                    "message": message,
+                    "fix": "Preserve this server-owned worker-session diagnostic; it cannot be repaired by changing tool arguments.",
+                    "json_pointer": "",
+                    "field_schema": {"type": "object"},
+                }],
+                "retryable": False,
+                "attempt_budget_consumed": False,
+                "worker_replacement_authorized": False,
+                "next_action": "Keep the same task resumable and use the server-owned worker-session recovery action; do not create a replacement worker.",
+            }
         terminal = isinstance(exc, OSError) or any(fragment in lowered for fragment in (
             "attempt is no longer active",
             "invalidated or terminal attempt",

@@ -307,11 +307,11 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         }))
         self.assertEqual(closed["tool"], "close_agent")
 
-    def test_native_followup_transport_alias_is_normalized_without_arguments(self) -> None:
+    def test_native_followup_transport_is_reported_without_arguments(self) -> None:
         event = self.harness.sanitize_codex_stream_line(json.dumps({
             "item": {
                 "type": "collab_tool_call",
-                "tool": "resume_agent",
+                "tool": "followup_task",
                 "status": "completed",
                 "arguments": {"target": "SECRET_CHILD"},
             },

@@ -10,28 +10,27 @@ from cortex_runtime.questions import worker_question
 
 
 class WorkerBoundaryValidationContractTests(unittest.TestCase):
-    def test_worker_question_aggregates_form_errors_before_state_lookup(self):
+    def test_unbound_worker_question_fails_closed_without_model_identity_fields(self):
         response = worker_question({"action": "invalid", "profile": "nope", "question": ""})
         self.assertFalse(response["ok"])
-        self.assertEqual(response["code"], "worker_question_request_invalid")
+        self.assertEqual(response["code"], "worker_question_unavailable")
         paths = {item["path"] for item in response["diagnostics"]}
-        self.assertTrue({"$.project_root", "$.task_id", "$.attempt_id", "$.action", "$.profile"}.issubset(paths))
+        self.assertEqual(paths, {"$"})
         self.assertTrue(all(item.get("field_schema") for item in response["diagnostics"]))
-        self.assertTrue(all(item.get("json_pointer") == item.get("path") for item in response["diagnostics"]))
-        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
-        self.assertIn("worker_question", response["next_action"])
-        self.assertFalse(response["validation"]["retry"]["replacement_worker_authorized"])
+        self.assertNotIn("project_root", response["next_action"])
+        self.assertNotIn("attempt_id", response["next_action"])
+        self.assertIn("worker-session recovery", response["next_action"])
+        self.assertFalse(response["worker_replacement_authorized"])
 
-    def test_dispatch_briefing_reports_all_missing_identity_fields(self):
+    def test_unbound_dispatch_briefing_fails_closed_without_model_identity_fields(self):
         response = read_dispatch_briefing({"max_bytes": 0})
         self.assertFalse(response["ok"])
-        self.assertEqual(response["code"], "dispatch_briefing_request_invalid")
+        self.assertEqual(response["code"], "dispatch_briefing_unavailable")
         paths = {item["path"] for item in response["diagnostics"]}
-        self.assertTrue({"project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest"}.issubset(paths))
-        self.assertTrue(all(item.get("field_schema") for item in response["diagnostics"]))
-        self.assertTrue(all(item.get("json_pointer") == item.get("path") for item in response["diagnostics"]))
-        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
-        self.assertIn("read_dispatch_briefing", response["next_action"])
+        self.assertEqual(paths, {"$"})
+        self.assertNotIn("project_root", response["next_action"])
+        self.assertNotIn("attempt_id", response["next_action"])
+        self.assertIn("server-owned recovery", response["next_action"])
 
 
 if __name__ == "__main__":

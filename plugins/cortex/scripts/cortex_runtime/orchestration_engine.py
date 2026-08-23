@@ -238,13 +238,7 @@ def _orchestrate_error(
 
 
 def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
-    """Expose a stable human view beside the coordinator stable shape.
-
-    Existing callers still receive the historical top-level protocol fields.
-    ``user_view`` is deliberately small and contains no task/dispatch IDs or
-    machine recovery instructions; ``internal`` is the explicit machine
-    boundary for coordinators that want to avoid rendering those fields.
-    """
+    """Attach the canonical human view and a minimal machine boundary."""
     raw_state = str(response.get("state") or "needs_input")
     # ``blocked`` is a durable audit marker used while the server derives a
     # corrective route.  It is never a public lifecycle state: exposing it
@@ -373,10 +367,10 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
     if state == "waiting_workers":
         response["user_view"] = None
         response["allowed_visible_events"] = []
-    internal = {
-        key: value for key, value in response.items()
-        if key not in {"user_view", "internal"}
-    }
+    internal = {}
+    existing_internal = response.get("internal")
+    if isinstance(existing_internal, dict):
+        internal.update(existing_internal)
     internal.update({
         "task_ref": response.get("task_id"),
         "wave_id": response.get("wave_id"),
@@ -693,8 +687,8 @@ def _normalize_orchestrate_waves(
         "pipeline": proposed_pipeline,
         "parallel_groups": proposed_groups,
     })
-    spawn_models = host_capabilities.get("spawn_agent_models") or host_capabilities.get("available_models")
-    thread_models = host_capabilities.get("create_thread_models") or host_capabilities.get("available_thread_models")
+    spawn_models = host_capabilities.get("spawn_agent_models")
+    thread_models = host_capabilities.get("create_thread_models")
     configured_default_model = str(
         host_capabilities.get("spawn_agent_default_model")
         or host_capabilities.get("configured_default_model")
@@ -734,8 +728,6 @@ def _normalize_orchestrate_waves(
                     "allowed_paths": raw_spec.get("allowed_paths") or task.get("allowed_paths") or ["."],
                     "acceptance_criteria": raw_spec.get("acceptance_criteria") or briefing["acceptance_criteria"],
                     "verification": raw_spec.get("verification") or briefing["verification"],
-                    "available_models": raw_spec.get("available_models") or spawn_models,
-                    "available_thread_models": raw_spec.get("available_thread_models") or thread_models,
                     "configured_default_model": raw_spec.get("configured_default_model") or configured_default_model,
                     "parallel": len(group) > 1 or len(specs) > 1,
                     "facade_managed": True,
@@ -765,23 +757,6 @@ def _normalize_orchestrate_waves(
     return normalized, classification
 
 
-def _validate_v2_wave_contract(
-    waves: list[dict[str, Any]],
-    *,
-    plan_approval: str,
-) -> None:
-    """Validate only the shape of a v2 wave contract.
-
-    Ordering and plan-approval rules are Cortex recommendations, not
-    authorization. The orchestrator owns the chosen pipeline and may
-    intentionally skip, reorder, or repeat policy-oriented gates. Capability
-    and dispatch-shape validation remains in wave normalization and route
-    resolution.
-    """
-    del waves, plan_approval
-    return
-
-
 def _orchestrate_plan_path(task_dir: Path) -> Path:
     """Stable label; canonical plans are stored in ``tasks.plan_json``."""
     return _ledger_root_for_artifact(task_dir) / "cortex.db"
@@ -805,8 +780,8 @@ def _record_chosen_pipeline(
 ) -> dict[str, Any]:
     """Persist the orchestrator's chosen route without a policy rewrite.
 
-    ``update_pipeline`` is intentionally policy-aware for legacy callers. The
-    orchestration engine has a different contract: a valid coordinator choice
+    ``update_pipeline`` may retain policy assessment for its own advisory
+    operation. The orchestration engine has a different contract: a valid coordinator choice
     is executable even when it differs from Cortex's recommended governance
     route. This helper keeps capability/syntax validation at the boundary,
     records both routes for audit, and uses the existing state-only projection
@@ -885,6 +860,12 @@ def _load_orchestrate_plan(task_dir: Path, state: dict[str, Any]) -> dict[str, A
         raise ValueError("canonical orchestration plan is missing from the SQLite task record")
     if plan.get("schema") != ORCHESTRATION_PLAN_SCHEMA or plan.get("task_id") != state.get("task_id"):
         raise ValueError("orchestrate plan schema or task identity is not supported")
+    state_version = _pipeline_contract_version(state)
+    plan_version = plan.get("pipeline_contract_version")
+    if plan_version != state_version:
+        raise ValueError(
+            "orchestrate plan pipeline_contract_version does not match the current canonical state"
+        )
     return plan
 
 
@@ -915,7 +896,7 @@ def _wave_for_gates(plan: dict[str, Any], gates: list[str]) -> dict[str, Any] | 
 
 def _predecessor_context_result_refs(
     state: dict[str, Any],
-    required_gates: set[str] | None = None,
+    gate_filter: set[str] | None = None,
 ) -> list[str]:
     """Select finalized AttemptResults from completed predecessor attempts.
 
@@ -931,7 +912,7 @@ def _predecessor_context_result_refs(
             or attempt.get("status") != "passed"
             or attempt.get("invalidated")
             or attempt.get("gate") not in completed
-            or (required_gates is not None and attempt.get("gate") not in required_gates)
+            or (gate_filter is not None and attempt.get("gate") not in gate_filter)
         ):
             continue
         raw_result_ref = str(attempt.get("attempt_result_ref") or "").strip()
@@ -1544,12 +1525,12 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
         ]
         context_result_refs = list(dict.fromkeys(context_result_refs + corrective_context_refs))
         if spec.get("gate") == "plan" and _pipeline_contract_version(state) >= 2:
-            required_gates = {
+            predecessor_gate_filter = {
                 gate for gate in ("scope", "discover", "architecture", "database_architecture", "ux")
                 if gate in [item for wave_item in plan.get("waves", []) for item in wave_item.get("gates", [])]
             }
             context_result_refs = list(dict.fromkeys(
-                context_result_refs + _predecessor_context_result_refs(state, required_gates)
+                context_result_refs + _predecessor_context_result_refs(state, predecessor_gate_filter)
             ))
         # A successor result transitive frontier is derived solely from the
         # AttemptResult refs that its completed attempt was assigned.
@@ -1643,7 +1624,7 @@ def _orchestrate_response(
         next_action = (
             "read the planner result, present a concise main-chat plan summary, and call plan_approval with "
             "decision=prompt. An initialized stdio host receives native Approve/Cancel controls plus free-form "
-            "input; direct callers receive the equivalent cortex/plan-approval/v1 fallback interaction. Non-empty "
+            "input; direct callers use the canonical plan_approval operation through this lifecycle contract. Non-empty "
             "custom text requests Planner revision; otherwise submit only the selected action's embedded response "
             "arguments, or leave the plan pending when the host cannot render it"
         )
@@ -1663,7 +1644,8 @@ def _orchestrate_response(
         "next_action": next_action,
     }
     if ledger_state == "blocked":
-        response["internal_ledger_state"] = ledger_state
+        response.setdefault("internal", {})
+        response["internal"]["ledger_state"] = ledger_state
     if facade_state == "waiting_workers":
         response.update({
             "output_policy": "silent",
@@ -1730,18 +1712,6 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
     # activation/classification/task initialization leave durable records.
     _preflight_dispatch_context(task, {})
     root = ledger_root(params)
-    existing_contract_version = PIPELINE_CONTRACT_VERSION
-    try:
-        _, _, existing_preview = load_state(task_id, params)
-    except (FileNotFoundError, ValueError):
-        existing_preview = None
-    if isinstance(existing_preview, dict):
-        existing_contract_version = int(existing_preview.get("pipeline_contract_version") or 1)
-    if existing_contract_version >= 2:
-        _validate_v2_wave_contract(
-            waves,
-            plan_approval=str(task.get("plan_approval") or "auto"),
-        )
     with state_lock(root):
         activated = activate_orchestration({**params, "user_command": ACTIVATION_COMMAND})
         if not activated.get("active"):
@@ -1806,7 +1776,7 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
         plan = {
             "schema": ORCHESTRATION_PLAN_SCHEMA,
             "task_id": task_id,
-            "pipeline_contract_version": int(state.get("pipeline_contract_version") or 1),
+            "pipeline_contract_version": _pipeline_contract_version(state),
             "semantic_pipeline_version": 1,
             "history": [],
             "waves": waves,
@@ -1857,8 +1827,8 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
             recommended_parallel_groups=recommended_groups,
             reason="Recorded orchestrator-selected pipeline; Cortex recommendation is advisory.",
         )
-        # C2/C3 defaults may populate ``plan_approval=required`` for legacy
-        # policy reasons. That default is not user intent. Only an explicit
+        # C2/C3 defaults may populate ``plan_approval=required`` as policy
+        # metadata. That default is not user intent. Only an explicit
         # request marker may make plan review visible and pause the pipeline.
         explicit_plan_review = bool(
             any(
@@ -1900,8 +1870,18 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
 
 
 def _pipeline_contract_version(state: dict[str, Any]) -> int:
-    """Treat active tasks created before the additive field as pipeline v1."""
-    return int(state.get("pipeline_contract_version") or 1)
+    """Return the current pipeline contract; never infer or migrate older state."""
+    raw = state.get("pipeline_contract_version")
+    try:
+        version = int(raw)
+    except (TypeError, ValueError):
+        version = None
+    if version != PIPELINE_CONTRACT_VERSION:
+        raise ValueError(
+            f"unsupported pipeline_contract_version {raw!r}; expected current canonical contract "
+            f"{PIPELINE_CONTRACT_VERSION}"
+        )
+    return version
 
 
 def _semantic_future_pipeline(plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1947,30 +1927,6 @@ def _semantic_future_pipeline(plan: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _semantic_future_pipeline_digest(plan: dict[str, Any]) -> str:
     return digest_text(canonical_json.dumps(_semantic_future_pipeline(plan)))
-
-
-def _semantic_pipeline_gates(pipeline: list[dict[str, Any]]) -> set[str]:
-    """Return canonical gates represented by an approval-semantic pipeline."""
-    return {
-        str(worker.get("phase") or "")
-        for wave in pipeline
-        for worker in (wave.get("workers") or [])
-        if isinstance(worker, dict) and str(worker.get("phase") or "")
-    }
-
-
-def _is_singleton_recovery_planner(wave: object) -> bool:
-    """Identify a legacy Planner-shaped wave for diagnostics only."""
-    if not isinstance(wave, dict):
-        return False
-    delegations = wave.get("delegations")
-    return (
-        wave.get("gates") == ["plan"]
-        and isinstance(delegations, list)
-        and len(delegations) == 1
-        and isinstance(delegations[0], dict)
-        and str(delegations[0].get("agent") or "") == "planner"
-    )
 
 
 def _recovery_contract(waves: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -2031,18 +1987,6 @@ def _recovery_baseline_from_gate(plan: dict[str, Any], gate: str) -> list[dict[s
     return waves
 
 
-_RECOVERY_REMEDIATION_MARKERS = {
-    "infrastructure": (
-        "network", "transport", "connection", "service", "host", "mcp", "timeout", "rate limit",
-    ),
-    "environment": (
-        "dependency", "permission", "binary", "configuration", "sandbox", "disk", "toolchain",
-    ),
-}
-_RECOVERY_REMEDIATION_ACTIONS = (
-    "repair", "remediate", "restore", "configure", "provision", "install", "grant", "restart", "resolve",
-)
-
 _NEGATION_WORDS = {"not", "no", "never", "without", "avoid", "dont", "don't"}
 
 
@@ -2070,63 +2014,6 @@ def _has_non_negated_term(text: str, term: str) -> bool:
     return False
 
 
-def _has_matching_environment_remediation(
-    pause: dict[str, Any],
-    planner_wave: dict[str, Any],
-) -> bool:
-    """Accept an explicit, class-matched environment remediation in Planner.
-
-    A generic "retry" is intentionally insufficient.  The plan must name an
-    action and a condition that matches the paused infrastructure/environment
-    class, so a coordinator cannot evade the circuit breaker with only new
-    prose in its resume reason.
-    """
-    failure_class = str(pause.get("failure_class") or "").strip()
-    markers = _RECOVERY_REMEDIATION_MARKERS.get(failure_class)
-    if not markers:
-        return False
-    delegations = planner_wave.get("delegations") if isinstance(planner_wave, dict) else []
-    planner = delegations[0] if isinstance(delegations, list) and delegations else {}
-    if not isinstance(planner, dict):
-        return False
-    text = " ".join(
-        str(value or "")
-        for value in (
-            planner.get("objective"),
-            planner.get("strategy"),
-            *(planner.get("acceptance_criteria") or []),
-            *(planner.get("verification") or []),
-        )
-    ).casefold()
-    return any(_has_non_negated_term(text, marker) for marker in markers) and any(
-        _has_non_negated_term(text, action) for action in _RECOVERY_REMEDIATION_ACTIONS
-    )
-
-
-def _validate_no_progress_recovery_plan(
-    state: dict[str, Any],
-    plan: dict[str, Any],
-    future_waves: object,
-    *,
-    pause: dict[str, Any] | None = None,
-) -> None:
-    """Record no-progress as advice; never make it a dispatch veto."""
-    del state, plan, future_waves, pause
-    return
-
-
-def _validate_pending_implementation_retained(
-    state: dict[str, Any],
-    old_semantic_pipeline: list[dict[str, Any]],
-    requested_future_gates: set[str],
-    completed_gates: set[str],
-    obligation_gates: set[str] | None = None,
-) -> None:
-    """Keep the historical check as an advisory-only compatibility seam."""
-    del state, old_semantic_pipeline, requested_future_gates, completed_gates, obligation_gates
-    return
-
-
 _DELIVERY_RECOVERY_ORDER = (
     "implementation", "qa", "security", "performance", "review", "documentation", "close",
 )
@@ -2134,136 +2021,6 @@ _IMPLEMENTATION_PROFILES = {
     "backend_dev", "data_engineer", "debugger", "devops_engineer", "frontend_dev",
     "fullstack_dev", "general", "mobile_dev", "refactorer",
 }
-
-
-def _pipeline_obligation_gates(
-    state: dict[str, Any],
-    plan: dict[str, Any],
-    task: dict[str, Any] | None = None,
-) -> set[str]:
-    """Recover immutable delivery obligations, including pre-v9 task history."""
-    obligations = {
-        str(gate) for gate in state.get("pipeline_obligations", []) if str(gate)
-    }
-    if isinstance(task, dict):
-        obligations.update(
-            str(gate)
-            for gate in (task.get("initial_pipeline") or task.get("base_pipeline") or [])
-            if str(gate)
-        )
-    for change in state.get("pipeline_changes", []):
-        if isinstance(change, dict):
-            obligations.update(str(gate) for gate in change.get("from", []) if str(gate))
-    for entry in plan.get("history", []):
-        if isinstance(entry, dict):
-            obligations.update(
-                _semantic_pipeline_gates(entry.get("semantic_future_pipeline") or [])
-            )
-    obligations.update(str(gate) for gate in state.get("current_pipeline", []) if str(gate))
-    # A blocked delivery attempt is itself durable evidence that the delivery
-    # obligation still exists.  Older task states may not have copied the
-    # implementation phase into ``pipeline_obligations`` before the worker
-    # stopped, so relying only on the projected pipeline can manufacture a
-    # planner-only recovery wave and then fail the retention invariant.  Keep
-    # only non-invalidated, unfinished attempts here; completed attempts are
-    # deliberately not allowed to re-enter the recovery graph implicitly.
-    obligations.update(
-        str(attempt.get("gate") or "")
-        for attempt in state.get("attempts", [])
-        if isinstance(attempt, dict)
-        and str(attempt.get("gate") or "") == "implementation"
-        and not attempt.get("invalidated")
-        and str(attempt.get("status") or "") in {
-            "blocked", "failed", "running", "waiting_question", AWAITING_HOST_SPAWN,
-        }
-    )
-    return obligations
-
-
-def _approved_plan_delivery_gap(
-    task_dir: Path,
-    state: dict[str, Any],
-    plan: dict[str, Any],
-) -> tuple[list[str], list[str]]:
-    """Report delivery coverage as advice, never as executable obligations.
-
-    An approved planning artifact may describe implementation work even when
-    the orchestrator deliberately selected another route.  The old helper
-    expanded that description into mandatory implementation/QA/review/docs/
-    close gates, which could manufacture a recovery dispatch.  Keep the
-    return shape for compatibility, but the first list is intentionally empty
-    (there are no server-owned required gates); the second list is an advisory
-    coverage report only.
-    """
-    if "plan" not in state.get("completed_gates", []):
-        return [], []
-    approval_status = str(_plan_approval(state).get("status") or "")
-    if approval_status not in {"approved", "not_required"}:
-        return [], []
-    manifest = current_planning_manifest(task_dir)
-    if not isinstance(manifest, dict) or not manifest.get("work_packages"):
-        return [], []
-    planning_requires_implementation = False
-    for package_summary in manifest.get("work_packages", []):
-        if not isinstance(package_summary, dict):
-            continue
-        artifact_path = str(package_summary.get("artifact_path") or "")
-        if not artifact_path:
-            continue
-        try:
-            package_record, _ = read_immutable_json_artifact(
-                task_dir,
-                state["task_id"],
-                artifact_path,
-                kinds={"planning_revision"},
-            )
-        except ValueError:
-            planning_requires_implementation = True
-            break
-        package = package_record.get("package") if isinstance(package_record, dict) else None
-        if not isinstance(package, dict):
-            planning_requires_implementation = True
-            break
-        if any(
-            str(microtask.get("profile") or "") in _IMPLEMENTATION_PROFILES
-            for microtask in package.get("microtasks", [])
-            if isinstance(microtask, dict)
-        ):
-            planning_requires_implementation = True
-            break
-        if any(
-            str(path).strip() in {".", "*"}
-            or not (
-                str(path).replace("\\", "/").startswith("docs/")
-                or str(path).lower().endswith((".md", ".mdx"))
-            )
-            for path in package.get("allowed_paths", [])
-        ):
-            planning_requires_implementation = True
-            break
-    if not planning_requires_implementation:
-        return [], []
-    recommended = ["implementation", "qa", "review", "documentation", "close"]
-    passed = {
-        str(attempt.get("gate") or "")
-        for attempt in state.get("attempts", [])
-        if attempt.get("status") == "passed"
-        and not attempt.get("invalidated")
-        and attempt.get("attempt_result_ref")
-    }
-    missing = [gate for gate in recommended if gate not in passed]
-    advice = {
-        "code": "approved_plan_delivery_coverage_advisory",
-        "severity": "warning",
-        "message": "The approved plan describes implementation work; delivery coverage is advisory and does not alter the orchestrator-selected pipeline.",
-        "recommended_gates": recommended,
-        "missing_gates": missing,
-        "chosen_pipeline_unchanged": True,
-    }
-    existing = state.setdefault("pipeline_advice", [])
-    if isinstance(existing, list) and advice not in existing:
-        existing.append(advice)
-    return [], missing
 
 
 def _historical_recovery_specs(plan: dict[str, Any], gate: str) -> list[dict[str, Any]]:
@@ -2303,7 +2060,6 @@ def _delivery_recovery_waves(
     task_dir: Path,
     state: dict[str, Any],
     plan: dict[str, Any],
-    required_gates: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return recovery waves for the coordinator-selected route.
 
@@ -2315,9 +2071,6 @@ def _delivery_recovery_waves(
     contracts already present in the plan, and fall back to the current
     attempt's contract only when the projection has lost its wave details.
 
-    ``required_gates`` is retained for callers that predate the chosen-pipeline
-    fields.  It is only a fallback when no chosen/current frontier exists; it
-    can never add a Planner wave or override a selected route.
     """
     del task_dir
     completed = {
@@ -2340,7 +2093,6 @@ def _delivery_recovery_waves(
             state.get("chosen_pipeline")
             or state.get("current_pipeline")
             or unfinished_attempt_gates
-            or required_gates
         )
         if str(gate).strip() and str(gate) not in completed
     ]
@@ -2404,11 +2156,11 @@ def _verified_plan_predecessor_basis(
 ) -> tuple[list[dict[str, str]], str]:
     pipeline = list(state.get("current_pipeline") or [])
     plan_index = pipeline.index("plan") if "plan" in pipeline else len(pipeline)
-    required_gates = {
+    predecessor_gate_filter = {
         gate for gate in ("scope", "discover", "architecture", "database_architecture", "ux")
         if gate in pipeline and pipeline.index(gate) < plan_index
     }
-    result_refs = _predecessor_context_result_refs(state, required_gates)
+    result_refs = _predecessor_context_result_refs(state, predecessor_gate_filter)
     basis: list[dict[str, str]] = []
     for result_ref in result_refs:
         attempt = next(
@@ -2853,28 +2605,12 @@ def _active_no_progress_pauses(state: dict[str, Any]) -> dict[str, dict[str, Any
     return pauses
 
 
-def _normalize_no_progress_pause_state(state: dict[str, Any]) -> bool:
-    """Migrate legacy Planner pauses into non-blocking retry advice."""
-    raw = state.get("rework_pauses")
-    if not isinstance(raw, dict):
-        return False
-    changed = False
-    for pause in raw.values():
-        if isinstance(pause, dict) and pause.get("status") == "planner_recovery_pending":
-            pause["status"] = "retry_pending"
-            pause["advisory"] = True
-            changed = True
-    if changed:
-        _store_no_progress_pauses(state, raw)
-    return changed
-
-
 def _store_no_progress_pauses(state: dict[str, Any], pauses: dict[str, dict[str, Any]]) -> None:
     """Persist gate-scoped pauses."""
     active = {
         str(gate): dict(pause)
         for gate, pause in pauses.items()
-        if isinstance(pause, dict) and pause.get("status") in {"planner_recovery_pending", "retry_pending"}
+        if isinstance(pause, dict) and pause.get("status") == "retry_pending"
     }
     if active:
         state["rework_pauses"] = active
@@ -2963,20 +2699,6 @@ def _apply_pending_revision_impact(
     if not isinstance(impact, dict):
         return state, False
     earliest = str(impact.get("earliest_affected_gate") or "").strip()
-    # Older durable impacts may contain ``replacement_waves`` from the former
-    # policy-owned steer implementation.  Never replay that payload: it can
-    # overwrite the coordinator's chosen route after the fact.  Retain a
-    # bounded advisory record for diagnostics and continue with the selected
-    # pipeline below.
-    replacement = impact.pop("replacement_waves", None)
-    if isinstance(replacement, list) and replacement:
-        state.setdefault("pipeline_advice", []).append({
-            "code": "legacy_replacement_waves_ignored",
-            "severity": "warning",
-            "message": "Ignored a legacy policy replacement route; the orchestrator-selected pipeline remains authoritative.",
-            "wave_count": len(replacement),
-            "at": now(),
-        })
     if not earliest or earliest not in state.get("current_pipeline", []):
         state.pop("pending_revision_impact", None)
         return state, False
@@ -3408,14 +3130,6 @@ def _replace_future_orchestrate_waves(
     new_semantic_digest = _semantic_future_pipeline_digest(candidate_plan)
     semantic_changed = old_semantic_digest != new_semantic_digest
     completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
-    new_semantic_gates = _semantic_pipeline_gates(_semantic_future_pipeline(candidate_plan))
-    _validate_pending_implementation_retained(
-        state,
-        old_semantic_pipeline,
-        new_semantic_gates,
-        completed_set,
-        _pipeline_obligation_gates(state, plan, task),
-    )
     approval_before = _plan_approval(state)
     explicit_plan_review = bool(
         _plan_approval_user_requested(state)
@@ -3428,7 +3142,7 @@ def _replace_future_orchestrate_waves(
     # into a second user-facing approval gate.
     # A material route change only reopens a plan review when the user
     # explicitly requested visible plan approval.  Governance defaults and
-    # legacy ``policy=required`` values are internal recommendations; they
+    # policy ``required`` values are internal recommendations; they
     # cannot turn a coordinator-selected future-wave update into a Cortex
     # pause.
     invalidate_approval = bool(semantic_changed and explicit_plan_review)
@@ -3612,28 +3326,6 @@ def _replace_future_orchestrate_waves(
             "plan_approval",
             "material future-wave change requires a replacement plan and approval",
         )
-    elif not explicit_plan_review:
-        # Migrate a legacy required/pending projection back to an advisory
-        # state while this coordinator-selected route is being applied.  The
-        # old review payload is stale for the new route and must not remain
-        # capable of surfacing a hidden user stop on a later continuation.
-        approval = _plan_approval(state)
-        if approval.get("status") in {"pending_plan", "awaiting_user"}:
-            for key in (
-                "review", "plan_result_ref", "pending_basis", "approved_basis",
-                "requested_at", "approved_at", "request_id",
-            ):
-                approval.pop(key, None)
-            approval.update({"policy": "auto", "status": "not_required", "user_requested": False, "feedback": None})
-            state["plan_approval"] = approval
-            state["plan_approval_user_requested"] = False
-            save_state(
-                task_dir,
-                task_dir / "state.sqlite",
-                state,
-                "plan_approval_advisory",
-                "migrated legacy plan approval policy to advisory mode for the chosen route",
-            )
     if rework_request_digest:
         history_entry = {
             "request_digest": rework_request_digest,
@@ -3668,11 +3360,6 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
     with state_lock(root):
         _, task_dir, state = load_state(task_id, params)
         authorize(state, params)
-        if _normalize_no_progress_pause_state(state):
-            state["status"] = "active"
-            state.pop("blocked_reason", None)
-            sync_current_wave(state)
-            save_state(task_dir, task_dir / "state.sqlite", state, "retry_advisory_migration", "migrated legacy Planner pause to automatic retry advice")
         plan = _load_orchestrate_plan(task_dir, state)
         task = load_task_definition(task_dir, state)
         # Do this before completing the current worker or recording a gate.
@@ -3838,13 +3525,6 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             )
             prospective_completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])) | set(executable_gates)
             requested_future_gates = {gate for wave in future_preview for gate in wave["gates"]}
-            _validate_pending_implementation_retained(
-                state,
-                _semantic_future_pipeline(plan),
-                requested_future_gates,
-                prospective_completed,
-                _pipeline_obligation_gates(state, plan, task),
-            )
             reintroduced = sorted(prospective_completed & requested_future_gates)
             # Reintroduced gates are an explicit chosen-pipeline rework, not a
             # policy violation. Immutable prior evidence remains in the ledger.
@@ -4820,32 +4500,6 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _terminal_blocked_recovery(
-    params: dict[str, Any],
-    task_dir: Path,
-    state: dict[str, Any],
-    plan: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
-    """Retired compatibility seam; selected-pipeline recovery owns this route."""
-    # Keep the symbol for old in-process callers, but never synthesize a route
-    # or mutate the coordinator-selected pipeline.
-    del params, task_dir, state, plan
-    return None
-
-
-
-def _server_owned_diagnostic_recovery(
-    params: dict[str, Any],
-    task_dir: Path,
-    state: dict[str, Any],
-    plan: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
-    """Retired compatibility seam; selected-pipeline recovery owns this route."""
-    # Do not create a policy-owned route for an orchestration defect. The
-    # active chosen pipeline is the only recovery authority.
-    del params, task_dir, state, plan
-    return None
-
 def _dispatch_server_owned_recovery(
     params: dict[str, Any],
     task_dir: Path,
@@ -4861,13 +4515,6 @@ def _dispatch_server_owned_recovery(
     if state.get("status") == "blocked":
         state["status"] = "active"
         state.pop("blocked_reason", None)
-    _normalize_no_progress_pause_state(state)
-    pauses = state.get("rework_pauses")
-    if isinstance(pauses, dict):
-        for gate, pause in list(pauses.items()):
-            if isinstance(pause, dict) and pause.get("status") == "planner_recovery_pending":
-                pause["status"] = "retry_pending"
-        _store_no_progress_pauses(state, pauses)
     current = active_gates(state)
     if not current:
         completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
@@ -5062,11 +4709,6 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
     task_id = safe_id(str(params.get("task_id", "")))
     _, task_dir, state = load_state(task_id, params)
     authorize(state, params)
-    if _normalize_no_progress_pause_state(state):
-        state["status"] = "active"
-        state.pop("blocked_reason", None)
-        sync_current_wave(state)
-        save_state(task_dir, task_dir / "state.sqlite", state, "retry_advisory_migration", "migrated legacy Planner pause to automatic retry advice")
     task = load_task_definition(task_dir, state)
     plan = _load_orchestrate_plan(task_dir, state)
     terminal_recovery_requested = bool(params.get("terminal_recovery"))

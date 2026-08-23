@@ -128,51 +128,33 @@ def test_plan_approval_defaults_to_auto_and_requires_explicit_user_intent():
     assert "never forces a planner wave" in control_skill
 
 
-def test_legacy_plan_reapproval_is_advice_unless_user_requested():
+def test_plan_approval_is_exposed_only_as_the_canonical_user_decision_state():
     import sys
 
     sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
     from cortex_runtime import mcp_api
 
-    legacy = {
+    canonical = {
         "ok": False,
-        "state": "needs_input",
-        "code": "plan_reapproval_required",
+        "state": "awaiting_plan_approval",
+        "code": "plan_approval_required",
         "next_action": "Call manage_orchestration with intent=plan_approval.",
-        # This is the former policy-generated signal and must not become a
-        # visible user stop merely because it says requires_user_decision.
         "result": {"requires_user_decision": True},
     }
     response = mcp_api.v3_response(
-        legacy,
-        "task-legacy-plan-review",
+        canonical,
+        "task-plan-review",
         native_arguments=lambda request: {},
         public_schema="cortex/test/v1",
         coordinator_lock="internal-only",
         include_result=True,
     )
-    assert response["outcome"] == "recovery_pending"
-    assert response["code"] == "plan_reapproval_advisory"
-    assert response["requires_user_decision"] is False
-    assert response["user_view"]["requires_user_decision"] is False
-    assert response["advisory"]["code"] == "plan_reapproval_advisory"
-    assert response["recovery"]["action"] == "continue_chosen_pipeline"
+    assert response["outcome"] == "awaiting_plan_approval"
+    assert response["code"] == "plan_approval_required"
+    assert response["requires_user_decision"] is True
+    assert response["user_view"]["requires_user_decision"] is True
     assert "intent=plan_approval" in response["next_action"]
-    assert "do not call intent=plan_approval" in response["next_action"]
-
-    explicit = dict(legacy)
-    explicit["plan_approval_user_requested"] = True
-    explicit_response = mcp_api.v3_response(
-        explicit,
-        "task-explicit-plan-review",
-        native_arguments=lambda request: {},
-        public_schema="cortex/test/v1",
-        coordinator_lock="internal-only",
-        include_result=True,
-    )
-    assert explicit_response["outcome"] == "plan_reapproval_required"
-    assert explicit_response["requires_user_decision"] is True
-    assert explicit_response["user_view"]["requires_user_decision"] is True
+    assert "advisory" not in response
 
 
 def test_governance_briefing_routes_internal_evidence_gaps_to_correction():

@@ -174,20 +174,15 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             },
         )
 
-    def test_recovery_requires_non_durable_proof_and_worker_is_denied(self) -> None:
+    def test_recovery_is_host_bound_and_worker_is_denied(self) -> None:
         started, authorization, durable_start = self._start_coordinator_task()
         task_ref = str(started["task_ref"])
-        principal = str(durable_start["principal"])
-        thread_id = str(durable_start["thread_id"])
         initial_generation = int(durable_start["coordinator_capability_claims"]["generation"])
         original_capability_digest = str(durable_start["coordinator_capability_digest"])
 
         recovery_arguments = {
-            "project_root": str(self.project),
             "action": "recover_coordinator_capability",
             "task_ref": task_ref,
-            "principal": principal,
-            "thread_id": thread_id,
             "capability_generation": initial_generation,
         }
         recovery_response = self._rpc(
@@ -199,8 +194,7 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "params": {"name": "manage_governance", "arguments": recovery_arguments},
             },
         )["result"]["structuredContent"]
-        self.assertFalse(recovery_response["ok"])
-        self.assertEqual(recovery_response["code"], "coordinator_recovery_proof_required")
+        self.assertTrue(recovery_response["ok"], recovery_response)
         serialized_recovery_response = json.dumps(recovery_response, sort_keys=True)
         self.assertNotIn(str(authorization["coordinator_capability"]), serialized_recovery_response)
         self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_recovery_response)
@@ -223,23 +217,6 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertNotIn(str(authorization["coordinator_capability"]), serialized_worker_response)
         self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_worker_response)
 
-        # Handler-level proof validation is also authoritative for an
-        # in-process call. Even if a caller has learned every durable
-        # identifier, absence of the raw recovery proof must fail before any
-        # generation mutation.
-        direct = cortex.manage_governance(
-            {
-                "project_root": str(self.project),
-                "action": "recover_coordinator_capability",
-                "task_ref": task_ref,
-                "principal": principal,
-                "thread_id": thread_id,
-                "capability_generation": initial_generation,
-            }
-        )
-        self.assertFalse(direct["ok"])
-        self.assertEqual(direct["code"], "coordinator_recovery_proof_required")
-
         registry = cortex._operation_registry(cortex.ledger_root({"project_root": str(self.project)}))
         unchanged = next(iter(registry["tasks"].values()))["start"]
         self.assertEqual(
@@ -261,13 +238,9 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "params": {
                     "name": "manage_governance",
                     "arguments": {
-                        "project_root": str(self.project),
                         "action": "recover_coordinator_capability",
                         "task_ref": str(started["task_ref"]),
-                        "principal": str(durable_start["principal"]),
-                        "thread_id": str(durable_start["thread_id"]),
                         "capability_generation": initial_generation,
-                        "coordinator_recovery_proof": original_proof,
                     },
                 },
             },
@@ -289,15 +262,9 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "params": {
                     "name": "manage_governance",
                     "arguments": {
-                        "project_root": str(self.project),
                         "action": "acknowledge_coordinator_recovery",
                         "task_ref": str(started["task_ref"]),
-                        "principal": str(durable_start["principal"]),
-                        "thread_id": str(durable_start["thread_id"]),
                         "capability_generation": initial_generation + 1,
-                        "coordinator_capability": renewed_capability,
-                        "coordinator_recovery_proof": renewed_proof,
-                        "previous_coordinator_recovery_proof": original_proof,
                     },
                 },
             },
@@ -312,13 +279,9 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "params": {
                     "name": "manage_governance",
                     "arguments": {
-                        "project_root": str(self.project),
                         "action": "recover_coordinator_capability",
                         "task_ref": str(started["task_ref"]),
-                        "principal": str(durable_start["principal"]),
-                        "thread_id": str(durable_start["thread_id"]),
                         "capability_generation": initial_generation + 1,
-                        "coordinator_recovery_proof": original_proof,
                     },
                 },
             },

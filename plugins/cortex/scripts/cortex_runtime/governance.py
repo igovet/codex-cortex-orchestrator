@@ -371,9 +371,10 @@ def _initiative_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def _record_row(row: sqlite3.Row) -> dict[str, Any]:
     value = _row_dict(row) or {}
-    for key in ("content_json", "approval_basis_json"):
-        if value.get(key) is not None:
-            value[key] = _strict_json_loads(str(value[key]), key)
+    if value.get("approval_basis_json") is not None:
+        value["approval_basis_json"] = _strict_json_loads(
+            str(value["approval_basis_json"]), "approval_basis_json"
+        )
     return value
 
 
@@ -557,12 +558,7 @@ def _append_record_lifecycle_transition(
 
 
 def _record_from_storage(root: Path, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    """Read a record from its immutable artifact and verify the cache.
-
-    ``content_json`` remains in the v9 table only as an indexed migration
-    cache.  It is never authoritative after v10: any disagreement
-    between that cache and the immutable artifact is ledger corruption.
-    """
+    """Read a record from its immutable canonical content artifact."""
     _validate_record_lifecycle(root, connection, row)
     record = _record_row(row)
     artifact_ref = str(row["content_artifact_ref"] or "").strip()
@@ -577,8 +573,8 @@ def _record_from_storage(root: Path, connection: sqlite3.Connection, row: sqlite
         body = _validated_artifact_payload(connection, metadata)
     except GovernanceError as exc:
         raise GovernanceError("governance record immutable artifact is invalid", code="ledger_corrupt") from exc
-    if _digest(body) != str(row["content_digest"]) or _canonical(body) != str(row["content_json"]):
-        raise GovernanceError("governance record cache does not match immutable artifact", code="ledger_corrupt")
+    if _digest(body) != str(row["content_digest"]):
+        raise GovernanceError("governance record artifact digest is invalid", code="ledger_corrupt")
     record["content_json"] = body
     return record
 
@@ -624,7 +620,7 @@ def classify_governance(
     initiative_ref: str | None = None,
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return a deterministic requested/effective governance classification.
+    """Return a deterministic requested/chosen governance classification.
 
     Only the explicitly documented trigger classes are considered.  The
     resolver accepts structured trigger hints for callers that already have a
@@ -745,11 +741,6 @@ def classify_governance(
     return {
         "schema": GOVERNANCE_SCHEMA,
         "requested_mode": mode,
-        "effective_mode": effective,
-        # ``effective_mode`` remains the compatibility name for the server's
-        # assessment.  These explicit fields make authority unambiguous:
-        # Cortex recommends a depth, while the coordinator's requested mode
-        # remains the chosen route and is never vetoed by policy.
         "recommended_mode": recommended_mode,
         "chosen_mode": "minimal" if mode == "off" else recommended_mode,
         "policy_warnings": policy_warnings,

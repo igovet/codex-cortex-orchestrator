@@ -149,34 +149,9 @@ def resolve_dispatch_route(
         minimum_effort = default_effort
     if minimum_effort and effort_order[selected_effort] < effort_order[minimum_effort]:
         selected_effort = minimum_effort
-    available_models_param = params.get("available_models")
-    host_available_models: list[str] | None = None
-    if available_models_param is not None:
-        if not isinstance(available_models_param, list) or not available_models_param:
-            raise ValueError("available_models must be a non-empty list when supplied")
-        if any(not isinstance(model, str) for model in available_models_param):
-            raise ValueError("available_models must contain only model identifiers")
-        host_available_models = sorted({model.strip() for model in available_models_param if model.strip()})
-        if not host_available_models:
-            raise ValueError("available_models must contain at least one non-empty model identifier")
-
-    fallback_reason = None
-    fallback_from_model = None
     if selected_model not in policy["supported_models"]:
         raise ValueError("dispatch route cannot be resolved to a Cortex policy model")
     model_resolution = "configured_default" if selected_model == policy["configured_default_model"] and configured_default_available else "explicit_override"
-    if host_available_models is not None and selected_model not in host_available_models:
-        if model_resolution == "configured_default":
-            pass
-        elif selected_model == "gpt-5.6-luna" and "gpt-5.6-terra" in host_available_models:
-            fallback_from_model = selected_model
-            selected_model = "gpt-5.6-terra"
-            fallback_reason = "host_model_unavailable"
-            model_resolution = "explicit_override"
-        else:
-            raise ValueError(
-                f"native host does not expose required model {selected_model}; available_models={','.join(host_available_models)}"
-            )
     return {
         "requested_model": requested_model,
         "configured_default_model": configured_default_model or None,
@@ -193,8 +168,5 @@ def resolve_dispatch_route(
         "policy_model": policy_model,
         "policy_reason": policy_reason,
         "model_choice_reason": model_choice_reason,
-        "fallback_reason": fallback_reason,
-        "fallback_from_model": fallback_from_model,
-        "host_available_models": host_available_models,
         "user_requested_model": raw_user_requested_model or None,
     }

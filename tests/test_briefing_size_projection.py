@@ -18,6 +18,7 @@ class BriefingSizeProjectionTests(unittest.TestCase):
         package = {
             "task_id": "task-size", "task_ref": "task-size", "attempt_id": "attempt-size",
             "gate": "implementation", "profile": "backend_dev", "project_root": "/tmp/project",
+            "user_request": "Exercise the canonical bounded briefing projection.",
             "objective": huge, "selection_reason": huge, "strategy": huge,
             "task_requirements": [huge] * 40, "task_constraints": [huge] * 40,
             "task_scope": [huge] * 40, "task_acceptance_criteria": [huge] * 40,
@@ -46,6 +47,7 @@ class BriefingSizeProjectionTests(unittest.TestCase):
         package = {
             "task_id": "task-admission", "task_ref": "task-admission", "attempt_id": "attempt-admission",
             "gate": "implementation", "profile": "backend_dev", "project_root": "/tmp/project",
+            "user_request": "Exercise the canonical bounded briefing projection.",
             "objective": "Bounded UTF-8 admission", "selection_reason": "size test", "strategy": "default",
             "task_requirements": [fitting, omitted], "task_constraints": [], "task_scope": ["src"],
             "task_acceptance_criteria": [], "task_verification": [], "allowed_paths": ["src"],

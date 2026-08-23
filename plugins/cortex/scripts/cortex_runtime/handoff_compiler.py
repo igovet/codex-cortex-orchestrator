@@ -26,19 +26,6 @@ def _unique(values: list[str]) -> list[str]:
     return [str(value) for value in values if str(value).strip()]
 
 
-def _compact_projection(projection: dict[str, Any], *, kind: str) -> dict[str, Any]:
-    """Return the complete projection; compactness is prompt-level guidance.
-
-    Static task intent, scope, and acceptance fields already have canonical
-    assignment slots in the briefing.  The ``compact`` flag is retained as an
-    adapter compatibility seam, but it cannot make canonical content vanish.
-    """
-    # ``compact`` remains a compatibility flag for callers, not permission to
-    # remove canonical predecessor/task facts from a worker's briefing.
-    del kind
-    return projection
-
-
 class HandoffCompiler:
     """Project target-relevant fields without attaching raw worker bodies."""
 
@@ -51,7 +38,6 @@ class HandoffCompiler:
         *,
         target_profile: str,
         target_gate: str | None = None,
-        compact: bool = False,
     ) -> dict[str, Any]:
         context = self._context_compiler.compile(canonical, target_profile=target_profile, target_gate=target_gate)
         task = context.get("task", {})
@@ -108,7 +94,7 @@ class HandoffCompiler:
         else:
             projection = {**common, "requirements": task.get("requirements", []), "relevant_conclusions": conclusions}
         projection = {key: value for key, value in projection.items() if value not in (None, "", [], {})}
-        return _compact_projection(projection, kind=kind) if compact else projection
+        return projection
 
 
 def build_handoff(
@@ -116,14 +102,12 @@ def build_handoff(
     *,
     target_profile: str,
     target_gate: str | None = None,
-    compact: bool = False,
 ) -> dict[str, Any]:
     """Convenience functional API for runtime facade integration."""
     return HandoffCompiler().build(
         canonical,
         target_profile=target_profile,
         target_gate=target_gate,
-        compact=compact,
     )
 
 
@@ -134,5 +118,4 @@ def build_dispatch_handoff(package: Mapping[str, Any], profile: str) -> dict[str
         canonical,
         target_profile=profile,
         target_gate=str(package.get("gate") or "") or None,
-        compact=True,
     )

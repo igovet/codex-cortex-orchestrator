@@ -2139,23 +2139,25 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
         results = []
         for worker, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
             label = f"step {current['step']} worker {worker}"
-            briefing_read = cortex.read_dispatch_briefing({
+            # Source-mode fixture calls use the same immutable worker-bound
+            # channel as the public worker MCP surface.
+            worker_context = cortex.worker_binding({
                 "project_root": str(project),
                 "task_id": state["task_id"],
+                "task_ref": current["task_ref"],
                 "attempt_id": attempt["attempt_id"],
                 "profile": attempt["profile"],
                 "dispatch_ref": attempt["dispatch_ref"],
                 "briefing_digest": attempt["briefing_digest"],
             })
+            worker_context.__enter__()
+            briefing_read = cortex.read_dispatch_briefing({
+            })
             if not briefing_read.get("ok"):
                 raise AssertionError(briefing_read)
             for predecessor_ref in attempt.get("context_result_refs") or []:
                 predecessor_read = cortex.read_worker_result({
-                    "project_root": str(project),
-                    "task_ref": current["task_ref"],
                     "attempt_result_ref": predecessor_ref,
-                    "attempt_id": attempt["attempt_id"],
-                    "profile": attempt["profile"],
                 })
                 if not predecessor_read.get("ok"):
                     raise AssertionError(predecessor_read)
@@ -2179,10 +2181,6 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                     evidence.append(f"Task verification {index}: PASS - Final deterministic fixture check completed with exit code zero.")
             evidence.append("Dispatch briefing reviewed: " + str(attempt["briefing_digest"]))
             publication: dict[str, object] = {
-                "project_root": str(project),
-                "task_id": state["task_id"],
-                "attempt_id": attempt["attempt_id"],
-                "profile": dispatch["profile"],
                 "status": "completed",
                 "summary": worker_result["summary"],
                 "findings": worker_result["findings"],
@@ -2198,12 +2196,13 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
             published = cortex.complete_worker_attempt(publication)
             if not published.get("ok"):
                 raise AssertionError(published)
+            worker_context.__exit__(None, None, None)
             value: dict[str, object] = {"attempt_result_ref": published["attempt_result_ref"]}
             if parallel:
                 value["worker"] = worker
             results.append(value)
         current = cortex.continue_orchestration({
-            "project_root": str(project), "task_ref": current["task_ref"],
+            "task_ref": current["task_ref"],
             "step": current["step"], "results": results,
         })
         if not current.get("ok"):
@@ -2233,7 +2232,10 @@ def _fixture_eval(base: Path) -> list[dict[str, object]]:
     current = cortex.start_orchestration({
         "project_root": str(parallel),
         "task": {**task("parallel Luna fixture", "C1"), "plan_approval": "auto"},
-        "waves": [{"workers": [{"phase": "research"}, {"phase": "discover", "profile": "explorer"}]}],
+        "waves": [{"workers": [
+            {"phase": "discover", "profile": "explorer"},
+            {"phase": "architecture", "profile": "architect"},
+        ]}],
     })
     if len(current.get("dispatches") or []) != 2:
         raise AssertionError("parallel fixture did not return two relative worker slots")
@@ -2248,7 +2250,7 @@ def _fixture_eval(base: Path) -> list[dict[str, object]]:
         "waves": [{"workers": [{"phase": "discover"}]}],
     })
     blocked_result = cortex.continue_orchestration({
-        "project_root": str(blocked), "task_ref": current["task_ref"], "step": current["step"],
+        "task_ref": current["task_ref"], "step": current["step"],
         "results": [{
             "status": "blocked",
             "reason": "fixture dependency unavailable",
@@ -2375,7 +2377,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
         f"never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist {result_contract} with complete_attempt and return only the bare canonical attempt_result_ref plus a short summary. A complete_attempt response may also contain projection_ref: it is a generated view identifier, never a result lookup token, and must never be passed to read_worker_result. When both fields appear, copy only the bare value of the attempt_result_ref field into read_worker_result. Do not use a formatted 'attempt_result_ref=<id>' string, a projection_ref, a summary token, or a stale ref from another child. "
-        f"For every review, governance review, or close dispatch, complete_attempt must use only the canonical AttemptResult fields; do not add gate-specific compatibility envelopes or prose protocol markers. "
+        f"For every review, governance review, or close dispatch, complete_attempt must use only the canonical AttemptResult fields; do not add gate-specific noncanonical envelopes or prose protocol markers. "
         "Read every ref with read_worker_result and advance only from its server-provided continuation object: verify its task_id matches the active task, "
         "then copy its step and results verbatim alongside the existing project_root and task_ref. Never reconstruct a continuation from a projection, summary, "
         "result reference, dispatch reference, or remembered step; if the read response provides no legal continuation object, do not call continue_orchestration. If a "
