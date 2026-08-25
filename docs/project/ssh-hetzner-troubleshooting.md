@@ -37,7 +37,7 @@ output emits one record for each check:
   `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode =
   "approve"`. If the user selects a granular approval policy, it also sets
   Cortex questions use ordinary chat and do not require an MCP-elicitation policy.
-- `cortex_hook_trust` — `hooks/list` returns exactly six enabled, trusted
+- `cortex_hook_trust` — `hooks/list` returns exactly five enabled, trusted
   `cortex@cortex` hooks from the matching cache, with valid hashes matching the
   persisted hook-state table.
 
@@ -55,7 +55,7 @@ it is not a passing registration result.
 | `codex_home` | The same-user cache is version- and content-aligned with the checked plugin. | Codex may load stale or incomplete package content. |
 | `cortex_registration` | The same user has one enabled matching `cortex@cortex` registration. | MCP registration is not proven for this user. |
 | `cortex_mcp_config` | The same-user Cortex MCP table is enabled and approval is `approve`. | Cortex lifecycle tool calls may be blocked before orchestration starts. |
-| `cortex_hook_trust` | All six lifecycle hooks are enabled, trusted, cache-backed, and hash-matched. | Worker binding, finalization guard, and stopped-worker recovery are not trusted. |
+| `cortex_hook_trust` | All five lifecycle hooks are enabled, trusted, cache-backed, and hash-matched. | Worker binding, finalization guard, and stopped-worker recovery are not trusted. |
 
 The script returns exit code `0` only for `READY`; an expected negative result
 must be wrapped by a test harness that asserts exit code `1` and itself exits
@@ -125,49 +125,33 @@ all seven check records pass and `mcp.status` is `READY`; then start a fresh
 Codex thread so its MCP and lifecycle-hook paths are reloaded. A source-mode
 `initialize`/`tools/list` smoke proves the checkout, not the installed cache.
 
-## Stuck-ledger recovery
+## Lifecycle recovery
 
-The formerly stuck state is an active gate with no pending dispatches and a
-stopped native worker. Recovery is bounded and identity-scoped:
+Do not diagnose an expected lifecycle/domain response by inspecting Cortex
+source, installed plugin/cache, logs, database/ledger, session, environment, or
+host state. The returned public `error` and `recovery` card is authoritative.
+Preserve the exact opaque `task_ref` **and** `coordinator_ref`; Cortex owns and
+issues both values, and a missing value fails closed rather than being inferred
+from a thread, worker, or project directory.
 
-1. Preserve the opaque `task_ref` and call
-   `manage_orchestration(intent="inspect")` once. Do not restart the task or
-   call `start_orchestration` again.
-2. From `context_handoff`, invoke only returned `pending_dispatches`; wait only
-   on the exact child IDs in `active_workers`. The handoff itself never
-   authorizes a spawn.
-3. If a stopped worker has `attempt_result_ref` values, read those results and continue the
-   current step. If it has a durable question, surface the question and resume
-   the same persisted worker only after the answer.
-4. If it has no AttemptResult or question, it is a server-owned recoverable
-   transport stop with `failure_reason="native_worker_stopped_without_result"`.
-   Never wait on, respawn, call `followup_task`, or submit a synthetic failed
-   result for that stopped child. Call
-   `manage_orchestration(intent="recover_inspect")` once with the exact
-   `task_ref` returned by the lifecycle response. Cortex derives the stopped
-   dispatch, records the private diagnostic, and returns the corrective
-   dispatch or receipt that the coordinator must follow. A duplicate
-   submission, a guessed child identity, or an empty wait is not a recovery
-   action.
-
-Cortex permits unbounded automatic corrective attempts while acceptance or a
-canonical finding still requires work. After the first prior failure the
-effort floor is `high`, after the second it is `xhigh`, and after the third and
-later failures it is `max`; eligible ordinary work moves to Terra after two
-prior failures. A supplied `next_strategy` is useful audit evidence but is not
-required to continue, and an unchanged strategy never blocks rework. Only an
-explicit non-retryable integrity, storage, permission, identity, or environment
-blocker—or user cancellation—halts the task. AttemptResult-backed stops and
-durable-question stops remain separate paths: neither is a reason to follow up
-a dead child.
-
-The runtime contract is implemented by the stop finalizer in
-[`cortex.py`](../../plugins/cortex/scripts/cortex.py), the recovery handoff in
-[`context_handoff.py`](../../plugins/cortex/scripts/cortex_runtime/context_handoff.py),
-and the lifecycle hook in [`cortex_hook.py`](../../plugins/cortex/scripts/cortex_hook.py).
-The focused control and revision regressions cover AttemptResult consumption,
-durable-question resumption, terminal worker stops, bounded corrective
-dispatch, and effort/model escalation.
+1. Follow only the returned action and recovery. `same_operation` is permitted
+   only if the response or already-held canonical server contract supplies
+   explicit `allowed_changes` for one deterministic legal retry.
+2. For `terminal_stop`, take no retry, inspect, or continuation action: its
+   action is `none`, and perform only explicitly prescribed cleanup.
+3. A missing worker bootstrap pair permits exactly one `followup_task` to that
+   same native child with the byte-identical server-built repair message, then
+   an exact wait. A second missing marker is finalized through the prescribed
+   `finalize_bootstrap_failure` operation; never spawn a replacement.
+4. On a durable question, retain its exact `question_ref`. A scalar answer or
+   stable-option selection resumes the same child, whose first worker call is
+   the exact scalar `worker_question(action:"poll", task_ref, assignment_ref,
+   question_ref)` form. Do not remove and recreate a question for a ref
+   mismatch.
+5. An exact `CORTEX_ATTEMPT_FAILED retryable=false` is terminal for its
+   original dispatch. Use only the prescribed one-time
+   `finalize_worker_failure` cleanup; do not read a result, continue, or
+   create a replacement.
 
 ## Verification
 
@@ -176,16 +160,18 @@ Run focused local checks without writing repository bytecode:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests.test_cortex_host_preflight
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
-  tests.test_cortex_control \
-  tests.test_revision_aware_epic \
+  tests.test_attempt_facade_lifecycle \
+  tests.test_worker_context_recovery \
+  tests.test_v11_install_gate \
   tests.test_cortex_invariants
 python3 scripts/validate-cortex-marketplace.py
 git diff --check
 ```
 
 The first command validates aligned readiness, each registration/configuration
-failure, hook trust, stale caches, and symlink boundaries. The recovery suites
-cover persisted results, durable questions, terminal worker stops,
-unbounded corrective dispatch, and effort/model escalation. These local checks do not prove that the named remote
+failure, hook trust, stale caches, and symlink boundaries. The lifecycle suites
+cover explicit capabilities, persisted results, durable questions, terminal
+worker stops, bounded corrective dispatch, and effort/model escalation. These
+local checks do not prove that the named remote
 host has been provisioned; that remains blocked until the approved Node >=16
 source and same-user authority are available.

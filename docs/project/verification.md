@@ -2,8 +2,8 @@
 
 <!-- GENERATED:START -->
 
-This page describes source-mode checks for Cortex 10.0.7, task contract v10,
-orchestration lifecycle v6, and SQLite schema v15. A command is evidence only
+This page describes source-mode checks for Cortex 11.0.1 and the v11 task and
+capability contract on SQLite schema v17. A command is evidence only
 when it was actually run; installation and live-model checks must be recorded
 separately.
 
@@ -38,6 +38,29 @@ Focused protocol checks must cover:
 - same-attempt finalization after view, serialization, or infrastructure failure;
 - server-derived changed files, checks, timestamps, identity, and observations;
 - exact task/attempt/result scope for briefing and predecessor-result reads;
+- exact coordinator `task_ref`/`coordinator_ref` and worker
+  `task_ref`/`assignment_ref` capability scope;
+- native `spawn_agent`/exact `wait`/read/continue ordering, with no
+  session/environment authorization or manually authored advance/completions;
+- digest- and capsule-bound plan and outcome repair through `complete_attempt`,
+  including self-contained multi-error patch cards, retryable malformed-copy
+  recovery, explicit allowed patch operations, and terminal correctly-shaped
+  MAC tampering;
+- malformed calls for every public tool branch, each with an exact JSON Pointer,
+  executable `error` + `recovery` kind/operation, no generic union diagnostic, no private
+  path/capability leakage, and no source/cache/ledger/session lookup needed to
+  form the next legal call;
+- terminal recovery with `action=none` and no contradictory retry/inspect/
+  continuation action; `same_operation` only when explicit `allowed_changes`
+  makes the same-tool retry deterministic;
+- Cortex-issued `task_ref`/`coordinator_ref`/`assignment_ref` values copied
+  byte-for-byte with no session/host inference or value echo on a missing-ref
+  failure;
+- one same-child server-built bootstrap repair, full automatic briefing cursor
+  pagination through `complete=true`, and exact same-child poll resumption for
+  scalar and stable-option durable answers without question recreation;
+- compact worker payloads with backend-derived identity and evidence;
+- quarantine and fail-closed handling for legacy rows and lost capabilities;
 - ContextCompiler and target-specific HandoffCompiler projections;
 - public operation union of exactly nine operations and fixed audiences.
 

@@ -66,13 +66,27 @@ findings. Raw worker payloads are never used as a mutable universal handoff.
 
 Result JSON/Markdown, journals, plans, and indexes are rebuildable views. They
 are useful for humans and tooling but cannot authorize a gate, read, resume,
-handoff, or completion. `attempt_result_ref`, `context_result_refs`, and
-`predecessor_result_refs` are the only result links carried between stages.
+handoff, or completion. A successful worker completion has no result-reference
+handoff: the worker returns the terminal acknowledgement and emits exactly
+`ATTEMPT_COMPLETED`. The coordinator reads
+`read_worker_result(task_ref, coordinator_ref, step)` and the server derives
+the current wave's canonical results. `attempt_result_ref`,
+`context_result_refs`, and `predecessor_result_refs` remain server-owned links,
+not values a child must transport to its parent.
+
+Bootstrap recovery is bounded to one same-child follow-up using the exact
+server-built `bootstrap_repair_message` byte-for-byte. A failed repair is
+closed by `finalize_bootstrap_failure`, which performs terminal cleanup.
+An already-started worker's exact nonretryable terminal marker is closed by
+`finalize_worker_failure` for its original structured dispatch. The same
+transaction blocks the task and makes the attempt/session terminal and
+nonresumable without deleting briefing, event, or repair evidence and without
+creating an AttemptResult or replacement.
 
 ## Governance and storage
 
 Governance state, immutable artifacts, scope/revision constraints, and
-authenticated lifecycle transitions remain server-owned in schema v15. SQLite
+authenticated lifecycle transitions remain server-owned in schema v17. SQLite
 is the atomic state boundary; filesystem views are private, digest-checked,
 and rebuildable. WAL/SHM files and advisory locks are SQLite machinery, not
 application evidence.
@@ -82,7 +96,7 @@ application evidence.
 - [storage-classification.md](storage-classification.md) defines retention and authority.
 - [orchestration ledger](../features/orchestration-ledger/index.md) documents the lifecycle.
 - [lifecycle telemetry](../features/lifecycle-telemetry/index.md) documents hooks and recovery.
-- [ledger_db.py](../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns schema v15.
+- [ledger_db.py](../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns schema v17.
 - [context_compiler.py](../../plugins/cortex/scripts/cortex_runtime/context_compiler.py) and [handoff_compiler.py](../../plugins/cortex/scripts/cortex_runtime/handoff_compiler.py) implement context boundaries.
 - [verification.md](verification.md) is the release validation index.
 

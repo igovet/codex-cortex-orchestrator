@@ -20,7 +20,6 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import cortex
-import cortex_hook
 from cortex_runtime import attempt_facade, attempt_protocol, context_handoff, ledger_db
 
 
@@ -77,6 +76,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
             dispatch_ref="dispatch-implementation-01",
             digest="a" * 64,
         )
+        cortex._governance_lifecycle_hmac_key(self.root, create=True)
         self.params = {
             "project_root": str(self.project),
             "task_id": self.task_id,
@@ -93,7 +93,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._temporary.cleanup()
 
-    def _facade_patches(self, generated_view):
+    def _facade_patches(self, generated_view, *, attempt=None, profile="backend_dev"):
         """Supply host facts while keeping AttemptResult persistence real."""
         observation = {
             "baseline_ref": "manifest-implementation-01",
@@ -110,7 +110,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
         patches.enter_context(mock.patch.multiple(
             attempt_facade,
             _worker_context=mock.Mock(return_value=(
-                self.project, self.project, self.state, self.attempt, "backend_dev",
+                self.project, self.project, self.state, attempt or self.attempt, profile,
             )),
             _receipt_guard=mock.Mock(return_value={}),
             _workspace_observation=mock.Mock(return_value=observation),
@@ -121,18 +121,435 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
         ))
         return patches
 
-    def _complete(self, params):
-        """Submit semantic completion through the server-bound worker channel."""
-        from cortex_runtime import worker_identity
-        binding = {
-            "project_root": str(self.project),
-            "task_id": self.task_id,
-            "attempt_id": self.attempt_id,
-            "profile": "backend_dev",
+    @staticmethod
+    def _planner_plan() -> dict[str, object]:
+        return {
+            "overview": "Create and verify the exact requested file in the implementation wave.",
+            "work_packages": [{
+                "id": "file-change", "title": "File change", "objective": "Create and verify the target.",
+                "allowed_paths": ["desktop-v11-multi-wave.txt"],
+                "microtasks": [{
+                    "id": "write-file", "title": "Write file", "objective": "Write exact bytes.",
+                    "profile": "backend_dev", "allowed_paths": ["desktop-v11-multi-wave.txt"],
+                    "acceptance_criteria": ["The file has the exact requested bytes."],
+                    "verification": ["Compare bytes and final newline count."],
+                }],
+            }],
+            "recommendation": "revise",
+            "recommendation_actions": [],
+            "risks": ["The implementation must preserve exactly one final newline."],
         }
-        semantic = {key: value for key, value in params.items() if key not in worker_identity.SERVER_OWNED_FIELDS}
-        with worker_identity.worker_binding(binding):
-            return attempt_facade.complete_attempt(semantic)
+
+    def _complete(self, params):
+        """Submit semantic completion through explicit v11 assignment authority."""
+        return attempt_facade._complete_attempt_impl({
+            "task_ref": "task-000000000001",
+            "assignment_ref": "assignment-v1-" + "a" * 64,
+            "outcome": {
+                "status": params["status"],
+                "summary": params["summary"],
+                "findings": params.get("findings", []),
+                "decisions_needed": params.get("decisions_needed", []),
+                "unresolved": params.get("unresolved", []),
+                "claims": params.get("claims", []),
+            },
+        })
+
+    def _public_complete(self, submission, generated_view=None):
+        view = generated_view or mock.Mock(return_value={"projection_ref": "attempt-result-view-implementation-01"})
+        with self._facade_patches(view):
+            return attempt_facade.complete_attempt(submission)
+
+    def test_private_repair_escrow_survives_reopen_reuses_handle_and_replays_success(self) -> None:
+        refs = {
+            "task_ref": "task-000000000001",
+            "assignment_ref": "assignment-v1-" + "a" * 64,
+        }
+        rejected = {
+            **refs,
+            "outcome": {
+                "status": "completed", "summary": "",
+                "findings": [{"summary": "Preserve this valid finding."}],
+            },
+        }
+        first = self._public_complete(rejected)
+        repeated = self._public_complete(rejected)
+        self.assertFalse(first["ok"])
+        self.assertEqual(first["recovery"]["repair"], repeated["recovery"]["repair"])
+        repair = first["recovery"]["repair"]
+        self.assertEqual(
+            len(repair["repair_capsule"]),
+            attempt_facade.v11_submission.REPAIR_HANDLE_LENGTH,
+        )
+        self.assertFalse(first["recovery"]["state_mutated"])
+        self.assertEqual(repair["patch_paths"], ["/summary"])
+        self.assertEqual(first["recovery"]["kind"], "repair_patch_only")
+        self.assertEqual(repair["diagnostics"][0]["repair_pointer"], "/summary")
+
+        handle_id = repair["repair_capsule"].split(".")[1]
+        ledger_db._forget_database_readiness(self.root)
+        row = ledger_db.get_repair_escrow(
+            self.root,
+            handle_digest=attempt_facade.v11_submission.repair_handle_digest(handle_id),
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["payload"]["findings"], [{"summary": "Preserve this valid finding."}])
+        with ledger_db._connection(self.root) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM repair_escrow").fetchone()[0], 1)
+
+        repaired_submission = {
+            **refs,
+            "repair_capsule": repair["repair_capsule"],
+            "base_payload_digest": repair["base_payload_digest"],
+            "patches": [{"op": "replace", "path": "/summary", "value": "Completed after exact repair."}],
+        }
+        completed = self._public_complete(repaired_submission)
+        replayed = self._public_complete(repaired_submission)
+        self.assertEqual(completed, replayed)
+        self.assertEqual(set(completed), {"schema", "ok", "terminal"})
+        self.assertTrue(completed["ok"])
+        self.assertTrue(completed["terminal"])
+
+    def test_live_planner_repair_stays_locked_across_four_bad_calls_and_recovers(self) -> None:
+        refs = {
+            "task_ref": "task-000000000001",
+            "assignment_ref": "assignment-v1-" + "a" * 64,
+        }
+        planner_attempt = {
+            **self.attempt,
+            "attempt_id": self.attempt_id,
+            "gate": "plan",
+            "profile": "planner",
+            "agent": "planner",
+            "allowed_paths": ["desktop-v11-multi-wave.txt"],
+        }
+        view = mock.Mock(return_value={"projection_ref": "attempt-result-view-plan-01"})
+        with self._facade_patches(view, attempt=planner_attempt, profile="planner"), mock.patch.object(
+            attempt_facade._runtime, "materialize_planning_payload",
+        ):
+            wrong_branch = attempt_facade.complete_attempt({
+                **refs,
+                "outcome": {"status": "completed", "summary": "Wrong planner branch."},
+            })
+            self.assertFalse(wrong_branch["ok"])
+            self.assertTrue(wrong_branch["recovery"]["retryable"])
+            self.assertEqual(wrong_branch["error"]["diagnostics"][0]["json_pointer"], "/plan")
+
+            rejected_plan = self._planner_plan()
+            issued = attempt_facade.complete_attempt({**refs, "plan": rejected_plan})
+            repair = issued["recovery"]["repair"]
+            self.assertEqual(repair["patch_paths"], ["/recommendation_actions"])
+            self.assertEqual(issued["recovery"]["kind"], "repair_patch_only")
+            self.assertTrue(issued["recovery"]["retryable"])
+
+            malformed_copy = attempt_facade.complete_attempt({
+                **refs,
+                "repair_capsule": repair["repair_capsule"][:-5],
+                "base_payload_digest": repair["base_payload_digest"],
+                "patches": [{
+                    "op": "replace", "path": "/recommendation_actions", "value": [],
+                }],
+            })
+            self.assertEqual(malformed_copy["recovery"]["repair"], repair)
+            self.assertTrue(malformed_copy["recovery"]["retryable"])
+
+            regenerated = self._planner_plan()
+            regenerated["risks"] = [{"summary": "A newly introduced, schema-invalid risk."}]
+            full_resubmit = attempt_facade.complete_attempt({**refs, "plan": regenerated})
+            self.assertEqual(full_resubmit["recovery"]["repair"], repair)
+
+            out_of_scope = attempt_facade.complete_attempt({
+                **refs,
+                "repair_capsule": repair["repair_capsule"],
+                "base_payload_digest": repair["base_payload_digest"],
+                "patches": [{"op": "replace", "path": "/risks", "value": ["changed"]}],
+            })
+            self.assertEqual(out_of_scope["recovery"]["repair"], repair)
+            self.assertTrue(out_of_scope["recovery"]["retryable"])
+
+            for label, patches in {
+                "empty": [],
+                "wrong_op": [{
+                    "op": "copy", "path": "/recommendation_actions", "value": [],
+                }],
+                "wrong_value": [{
+                    "op": "replace", "path": "/recommendation_actions", "value": ["not an action object"],
+                }],
+            }.items():
+                with self.subTest(repair_retry=label):
+                    retry = attempt_facade.complete_attempt({
+                        **refs,
+                        "repair_capsule": repair["repair_capsule"],
+                        "base_payload_digest": repair["base_payload_digest"],
+                        "patches": patches,
+                    })
+                    self.assertEqual(retry["recovery"]["repair"], repair)
+
+            valid = {
+                **refs,
+                "repair_capsule": repair["repair_capsule"],
+                "base_payload_digest": repair["base_payload_digest"],
+                "patches": [{
+                    "op": "replace",
+                    "path": "/recommendation_actions",
+                    "value": [{
+                        "issue": "The exact-byte implementation must be explicit.",
+                        "action": "Create the target with the requested bytes and one newline.",
+                        "plan_refs": ["write-file"],
+                        "verification": "Compare the complete byte sequence.",
+                    }],
+                }],
+            }
+            completed = attempt_facade.complete_attempt(valid)
+            replayed = attempt_facade.complete_attempt(valid)
+
+        self.assertEqual(completed, {"schema": "cortex/worker-completion/v11", "ok": True, "terminal": True})
+        self.assertEqual(replayed, completed)
+        with ledger_db._connection(self.root) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM repair_escrow").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM attempt_results").fetchone()[0], 1)
+
+    def test_multi_error_planner_repairs_from_public_diagnostics_without_schema_lookup(self) -> None:
+        refs = {
+            "task_ref": "task-000000000001",
+            "assignment_ref": "assignment-v1-" + "a" * 64,
+        }
+        planner_attempt = {
+            **self.attempt,
+            "gate": "plan",
+            "profile": "planner",
+            "agent": "planner",
+            "allowed_paths": ["desktop-v11-multi-wave.txt"],
+        }
+        invalid_plan = {
+            "overview": "Create, implement, and review the exact requested artifact.",
+            "work_packages": [
+                {
+                    "id": "plan", "title": "Plan", "objective": "Plan the work.",
+                    "microtasks": [{
+                        "id": "plan-one", "objective": "Define the implementation.",
+                        "profile": "planner", "allowed_paths": ["desktop-v11-multi-wave.txt"],
+                        "acceptance_criteria": ["The plan is complete."],
+                        "dependencies": [],
+                    }],
+                },
+                {
+                    "id": "implement", "title": "Implement", "objective": "Create the artifact.",
+                    "microtasks": [{
+                        "id": "write-one", "objective": "Write exact bytes.",
+                        "profile": "backend_dev", "allowed_paths": ["desktop-v11-multi-wave.txt"],
+                        "acceptance_criteria": ["Exact bytes are present."],
+                        "verification": ["Compare exact bytes."],
+                        "dependencies": ["plan-one"],
+                    }],
+                },
+            ],
+            "requirement_coverage": [
+                {"requirement": "Create the artifact.", "plan_refs": ["write-one"], "verification": "Compare bytes."},
+                {"requirement": "Review the artifact.", "plan_refs": ["write-one"], "verification": "Review bytes."},
+            ],
+            "risks": [{"summary": "This must be a string."}],
+        }
+
+        def value_from(card):
+            schema = card["field_schema"]
+            if "const" in schema:
+                return schema["const"]
+            if schema.get("enum"):
+                return schema["enum"][0]
+            if schema.get("type") == "string":
+                return "valid"
+            if schema.get("type") == "array":
+                count = max(1, int(schema.get("minItems", 0)))
+                return [value_from({"field_schema": schema.get("items", {"type": "string"})}) for _ in range(count)]
+            if schema.get("type") == "object":
+                properties = schema.get("properties", {})
+                return {
+                    name: value_from({"field_schema": properties[name]})
+                    for name in schema.get("required", [])
+                    if name in properties
+                }
+            if schema.get("type") == "integer":
+                return int(schema.get("minimum", 0))
+            if schema.get("type") == "boolean":
+                return True
+            raise AssertionError(f"public diagnostic is not self-contained: {card!r}")
+
+        with self._facade_patches(
+            mock.Mock(return_value={"projection_ref": "attempt-result-view-plan-01"}),
+            attempt=planner_attempt,
+            profile="planner",
+        ), mock.patch.object(attempt_facade._runtime, "materialize_planning_payload"):
+            issued = attempt_facade.complete_attempt({**refs, "plan": invalid_plan})
+            repair = issued["recovery"]["repair"]
+            self.assertEqual(len(repair["diagnostics"]), 12)
+            self.assertEqual(
+                repair["patch_paths"],
+                [card["repair_pointer"] for card in repair["diagnostics"]],
+            )
+            self.assertTrue(all(
+                set(card) == {"code", "json_pointer", "repair_pointer", "message", "field_schema", "allowed_ops"}
+                for card in repair["diagnostics"]
+            ))
+            self.assertTrue(all(card["allowed_ops"] for card in repair["diagnostics"]))
+            patches = []
+            for card in repair["diagnostics"]:
+                if card["code"] == "validation_unknown":
+                    patches.append({"op": "remove", "path": card["repair_pointer"]})
+                else:
+                    patches.append({
+                        "op": "add" if card["code"] == "validation_required" else "replace",
+                        "path": card["repair_pointer"],
+                        "value": value_from(card),
+                    })
+            completed = attempt_facade.complete_attempt({
+                **refs,
+                "repair_capsule": repair["repair_capsule"],
+                "base_payload_digest": repair["base_payload_digest"],
+                "patches": patches,
+            })
+
+        self.assertEqual(
+            completed,
+            {"schema": "cortex/worker-completion/v11", "ok": True, "terminal": True},
+        )
+
+    def test_tampered_cross_pair_stale_and_out_of_scope_repair_never_write_canonical_result(self) -> None:
+        refs = {
+            "task_ref": "task-000000000001",
+            "assignment_ref": "assignment-v1-" + "a" * 64,
+        }
+        rejected = {**refs, "outcome": {"status": "completed", "summary": ""}}
+        repair = self._public_complete(rejected)["recovery"]["repair"]
+        valid_patch = [{"op": "replace", "path": "/summary", "value": "fixed"}]
+        token = repair["repair_capsule"]
+        cases = {
+            "tampered": {
+                **refs, "repair_capsule": token[:-1] + ("0" if token[-1] != "0" else "1"),
+                "base_payload_digest": repair["base_payload_digest"], "patches": valid_patch,
+            },
+            "cross_pair": {
+                **refs, "assignment_ref": "assignment-v1-" + "b" * 64,
+                "repair_capsule": token, "base_payload_digest": repair["base_payload_digest"], "patches": valid_patch,
+            },
+            "stale": {
+                **refs, "repair_capsule": token, "base_payload_digest": "sha256:" + "0" * 64,
+                "patches": valid_patch,
+            },
+            "out_of_scope": {
+                **refs, "repair_capsule": token, "base_payload_digest": repair["base_payload_digest"],
+                "patches": [{"op": "replace", "path": "/status", "value": "failed"}],
+            },
+        }
+        for label, submission in cases.items():
+            with self.subTest(label=label):
+                response = self._public_complete(submission)
+                self.assertFalse(response["ok"])
+                if label == "out_of_scope":
+                    self.assertEqual(response["recovery"]["repair"], repair)
+                    self.assertTrue(response["recovery"]["retryable"])
+                    self.assertFalse(response["recovery"]["state_mutated"])
+                else:
+                    self.assertFalse(response["recovery"]["retryable"])
+                    self.assertFalse(response["recovery"]["state_mutated"])
+                self.assertNotIn("task_ref", response)
+                self.assertIsNone(attempt_protocol.get_attempt_result(
+                    self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+                ))
+
+    def test_every_private_escrow_field_is_reauthenticated_before_repair_use(self) -> None:
+        refs = {
+            "task_ref": "task-000000000001",
+            "assignment_ref": "assignment-v1-" + "a" * 64,
+        }
+        repair = self._public_complete({
+            **refs,
+            "outcome": {"status": "completed", "summary": "", "findings": [{"summary": "keep"}]},
+        })["recovery"]["repair"]
+        handle_id = repair["repair_capsule"].split(".")[1]
+        handle_digest = attempt_facade.v11_submission.repair_handle_digest(handle_id)
+        submission = {
+            **refs,
+            "repair_capsule": repair["repair_capsule"],
+            "base_payload_digest": repair["base_payload_digest"],
+            "patches": [{"op": "replace", "path": "/summary", "value": "fixed"}],
+        }
+        immutable_trigger = (
+            "CREATE TRIGGER repair_escrow_immutable_update BEFORE UPDATE ON repair_escrow "
+            "FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'repair escrow rows are immutable'); END"
+        )
+        with ledger_db._connection(self.root) as connection:
+            original = dict(connection.execute(
+                "SELECT * FROM repair_escrow WHERE handle_digest=?", (handle_digest,),
+            ).fetchone())
+        mutations = {
+            "payload_json": '{"status":"completed","summary":"","findings":[]}',
+            "diagnostics_json": '[{"json_pointer":"/outcome/status","repair_pointer":"/status"}]',
+            "allowed_paths_json": '["/status"]',
+            "task_ref_digest": "sha256:" + "1" * 64,
+            "attempt_id": "implementation-02",
+            "assignment_ref_digest": "sha256:" + "2" * 64,
+            "kind": "plan",
+            "base_payload_digest": "sha256:" + "3" * 64,
+            "escrow_digest": "4" * 64,
+        }
+        for column, mutated in mutations.items():
+            with self.subTest(column=column):
+                with ledger_db._connection(self.root, write=True) as connection:
+                    connection.execute("DROP TRIGGER repair_escrow_immutable_update")
+                    connection.execute(
+                        f"UPDATE repair_escrow SET {column}=? WHERE handle_digest=?",
+                        (mutated, handle_digest),
+                    )
+                    connection.execute(immutable_trigger)
+                response = self._public_complete(submission)
+                self.assertFalse(response["ok"])
+                self.assertFalse(response["recovery"]["retryable"])
+                self.assertFalse(response["recovery"]["state_mutated"])
+                self.assertIsNone(attempt_protocol.get_attempt_result(
+                    self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+                ))
+                with ledger_db._connection(self.root, write=True) as connection:
+                    connection.execute("DROP TRIGGER repair_escrow_immutable_update")
+                    connection.execute(
+                        f"UPDATE repair_escrow SET {column}=? WHERE handle_digest=?",
+                        (original[column], handle_digest),
+                    )
+                    connection.execute(immutable_trigger)
+
+    def test_post_completion_worker_event_and_result_read_are_terminal_failures(self) -> None:
+        refs = {
+            "task_ref": "task-000000000001",
+            "assignment_ref": "assignment-v1-" + "a" * 64,
+        }
+        terminal_attempt = {**self.attempt, "status": "completed"}
+        with mock.patch.object(
+            attempt_facade,
+            "_worker_context",
+            return_value=(self.project, self.project, self.state, terminal_attempt, "backend_dev"),
+        ):
+            event = attempt_facade.record_attempt_event({
+                **refs, "event_type": "progress", "payload": {"summary": "too late"},
+            })
+        self.assertFalse(event["ok"])
+        self.assertEqual(event["error"]["code"], "record_attempt_event_closed")
+        self.assertFalse(event["recovery"]["retryable"])
+        self.assertNotIn("task_ref", event)
+
+        terminal_state = {**self.state, "attempts": [terminal_attempt]}
+        with mock.patch.object(
+            attempt_facade._runtime,
+            "authorize_worker_assignment",
+            return_value=(self.project, self.project, terminal_state, terminal_attempt, "backend_dev"),
+        ):
+            result = attempt_facade.read_worker_result({
+                **refs, "attempt_result_ref": "attempt-result-own-terminal",
+            })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "read_worker_result_not_authorized")
+        self.assertFalse(result["recovery"]["retryable"])
+        self.assertNotIn("task_ref", result)
 
     def test_public_complete_attempt_keeps_semantic_result_through_projection_retry(self) -> None:
         """The second call finalizes the original result rather than a new worker."""
@@ -166,10 +583,11 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
             completed = self._complete(dict(self.params))
 
         self.assertTrue(completed["ok"])
-        self.assertEqual(completed["outcome"], "attempt_completed")
-        self.assertEqual(completed["attempt_result_ref"], stored["result_ref"])
-        self.assertEqual(completed["projection_ref"], "attempt-result-view-implementation-01")
-        self.assertFalse(completed["worker_replacement_authorized"])
+        self.assertEqual(completed, {
+            "schema": cortex.PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "terminal": True,
+        })
         final = attempt_protocol.get_attempt_result(
             self.root, task_id=self.task_id, attempt_id=self.attempt_id,
         )
@@ -233,68 +651,6 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
         self.assertEqual(diagnostic["received"]["path"], "tests/generated_invariants.py")
         self.assertIn("pytest -q tests/generated_invariants.py", diagnostic["fix"])
         self.assertIn("same implementation attempt", diagnostic["fix"])
-
-    def test_finalizing_or_completed_work_stop_does_not_become_worker_failure(self) -> None:
-        """The native-stop hook preserves both intermediate success lifecycles."""
-        for lifecycle in (
-            attempt_protocol.LIFECYCLE_WORK_COMPLETED,
-            attempt_protocol.LIFECYCLE_FINALIZING,
-        ):
-            with self.subTest(lifecycle=lifecycle):
-                attempt = {
-                    "attempt_id": "implementation-02",
-                    "status": "running",
-                    "gate": "implementation",
-                    "profile": "backend_dev",
-                    "dispatch_ref": "dispatch-implementation-02",
-                    "host_spawn": {
-                        "agent_id": "native.Finalization:02",
-                        "task_name": "implementation-finalization",
-                        "tool": "spawn_agent",
-                        "confirmed_at": "2026-08-22T00:00:00+00:00",
-                    },
-                }
-                state = {
-                    "task_id": "native-stop-finalization",
-                    "thread_id": "host-parent-session",
-                    "attempts": [attempt],
-                }
-                package: dict[str, object] = {}
-                session_write = mock.Mock()
-                saved = mock.Mock()
-                canonical_result = {
-                    "status": "completed",
-                    "lifecycle_status": lifecycle,
-                    "result_ref": "attempt-result-finalization-02",
-                }
-                with mock.patch.object(cortex, "select_project_root", return_value=self.project), \
-                     mock.patch.object(cortex, "ledger_root", return_value=self.root), \
-                     mock.patch.object(cortex, "state_lock", return_value=nullcontext()), \
-                     mock.patch.object(cortex, "_host_session_bindings", return_value={
-                         "tasks": {state["task_id"]: "host-parent-session"},
-                     }), \
-                     mock.patch.object(cortex, "_v3_task_state", return_value=(self.project, state, {})), \
-                     mock.patch.object(cortex, "_open_blocking_questions", return_value=[]), \
-                     mock.patch.object(cortex, "_delegation_package", return_value=package), \
-                     mock.patch.object(cortex, "_write_delegation_package"), \
-                     mock.patch.object(cortex, "db_put_worker_session", session_write), \
-                     mock.patch.object(cortex, "save_state", saved), \
-                     mock.patch.object(cortex.attempt_protocol, "get_attempt_result", return_value=canonical_result):
-                    result = cortex.finalize_host_worker_stop_from_hook(
-                        str(self.project), state["task_id"], "host-parent-session", "native.Finalization:02",
-                    )
-
-                self.assertTrue(result["updated"])
-                self.assertEqual(result["outcome"], "work_completed_finalization_pending")
-                self.assertEqual(attempt["status"], "running")
-                self.assertEqual(attempt["host_stop_outcome"], "work_completed_finalization_pending")
-                self.assertFalse(attempt["host_resumable"])
-                self.assertEqual(attempt["attempt_result_ref"], canonical_result["result_ref"])
-                self.assertEqual(package["spawn_status"], "stopped_finalization_pending")
-                self.assertFalse(package["resumable"])
-                self.assertEqual(session_write.call_args.args[1]["status"], "stopped_recoverable")
-                self.assertFalse(session_write.call_args.args[1]["resumable"])
-                self.assertEqual(saved.call_args.args[3], "host_stop_finalization_pending")
 
     def test_terminal_attempt_result_reconciles_exact_worker_session(self) -> None:
         """Terminal canonical results cannot leave their native session live."""
@@ -382,27 +738,6 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
                 self.project, [attempt],
             )
         self.assertEqual(violations, [self.attempt_id])
-
-    def test_wait_hook_for_finalization_explicitly_forbids_failed_continuation_and_replacement(self) -> None:
-        """Coordinator recovery wording cannot accidentally take the failure path."""
-        context = cortex_hook.stopped_worker_after_wait_context(
-            {"hook_event_name": "PostToolUse", "tool_name": "wait"},
-            {
-                "current_gates": ["implementation"],
-                "attempts": [{
-                    "attempt_id": "implementation-03",
-                    "gate": "implementation",
-                    "host_stop_outcome": "work_completed_finalization_pending",
-                    "attempt_result_ref": "attempt-result-finalization-03",
-                }],
-            },
-            "task-ref-finalization",
-        )
-        self.assertIsNotNone(context)
-        assert context is not None
-        self.assertIn("Retry complete_attempt only for this same persisted attempt", context)
-        self.assertIn("Do not submit status='failed'", context)
-        self.assertIn("or spawn a replacement", context)
 
     def test_context_handoff_keeps_finalization_pending_out_of_failure_recovery(self) -> None:
         """Compaction must not turn the hook's exact pending tag into a failed receipt."""

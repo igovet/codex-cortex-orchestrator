@@ -56,6 +56,7 @@
     "required_sections": ["authority", "hard_constraints", "assignment", "role", "tool_protocol", "output_contract", "stopping"],
     "conditional_sections": ["mode", "gate", "context"],
     "artifact_contract": "immutable_briefing_digest_bootstrap_remains_authoritative; AttemptResult/Event are the worker semantic transport; attempt_result_ref and any server-built human projection are derived outputs",
+    "failure_response_contract": "An expected MCP validation or domain failure is a tools/call result with isError=true and concise content, plus ok=false top-level error and recovery in structuredContent when the transport preserves it; it is not a raw JSON-RPC error. Use only public diagnostics, field schemas, allowed_ops, and opaque handles/digests; never inspect Cortex source, cache, logs, ledger, session, environment, or hidden paths. same_operation is legal only when retryable=true, state_mutated=false, and nonempty allowed_changes make one exact retry deterministic; otherwise stop. Incomplete recovery returns CORTEX_PROTOCOL_FAILURE retryable=false.",
     "prompt_volume_guidance": "Prompt volume targets are advisory worker guidance only. Prefer concise, complete evidence where practical, but never truncate, summarize away, reject, or omit material task, plan, result, event, question, answer, or artifact data to satisfy a byte, character, or file-size target. A complete payload may exceed any target and must be submitted intact; backend persistence stores the complete submitted content."
   },
   "attempt_result_contract": {
@@ -64,8 +65,8 @@
     "optional_payload": "typed gate payloads when a gate requires them",
     "worker_authority": "semantic facts only; the worker result is never authoritative for identity, task revision, dispatch, profile, phase, predecessors, changed_files, timestamps, verification metadata, receipts, or evidence markers",
     "server_receipts": ["briefing_read", "predecessor_read"],
-    "projection": "attempt_result_ref and any human projection generated from the canonical AttemptRecord",
-    "coordinator_completion": "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned dispatch.call with unmodified dispatch.arguments; a generic collaboration spawn, self-authored task name, or replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the coordinator must read its exact canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed. A successful continue is one-shot: follow only its returned dispatch/wait/terminal outcome; never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A task-identity or step-mismatch diagnostic is recoverable: inspect the same task and follow the server-owned recovery or concrete user question; never stop Cortex."
+    "projection": "attempt_result_ref and any human projection generated from the canonical AttemptRecord; coordinators obtain refs server-side through read_worker_result and never receive them from worker final text",
+    "coordinator_completion": "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned spawn_agent call with unmodified arguments; a self-authored task name or replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the worker final must be exactly ATTEMPT_COMPLETED. The coordinator calls read_worker_result with task_ref plus coordinator_ref plus the exact server-derived step; the server returns all canonical results for the current wave and the continuation. The coordinator then follows only that server-returned continuation and closes the completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed. A successful continuation is one-shot: follow only its returned native dispatch, wait, or terminal outcome; never call continue again with copied refs, request artifacts, a replacement pipeline, or a replacement worker. A task-identity or step-mismatch diagnostic is recoverable only with the same explicit coordinator capability: inspect the same task and follow server-owned recovery or a concrete user question; never infer authority from a host session."
   },
   "role_delta_required_markers": [
     "Role and mission:",
@@ -75,16 +76,16 @@
     "Escalate"
   ],
   "skill_section_requirements": {
-    "orchestrator": ["## Invocation and routes", "## Runtime protocol handoff"],
-    "cortex-control": ["## Coordinator state machine", "## Dispatch and evidence policy"],
-    "context-compaction": ["## Cortex recovery after context reset or compaction"],
+    "orchestrator": ["## Invocation", "## Normal lifecycle"],
+    "cortex-control": ["## MCP Cortex response handling", "## Exact authority pairs", "## Native V2 lifecycle"],
+    "context-compaction": ["## Cortex v11 compaction rule"],
     "knowledge-harvest": ["## Modes", "## Required pipeline", "## Worker result shape"],
     "output-validation": []
   },
   "prompt_guidance_semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
   "budgets": {
-    "bootstrap_target_bytes": 1500,
-    "ordinary_briefing_target_bytes": 16384,
+    "bootstrap_target_bytes": 1024,
+    "ordinary_briefing_target_bytes": 12288,
     "harvest_briefing_target_bytes": 18432,
     "role_delta_target_bytes": 4096,
     "prompt_eval_output_bytes": 65536
@@ -117,7 +118,7 @@
     ],
     "source_ownership": {
       "worker_operation_cards": "profiles.json.shared_worker_contract.operation_cards",
-      "worker_identity_binding": "runtime server-bound dispatch session",
+      "worker_assignment_authorization": "explicit task_ref plus assignment_ref capability",
       "planner_shape": "profiles.json.shared_worker_contract.planner_completion_shape",
       "attachment_preflight": "profiles.json.shared_worker_contract.attachment_preflight",
       "activation_context": "profiles.json.shared_worker_contract.activation_context"
@@ -135,6 +136,7 @@
     "max_native_calls": 20,
     "max_stream_events": 512,
     "live_runner": {
+      "scope": "development_source_prompt_eval_only",
       "command": "codex exec",
       "sandbox": "read-only",
       "timeout_seconds": 90,

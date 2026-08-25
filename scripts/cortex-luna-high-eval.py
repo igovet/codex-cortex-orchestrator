@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Fixture and optional live evaluation for a Luna-high Cortex parent."""
+"""Source-mode fixtures and an optional bounded Luna-high evaluator.
+
+This evaluator is development evidence only.  It never launches a Cortex
+worker on the server's behalf and never substitutes for the audited installed
+plugin acceptance flow.
+"""
 from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 from collections import namedtuple
 import json
 import os
@@ -76,8 +82,9 @@ SAFE_QUESTION_MANAGEMENT_OUTCOMES = {
     "question_answered", "awaiting_user", "awaiting_translation", "question_unavailable",
 }
 
-BOOTSTRAP_MISSING_INPUT_NAME = "bootstrap_fixture_approval"
-BOOTSTRAP_MISSING_INPUT_ANSWER = "APPROVED-FOR-ISOLATED-SMOKE"
+BOOTSTRAP_MISSING_MARKER = "CORTEX_WORKER_BOOTSTRAP_MISSING"
+BOOTSTRAP_RECOVERY_RESULT = "Bootstrap pair recovered."
+BOOTSTRAP_MISSING_FIELDS_PATTERN = r"(?:task_ref|assignment_ref|task_ref,assignment_ref)"
 
 
 def load_live_question_fixtures(path: Path = LIVE_QUESTION_FIXTURES_PATH) -> dict[str, object]:
@@ -135,16 +142,7 @@ def question_matches_pre_authorized_policy(question: object, policy: dict[str, o
     return isinstance(markers, list) and all(str(marker).casefold() in text for marker in markers)
 
 RESULT_FAILURE_PATTERNS = (
-    ("passed completion requires attempt_result_ref", "resultless_success"),
     ("non-success completion requires an explicit reason", "missing_failure_reason"),
-    ("advance requires a non-empty completions array", "empty_results"),
-    ("advance completion attempt_ids must be unique", "duplicate_attempt_result"),
-    ("advance contains attempts outside the active wave", "wrong_attempt_result"),
-    ("advance is missing completions for", "missing_attempt_result"),
-    # This is a caller-shape error, not a missing native identity.  Keep it
-    # distinct from the generic dispatch-ref failures so the live evaluator
-    # proves that its own success receipt contract remains unambiguous.
-    ("successful results use attempt_result_ref only; do not supply dispatch_ref", "success_with_dispatch_ref"),
     ("dispatch_ref", "dispatch_identity"),
     ("unanswered blocking worker question", "open_worker_question"),
     ("attempt_result_ref does not belong", "wrong_attempt_result_ref"),
@@ -690,6 +688,30 @@ def safe_question_management_metadata(item: dict[str, object], result: object) -
     return metadata
 
 
+def safe_terminal_management_metadata(item: dict[str, object], result: object) -> dict[str, object] | None:
+    """Classify only the two fixed dispatch-scoped terminal cleanup intents."""
+    if safe_tool_name(item.get("tool") or item.get("name")) != "manage_orchestration":
+        return None
+    arguments = bounded_mapping(item.get("arguments", item.get("input")))
+    intent = str(arguments.get("intent") or "").strip()
+    expected = {
+        "finalize_bootstrap_failure": "bootstrap_missing_identity",
+        "finalize_worker_failure": "worker_nonretryable_terminal",
+    }
+    if intent not in expected:
+        return None
+    payload = bounded_mapping(arguments.get("payload"))
+    if set(payload) != {"dispatch_ref", "reason_code"} or payload.get("reason_code") != expected[intent]:
+        return {"management_intent": intent, "terminal_cleanup": False}
+    response = public_response_mapping(result)
+    failure = response.get("failure") if isinstance(response.get("failure"), dict) else {}
+    expected_code = "bootstrap_terminal_failure" if intent == "finalize_bootstrap_failure" else "worker_terminal_failure"
+    cleanup = response.get("ok") is True or (
+        response.get("ok") is False and failure.get("code") == expected_code
+    )
+    return {"management_intent": intent, "terminal_cleanup": cleanup}
+
+
 def safe_dispatch_authorization_metadata(item: dict[str, object], result: object) -> dict[str, object] | None:
     """Retain only the count of dispatches authorized by a Cortex response.
 
@@ -710,27 +732,56 @@ def safe_dispatch_authorization_metadata(item: dict[str, object], result: object
         return None
     if not all(isinstance(dispatch, dict) for dispatch in dispatches):
         return None
-    return {"authorized_dispatch_count": len(dispatches)}
+    repair_messages = [dispatch.get("bootstrap_repair_message") for dispatch in dispatches]
+    if not all(isinstance(message, str) and message for message in repair_messages):
+        return None
+    return {
+        "authorized_dispatch_count": len(dispatches),
+        # A one-way digest proves that a later native follow-up byte-copied a
+        # server-built message without retaining a bearer-bearing payload.
+        "bootstrap_repair_message_digests": [
+            hashlib.sha256(str(message).encode("utf-8")).hexdigest()
+            for message in repair_messages
+        ],
+    }
+
+
+def safe_native_bootstrap_repair_metadata(item: dict[str, object]) -> dict[str, object] | None:
+    """Digest only a native follow-up message; never retain its text or target."""
+    if safe_tool_name(item.get("tool") or item.get("name")) not in {"followup_task", "send_input", "resume_agent"}:
+        return None
+    arguments = bounded_mapping(item.get("arguments", item.get("input")))
+    message = arguments.get("message")
+    if not isinstance(message, str) or not message:
+        return None
+    return {"bootstrap_repair_message_digest": hashlib.sha256(message.encode("utf-8")).hexdigest()}
 
 
 def safe_planning_repair_metadata(item: dict[str, object], result: object) -> dict[str, object] | None:
     """Audit planner repair call shape without retaining payload values.
 
-    The focused live repair scenario must prove that the second completion is
-    patch-only.  Inspect the transient MCP arguments and response here, then
-    retain only booleans/counts; no planning values, digest, refs, or patch
-    values are written to evaluator telemetry.
+    Focused live repair scenarios must prove that repair calls are patch-only
+    and that caller-correctable retries reissue the same pending contract.
+    Inspect transient MCP arguments and responses here, then retain only
+    booleans/counts; no plan values, digests, refs, capsules, or patch values
+    are written to evaluator telemetry.
     """
     if safe_tool_name(item.get("tool") or item.get("name")) != "complete_attempt":
         return None
     arguments = bounded_mapping(item.get("arguments", item.get("input")))
-    planning = arguments.get("planning")
+    plan = arguments.get("plan")
+    outcome = arguments.get("outcome")
     patches = arguments.get("patches")
     response = public_response_mapping(result)
-    repair = response.get("planning_repair") if isinstance(response.get("planning_repair"), dict) else {}
+    repair = response.get("repair") if isinstance(response.get("repair"), dict) else {}
     patch_paths = repair.get("patch_paths") if isinstance(repair.get("patch_paths"), list) else []
+    supplied_capsule = arguments.get("repair_capsule")
+    returned_capsule = repair.get("repair_capsule")
+    supplied_digest = arguments.get("base_payload_digest")
+    returned_digest = repair.get("base_payload_digest")
     return {
-        "has_planning": isinstance(planning, dict),
+        "has_planning": isinstance(plan, dict),
+        "has_outcome": isinstance(outcome, dict),
         "has_base_payload_digest": isinstance(arguments.get("base_payload_digest"), str)
         and bool(str(arguments.get("base_payload_digest") or "").strip()),
         "has_patches": isinstance(patches, list) and bool(patches),
@@ -739,7 +790,16 @@ def safe_planning_repair_metadata(item: dict[str, object], result: object) -> di
             isinstance(patches, list)
             and all(isinstance(patch, dict) and str(patch.get("path") or "").startswith("/") for patch in patches)
         ),
-        "repair_contract_exposed": bool(patch_paths) or repair.get("mode") == "same_attempt_patch",
+        "repair_contract_exposed": bool(patch_paths)
+        and repair.get("retry_strategy") == "repair_patch_only"
+        and repair.get("retryable") is True,
+        "same_pending_contract_reissued": (
+            isinstance(supplied_capsule, str)
+            and isinstance(returned_capsule, str)
+            and supplied_capsule == returned_capsule
+            and isinstance(supplied_digest, str)
+            and supplied_digest == returned_digest
+        ),
         "accepted": response.get("ok") is True,
     }
 
@@ -986,10 +1046,17 @@ def classified_native_outcome(value: object) -> str | None:
         if not message:
             continue
         saw_message = True
-        if message.startswith("ATTEMPT_COMPLETED attempt_result_ref="):
-            return "attempt_result_recorded"
+        if message == "ATTEMPT_COMPLETED":
+            return "attempt_completed"
+        if message == "CORTEX_ATTEMPT_FAILED retryable=false":
+            return "attempt_failed_nonretryable"
         if message.startswith("QUESTION_RECORDED question_ref="):
             return "question_recorded"
+        if re.fullmatch(
+            BOOTSTRAP_MISSING_MARKER + r" missing_fields=\[" + BOOTSTRAP_MISSING_FIELDS_PATTERN + r"\] retryable=true",
+            message,
+        ):
+            return "bootstrap_missing"
         lowered = message.lower()
         for pattern, category in NATIVE_TERMINAL_PATTERNS:
             if pattern in lowered:
@@ -1022,6 +1089,9 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
             "tool": normalized_tool if normalized_tool in SAFE_NATIVE_TOOL_NAMES else "other",
             "status": safe_status(item.get("status"), {"started", "in_progress", "completed", "failed"}),
         }
+        repair_metadata = safe_native_bootstrap_repair_metadata(item)
+        if repair_metadata is not None:
+            safe_native.update(repair_metadata)
         states = item.get("agents_states")
         native_outcome = classified_native_outcome(states)
         if native_outcome is not None:
@@ -1056,6 +1126,9 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
         question_metadata = safe_question_management_metadata(item, result)
         if question_metadata is not None:
             safe.update(question_metadata)
+        terminal_metadata = safe_terminal_management_metadata(item, result)
+        if terminal_metadata is not None:
+            safe.update(terminal_metadata)
         dispatch_metadata = safe_dispatch_authorization_metadata(item, result)
         if dispatch_metadata is not None:
             safe.update(dispatch_metadata)
@@ -1102,7 +1175,7 @@ def observed_native_lifecycle(events: list[dict[str, object]], *, workers: int =
         return False
     return all(
         operations[index:index + 3] == [
-            ("spawn_agent", None), ("wait", "attempt_result_recorded"), ("close_agent", None),
+            ("spawn_agent", None), ("wait", "attempt_completed"), ("close_agent", None),
         ]
         for index in range(0, len(operations), 3)
     )
@@ -1146,7 +1219,7 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
             if tool == "spawn_agent":
                 operation = "spawn"
             elif tool == "wait":
-                if outcome == "attempt_result_recorded":
+                if outcome == "attempt_completed":
                     operation = "wait_result"
                 elif outcome == "other_terminal_message":
                     # The native child did stop, but its retained message is
@@ -1318,6 +1391,118 @@ def safe_terminal_result_audit(
     }
 
 
+def observed_bootstrap_repair_lifecycle(
+    events: list[dict[str, object]], *, recovered: bool,
+) -> bool:
+    """Prove one zero-call bootstrap failure and at most one same-child repair.
+
+    Native telemetry intentionally exposes no child or capability values.  The
+    closed aggregate is therefore strict: one spawn, a sanitized missing-pair
+    final, one follow-up, and either the canonical successful-result route or
+    one terminal repair failure followed by server cleanup. Any public
+    Cortex call before the follow-up, replacement spawn, ambient-inspection
+    tool, second follow-up, or post-failure task call invalidates the proof.
+    """
+    operations: list[str] = []
+    server_repair_digests: set[str] = set()
+    exact_repair_copied = False
+    for event in events:
+        operation: str | None = None
+        if event.get("event") == "native_tool_call" and event.get("status") == "completed":
+            tool = str(event.get("tool") or "")
+            outcome = str(event.get("outcome") or "")
+            if tool == "spawn_agent":
+                operation = "spawn"
+            elif tool == "followup_task":
+                operation = "followup"
+                message_digest = str(event.get("bootstrap_repair_message_digest") or "")
+                exact_repair_copied = bool(message_digest and message_digest in server_repair_digests)
+            elif tool == "wait" and outcome == "bootstrap_missing":
+                operation = "bootstrap_missing"
+            elif tool == "wait" and outcome == "other_terminal_message":
+                operation = "bootstrap_invalid"
+            elif tool == "wait" and outcome == "attempt_completed":
+                operation = "wait_result"
+            elif tool == "wait" and not outcome:
+                continue
+            elif tool == "close_agent":
+                operation = "close"
+            else:
+                operation = "native_other"
+        elif event.get("event") == "cortex_mcp_call" and event.get("status") == "completed":
+            tool = str(event.get("tool") or "")
+            if tool == "start_orchestration" and not operations:
+                digests = event.get("bootstrap_repair_message_digests")
+                if isinstance(digests, list):
+                    server_repair_digests.update(
+                        str(digest) for digest in digests
+                        if re.fullmatch(r"[0-9a-f]{64}", str(digest))
+                    )
+                continue
+            if tool == "read_worker_result" and event.get("ok") is True:
+                operation = "read_result"
+            elif tool == "continue_orchestration" and event.get("ok") is True:
+                operation = "continue"
+            elif (
+                tool == "manage_orchestration"
+                and event.get("management_intent") == "finalize_bootstrap_failure"
+                and (event.get("terminal_cleanup") is True or event.get("ok") is True)
+            ):
+                operation = "finalize_bootstrap_failure"
+            else:
+                operation = "cortex_other"
+        if operation is not None:
+            operations.append(operation)
+
+    if recovered:
+        expected = ["spawn", "bootstrap_missing", "followup", "wait_result", "read_result", "continue", "close"]
+        return operations == expected and exact_repair_copied
+    # The exact second missing marker and any malformed/gate-ack terminal both
+    # require the one server-owned cleanup. No result read is legal.
+    return (
+        operations in (
+            ["spawn", "bootstrap_missing", "followup", "bootstrap_missing", "finalize_bootstrap_failure"],
+            ["spawn", "bootstrap_missing", "followup", "bootstrap_missing", "finalize_bootstrap_failure", "close"],
+            ["spawn", "bootstrap_missing", "followup", "bootstrap_invalid", "finalize_bootstrap_failure"],
+            ["spawn", "bootstrap_missing", "followup", "bootstrap_invalid", "finalize_bootstrap_failure", "close"],
+        )
+        and exact_repair_copied
+    )
+
+
+def observed_worker_failure_lifecycle(events: list[dict[str, object]]) -> bool:
+    """Require exact nonretryable child final -> one server cleanup and stop."""
+    operations: list[str] = []
+    for event in events:
+        operation: str | None = None
+        if event.get("event") == "native_tool_call" and event.get("status") == "completed":
+            tool = str(event.get("tool") or "")
+            if tool == "spawn_agent":
+                operation = "spawn"
+            elif tool == "wait" and event.get("outcome") == "attempt_failed_nonretryable":
+                operation = "attempt_failed_nonretryable"
+            elif tool == "close_agent":
+                operation = "close"
+            elif tool in {"followup_task"}:
+                operation = "forbidden_native"
+        elif event.get("event") == "cortex_mcp_call" and event.get("status") == "completed":
+            tool = str(event.get("tool") or "")
+            if (
+                tool == "manage_orchestration"
+                and event.get("management_intent") == "finalize_worker_failure"
+                and event.get("terminal_cleanup") is True
+            ):
+                operation = "finalize_worker_failure"
+            elif tool in {"read_worker_result", "continue_orchestration"}:
+                operation = "forbidden_cortex"
+        if operation is not None:
+            operations.append(operation)
+    return operations in (
+        ["spawn", "attempt_failed_nonretryable", "finalize_worker_failure"],
+        ["spawn", "attempt_failed_nonretryable", "finalize_worker_failure", "close"],
+    )
+
+
 def observed_question_resume_lifecycle(events: list[dict[str, object]]) -> bool:
     """Prove answer-before-follow-up ordering from privacy-safe live telemetry.
 
@@ -1345,7 +1530,7 @@ def observed_question_resume_lifecycle(events: list[dict[str, object]]) -> bool:
                 operation = "close"
             elif tool == "wait" and outcome == "question_recorded":
                 operation = "wait_question"
-            elif tool == "wait" and outcome == "attempt_result_recorded":
+            elif tool == "wait" and outcome == "attempt_completed":
                 operation = "wait_result"
             elif tool == "wait" and outcome:
                 operation = "wait_other_terminal"
@@ -1785,9 +1970,9 @@ def run_live_command(
             if is_gates_recorded_lifecycle_failure(safe_event):
                 # A normal continuation is server-derived.  Once Cortex has
                 # recorded a gate but rejected the successor preparation, the
-                # evaluator has no authority to reconstruct future_waves or
-                # rework.  Stop the native parent before it can mutate the
-                # task with speculative recovery calls.
+                # evaluator has no authority to reconstruct later pipeline
+                # work. Stop the native parent before it can mutate the task
+                # with speculative recovery calls.
                 termination_reason = "gates_recorded_public_failure"
             return
         # Preserve observability without exposing arbitrary host diagnostics.
@@ -2032,7 +2217,7 @@ def canonical_attempt_result_records(
 
 
 def canonical_results_are_strict(records: list[dict[str, object]]) -> bool:
-    """Validate the fresh semantic AttemptResult transport used by v10."""
+    """Validate the fresh semantic AttemptResult transport used by v11."""
     required = {"status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
     return bool(records) and all(
         isinstance(record.get("result"), dict)
@@ -2105,58 +2290,61 @@ def scoping(label: str) -> dict[str, object]:
 def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
     if not current.get("ok"):
         raise AssertionError(current)
+    coordinator_ref = str(current.get("coordinator_ref") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", coordinator_ref):
+        raise AssertionError("start response omitted its coordinator capability")
     while current.get("outcome") != "completed":
         if current.get("outcome") == "awaiting_plan_approval":
             prompt = cortex.manage_orchestration({
-                "project_root": str(project),
                 "task_ref": current["task_ref"],
+                "coordinator_ref": coordinator_ref,
                 "intent": "plan_approval",
                 "payload": {"decision": "prompt"},
             })
-            interaction = prompt.get("plan_approval_interaction") or {}
-            approve = next((action for action in interaction.get("actions", []) if action.get("id") == "approve"), None)
-            if not isinstance(approve, dict) or not isinstance(approve.get("arguments"), dict):
-                raise AssertionError(f"plan approval interaction omitted its Approve action: {prompt}")
-            current = cortex.manage_orchestration(approve["arguments"])
+            decision = prompt.get("decision") or {}
+            request_id = str(decision.get("request_id") or "")
+            if prompt.get("outcome") != "plan_approval" or not request_id:
+                raise AssertionError("plan approval response omitted its bounded decision receipt")
+            current = cortex.manage_orchestration({
+                "task_ref": current["task_ref"],
+                "coordinator_ref": coordinator_ref,
+                "intent": "plan_approval",
+                "payload": {"decision": "approve", "request_id": request_id},
+            })
             if not current.get("ok"):
                 raise AssertionError(current)
             continue
         dispatches = current.get("dispatches") or []
-        parallel = len(dispatches) > 1
         ledger = cortex.ledger_root({"project_root": str(project)})
         registry = cortex._operation_registry(ledger)
         task_id = next(
             candidate for candidate, record in registry["tasks"].items()
             if record.get("start", {}).get("task_ref") == current["task_ref"]
         )
-        task_dir, state, _ = cortex._v3_task_state(ledger, task_id)
+        task_dir, state, _ = cortex._v11_task_state(ledger, task_id)
         task_definition = cortex.load_task_definition(task_dir, state)
         active_attempts = [
             item for item in state["attempts"]
             if item.get("status") not in cortex.TERMINAL_ATTEMPT_STATUSES
             and item.get("gate") in cortex.active_gates(state)
         ][-len(dispatches):]
-        results = []
         for worker, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
             label = f"step {current['step']} worker {worker}"
-            # Source-mode fixture calls use the same immutable worker-bound
-            # channel as the public worker MCP surface.
-            worker_context = cortex.worker_binding({
-                "project_root": str(project),
-                "task_id": state["task_id"],
-                "task_ref": current["task_ref"],
-                "attempt_id": attempt["attempt_id"],
-                "profile": attempt["profile"],
-                "dispatch_ref": attempt["dispatch_ref"],
-                "briefing_digest": attempt["briefing_digest"],
-            })
-            worker_context.__enter__()
+            message = str(((dispatch.get("arguments") or {}).get("message")) or "")
+            assignment_refs = re.findall(r"assignment-v1-[0-9a-f]{64}", message)
+            if len(set(assignment_refs)) != 1:
+                raise AssertionError("native dispatch omitted its single worker assignment capability")
+            assignment_ref = assignment_refs[0]
             briefing_read = cortex.read_dispatch_briefing({
+                "task_ref": current["task_ref"],
+                "assignment_ref": assignment_ref,
             })
             if not briefing_read.get("ok"):
                 raise AssertionError(briefing_read)
             for predecessor_ref in attempt.get("context_result_refs") or []:
                 predecessor_read = cortex.read_worker_result({
+                    "task_ref": current["task_ref"],
+                    "assignment_ref": assignment_ref,
                     "attempt_result_ref": predecessor_ref,
                 })
                 if not predecessor_read.get("ok"):
@@ -2181,29 +2369,45 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                     evidence.append(f"Task verification {index}: PASS - Final deterministic fixture check completed with exit code zero.")
             evidence.append("Dispatch briefing reviewed: " + str(attempt["briefing_digest"]))
             publication: dict[str, object] = {
-                "status": "completed",
-                "summary": worker_result["summary"],
-                "findings": worker_result["findings"],
-                "decisions_needed": worker_result["decisions_needed"],
-                "unresolved": worker_result["unresolved"],
+                "task_ref": current["task_ref"],
+                "assignment_ref": assignment_ref,
             }
             if attempt.get("gate") == "plan":
                 # Server-owned diagnostic recovery dispatches a real Planner
                 # attempt.  Publish the required planning payload so the
                 # fixture exercises the same contract as a native worker;
                 # no coordinator-side recovery or management loop is needed.
-                publication["planning"] = planning(label)
+                publication["plan"] = planning(label)
+            else:
+                publication["outcome"] = {
+                    "status": "completed",
+                    "summary": worker_result["summary"],
+                    "findings": worker_result["findings"],
+                    "decisions_needed": worker_result["decisions_needed"],
+                    "unresolved": worker_result["unresolved"],
+                }
             published = cortex.complete_worker_attempt(publication)
             if not published.get("ok"):
                 raise AssertionError(published)
-            worker_context.__exit__(None, None, None)
-            value: dict[str, object] = {"attempt_result_ref": published["attempt_result_ref"]}
-            if parallel:
-                value["worker"] = worker
-            results.append(value)
+            # Completion is deliberately compact: the child no longer
+            # receives or transports an attempt_result_ref.  The coordinator
+            # must ask Cortex to derive the complete current wave from its
+            # canonical ledger state after every worker has completed.
+        canonical_read = cortex.read_worker_result({
+            "task_ref": current["task_ref"],
+            "coordinator_ref": coordinator_ref,
+            "step": current["step"],
+        })
+        if not canonical_read.get("ok"):
+            raise AssertionError(canonical_read)
+        continuation = canonical_read.get("continuation")
+        if not isinstance(continuation, dict):
+            raise AssertionError("coordinator result read omitted its server-derived continuation")
         current = cortex.continue_orchestration({
             "task_ref": current["task_ref"],
-            "step": current["step"], "results": results,
+            "coordinator_ref": coordinator_ref,
+            "step": continuation.get("step"),
+            "results": continuation.get("results"),
         })
         if not current.get("ok"):
             raise AssertionError(current)
@@ -2242,29 +2446,7 @@ def _fixture_eval(base: Path) -> list[dict[str, object]]:
     completed = finish(parallel, current)
     scenarios.append({"name": "compact_parallel", "outcome": completed["outcome"]})
 
-    blocked = base / "blocked"
-    blocked.mkdir()
-    current = cortex.start_orchestration({
-        "project_root": str(blocked),
-        "task": {**task("blocked resume Luna fixture", "C1"), "plan_approval": "auto"},
-        "waves": [{"workers": [{"phase": "discover"}]}],
-    })
-    blocked_result = cortex.continue_orchestration({
-        "task_ref": current["task_ref"], "step": current["step"],
-        "results": [{
-            "status": "blocked",
-            "reason": "fixture dependency unavailable",
-            "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
-        }],
-    })
-    if blocked_result.get("outcome") != "ready_to_spawn" or blocked_result.get("requires_user_decision"):
-        raise AssertionError(blocked_result)
-    # Technical worker failure is repaired by the server-owned Planner route
-    # returned above; no management loop or user decision is needed.
-    completed = finish(blocked, blocked_result)
-    scenarios.append({"name": "blocked_resume", "outcome": completed["outcome"]})
-
-    for project in (sequential, parallel, blocked):
+    for project in (sequential, parallel):
         task_dir = canonical_task_directories(project)[0]
         state = cortex.load_task_state_for_artifact(task_dir)
         ledger = cortex.ledger_root({"project_root": str(project)})
@@ -2341,33 +2523,36 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         )
     if scenario == "bootstrap_missing_inputs":
         return (
-            "You are the live Cortex parent for one isolated bootstrap-question smoke. There is no existing task. "
+            "You are the live Cortex parent for one isolated worker-bootstrap recovery smoke. There is no existing task. "
             "Your FIRST and only initial lifecycle action MUST be one public Cortex MCP call: start_orchestration. "
             "Do not call continue_orchestration, manage_orchestration, read_worker_result, a native host tool, or inspect "
             "the project before that successful start. Call start_orchestration exactly once with project_root="
             f"{project}, task=<cortex_task_contract>, and waves=<cortex_initial_waves>. "
-            "<cortex_task_contract>{\"user_request\":\"Create result.md only after the user supplies the required "
-            f"{BOOTSTRAP_MISSING_INPUT_NAME} value. This required acceptance and verification evidence is intentionally "
-            "absent from the immutable dispatch briefing, so the worker must validate bootstrap inputs and ask before "
-            "any project operation.\",\"complexity\":\"C1\",\"acceptance_criteria\":[\"The required "
-            f"{BOOTSTRAP_MISSING_INPUT_NAME} evidence is supplied through one durable bootstrap question before project work.\","
-            "\"result.md contains exactly one line: Bootstrap fixture approved.\"],\"verification\":[\"Verify the "
-            f"durable question identifies missing {BOOTSTRAP_MISSING_INPUT_NAME} and why it is required acceptance/verification evidence.\","
-            "\"Read result.md and verify its exact one-line content after the same worker resumes.\"],\"plan_approval\":\"auto\"}</cortex_task_contract> "
+            "<cortex_task_contract>{\"user_request\":\"Create result.md only after the same native worker receives its "
+            "server-issued bootstrap capability pair through the one allowed recovery follow-up.\",\"complexity\":\"C1\","
+            "\"acceptance_criteria\":[\"The initial worker makes zero Cortex and project calls when its bootstrap pair is missing.\","
+            "\"Exactly one same-child followup_task byte-copies the original server-built bootstrap repair message.\","
+            "\"result.md contains exactly one line: Bootstrap pair recovered.\"],\"verification\":[\"Audit one spawn, one "
+            "sanitized CORTEX_WORKER_BOOTSTRAP_MISSING final, one same-child followup, and no replacement spawn or ambient "
+            "reconstruction.\",\"Read result.md and verify its exact one-line content only after recovery.\"],"
+            "\"plan_approval\":\"auto\"}</cortex_task_contract> "
             "<cortex_initial_waves>[{\"workers\":[{\"phase\":\"implementation\",\"profile\":\"general\","
-            "\"objective\":\"Before any project action or non-Cortex tool, validate all immutable briefing inputs. "
-            f"{BOOTSTRAP_MISSING_INPUT_NAME} is intentionally absent and is required acceptance/verification evidence: ask exactly one "
-            "durable text worker_question that names that input and why it is material, then stop. After the answer, poll "
-            "the same question, rerun complete bootstrap validation, create result.md containing only Bootstrap fixture approved. "
-            "and record the strict result.\",\"allowed_paths\":[\"result.md\"]}]}]</cortex_initial_waves>. "
-            "Spawn only the returned worker and wait. Its first terminal response must start with QUESTION_RECORDED; do not let it "
-            "perform project work before that. Route exactly that durable question with manage_orchestration intent=question and its "
-            "exact returned question_ref. Then submit only the same durable question_ref with command=answer and the supplied text answer "
-            f"{BOOTSTRAP_MISSING_INPUT_NAME}={BOOTSTRAP_MISSING_INPUT_ANSWER}. Do not call followup_task until that answer call returns "
-            "outcome=question_answered and the server next_action explicitly requires the exact same native worker, followup_task, and "
-            "worker_question(action=poll) with the same question. Use only that server resume contract and the original child target to "
-            "resume the same child. Wait again; accept the resumed child only when it starts with ATTEMPT_COMPLETED, then read its result, "
-            "continue the current step with only the server-provided continuation for its attempt_result_ref, and require a successful "
+            "\"objective\":\"Apply the bootstrap gate before any Cortex or project call. After the exact capability pair is present, "
+            "read the briefing, create result.md containing only Bootstrap pair recovered., verify it, and complete the attempt.\","
+            "\"allowed_paths\":[\"result.md\"]}]}]</cortex_initial_waves>. "
+            "This is a bounded transport-fault fixture: retain the exact server-generated bootstrap_repair_message privately, but omit assignment_ref only from the first native spawn message so the child must make zero "
+            "Cortex/project calls and return exactly `CORTEX_WORKER_BOOTSTRAP_MISSING "
+            "missing_fields=[assignment_ref] retryable=true` without capability values. Do not use worker_question, "
+            "manage_orchestration, a session, environment, thread, path, database, hook, or project read to repair it. "
+            "Call followup_task exactly once for that same native child, byte-copying the exact original bootstrap_repair_message unchanged. "
+            "With both repaired refs valid, the child must emit no gate-passed acknowledgement: it immediately calls "
+            "read_dispatch_briefing with the exact pair, consumes the complete briefing, and continues the original assignment "
+            "through complete_attempt to exactly ATTEMPT_COMPLETED. Any gate-passed prose final is a nonterminal protocol failure. "
+            "Never spawn a replacement. Wait again. If the same child reports a still missing or invalid pair, make no second follow-up "
+            "and call manage_orchestration finalize_bootstrap_failure exactly once with the original structured dispatch_ref; never read a worker result. "
+            "Apply that same cleanup to gate-passed prose, malformed terminal output, or termination without canonical progress, so no resumable orphan remains. On successful same-child recovery, "
+            "accept only ATTEMPT_COMPLETED, then read the complete current-wave results as coordinator using only the current server step, "
+            "continue with only the server-provided continuation, and require a successful "
             "server continuation/terminal audit before closing that completed child. Stop after that continuation response; do not execute "
             "any successor dispatch. Never use a private Cortex API or create another worker."
         )
@@ -2381,8 +2566,8 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "Read every ref with read_worker_result and advance only from its server-provided continuation object: verify its task_id matches the active task, "
         "then copy its step and results verbatim alongside the existing project_root and task_ref. Never reconstruct a continuation from a projection, summary, "
         "result reference, dispatch reference, or remembered step; if the read response provides no legal continuation object, do not call continue_orchestration. If a "
-        "public lifecycle call is rejected after gates are recorded, stop the scenario and retain only the safe machine classification; never call recovery, add future_waves, "
-        "or set rework in response. Except for the single explicitly prescribed blocked_resume reassessment fixture, do not send future_waves, reason, or rework at all. After a durable result was read and no "
+        "public lifecycle call is rejected after gates are recorded, stop the scenario and retain only the safe machine classification; never call recovery, alter later pipeline work, "
+        "or set rework in response. Do not send a self-authored reason or rework field. After a durable result was read and no "
         "question or follow-up remains for that child, require the successful server-derived continuation/terminal audit from "
         "continue_orchestration, then close the completed native child with close_agent before "
         "dispatching a later wave; never close a running or question-paused child. Before every new spawn, FIRST close every known "
@@ -2478,7 +2663,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "tool call is every returned dispatch.call with its exact arguments. A native wait is legal only immediately "
             "after a successful native dispatch and must use the new child target returned by that exact dispatch. Never "
             "reuse a closed child target, never call continue_orchestration twice for one step, never request artifacts "
-            "or add future_waves after an accepted continuation, and never call wait without the child target returned "
+            "or alter later pipeline work after an accepted continuation, and never call wait without the child target returned "
             "by the immediately preceding native dispatch. If Cortex returns retryable=false for task identity or step "
             "mismatch, stop the scenario immediately; do not retry continue, inspect broadly, or synthesize a recovery. "
             "Governance reviewers must follow their immutable "
@@ -2564,29 +2749,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "invoke every returned implementation dispatch in order. Implementation creates result.md. Do not bypass "
             "approval or edit .codex/cortex."
         )
-    return common + (
-        "Exercise a deterministic future-wave reassessment without manufacturing a blocker. "
-        "<cortex_task_contract>"
-        "{\"user_request\":\"Inspect README.md, then create result.md containing exactly one line: Reassessment fixture completed.\","
-        "\"complexity\":\"C2\","
-        "\"acceptance_criteria\":[\"README.md is inspected before result.md is created.\","
-        "\"result.md contains exactly one line: Reassessment fixture completed.\","
-        "\"The final handoff identifies result.md and the verification evidence.\"],"
-        "\"verification\":[\"Read README.md and result.md, then verify the exact result.md content.\","
-        "\"Inspect the resulting diff or equivalent file evidence.\"],"
-        "\"plan_approval\":\"auto\"}"
-        "</cortex_task_contract> "
-        "Call start_orchestration with that exact task and these exact initial waves: "
-        "[{\"workers\":[{\"phase\":\"discover\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
-        "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"close\"}]}]. "
-        "After the discover result is read and its completed child is closed, call continue_orchestration for that "
-        "wave with its exact task_ref, step, and attempt_result_ref result plus future_waves exactly "
-        "[{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
-        "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"close\"}]}] and reason exactly "
-        "'Discovery confirms result.md must be created, so add implementation before documentation.' Do not set "
-        "rework. This one replacement must create the reassessment evidence; after it, follow the returned pipeline "
-        "normally and do not replace future waves again."
-    )
+    raise ValueError(f"unsupported v11 live-evaluator scenario: {scenario}")
 
 
 def _live_eval(
@@ -2598,7 +2761,7 @@ def _live_eval(
         return [{"status": "SKIP", "reason": "codex runtime unavailable; no live evidence"}]
     results: list[dict[str, object]] = []
     for scenario in scenarios or (
-        "automatic_sequential", "compact_parallel", "blocked_resume",
+        "automatic_sequential", "compact_parallel",
         "planner_work_breakdown", "planner_patch_repair", "automatic_governance",
     ):
         project = base / f"live-{scenario}"
@@ -2621,9 +2784,12 @@ def _live_eval(
                 cortex.load_task_definition(source_dir),
                 cortex.load_task_state_for_artifact(source_dir),
             )
+        # This is a private development source evaluator, not installed-plugin
+        # validation.  It must never use the destructive approval/sandbox
+        # bypass; installed evidence uses its separately audited CLI shape.
         command = [
             codex, "exec", "--json", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox", "-C", str(project),
+            "-C", str(project),
             "-m", "gpt-5.6-luna", "-c", 'model_reasoning_effort="high"',
             "-c", f'mcp_servers.cortex.command="{sys.executable}"',
             # Codex starts stdio MCP servers with their declared server
@@ -2747,7 +2913,6 @@ def _live_eval(
                 continue
             attempts_by_wave.setdefault(str(attempt.get("orchestration_wave_id") or ""), set()).add(str(attempt.get("gate") or ""))
         parallel_exercised = any(len(gates) > 1 for gates in attempts_by_wave.values())
-        adaptive_exercised = bool(state.get("resume_events")) or len(state.get("reassessment_receipts", [])) > 1 or bool(state.get("pipeline_changes"))
         close_evidence = any(
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
@@ -2806,8 +2971,6 @@ def _live_eval(
             # from transport echoes.  Do not let an aggregate result count
             # masquerade as an exact per-child terminal audit.
             checks["parallel_native_identity_verifiable"] = False
-        if scenario == "blocked_resume":
-            checks["resume_or_reassessment_exercised"] = adaptive_exercised
         if scenario == "automatic_sequential":
             checks["decision_complete_fixture_has_no_questions"] = (
                 sequential_question_audit["no_unexpected_questions"] is True
@@ -2967,51 +3130,25 @@ def _live_eval(
                 "no_failed_public_calls": not failed_public_calls,
             }
         if scenario == "bootstrap_missing_inputs":
-            question_records = cortex._question_records(cortex.question_bus_paths(task_dir), state)
-            matching_questions = [
-                record for record in question_records
-                if BOOTSTRAP_MISSING_INPUT_NAME in str(record.get("question") or "")
-            ]
-            question = matching_questions[0] if len(matching_questions) == 1 else {}
-            result_attempt_ids = {
-                str(record.get("attempt_id") or "") for record in result_records
-            }
-            question_text = str(question.get("question") or "").lower()
             checks = {
                 "process_ok": streamed["returncode"] == 0,
                 "used_one_start": completed_tool_names.count("start_orchestration") == 1,
-                # The worker's own MCP call is scoped to its native stream,
-                # not the parent stream captured here.  The durable answered
-                # record plus both public root management calls proves route
-                # selection and answer submission without inventing a parent
-                # worker_question event.
-                "used_question_route": completed_tool_names.count("manage_orchestration") >= 2,
-                "used_followup": "followup_task" in completed_native_tool_names,
+                "one_native_spawn": completed_native_tool_names.count("spawn_agent") == 1,
+                "one_same_child_repair": completed_native_tool_names.count("followup_task") == 1,
+                "no_question_or_management_route": (
+                    not question_records
+                    and "worker_question" not in completed_tool_names
+                    and "manage_orchestration" not in completed_tool_names
+                ),
+                "no_replacement_or_ambient_native_route": (
+                    completed_native_tool_names.count("spawn_agent") == 1
+                    and completed_native_tool_names.count("followup_task") == 1
+                    and not ({"send_message", "interrupt_agent", "list_agents"} & set(completed_native_tool_names))
+                ),
                 "avoided_private_tools": "orchestrate" not in tool_names,
                 "single_task": len(task_dirs) == 1,
-                "one_answered_missing_input_question": (
-                    len(question_records) == 1
-                    and len(matching_questions) == 1
-                    and question.get("status") == "answered"
-                    and str(question.get("answer_text") or "") == f"{BOOTSTRAP_MISSING_INPUT_NAME}={BOOTSTRAP_MISSING_INPUT_ANSWER}"
-                ),
-                "question_names_missing_input_and_reason": (
-                    BOOTSTRAP_MISSING_INPUT_NAME in question_text
-                    and any(word in question_text for word in ("acceptance", "verification", "evidence", "required"))
-                ),
-                "same_attempt_question_and_result": (
-                    str(question.get("attempt_id") or "") in result_attempt_ids
-                ),
-                "question_events_resolved_same_attempt_before_result": (
-                    question_resolution_audit["question_attempt_count"] == 1
-                    and question_resolution_audit["question_created_count"] == 1
-                    and question_resolution_audit["question_answered_count"] == 1
-                    and question_resolution_audit["decision_resolved_count"] == 1
-                    and question_resolution_audit["resolved_before_result_count"] == 1
-                    and question_resolution_audit["all_question_attempts_resolved_before_result"] is True
-                ),
-                "bootstrap_result_created_after_answer": (
-                    (project / "result.md").read_text(encoding="utf-8") == "Bootstrap fixture approved.\n"
+                "bootstrap_result_created_after_repair": (
+                    (project / "result.md").read_text(encoding="utf-8") == BOOTSTRAP_RECOVERY_RESULT + "\n"
                     if (project / "result.md").is_file() else False
                 ),
                 "strict_worker_result": strict_results and len(result_records) == 1,
@@ -3024,7 +3161,7 @@ def _live_eval(
                     and native_terminal_audit["spawned_worker_observations"] == 1
                     and streamed["dropped_stream_events"] == 0
                 ),
-                "native_question_resume_lifecycle": observed_question_resume_lifecycle(events),
+                "native_bootstrap_repair_lifecycle": observed_bootstrap_repair_lifecycle(events, recovered=True),
                 "no_failed_public_calls": not failed_public_calls,
             }
         passed = all(checks.values())
@@ -3126,10 +3263,13 @@ def live_eval(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--live", action="store_true", help="run the real gpt-5.6-luna high parent scenarios")
+    parser.add_argument(
+        "--live", action="store_true",
+        help="run bounded source-mode Luna-high scenarios; never installed-plugin evidence",
+    )
     parser.add_argument(
         "--scenario", choices=(
-            "automatic_sequential", "compact_parallel", "blocked_resume",
+            "automatic_sequential", "compact_parallel",
             "planner_work_breakdown", "planner_patch_repair", "automatic_governance", "follow_up_partial",
             "bootstrap_missing_inputs",
         ),

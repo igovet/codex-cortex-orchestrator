@@ -1,4 +1,4 @@
-"""Focused acceptance coverage for the v10 governance ledger and resolver."""
+"""Focused acceptance coverage for the v11 governance ledger and resolver."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -213,21 +213,33 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         })
         self.assertTrue(started["ok"], started)
         activation = started["dispatches"][0]
-        self.assertEqual(activation["phase"], "implementation")
-        briefing = Path(activation["briefing_path"]).read_text(encoding="utf-8")
+        self.assertEqual(activation["call"], "spawn_agent")
+        ledger = cortex.ledger_root({"project_root": str(project)})
+        task_dir = next((ledger / "tasks").iterdir())
+        state = cortex.load_task_state_for_artifact(task_dir)
+        attempt = next(item for item in state["attempts"] if item.get("gate") == "implementation")
+        briefing = (task_dir / str(attempt["briefing_file"])).read_text(encoding="utf-8")
         self.assertIn("Prompt volume targets are advisory worker guidance only", briefing)
-        route = [
-            "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>",
-            "Answer=>followup_task same child",
-            "poll same ref/attempt first",
-            "Answered=>record_attempt_event",
-            "rerun, complete_attempt",
-            "ATTEMPT_COMPLETED attempt_result_ref=<generated id>",
+        briefing_route = [
+            "Ask worker_question only for an explicit requirement",
+            "Record material evidence before completion",
+            "complete_attempt ok=true terminal=true ends all task-scoped calls",
+            "Return exactly ATTEMPT_COMPLETED",
         ]
-        positions = [briefing.index(marker) for marker in route]
+        positions = [briefing.index(marker) for marker in briefing_route]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("Pending=>QUESTION_RECORDED", briefing)
-        self.assertIn("No OTHER_TERMINAL/freeform/replacement", briefing)
+
+        # The full static resume sequence now lives once in the installed
+        # profile contract instead of being repeated in every worker briefing.
+        profiles = json.loads((Path(cortex.__file__).parents[1] / "profiles.json").read_text(encoding="utf-8"))
+        question_route = profiles["shared_worker_contract"]["question_resume_contract"]
+        route = [
+            "worker_question(action=ask)", "QUESTION_RECORDED", "followup_task",
+            "worker_question({action:'poll'", "record_attempt_event", "complete_attempt",
+            "pending poll returns QUESTION_RECORDED", "no OTHER_TERMINAL",
+        ]
+        route_positions = [question_route.index(marker) for marker in route]
+        self.assertEqual(route_positions, sorted(route_positions))
 
     def test_minimal_and_light_modes_preserve_the_existing_pipeline(self) -> None:
         ordinary = [{"wave_id": "wave-01", "delegations": [{"gate": "implementation", "agent": "general"}]}]
@@ -254,23 +266,34 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 }
             )
 
+        def durable(project: Path) -> tuple[dict[str, object], dict[str, object]]:
+            ledger = cortex.ledger_root({"project_root": str(project)})
+            task_dir = next((ledger / "tasks").iterdir())
+            state = cortex.load_task_state_for_artifact(task_dir)
+            return state, cortex._load_orchestrate_plan(task_dir, state)
+
         c2_off = start(Path(self.temp.name) / "c2-off", "Write a plain plan.", "C2", "off")
         self.assertTrue(c2_off["ok"], c2_off)
-        self.assertTrue(c2_off["governance"]["policy_advisory"])
-        self.assertEqual(c2_off["governance"]["chosen_mode"], "minimal")
-        c3 = start(Path(self.temp.name) / "c3", "Review a high-impact change.", "C3", "auto")
+        c2_state, _ = durable(Path(self.temp.name) / "c2-off")
+        self.assertTrue(c2_state["governance"]["policy_advisory"])
+        self.assertEqual(c2_state["governance"]["chosen_mode"], "minimal")
+        c3_path = Path(self.temp.name) / "c3"
+        c3 = start(c3_path, "Review a high-impact change.", "C3", "auto")
         self.assertTrue(c3["ok"], c3)
-        self.assertEqual(c3["governance"]["chosen_mode"], "full")
+        c3_state, c3_plan = durable(c3_path)
+        self.assertEqual(c3_state["governance"]["chosen_mode"], "full")
         self.assertEqual(
-            [wave["workers"][0]["phase"] for wave in c3["pipeline"]["waves"] if wave["workers"]],
+            [wave["delegations"][0]["gate"] for wave in c3_plan["waves"] if wave["delegations"]],
             ["scope", "discover", "architecture", "plan", "implementation", "qa", "review", "documentation", "close"],
         )
-        triggered = start(Path(self.temp.name) / "triggered", "Rotate an API key.", "C1", "auto")
+        triggered_path = Path(self.temp.name) / "triggered"
+        triggered = start(triggered_path, "Rotate an API key.", "C1", "auto")
         self.assertTrue(triggered["ok"], triggered)
-        self.assertEqual(triggered["governance"]["chosen_mode"], "full")
-        required = start(Path(self.temp.name) / "required", "Write a plain note.", "C1", "required")
+        self.assertEqual(durable(triggered_path)[0]["governance"]["chosen_mode"], "full")
+        required_path = Path(self.temp.name) / "required"
+        required = start(required_path, "Write a plain note.", "C1", "required")
         self.assertTrue(required["ok"], required)
-        self.assertEqual(required["governance"]["chosen_mode"], "full")
+        self.assertEqual(durable(required_path)[0]["governance"]["chosen_mode"], "full")
 
     def test_public_auto_governance_waves_keep_integer_relative_steps(self) -> None:
         project = Path(self.temp.name) / "auto-governance-relative-steps"
@@ -293,15 +316,19 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
             }
         )
         self.assertTrue(started["ok"], started)
-        self.assertEqual(started["requested_mode"], "auto")
-        self.assertEqual(started["governance"]["chosen_mode"], "full")
         self.assertEqual(started["step"], 1)
+        ledger = cortex.ledger_root({"project_root": str(project)})
+        task_dir = next((ledger / "tasks").iterdir())
+        state = cortex.load_task_state_for_artifact(task_dir)
+        plan = cortex._load_orchestrate_plan(task_dir, state)
+        self.assertEqual(state["governance"]["requested_mode"], "auto")
+        self.assertEqual(state["governance"]["chosen_mode"], "full")
         self.assertEqual(
-            [wave["wave"] for wave in started["pipeline"]["waves"]],
-            [1, 2, 3],
+            [wave["wave_id"] for wave in plan["waves"]],
+            ["wave-01", "wave-02", "wave-03"],
         )
         self.assertEqual(
-            [wave["workers"][0]["phase"] for wave in started["pipeline"]["waves"]],
+            [wave["delegations"][0]["gate"] for wave in plan["waves"]],
             [
                 "implementation",
                 "documentation",
@@ -788,21 +815,11 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         evidence["independent_review"].update(
             {"reviewer_identity": "reviewer-1"}
         )
-        with self.assertRaisesRegex(governance.GovernanceError, "independent review"):
-            governance.transition_initiative(
-                self.root,
-                initiative_ref=initiative["initiative_ref"],
-                status="closed",
-                evidence=evidence,
-            )
-        ledger_db.put_worker_session(self.root, {
-            "task_id": "task-203",
-            "attempt_id": "governance-close-1",
-            "host_agent_id": "reviewer-1",
-            "host_task_name": "code_reviewer_repository_1",
-            "host_tool": "spawn_agent",
-            "status": "completed",
-        })
+        with ledger_db.connection(self.root) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM worker_sessions WHERE task_id=? AND attempt_id=?",
+                ("task-203", "governance-close-1"),
+            ).fetchone())
         closed = governance.transition_initiative(
             self.root,
             initiative_ref=initiative["initiative_ref"],

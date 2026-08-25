@@ -117,16 +117,6 @@ def main() -> int:
         if installed_agents != EXPECTED_AGENT_FILES or installed_skills != EXPECTED_SKILLS:
             raise SystemExit("fresh plugin probe: installed agent profiles or skills are incomplete")
         cortex_skill = (cache / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-        route_contract = (
-            "| `empty` | `orchestrate` |",
-            "| `help` | `help` |",
-            "| `harvest` | `harvest` |",
-            "| `harvest-refresh` | `harvest-refresh` |",
-            "| `normal` | `normal` |",
-        )
-        skill_lines = cortex_skill.splitlines()
-        if not all(any(line.startswith(route) for line in skill_lines) for route in route_contract):
-            raise SystemExit("fresh plugin probe: installed Cortex route contract is incomplete")
         if "`cortex:orchestrator`" not in cortex_skill or "`$cortex:orchestrator`" not in cortex_skill:
             raise SystemExit("fresh plugin probe: installed Cortex native invocation help is incomplete")
         mcp_manifest = json.loads((cache / ".mcp.json").read_text(encoding="utf-8"))
@@ -146,7 +136,7 @@ def main() -> int:
             for registration in registrations
             for hook in registration.get("hooks", [])
         ]
-        if len(hook_commands) != 6 or any(
+        if len(hook_commands) != 5 or any(
             '"${PLUGIN_ROOT}/scripts/cortex-launcher"' not in command
             or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
             for command in hook_commands
@@ -219,7 +209,11 @@ def main() -> int:
             environment,
             workspace,
             "manage_orchestration",
-            {"task_ref": created["task_ref"], "intent": "inspect"},
+            {
+                "task_ref": created["task_ref"],
+                "coordinator_ref": created["coordinator_ref"],
+                "intent": "inspect",
+            },
             include_project_root=False,
         )
         task = cortex.load_task_definition(expected_task)
@@ -236,8 +230,8 @@ def main() -> int:
         if (
             not confirmed.get("ok")
             or task.get("project_root") != str(workspace)
-            or task.get("schema") != "cortex/v8"
-            or state.get("schema") != "cortex/v8"
+            or task.get("schema") != "cortex/v11"
+            or state.get("schema") != "cortex/v11"
             or not ledger.is_relative_to(host_store / "projects")
             or not (ledger / "cortex.db").is_file()
             or (workspace / ".codex/cortex/cortex.db").exists()

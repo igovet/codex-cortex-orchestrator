@@ -47,8 +47,8 @@ class GovernanceIntegrityTests(unittest.TestCase):
             owner="coordinator",
         )
 
-    def test_v15_schema_has_non_null_scope_lifecycle_authority_and_public_uow_boundary(self) -> None:
-        self.assertEqual(ledger_db.DATABASE_SCHEMA_VERSION, 15)
+    def test_v17_schema_has_non_null_scope_lifecycle_authority_and_public_uow_boundary(self) -> None:
+        self.assertEqual(ledger_db.DATABASE_SCHEMA_VERSION, 17)
         history = ledger_db.migration_history(self.root)
         self.assertEqual(history[-1]["name"], "canonical-current-ledger")
         with ledger_db.connection(self.root) as connection:
@@ -77,7 +77,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
         immutable_trigger = next(
             statement
             for migration in ledger_db._migration_plan()
-            if migration.version == 15
+            if migration.version == ledger_db.DATABASE_SCHEMA_VERSION
             for statement in migration.statements
             if statement.startswith("CREATE TRIGGER governance_record_lifecycle_immutable_update")
         )
@@ -124,7 +124,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
             auth_delete_trigger = next(
                 statement
                 for migration in ledger_db._migration_plan()
-                if migration.version == 15
+                if migration.version == ledger_db.DATABASE_SCHEMA_VERSION
                 for statement in migration.statements
                 if statement.startswith("CREATE TRIGGER governance_record_lifecycle_auth_immutable_delete")
             )
@@ -275,7 +275,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
             authority_trigger = next(
                 statement
                 for migration in ledger_db._migration_plan()
-                if migration.version == 15
+                if migration.version == ledger_db.DATABASE_SCHEMA_VERSION
                 for statement in migration.statements
                 if statement.startswith("CREATE TRIGGER governance_records_lifecycle_authority_update")
             )
@@ -433,7 +433,6 @@ class GovernanceIntegrityTests(unittest.TestCase):
         attempt_protocol.finalize_attempt(self.root, task_id="task-7", attempt_id="close-review")
         state["attempts"][0]["attempt_result_ref"] = completed_result["result_ref"]
         ledger_db.update_task_state(self.root, state)
-        ledger_db.put_worker_session(self.root, {"task_id": "task-7", "attempt_id": "close-review", "host_agent_id": "reviewer-7", "host_task_name": "review", "host_tool": "spawn_agent", "status": "completed"})
         payload = {
             "task_id": "task-7", "attempt_id": "close-review", "attempt_result_ref": completed_result["result_ref"], "reviewer_identity": "reviewer-7",
             "reviewed_initiative_revision": 4,
@@ -441,6 +440,12 @@ class GovernanceIntegrityTests(unittest.TestCase):
             "reviewed_artifact_digests": {artifact["artifact_ref"]: artifact["digest_sha256"]},
         }
         with ledger_db.connection(self.root) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM worker_sessions WHERE task_id=? AND attempt_id=?",
+                ("task-7", "close-review"),
+            ).fetchone())
+            with self.assertRaisesRegex(governance.GovernanceError, "cannot approve its own"):
+                governance._validate_independent_review_attestation(connection, initiative_ref=initiative["initiative_ref"], owner="dispatch-close-review", initiative_revision=4, metadata={"task_id": "task-7"}, payload=payload)
             governance._validate_independent_review_attestation(connection, initiative_ref=initiative["initiative_ref"], owner="coordinator", initiative_revision=4, metadata={"task_id": "task-7"}, payload=payload)
         state["revision"] = 2
         state["updated_at"] = "2026-01-02T00:00:00+00:00"

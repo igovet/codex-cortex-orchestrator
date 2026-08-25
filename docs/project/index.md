@@ -4,11 +4,16 @@
 
 ## Purpose
 
-Cortex 10.0.7 is an opt-in Codex plugin for staged multi-agent work. The
+Cortex 11.0.1 is an opt-in Codex plugin for staged multi-agent work. The
 installable runtime is under [plugins/cortex](../../plugins/cortex/); root
 scripts and tests support source development. New tasks use task contract
-cortex/v10, orchestration lifecycle cortex/orchestration/v6, and SQLite schema
-v15.
+v11 and SQLite schema v17. The coordinator carries `task_ref` plus
+`coordinator_ref`; a worker carries `task_ref` plus `assignment_ref`.
+`start_orchestration` is the sole task creator and initial coordinator
+capability issuer. Native worker execution is only the exact
+`spawn_agent` → `wait` → `read_worker_result` → server-derived continuation
+route. Cortex owns and issues every opaque ref; models copy them byte-for-byte
+and never infer one from a session, host, thread, or path.
 
 ## Stack and entry points
 

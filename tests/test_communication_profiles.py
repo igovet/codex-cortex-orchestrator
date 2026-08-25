@@ -16,9 +16,10 @@ class CommunicationProfileTests(unittest.TestCase):
         self.assertEqual(communication.select_profile({"communication_profile": "unknown"}), "natural")
         self.assertEqual(communication.select_profile({}, env={communication.PROFILE_ENV: "technical"}), "technical")
 
-    def test_aliases_and_human_message_types(self):
-        self.assertEqual(communication.select_profile({"communication_profile": "detailed"}), "technical")
-        self.assertEqual(communication.select_profile({"communication_profile": "neutral"}), "natural")
+    def test_noncanonical_profiles_fall_back_and_human_message_types(self):
+        self.assertEqual(communication.select_profile({"communication_profile": "unsupported_profile"}), "natural")
+        self.assertEqual(communication.select_profile({"communication_profile": "other_profile"}), "natural")
+        self.assertEqual(communication.select_profile({"profile": "technical"}), "natural")
         self.assertEqual(communication.message_type("blocked"), "Action needed")
         self.assertEqual(communication.message_type("private_internal_value"), "Update")
 

@@ -40,11 +40,11 @@ routing evidence, not a retry budget. Cortex raises reasoning effort after
 each unresolved cycle (`high`, then `xhigh`, then `max`) and routes eligible
 ordinary work to Terra after two failures unless the user explicitly selected
 a model. Use a materially different `next_strategy` or replan when evidence
-supports it, but never require either merely to authorize another correction.
+supports it, but never require either merely to authorize another recovery.
 
 Question Firewall: a user question may cover only task requirements, scope,
 acceptance/product behavior, or explicit external/destructive authorization.
-Mark such a question with `context.decision_scope` when possible. Never turn a
+Mark such a question with the top-level `decision_scope` enum. Never turn a
 policy or lifecycle recommendation into a user question; return it as
 `orchestrator_advice`, preserve the evidence, and let the orchestrator choose
 the next corrective wave.

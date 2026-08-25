@@ -4,34 +4,37 @@
 
 ## Purpose
 
-Hooks observe native session, worker, and tool lifecycle events and inject a
-bounded authorized context. They are observational only: the SQLite v15
-ledger owns attempts, `AttemptEvent`, `AttemptResult`, read observations, and
-terminal state.
+Hooks observe native session, worker, and tool lifecycle events and may inject
+bounded, identity-free guidance. They are telemetry only: the SQLite v17
+ledger and explicit capability-scoped public operations own attempts,
+`AttemptEvent`, `AttemptResult`, read observations, and terminal state.
 
 ## Key files
 
-- [hooks.json](../../../plugins/cortex/hooks/hooks.json) registers the six lifecycle hooks.
-- [cortex_hook.py](../../../plugins/cortex/scripts/cortex_hook.py) binds native identities and records observations.
+- [hooks.json](../../../plugins/cortex/hooks/hooks.json) registers the five lifecycle hooks.
+- [cortex_hook.py](../../../plugins/cortex/scripts/cortex_hook.py) emits sanitized, identity-free telemetry guidance.
 - [profiles.json](../../../plugins/cortex/profiles.json) is the profile source.
 - [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns canonical state.
 - [context_compiler.py](../../../plugins/cortex/scripts/cortex_runtime/context_compiler.py) builds bounded context.
 
 ## Behavior
 
-`SessionStart` and `SubagentStart` bind the exact server-issued task,
-dispatch, and native identity. `resume`, `clear`, and `compact` reassert the
-recovery instruction and require an explicit inspection call.
+`SessionStart` may remind a coordinator to preserve its already-held exact
+capability pair through resume, clear, or compact. `SubagentStart`,
+`SubagentStop`, and `Stop` emit only neutral native-lifecycle observations.
+`PostToolUse` is limited to exact native `spawn_agent`, `wait`, and
+`wait_agent` calls. There is no `PreToolUse` hook.
 
-`PreToolUse` provides non-blocking coordinator guidance. `PostToolUse` records
-bounded observations and re-reads canonical state after a wait. `SubagentStop`
-records the exact child stop without persisting model-authored prose. `Stop`
-prevents a coordinator final answer while a bound worker is still active.
+No hook binds a child, carries or reconstructs a capability, reads or writes
+the ledger, records an attempt observation, selects a task, authorizes a
+replacement, or proves completion. Exact native lifecycle binding and
+canonical result processing remain server-owned public operations.
 
 Workers close through `record_attempt_event` and `complete_attempt`. A stop
-before `WORK_COMPLETED` enters exact-attempt recovery. Once the canonical
-result is `WORK_COMPLETED`, finalization retries that same attempt; no new
-worker is created for a view or infrastructure failure.
+before `WORK_COMPLETED` is only telemetry; the coordinator follows the exact
+server-derived wait or recovery route for its already-bound child. Once the
+canonical result is `WORK_COMPLETED`, finalization retries that same attempt;
+no new worker is created for a view or infrastructure failure.
 
 Successful `read_dispatch_briefing` and assigned predecessor
 `read_worker_result` calls create server-owned, idempotent read observations.
@@ -40,11 +43,10 @@ responses, credentials, tokens, or private worker diagnostics.
 
 ## Privacy and bounds
 
-Telemetry is bounded by event count and byte budgets, rejects symlink and
-non-regular targets, and fails open when an optional observation cannot be
-recorded. Ambiguous sessions are rejected rather than guessed. Context
-injection contains only the authorized projection for the matching task and
-attempt.
+Telemetry output is bounded, sanitized JSON and never contains a capability,
+task identity, assignment identity, briefing path, ledger path, or raw host
+response. Ambiguous or missing state produces neutral fail-closed guidance;
+it is never guessed from a session, environment, path, database, or thread.
 
 ## Installation and verification
 

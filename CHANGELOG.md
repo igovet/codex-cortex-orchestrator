@@ -1,5 +1,42 @@
 # Changelog
 
+## [11.0.1] - 2026-08-24
+
+### Fixed
+
+- Harden the v11 worker boundary with a fixed-size opaque repair handle backed
+  by immutable, task-cascaded schema-v17 escrow and exact-v16 predecessor
+  quarantine; v15 and older namespaces are unsupported historical input.
+- Shorten the signed repair handle, retry malformed model copies against the
+  same immutable escrow, and expose self-contained per-path patch diagnostics;
+  correctly shaped handles that fail integrity remain terminal.
+- Require same-child bootstrap recovery to use one bounded repair follow-up,
+  and make accepted worker completion terminal without a result-reference
+  handoff.
+- Compact the native bootstrap and immutable briefing, expose `dispatch_ref`
+  structurally, keep private host paths on the failure-only recovery branch,
+  and remove duplicate task intent and unused event success metadata.
+- Add atomic `finalize_worker_failure` cleanup for exact nonretryable child
+  terminals without deleting forensic receipts/events/repair escrow or
+  creating a result, continuation, replacement, or resumable orphan.
+- Minimize all nine public response projections and align package validators,
+  prompts, profiles, and release metadata with the v11 contract.
+
+## [11.0.0] - 2026-08-24
+
+### Changed
+
+- Make explicit server-issued `task_ref` plus audience-specific capability
+  references the only public coordinator and worker authorization contract.
+- Preserve native V2 `spawn_agent` and exact-child wait/follow-up as the only
+  worker lifecycle transport; hooks remain bounded telemetry only.
+- Replace compatibility lifecycle and completion forms with the nine-operation
+  v11 public registry, compact typed responses, and canonical AttemptResult and
+  AttemptEvent persistence.
+- Add digest-bound structural repair for invalid planner and outcome
+  submissions, with aggregated JSON Pointer diagnostics and validation before
+  mutation.
+
 ## [10.0.7] - 2026-08-22
 
 ### Fixed
@@ -651,7 +688,7 @@ same base version.
   consumes the three-failed-attempt recovery budget; success binds a digest to
   the same file without returning its body.
 - Make `record_report` reload and atomically revalidate that exact file from
-  only worker identity, `draft_ref`, and `validation_digest`, then delete the
+  only worker authority, `draft_ref`, and `validation_digest`, then delete the
   draft and its metadata after the durable report transaction commits. Drafts
   expire after one hour and a new template supersedes the prior attempt draft.
 - Treat ordinary source deltas observed by a host-sandboxed read-only worker

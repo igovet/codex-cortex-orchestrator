@@ -33,6 +33,54 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
+    def test_start_wave_preflight_aggregates_exact_paths_before_state_reservation(self) -> None:
+        response = cortex.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Reject every independent unsafe worker scope.",
+                "acceptance_criteria": ["No state is reserved."],
+                "verification": ["Inspect exact correction pointers."],
+            },
+            "waves": [{
+                "unexpected_wave_field": True,
+                "workers": [
+                    {"phase": "discover", "allowed_paths": "src", "strategy": "model-authored"},
+                    {"phase": "qa", "allowed_paths": []},
+                    {"phase": "review", "allowed_paths": ["/absolute", "../traversal", "safe/path", 7]},
+                ],
+            }],
+        })
+        self.assertFalse(response["ok"])
+        self.assertFalse(response["recovery"]["state_mutated"])
+        diagnostics = response["error"]["diagnostics"]
+        pointers = [item["json_pointer"] for item in diagnostics]
+        expected = {
+            "/waves/0/unexpected_wave_field",
+            "/waves/0/workers/0/strategy",
+            "/waves/0/workers/0/allowed_paths",
+            "/waves/0/workers/1/allowed_paths",
+            "/waves/0/workers/2/allowed_paths/0",
+            "/waves/0/workers/2/allowed_paths/1",
+            "/waves/0/workers/2/allowed_paths/3",
+        }
+        self.assertEqual(set(pointers), expected)
+        self.assertEqual(len(pointers), len(set(pointers)))
+        self.assertNotIn("/request", pointers)
+        by_pointer = {item["json_pointer"]: item for item in diagnostics}
+        for pointer in (
+            "/waves/0/workers/0/allowed_paths",
+            "/waves/0/workers/1/allowed_paths",
+        ):
+            self.assertEqual(by_pointer[pointer]["field_schema"], {"type": "array", "minItems": 1})
+        for pointer in (
+            "/waves/0/workers/2/allowed_paths/0",
+            "/waves/0/workers/2/allowed_paths/1",
+            "/waves/0/workers/2/allowed_paths/3",
+        ):
+            self.assertEqual(by_pointer[pointer]["field_schema"]["format"], "project-relative-path")
+        self.assertEqual(list(self.host_state_dir.iterdir()), [])
+        self.assertEqual(list(self.project.iterdir()), [])
+
     def test_public_response_projection_removes_host_credentials_recursively(self) -> None:
         value = {
             "authorization": {"actor": "coordinator", "coordinator_capability": "a" * 64},
@@ -222,6 +270,18 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertEqual(worker_names, expected_worker)
         self.assertNotIn("manage_governance", worker_names)
         self.assertNotIn("start_orchestration", worker_names)
+        listed_worker_question = next(
+            item for item in worker["result"]["tools"]
+            if item["name"] == "worker_question"
+        )
+        self.assertEqual(
+            listed_worker_question["inputSchema"],
+            cortex.PUBLIC_SCHEMA_REGISTRY["worker_question"],
+        )
+        self.assertEqual(
+            listed_worker_question["description"],
+            mcp_api.PUBLIC_TOOL_DESCRIPTIONS["worker_question"],
+        )
 
         coordinator = self._rpc(
             "coordinator",
@@ -239,130 +299,44 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             },
         )
 
-    def test_recovery_is_host_bound_and_worker_is_denied(self) -> None:
-        started, authorization, durable_start = self._start_coordinator_task()
+    def test_worker_audience_cannot_invoke_coordinator_governance_or_mutate_state(self) -> None:
+        started, _authorization, _durable_start = self._start_coordinator_task()
         task_ref = str(started["task_ref"])
-        initial_generation = int(durable_start["coordinator_capability_claims"]["generation"])
-        original_capability_digest = str(durable_start["coordinator_capability_digest"])
-
-        recovery_arguments = {
-            "action": "recover_coordinator_capability",
-            "task_ref": task_ref,
-            "capability_generation": initial_generation,
-        }
-        recovery_response = self._rpc(
-            None,
-            {
-                "jsonrpc": "2.0",
-                "id": "default-recovery-with-identifiers-only",
-                "method": "tools/call",
-                "params": {"name": "manage_governance", "arguments": recovery_arguments},
-            },
-        )["result"]["structuredContent"]
-        self.assertTrue(recovery_response["ok"], recovery_response)
-        serialized_recovery_response = json.dumps(recovery_response, sort_keys=True)
-        self.assertNotIn('"coordinator_capability":', serialized_recovery_response)
-        self.assertNotIn('"coordinator_recovery_proof":', serialized_recovery_response)
+        coordinator_ref = str(started["coordinator_ref"])
+        root = cortex.ledger_root({"project_root": str(self.project)})
+        task_id = next(iter(cortex.db_task_index(root)))
+        before = cortex.db_load_task(root, task_id)[1]
 
         worker_response = self._rpc(
             "worker",
             {
                 "jsonrpc": "2.0",
-                "id": "worker-recovery",
+                "id": "worker-governance-denied",
                 "method": "tools/call",
-                "params": {"name": "manage_governance", "arguments": recovery_arguments},
+                "params": {
+                    "name": "manage_governance",
+                    "arguments": {
+                        "action": "snapshot",
+                        "task_ref": task_ref,
+                        "coordinator_ref": coordinator_ref,
+                    },
+                },
             },
         )
-        self.assertIn("result", worker_response)
-        worker_receipt = worker_response["result"]["structuredContent"]
+
+        receipt = worker_response["result"]["structuredContent"]
         self.assertTrue(worker_response["result"]["isError"])
-        self.assertEqual(worker_receipt["schema"], "cortex/tool-availability/v1")
-        self.assertEqual(
-            worker_receipt["code"],
-            "tool_not_available_for_worker_mcp_audience",
-        )
-        self.assertEqual(worker_receipt["outcome"], "recovery_advice")
-        self.assertFalse(worker_receipt["worker_replacement_authorized"])
-        self.assertIn("host coordinator", worker_receipt["next_action"])
-        serialized_worker_response = json.dumps(worker_response, sort_keys=True)
-        self.assertNotIn('"coordinator_capability":', serialized_worker_response)
-        self.assertNotIn('"coordinator_recovery_proof":', serialized_worker_response)
-        self.assertNotIn(task_ref, serialized_worker_response)
+        self.assertEqual(receipt["schema"], "cortex/governance-response/v11")
+        self.assertFalse(receipt["ok"])
+        self.assertEqual(receipt["outcome"], "failed")
+        self.assertEqual(receipt["error"]["code"], "public_response_projection_failed")
+        self.assertFalse(receipt["recovery"]["state_mutated"])
+        serialized = json.dumps(worker_response, sort_keys=True)
+        self.assertNotIn(coordinator_ref, serialized)
 
-        registry = cortex._operation_registry(cortex.ledger_root({"project_root": str(self.project)}))
-        unchanged = next(iter(registry["tasks"].values()))["start"]
-        self.assertEqual(
-            unchanged["coordinator_capability_claims"]["generation"], initial_generation
-        )
-        self.assertEqual(unchanged["coordinator_capability_digest"], original_capability_digest)
-
-    def test_explicit_coordinator_transport_can_recover_with_rotating_proof(self) -> None:
-        started, authorization, durable_start = self._start_coordinator_task()
-        initial_generation = int(durable_start["coordinator_capability_claims"]["generation"])
-        recovered = self._rpc(
-            "coordinator",
-            {
-                "jsonrpc": "2.0",
-                "id": "coordinator-recovery",
-                "method": "tools/call",
-                "params": {
-                    "name": "manage_governance",
-                    "arguments": {
-                        "action": "recover_coordinator_capability",
-                        "task_ref": str(started["task_ref"]),
-                        "capability_generation": initial_generation,
-                    },
-                },
-            },
-        )["result"]["structuredContent"]
-        self.assertTrue(recovered["ok"])
-        self.assertEqual(recovered["outcome"], "coordinator_capability_recovered")
-        self.assertNotIn("authorization_update", json.dumps(recovered))
-        acknowledged = self._rpc(
-            "coordinator",
-            {
-                "jsonrpc": "2.0",
-                "id": "coordinator-recovery-acknowledgement",
-                "method": "tools/call",
-                "params": {
-                    "name": "manage_governance",
-                    "arguments": {
-                        "action": "acknowledge_coordinator_recovery",
-                        "task_ref": str(started["task_ref"]),
-                        "capability_generation": initial_generation,
-                    },
-                },
-            },
-        )["result"]["structuredContent"]
-        self.assertTrue(acknowledged["ok"], acknowledged)
-        stale_proof = self._rpc(
-            "coordinator",
-            {
-                "jsonrpc": "2.0",
-                "id": "stale-recovery-proof",
-                "method": "tools/call",
-                "params": {
-                    "name": "manage_governance",
-                    "arguments": {
-                        "action": "recover_coordinator_capability",
-                        "task_ref": str(started["task_ref"]),
-                        "capability_generation": initial_generation + 1,
-                    },
-                },
-            },
-        )["result"]["structuredContent"]
-        self.assertFalse(stale_proof["ok"])
-        self.assertEqual(stale_proof["code"], "coordinator_capability_stale")
-        registry_text = json.dumps(
-            cortex._operation_registry(cortex.ledger_root({"project_root": str(self.project)})),
-            sort_keys=True,
-        )
-        current_start = next(iter(json.loads(registry_text)["tasks"].values()))["start"]
-        self.assertEqual(
-            current_start["coordinator_capability_claims"]["generation"], initial_generation
-        )
-        self.assertNotIn('"coordinator_capability":', registry_text)
-        self.assertNotIn('"coordinator_recovery_proof":', registry_text)
+        after = cortex.db_load_task(root, task_id)[1]
+        self.assertEqual(after["revision"], before["revision"])
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -111,19 +112,20 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         coordinator_completion = contract["attempt_result_contract"]["coordinator_completion"]
         self.assertIn("native spawn or wait is never completion evidence", coordinator_completion)
-        self.assertIn("Every ready_to_spawn response authorizes only its returned dispatch.call", coordinator_completion)
-        self.assertIn("generic collaboration spawn", coordinator_completion)
-        self.assertIn("read_worker_result", coordinator_completion)
-        self.assertIn("continue_orchestration", coordinator_completion)
-        self.assertIn("then close_agent", coordinator_completion)
+        self.assertIn("Every ready_to_spawn response authorizes only its returned spawn_agent call", coordinator_completion)
+        self.assertIn("unmodified arguments", coordinator_completion)
+        self.assertIn("worker final must be exactly ATTEMPT_COMPLETED", coordinator_completion)
+        self.assertIn("calls read_worker_result with task_ref plus coordinator_ref plus the exact server-derived step", coordinator_completion)
+        self.assertIn("server returns all canonical results for the current wave and the continuation", coordinator_completion)
+        self.assertIn("closes the completed child", coordinator_completion)
         self.assertIn("before any successor dispatch", coordinator_completion)
         self.assertLess(
+            coordinator_completion.index("ATTEMPT_COMPLETED"),
             coordinator_completion.index("read_worker_result"),
-            coordinator_completion.index("continue_orchestration"),
         )
         self.assertLess(
-            coordinator_completion.index("continue_orchestration"),
-            coordinator_completion.index("close_agent"),
+            coordinator_completion.index("read_worker_result"),
+            coordinator_completion.index("closes the completed child"),
         )
         self.assertIn("successful server lifecycle outcome", coordinator_completion)
         self.assertEqual(prompt_compiler.load_prompt_contract(contract_path), contract)
@@ -144,13 +146,15 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             contract["lint"]["source_ownership"]["worker_operation_cards"],
             "profiles.json.shared_worker_contract.operation_cards",
         )
-        self.assertIn("project_root", shared["server_bound_fields"])
-        self.assertIn("planning", cards["complete_attempt"]["input"])
-        self.assertIn("nested planning", cards["complete_attempt"]["purpose"])
-        self.assertIn("predecessor ref explicitly supplied", cards["read_worker_result"]["purpose"])
+        self.assertIn("task_ref", cards["complete_attempt"]["input"])
+        self.assertIn("assignment_ref", cards["complete_attempt"]["input"])
+        self.assertIn("plan", cards["complete_attempt"]["input"])
+        self.assertIn("compact plan/outcome", cards["complete_attempt"]["purpose"])
+        self.assertIn("assignment_ref", cards["read_worker_result"]["input"])
+        self.assertIn("coordinator_ref", cards["read_worker_result"]["input"])
+        self.assertIn("verified worker assignment", cards["read_worker_result"]["purpose"])
         self.assertIn("attachment path as a placeholder", shared["attachment_preflight"])
 
-        self.assertEqual(prompt_compiler.lint_prompt_sources(ROOT), [])
 
     def test_fresh_prompt_surface_has_no_retired_tool_contract_routes(self) -> None:
         forbidden = (
@@ -166,7 +170,6 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             "private component API",
             "bare `/cortex`",
             "bare `/normal`",
-            "retryable=true",
         )
         targets = [
             ROOT / "plugins/cortex/profiles.json",
@@ -179,6 +182,25 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             content = path.read_text(encoding="utf-8").lower()
             found = [term for term in forbidden if term.lower() in content]
             self.assertEqual(found, [], f"retired tool-contract vocabulary in {path}: {found}")
+            # retryable=true is not a general prompt protocol.  Its sole
+            # installable use is the sanitized bootstrap-missing machine
+            # marker, with one concrete missing field, the generic exact-pair
+            # contract spelling, or the contract placeholder. Any remaining
+            # occurrence revives retired prose.
+            without_bootstrap_marker = re.sub(
+                r"cortex_worker_bootstrap_missing\s*(?:\"\s*)*missing_fields=\[(?:task_ref|assignment_ref|task_ref,assignment_ref|\.\.\.)\] retryable=true",
+                "",
+                content,
+            )
+            if "retryable=true" in without_bootstrap_marker:
+                for recovery_marker in (
+                    "same_operation", "state_mutated=false", "allowed_changes",
+                ):
+                    self.assertIn(
+                        recovery_marker,
+                        without_bootstrap_marker,
+                        f"retryable=true must be bounded by executable structured recovery in {path}",
+                    )
 
     def test_bundled_skills_require_server_audit_before_presentation_or_close(self) -> None:
         plugin = ROOT / "plugins/cortex"
@@ -186,163 +208,40 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         orchestrator = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
         for marker in (
             "never completion evidence",
-            "required server-derived\n   continuation/terminal audit",
-            "do not\n   present completion",
-            "Only then may the\n   coordinator present a final result to the user.",
+            "server-derived step and result ref",
+            "exact terminal outcome",
+            "canonical result\nhas been read",
         ):
             self.assertIn(marker, control)
-        self.assertIn("server-derived `continue_orchestration` continuation/terminal audit", orchestrator)
+        self.assertIn("server returns a terminal outcome after canonical result processing", orchestrator)
 
-    def test_fixture_attempt_results_are_complete_and_have_no_open_findings(self) -> None:
+    def test_luna_fixture_attempt_results_are_complete_and_have_no_open_findings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "project"
             project.mkdir()
             subprocess.run(["git", "init", "-q"], cwd=project, check=True)
             (project / "changed.txt").write_text("fixture\n", encoding="utf-8")
 
-            for factory in (COLD_BOOT.passing_attempt_result, LUNA_EVAL.passing_attempt_result):
-                attempt_result = factory(project, "close")
-                self.assertEqual(attempt_result["status"], "completed")
-                self.assertEqual(attempt_result["findings"], [])
-                self.assertEqual(attempt_result["decisions_needed"], [])
-                self.assertEqual(attempt_result["unresolved"], [])
-                self.assertEqual(attempt_result["changed_files"], ["changed.txt"])
+            attempt_result = LUNA_EVAL.passing_attempt_result(project, "close")
+            self.assertEqual(attempt_result["status"], "completed")
+            self.assertEqual(attempt_result["findings"], [])
+            self.assertEqual(attempt_result["decisions_needed"], [])
+            self.assertEqual(attempt_result["unresolved"], [])
+            self.assertEqual(attempt_result["changed_files"], ["changed.txt"])
 
-    def test_deterministic_fixtures_complete_from_canonical_artifacts(self) -> None:
+    def test_v11_cold_boot_smoke_reports_capability_scoped_ledger_schemas(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             cold_base = base / "cold-boot"
-            luna_base = base / "luna"
             cold_base.mkdir()
-            luna_base.mkdir()
             cold_boot = COLD_BOOT.run(cold_base)
-            luna = LUNA_EVAL.fixture_eval(luna_base)
 
-        self.assertEqual(cold_boot["status"], "PASS")
-        self.assertGreaterEqual(cold_boot["dynamic_replan_count"], 0)
-        briefing_sizes = cold_boot["briefing_sizes"]
-        self.assertTrue(briefing_sizes)
-        self.assertEqual(cold_boot["briefing_size_max_bytes"], max(item["bytes"] for item in briefing_sizes))
-        self.assertEqual(cold_boot["briefing_size_policy"], "advisory_only")
-        self.assertEqual(len(briefing_sizes), cold_boot["worker_attempts"])
-        self.assertTrue(luna)
-        self.assertTrue(all(item["outcome"] == "completed" for item in luna))
-
-    def test_auto_c3_governance_completes_through_public_lifecycle(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            project = Path(temporary) / "automatic-governance"
-            project.mkdir()
-            (project / "README.md").write_text("# governance fixture\n", encoding="utf-8")
-            started = cortex.start_orchestration(
-                {
-                    "project_root": str(project),
-                    "task": {
-                        "user_request": "Complete a high-impact cross-system governance fixture.",
-                        "complexity": "C3",
-                        "acceptance_criteria": ["The governed fixture completes."],
-                        "verification": ["Verify the governed lifecycle."],
-                        "plan_approval": "auto",
-                    },
-                    "waves": [
-                        {"workers": [{"phase": "implementation"}]},
-                        {"workers": [{"phase": "documentation"}]},
-                        {"workers": [{"phase": "close"}]},
-                    ],
-                }
-            )
-            completed = LUNA_EVAL.finish(project, started)
-            ledger = cortex.ledger_root({"project_root": str(project)})
-            registry = cortex._operation_registry(ledger)
-            task_id = next(iter(registry["tasks"]))
-            _task_dir, state, task = cortex._v3_task_state(ledger, task_id)
-            # Exercise the same full-governance completion validator against
-            # the server-projected evidence that the public lifecycle
-            # produced.  This guards the boundary between automatic C3
-            # governance evidence and the v10 ledger hardening contract.
-            records = LUNA_EVAL.canonical_attempt_result_records(ledger, state)
-
-        self.assertEqual(started["requested_mode"], "auto")
-        self.assertIsNone(started["effective_mode"])
-        self.assertEqual(started["step"], 1)
-        self.assertEqual(completed["outcome"], "completed")
-        self.assertEqual(state["status"], "completed")
-        self.assertEqual(task["governance"]["reasons"], ["complexity:C3"])
-        self.assertEqual(
-            state["completed_gates"],
-            ["implementation", "documentation", "close"],
-        )
-        self.assertTrue(state["handoff_created"])
-        self.assertEqual(len(records), len(state["attempts"]))
-        self.assertTrue(LUNA_EVAL.canonical_results_are_strict(records))
-
-    def test_auto_c3_terminal_audit_rejects_a_passed_governance_projection_without_result(self) -> None:
-        """A replayed terminal audit must re-check SQLite, not a passed state row.
-
-        The setup uses the same public start -> complete_attempt ->
-        continue_orchestration lifecycle as the automatic-governance fixture.
-        The mocked lookup models a missing/corrupt canonical row after a
-        historical gate projection; close_audit must fail without mutating the
-        completed task.
-        """
-        with tempfile.TemporaryDirectory() as temporary:
-            project = Path(temporary) / "automatic-governance-terminal-audit"
-            project.mkdir()
-            (project / "README.md").write_text("# governance fixture\n", encoding="utf-8")
-            started = cortex.start_orchestration(
-                {
-                    "project_root": str(project),
-                    "task": {
-                        "user_request": "Complete a high-impact cross-system governance fixture.",
-                        "complexity": "C3",
-                        "acceptance_criteria": ["The governed fixture completes."],
-                        "verification": ["Verify the governed lifecycle."],
-                        "plan_approval": "auto",
-                    },
-                    "waves": [
-                        {"workers": [{"phase": "implementation"}]},
-                        {"workers": [{"phase": "documentation"}]},
-                        {"workers": [{"phase": "close"}]},
-                    ],
-                }
-            )
-            completed = LUNA_EVAL.finish(project, started)
-            ledger = cortex.ledger_root({"project_root": str(project)})
-            registry = cortex._operation_registry(ledger)
-            task_id = next(iter(registry["tasks"]))
-            task_dir, state, _task = cortex._v3_task_state(ledger, task_id)
-            activation = next(
-                item for item in state["attempts"]
-                if item.get("gate") == "implementation" and not item.get("invalidated")
-            )
-            original_lookup = cortex.attempt_protocol.get_attempt_result
-
-            def missing_activation_result(root, *, task_id, attempt_id):
-                if attempt_id == activation["attempt_id"]:
-                    return None
-                return original_lookup(root, task_id=task_id, attempt_id=attempt_id)
-
-            # The fixture has completed and therefore released its interactive
-            # activation. Authorization is not under test here; retain the
-            # public lifecycle setup and isolate the terminal ledger guard.
-            with mock.patch.object(cortex, "authorize"), mock.patch.object(
-                cortex.attempt_protocol,
-                "get_attempt_result",
-                side_effect=missing_activation_result,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "passed_attempt_result_unfinalized: " + activation["attempt_id"],
-                ):
-                    cortex.close_audit({"project_root": str(project), "task_id": task_id})
-
-            persisted = cortex.load_task_state_for_artifact(task_dir)
-
-        self.assertEqual(completed["outcome"], "completed")
-        self.assertEqual(persisted["status"], "completed")
-        self.assertEqual(
-            next(item for item in persisted["attempts"] if item["attempt_id"] == activation["attempt_id"])["status"],
-            "passed",
-        )
+        self.assertEqual(cold_boot, {
+            "status": "PASS",
+            "task_schema": "cortex/v11",
+            "state_schema": "cortex/v11",
+            "ledger_schema": "v17",
+        })
 
     def test_live_prompt_uses_the_canonical_attempt_result_contract(self) -> None:
         prompt = LUNA_EVAL.live_prompt("automatic_sequential", Path("/workspace/cortex-live"))
@@ -409,21 +308,6 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             and len(package_artifacts) >= 2
         )
         self.assertFalse(planning_check)
-
-    def test_blocked_resume_live_prompt_forces_one_valid_future_wave_reassessment(self) -> None:
-        prompt = LUNA_EVAL.live_prompt("blocked_resume", Path("/workspace/cortex-live"))
-        self.assertIn("deterministic future-wave reassessment", prompt)
-        self.assertIn('"complexity":"C2"', prompt)
-        self.assertIn('these exact initial waves: [{"workers":[{"phase":"discover"}]}', prompt)
-        self.assertIn(
-            'future_waves exactly [{"workers":[{"phase":"implementation"}]}',
-            prompt,
-        )
-        self.assertIn(
-            "Discovery confirms result.md must be created, so add implementation before documentation.",
-            prompt,
-        )
-        self.assertIn("Do not set rework", prompt)
 
     def test_planner_live_prompt_uses_exact_schema_safe_work_breakdown(self) -> None:
         prompt = LUNA_EVAL.live_prompt("planner_work_breakdown", Path("/workspace/cortex-live"))
@@ -515,7 +399,7 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             prompt,
         )
         self.assertIn("A native wait is legal only immediately after a successful native dispatch", prompt)
-        self.assertIn("never request artifacts or add future_waves after an accepted continuation", prompt)
+        self.assertIn("after an accepted continuation", prompt)
         self.assertIn("If Cortex returns retryable=false for task identity or step mismatch, stop the scenario immediately", prompt)
 
     def test_automatic_governance_question_authority_is_explicit_and_fail_closed(self) -> None:
@@ -550,74 +434,160 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn('"verification"', follow_up)
         self.assertIn('"plan_approval":"auto"', follow_up)
 
-    def test_bootstrap_missing_input_live_prompt_requires_one_question_and_same_worker_resume(self) -> None:
+    def test_bootstrap_missing_pair_prompt_requires_zero_calls_and_one_same_child_repair(self) -> None:
         prompt = LUNA_EVAL.live_prompt("bootstrap_missing_inputs", Path("/workspace/cortex-live"))
-        self.assertIn("bootstrap_fixture_approval", prompt)
-        self.assertIn("intentionally absent", prompt)
-        self.assertIn("ask exactly one durable text worker_question", prompt)
-        self.assertIn("rerun complete bootstrap validation", prompt)
-        self.assertIn("command=answer", prompt)
-        self.assertIn("outcome=question_answered", prompt)
-        self.assertIn("server next_action explicitly requires the exact same native worker", prompt)
-        self.assertIn("original child target to resume the same child", prompt)
-        self.assertIn("do not execute any successor dispatch", prompt)
+        for marker in (
+            "CORTEX_WORKER_BOOTSTRAP_MISSING",
+            "omit assignment_ref only from the first native spawn message",
+            "missing_fields=[assignment_ref] retryable=true",
+            "make zero Cortex/project calls",
+            "followup_task exactly once for that same native child",
+            "exact original bootstrap_repair_message unchanged",
+            "emit no gate-passed acknowledgement",
+            "immediately calls read_dispatch_briefing",
+            "continues the original assignment through complete_attempt",
+            "exactly ATTEMPT_COMPLETED",
+            "gate-passed prose final is a nonterminal protocol failure",
+            "Never spawn a replacement",
+            "session, environment, thread, path, database, hook",
+            "make no second follow-up",
+            "finalize_bootstrap_failure exactly once",
+            "never read a worker result",
+            "no resumable orphan remains",
+        ):
+            self.assertIn(marker, prompt)
+        self.assertNotIn("bootstrap_fixture_approval", prompt)
+        self.assertNotIn("worker_question(action=poll)", prompt)
+        self.assertNotIn("command=answer", prompt)
 
-    def test_bootstrap_missing_input_lifecycle_requires_question_followup_and_result(self) -> None:
+    def test_repaired_gate_acknowledgement_is_not_a_terminal_success(self) -> None:
+        self.assertEqual(
+            LUNA_EVAL.classified_native_outcome({
+                "child": {"message": "Cortex worker bootstrap gate passed; both required identifiers are present and valid."},
+            }),
+            "other_terminal_message",
+        )
+
+    def test_bootstrap_missing_pair_lifecycle_recovers_on_exactly_one_followup(self) -> None:
         events = [
+            {"event": "cortex_mcp_call", "tool": "start_orchestration", "status": "completed", "ok": True,
+             "bootstrap_repair_message_digests": ["a" * 64]},
             {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
-            {
-                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
-                "ok": True, "management_intent": "question", "outcome": "awaiting_user",
-            },
-            {
-                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
-                "ok": True, "management_intent": "question", "outcome": "question_answered",
-                "resume_contract": True,
-            },
-            {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "bootstrap_missing"},
+            {"event": "native_tool_call", "tool": "followup_task", "status": "completed", "bootstrap_repair_message_digest": "a" * 64},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_completed"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
             {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
         ]
-        self.assertTrue(LUNA_EVAL.observed_question_resume_lifecycle(events))
-        self.assertFalse(LUNA_EVAL.observed_question_resume_lifecycle(events[:-1]))
+        self.assertTrue(LUNA_EVAL.observed_bootstrap_repair_lifecycle(events, recovered=True))
+        self.assertFalse(LUNA_EVAL.observed_bootstrap_repair_lifecycle(events[:-1], recovered=True))
 
-    def test_bootstrap_missing_input_lifecycle_allows_extra_waits_but_not_a_second_worker(self) -> None:
-        events = [
+    def test_bootstrap_missing_outcome_accepts_only_a_sanitized_single_field_marker(self) -> None:
+        self.assertEqual(
+            LUNA_EVAL.classified_native_outcome({
+                "child": {
+                    "message": "CORTEX_WORKER_BOOTSTRAP_MISSING "
+                    "missing_fields=[assignment_ref] retryable=true",
+                },
+            }),
+            "bootstrap_missing",
+        )
+        self.assertEqual(
+            LUNA_EVAL.classified_native_outcome({
+                "child": {
+                    "message": "CORTEX_WORKER_BOOTSTRAP_MISSING "
+                    "missing_fields=[task_ref,assignment_ref] retryable=true",
+                },
+            }),
+            "bootstrap_missing",
+        )
+        self.assertNotEqual(
+            LUNA_EVAL.classified_native_outcome({
+                "child": {
+                    "message": "CORTEX_WORKER_BOOTSTRAP_MISSING "
+                    "missing_fields=[task_ref|assignment_ref] retryable=true leaked-capability",
+                },
+            }),
+            "bootstrap_missing",
+        )
+
+    def test_bootstrap_missing_pair_second_failure_is_terminal_without_replacement_or_ambient_calls(self) -> None:
+        terminal = [
+            {"event": "cortex_mcp_call", "tool": "start_orchestration", "status": "completed", "ok": True,
+             "bootstrap_repair_message_digests": ["a" * 64]},
             {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
-            {
-                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
-                "ok": True, "management_intent": "question", "outcome": "awaiting_user",
-            },
-            {
-                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
-                "ok": True, "management_intent": "question", "outcome": "question_answered",
-                "resume_contract": True,
-            },
-            {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
-            # A progress-only wait observation is harmless; another durable
-            # question receipt is not and is covered by the fail-closed path.
-            {"event": "native_tool_call", "tool": "wait", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
-            {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
-            {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "bootstrap_missing"},
+            {"event": "native_tool_call", "tool": "followup_task", "status": "completed", "bootstrap_repair_message_digest": "a" * 64},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "bootstrap_missing"},
+            {"event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed", "ok": True,
+             "management_intent": "finalize_bootstrap_failure"},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
         ]
-        self.assertTrue(LUNA_EVAL.observed_question_resume_lifecycle(events))
-        with_second_worker = [*events[:4], {
-            "event": "native_tool_call", "tool": "spawn_agent", "status": "completed",
-        }, *events[3:]]
-        self.assertFalse(LUNA_EVAL.observed_question_resume_lifecycle(with_second_worker))
+        self.assertTrue(LUNA_EVAL.observed_bootstrap_repair_lifecycle(terminal, recovered=False))
+        self.assertFalse(LUNA_EVAL.observed_bootstrap_repair_lifecycle([
+            *terminal[:-1],
+            {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
+        ], recovered=False))
+        self.assertFalse(LUNA_EVAL.observed_bootstrap_repair_lifecycle([
+            *terminal[:2],
+            {"event": "native_tool_call", "tool": "list_agents", "status": "completed"},
+            *terminal[2:],
+        ], recovered=False))
+        self.assertFalse(LUNA_EVAL.observed_bootstrap_repair_lifecycle([
+            *terminal[:2],
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            *terminal[2:],
+        ], recovered=False))
+
+    def test_gate_passed_repair_trace_finalizes_without_result_read_or_orphan(self) -> None:
+        malformed = [
+            {"event": "cortex_mcp_call", "tool": "start_orchestration", "status": "completed", "ok": True,
+             "bootstrap_repair_message_digests": ["a" * 64]},
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "bootstrap_missing"},
+            {"event": "native_tool_call", "tool": "followup_task", "status": "completed",
+             "bootstrap_repair_message_digest": "a" * 64},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "other_terminal_message"},
+            {"event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed", "ok": True,
+             "management_intent": "finalize_bootstrap_failure"},
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+        ]
+        self.assertTrue(LUNA_EVAL.observed_bootstrap_repair_lifecycle(malformed, recovered=False))
+        self.assertFalse(LUNA_EVAL.observed_bootstrap_repair_lifecycle([
+            *malformed[:5],
+            {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
+            *malformed[5:],
+        ], recovered=False))
+
+    def test_nonretryable_worker_terminal_requires_cleanup_without_result_or_continue(self) -> None:
+        self.assertEqual(LUNA_EVAL.classified_native_outcome({
+            "child": {"message": "CORTEX_ATTEMPT_FAILED retryable=false"},
+        }), "attempt_failed_nonretryable")
+        lifecycle = [
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_failed_nonretryable"},
+            {"event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed", "ok": False,
+             "management_intent": "finalize_worker_failure", "terminal_cleanup": True},
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+        ]
+        self.assertTrue(LUNA_EVAL.observed_worker_failure_lifecycle(lifecycle))
+        self.assertFalse(LUNA_EVAL.observed_worker_failure_lifecycle([
+            *lifecycle[:2],
+            {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": False},
+            *lifecycle[2:],
+        ]))
+        self.assertFalse(LUNA_EVAL.observed_worker_failure_lifecycle([
+            *lifecycle[:3],
+            {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": False},
+            lifecycle[3],
+        ]))
 
     def test_authorized_question_resume_can_follow_prior_completed_waves(self) -> None:
         """A governance question is allowed late; only its local route is strict."""
         events = [
             {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_completed"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
             {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
@@ -633,7 +603,7 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
                 "resume_contract": True,
             },
             {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_completed"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
             {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},

@@ -37,15 +37,16 @@ _EXPECTED_GATES = frozenset((
 ))
 _COORDINATOR_COMPLETION_CONTRACT = (
     "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned "
-    "dispatch.call with unmodified dispatch.arguments; a generic collaboration spawn, self-authored task name, or "
-    "replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the coordinator must read its exact "
-    "canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned "
-    "continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only "
-    "the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator "
-    "must neither present completion nor close the worker as consumed. A successful continue is one-shot: follow only "
-    "its returned dispatch/wait/terminal outcome; never call continue again with the same step/results, request artifacts, "
-    "add future_waves, or spawn a replacement. A task-identity or step-mismatch diagnostic is recoverable: "
-    "inspect the same task and follow the server-owned recovery or concrete user question; never stop Cortex."
+    "spawn_agent call with unmodified arguments; a self-authored task name or replacement child cannot bind to or advance "
+    "a Cortex attempt. For every terminal worker, the worker final must be exactly ATTEMPT_COMPLETED. The coordinator calls "
+    "read_worker_result with task_ref plus coordinator_ref plus the exact server-derived step; the server returns all canonical "
+    "results for the current wave and the continuation. The coordinator then follows only that server-returned continuation and "
+    "closes the completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the "
+    "continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed. "
+    "A successful continuation is one-shot: follow only its returned native dispatch, wait, or terminal outcome; never call "
+    "continue again with copied refs, request artifacts, a replacement pipeline, or a replacement worker. A task-identity or "
+    "step-mismatch diagnostic is recoverable only with the same explicit coordinator capability: inspect the same task and "
+    "follow server-owned recovery or a concrete user question; never infer authority from a host session."
 )
 
 
@@ -106,7 +107,7 @@ def _validate_contract(payload: object) -> dict[str, Any]:
         raise RuntimeError("bundled Cortex prompt source ownership is invalid")
     required_source_owners = {
         "worker_operation_cards": "profiles.json.shared_worker_contract.operation_cards",
-        "worker_identity_binding": "runtime server-bound dispatch session",
+        "worker_assignment_authorization": "explicit task_ref plus assignment_ref capability",
         "planner_shape": "profiles.json.shared_worker_contract.planner_completion_shape",
         "attachment_preflight": "profiles.json.shared_worker_contract.attachment_preflight",
         "activation_context": "profiles.json.shared_worker_contract.activation_context",
@@ -141,6 +142,7 @@ def _validate_contract(payload: object) -> dict[str, Any]:
     live_runner = prompt_eval.get("live_runner")
     if (
         not isinstance(live_runner, dict)
+        or live_runner.get("scope") != "development_source_prompt_eval_only"
         or live_runner.get("command") != "codex exec"
         or live_runner.get("sandbox") != "read-only"
         or live_runner.get("response_schema") != "cortex/prompt-live-eval-response/v1"

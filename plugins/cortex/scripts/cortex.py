@@ -68,15 +68,13 @@ from cortex_runtime.mcp_api import (
     _public_next_action,
     build_public_schemas,
     configure_internal_schemas,
+    project_public_response,
     public_tools as build_public_tools,
     public_tools_for_audience,
     serve_stdio,
-    v3_response as render_v3_response,
+    v11_response as render_v11_response,
 )
-from cortex_runtime.worker_identity import (
-    binding_from_environment,
-    worker_binding,
-)
+from cortex_runtime.v11_responses import validate_response as validate_v11_response
 from cortex_runtime.ledger_db import (
     DATABASE_SCHEMA_VERSION,
     all_lanes as db_all_lanes,
@@ -92,6 +90,7 @@ from cortex_runtime.ledger_db import (
     get_global as db_get_global,
     get_lane as db_get_lane,
     get_manifest_snapshot as db_get_manifest_snapshot,
+    get_pending_repair_escrow as db_get_pending_repair_escrow,
     get_artifact_for_export_path as db_get_artifact_for_export_path,
     get_artifact_metadata as db_get_artifact_metadata,
     manifest_snapshot_refs as db_manifest_snapshot_refs,
@@ -137,6 +136,7 @@ from cortex_runtime.ledger_db import (
     fail_prune as db_fail_prune,
 )
 from cortex_runtime.validation import ValidationFailure
+from cortex_runtime.v11_submission import COORDINATOR_REF_PATTERN
 from cortex_runtime.routing import (
     profile_can_own_gate as routing_profile_can_own_gate,
     profiles_for_gate as routing_profiles_for_gate,
@@ -161,7 +161,7 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback; atomic replace still applies.
     fcntl = None
-SCHEMA = "cortex/v8"
+SCHEMA = "cortex/v11"
 RESULT_VALIDATION_SCHEMA = "cortex/result-validation/v1"
 PLANNING_SCHEMA = "cortex/planning/v1"
 SCOPING_SCHEMA = "cortex/scoping/v1"
@@ -175,8 +175,6 @@ PROFILE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "profiles.json"
 # Orchestrator skill. It is host transport metadata, not user task content;
 # retaining its absolute plugin-cache path in task labels or durable ledgers
 # leaks a machine-local path and makes the label depend on the cache version.
-CODEX_SESSION_ENV_KEYS = ("CODEX_SESSION_ID", "CODEX_THREAD_ID")
-HOST_SESSION_SCHEMA = "cortex/host-sessions/v1"
 # This is intentionally a host process setting, not a public Cortex tool
 # argument.  It selects the parent directory for per-project private stores;
 # it never receives a workspace-controlled ``project_root/.codex`` value.
@@ -272,7 +270,9 @@ def _clear_state_lock_holder(root: Path, token: str) -> None:
 MCP_SERVER_INSTRUCTIONS = (
     "Cortex opt-in. Read canonical attempt results by attempt_result_ref before continuation. "
     "Internal workers emit English only. Lifecycle requires task_ref; no unscoped recovery. "
-    "After resume, clear, or compaction inspect once with task_ref; use context_handoff and never restart."
+    "After resume, clear, or compaction inspect once with task_ref; use context_handoff and never restart. "
+    "An MCP isError result may contain the normal structured Cortex error/recovery. Retry the same operation only when "
+    "retryable=true, state_mutated=false, and allowed_changes is nonempty; otherwise stop. Never inspect implementation or private state."
 )
 
 try:
@@ -366,7 +366,7 @@ if (
     or SHARED_WORKER_CONTRACT.get("worker_operations")
     != ["worker_question", "record_attempt_event", "complete_attempt", "read_dispatch_briefing", "read_worker_result"]
     or SHARED_WORKER_CONTRACT.get("caller_correctable_tool_errors")
-    != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
+    != "retry_same_operation_only_when_retryable_state_unmutated_and_allowed_changes_nonempty_otherwise_stop"
     or SHARED_WORKER_CONTRACT.get("read_only_workspace_delta")
     != "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
@@ -382,8 +382,8 @@ if (
     }
     or not all(isinstance(value, str) and value.strip() for value in MODE_OVERLAYS["harvest"].values())
     or PROMPT_COMPACTION_GUIDANCE != {
-        "bootstrap_target_bytes": 1500,
-        "ordinary_briefing_target_bytes": 16 * 1024,
+        "bootstrap_target_bytes": 1024,
+        "ordinary_briefing_target_bytes": 12 * 1024,
         "harvest_briefing_target_bytes": 18 * 1024,
         "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
     }
@@ -672,7 +672,7 @@ SUPPORTED_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 REQUESTABLE_MODELS = SUPPORTED_MODELS
 SUPPORTED_EFFORT_SEQUENCE = ("low", "medium", "high", "xhigh", "max")
 SUPPORTED_EFFORTS = set(SUPPORTED_EFFORT_SEQUENCE)
-MODEL_RESOLUTIONS = {"configured_default", "explicit_override", "visible_thread"}
+MODEL_RESOLUTIONS = {"configured_default", "explicit_override"}
 MODEL_ROUTING = PROFILE_CONTRACT.get("model_routing")
 if not isinstance(MODEL_ROUTING, dict) or MODEL_ROUTING.get("schema") != "cortex/model-routing/v1":
     raise RuntimeError("bundled Cortex model routing contract is invalid")
@@ -877,8 +877,9 @@ SENSITIVE_KEY_RE = re.compile(r"(?i)(?:^|[_ -])(api[_ -]?key|access[_ -]?token|r
 SENSITIVE_LOG_KEY_NAMES = {
     "apikey", "accesstoken", "refreshtoken", "clientsecret", "token",
     "password", "passwd", "secret", "privatekey", "authorization",
-    "coordinatorcapability", "coordinatorrecoveryproof",
+    "coordinatorcapability", "coordinatorrecoveryproof", "coordinatorref", "assignmentref",
 }
+ASSIGNMENT_VALUE_RE = re.compile(r"assignment-v1-[0-9a-f]{64}")
 INTERNAL_NON_ENGLISH_SCRIPT_RE = re.compile(
     r"[\u0370-\u052f\u0530-\u058f\u0590-\u08ff\u0900-\u0fff"
     r"\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
@@ -889,7 +890,7 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def v3_task_slug(value: object) -> str:
+def v11_task_slug(value: object) -> str:
     """Build a concise durable-ID label from the exact task text."""
     raw = str(value or "").strip()
     return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:48] or "task"
@@ -912,6 +913,7 @@ def redact(value: object, limit: int | None = MAX_TEXT) -> str:
     text = BEARER_RE.sub(lambda match: f"{match.group(1)}<REDACTED>", text)
     text = URI_CREDENTIAL_RE.sub(r"\1<REDACTED>@", text)
     text = ENV_SECRET_RE.sub(r"\1<REDACTED>", text)
+    text = ASSIGNMENT_VALUE_RE.sub("<REDACTED-ASSIGNMENT-REF>", text)
     return SENSITIVE_RE.sub(lambda match: f"{match.group(1)}=<REDACTED>", text)
 
 
@@ -977,113 +979,6 @@ def normalize_user_language(value: object, fallback_text: object = "") -> str:
 
 def digest_text(value: object) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
-
-
-def _codex_host_session_id() -> str | None:
-    """Return a validated session hint explicitly forwarded to the MCP process.
-
-    Public v5 arguments intentionally do not accept caller-supplied durable
-    identity.  Some hosts or operator configurations forward a session/thread
-    environment value; the documented PostToolUse hook session_id is the
-    primary lifecycle binding.  An absent or malformed value keeps the
-    standalone-MCP fallback behavior until that hook runs.
-    """
-    for name in CODEX_SESSION_ENV_KEYS:
-        candidate = str(os.environ.get(name, "")).strip().lower()
-        if SAFE_ID_RE.fullmatch(candidate):
-            return candidate
-    return None
-
-
-def _worker_binding_from_host_session() -> dict[str, str] | None:
-    """Resolve a native worker binding when the host cannot inject env JSON.
-
-    The Codex native spawn host starts the child's MCP process independently
-    and does not provide a per-process environment extension.  The lifecycle
-    hook nevertheless records the exact host agent/session identity in the
-    private worker_sessions ledger before the child makes its first MCP call.
-    Resolve only one matching resumable/running row across the private host
-    project stores, then derive the complete identity from that attempt.  The
-    coordinator's ordinary CODEX_SESSION_ID is not a worker row and therefore
-    remains unbound.  No model-authored token or semantic request field is
-    consulted.
-    """
-    candidates = {
-        str(os.environ.get(name) or "").strip()
-        for name in (
-            "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_AGENT_ID",
-            "CODEX_SUBAGENT_ID", "CODEX_TASK_ID",
-        )
-    }
-    candidates = {value for value in candidates if value and SAFE_ID_RE.fullmatch(value)}
-    # Desktop's native child MCP process does not inherit the child id (and
-    # currently starts with the same stripped environment as the coordinator).
-    # The SubagentStart hook has nevertheless already durably confirmed the
-    # child.  Keep an adapter-neutral fallback for that hand-off: claim one
-    # freshly observed running session only when it is unambiguous.  Old rows
-    # are deliberately ignored so a restarted coordinator cannot attach to a
-    # historical worker, and ambiguity remains fail-closed.
-    projects = _host_control_projects_for_lookup()
-    if projects is None:
-        return None
-    matches: list[dict[str, str]] = []
-    now_utc = datetime.now(timezone.utc)
-    try:
-        project_dirs = sorted(projects.iterdir(), key=lambda item: item.name)
-    except OSError:
-        return None
-    for project_dir in project_dirs:
-        if not project_dir.name.startswith("p-"):
-            continue
-        try:
-            _assert_private_directory(project_dir, "Cortex host project ledger")
-            for task_id in sorted(db_task_index(project_dir)):
-                sessions = db_list_worker_sessions(project_dir, str(task_id))
-                for session in sessions:
-                    if str(session.get("status") or "") not in {"running", "awaiting_spawn", "idle_resumable"}:
-                        continue
-                    identities = {
-                        str(session.get("session_id") or "").strip(),
-                        str(session.get("host_agent_id") or "").strip(),
-                        str(session.get("host_task_name") or "").strip(),
-                    }
-                    identity_match = bool(candidates and not candidates.isdisjoint(identities))
-                    try:
-                        last_seen = datetime.fromisoformat(str(session.get("last_seen_at") or "").replace("Z", "+00:00"))
-                        fresh = (now_utc - last_seen).total_seconds() <= 300
-                    except (TypeError, ValueError):
-                        fresh = False
-                    # With no host-provided identity, only a single fresh
-                    # server-observed worker may be claimed.  We collect all
-                    # such rows and reject ambiguity below.
-                    if identity_match or (not candidates and fresh):
-                        loaded = _v3_task_state(project_dir, str(task_id))
-                        if loaded is None:
-                            continue
-                        _task_dir, state, task = loaded
-                        attempt_id = str(session.get("attempt_id") or "").strip()
-                        attempt = _attempt(state, attempt_id)
-                        if not attempt or attempt.get("status") not in {"running", AWAITING_HOST_SPAWN}:
-                            continue
-                        matches.append({
-                            "project_root": str(task.get("project_root") or ""),
-                            "task_id": str(state.get("task_id") or task_id),
-                            "task_ref": str(state.get("task_ref") or _v3_task_ref(str(task_id))),
-                            "attempt_id": attempt_id,
-                            "profile": str(attempt.get("profile") or attempt.get("agent") or ""),
-                            "dispatch_ref": str(attempt.get("dispatch_ref") or ""),
-                            "briefing_digest": str(attempt.get("briefing_digest") or ""),
-                            "session_id": str(session.get("session_id") or ""),
-                        })
-        except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError, TypeError):
-            continue
-    if len(matches) != 1:
-        return None
-    binding = matches[0]
-    required = ("project_root", "task_id", "attempt_id", "profile")
-    if any(not binding.get(field) for field in required):
-        return None
-    return binding
 
 
 def _reject_symlink_ancestry(path: Path, label: str, allow_missing_leaf: bool = False) -> Path:
@@ -1479,9 +1374,9 @@ def _bound_project_root_for_task_ref(task_ref: str, *, include_completed: bool =
         try:
             _assert_private_directory(candidate, "Cortex host project ledger")
             for task_id in sorted(db_task_index(candidate)):
-                if _v3_task_ref(str(task_id)) != requested:
+                if _v11_task_ref(str(task_id)) != requested:
                     continue
-                loaded = _v3_task_state(candidate, str(task_id))
+                loaded = _v11_task_state(candidate, str(task_id))
                 if loaded is None:
                     continue
                 _, state, task = loaded
@@ -2142,7 +2037,7 @@ def reconcile_manifest(task_dir: Path, state: dict[str, Any], reported_paths: li
     return receipt, current
 
 
-def remove_active_mapping(root: Path, task_id: str, thread_id: str) -> None:
+def remove_active_mapping(root: Path, task_id: str) -> None:
     try:
         activations = _activation_records(root)
         changed = False
@@ -2163,24 +2058,11 @@ def remove_active_mapping(root: Path, task_id: str, thread_id: str) -> None:
         # makes public governance mutations fail closed if the compact audit
         # receipt cannot be updated.
         pass
-    try:
-        bindings = _host_session_bindings(root)
-        if bindings["tasks"].pop(task_id, None) is not None:
-            bindings["updated_at"] = now()
-            if bindings["tasks"]:
-                db_put_global(root, "host_sessions", bindings)
-            else:
-                db_delete_global(root, "host_sessions")
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
 
 
 def authorize(state: dict[str, Any], params: dict[str, Any]) -> None:
     authorize_principal(state, params)
-    activation_params = dict(params)
-    if not activation_params.get("thread_id") and state.get("thread_id"):
-        activation_params["thread_id"] = state["thread_id"]
-    require_activation(activation_params, state.get("task_id"))
+    require_activation(params, state.get("task_id"))
 
 
 def _canonical_principal(value: object) -> str:
@@ -2192,53 +2074,12 @@ def _canonical_principal(value: object) -> str:
 def authorize_principal(state: dict[str, Any], params: dict[str, Any]) -> None:
     expected = str(state.get("principal") or "local")
     supplied_principal = str(params.get("principal") or "").strip()
-    supplied_thread = str(params.get("thread_id") or "").strip()
-    bound_thread = str(state.get("thread_id") or "").strip()
-
-    if supplied_principal:
-        if expected != "local" and _canonical_principal(supplied_principal) != _canonical_principal(expected):
-            raise ValueError("task is owned by a different principal")
-        # A resumed root coordinator can be represented by `/root` after a
-        # host turn while the durable task was initialized as `root`.  Keep
-        # the durable owner authoritative for subsequent activation lookup
-        # and receipts instead of treating the spelling change as a new
-        # principal.
-        if expected != "local" and supplied_principal != expected:
-            params["principal"] = expected
-        if supplied_thread and bound_thread and supplied_thread != bound_thread:
-            raise ValueError("task is bound to a different thread")
-        return
-
-    # principal and thread_id are distinct identities. A caller that supplies
-    # only the exact bound thread may recover the task principal, but an
-    # arbitrary thread value must never be compared to the principal string.
-    if supplied_thread:
-        if bound_thread and supplied_thread == bound_thread:
-            try:
-                inferred = {"thread_id": supplied_thread, "principal": expected}
-                if activation_record(ledger_root(params), inferred, state.get("task_id")):
-                    return
-            except (OSError, ValueError, TypeError):
-                pass
-        raise ValueError("task is bound to a different thread")
-
-    if not supplied_principal and not supplied_thread:
-        # Native model calls occasionally omit the repeated identity fields
-        # after activation.  Recover only when this task is still bound to
-        # the exact active activation recorded in the ledger; otherwise keep
-        # the authentication boundary fail-closed.
-        try:
-            inferred = {
-                "thread_id": str(state.get("thread_id") or ""),
-                "principal": expected,
-            }
-            if state.get("thread_id") and activation_record(
-                ledger_root(params), inferred, state.get("task_id")
-            ):
-                return
-        except (OSError, ValueError, TypeError):
-            pass
-        raise ValueError("principal or thread_id is required for this task")
+    if not supplied_principal:
+        raise ValueError("server-owned task principal is required")
+    if expected != "local" and _canonical_principal(supplied_principal) != _canonical_principal(expected):
+        raise ValueError("task is owned by a different principal")
+    if expected != "local" and supplied_principal != expected:
+        params["principal"] = expected
 
 
 def ledger_root(params: dict[str, Any] | None = None) -> Path:
@@ -2263,13 +2104,9 @@ def ledger_root(params: dict[str, Any] | None = None) -> Path:
 
 def activation_key(params: dict[str, Any]) -> str:
     principal = str(params.get("principal") or "").strip()
-    # Public orchestration owns a server-generated principal for each task. Keep activation
-    # records keyed by that unique identity even when the host session binding
-    # is shared by more than one task in the same Codex thread.
-    key = principal if principal.startswith("orchestration-task-") else str(params.get("thread_id") or principal).strip()
-    if not key:
-        raise ValueError("explicit orchestration activation requires thread_id or principal")
-    return redact(key, 256)
+    if not principal:
+        raise ValueError("explicit orchestration activation requires a server-owned principal")
+    return redact(principal, 256)
 
 
 def activation_path(root: Path) -> Path:
@@ -2326,11 +2163,10 @@ def activate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     if activation_token != ACTIVATION_COMMAND:
         raise ValueError(f"explicit orchestration activation is owned by the Cortex skill route; {SKILL_ROUTE_HINT}")
     principal = str(params.get("principal", "")).strip()
-    thread_id = str(params.get("thread_id", "")).strip()
-    if not principal or not thread_id:
+    if not principal:
         return {
             "active": False,
-            "next_action": "retry activate_orchestration with both principal and thread_id",
+            "next_action": "retry activate_orchestration with the server-owned principal",
             "recoverable": True,
             "ledger_root": str(ledger_root(params)),
         }
@@ -2341,14 +2177,13 @@ def activate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         activations = _activation_records(root)
         activations[key] = {
             "schema": SCHEMA,
-            "thread_id": redact(thread_id, 256),
             "principal": redact(principal, 256),
             "coordinator": "main",
             "mode": mode,
             "parent_project_operations": "delegated",
             "worker_visibility": "hidden",
             "worker_return_route": "main_chat",
-            "identity_assurance": "caller_asserted_principal_and_thread",
+            "identity_assurance": "server_owned_principal",
             "dispatch_attestation": "not_host_attested",
             "task_id": None,
             "activated_at": now(),
@@ -2370,30 +2205,6 @@ def deactivate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         if task_id:
             _revoke_coordinator_capability(root, task_id, reason="orchestration_deactivated")
         return {"active": False, "key": key, "removed": bool(removed)}
-
-
-def activation_status(params: dict[str, Any]) -> dict[str, Any]:
-    root = ledger_root(params)
-    if not str(params.get("thread_id") or params.get("principal") or "").strip():
-        activations = _activation_records(root)
-        valid = [
-            item for item in activations.values()
-            if isinstance(item, dict) and item.get("schema") == SCHEMA
-            and item.get("coordinator") == "main" and item.get("mode") == "main-orchestrator"
-        ]
-        if len(valid) == 1:
-            return {"active": True, "activation": valid[0], "ledger_root": str(root), "identity_inferred": True}
-        return {
-            "active": False,
-            "activation": None,
-            "ledger_root": str(root),
-            "identity_inferred": False,
-            "reason": "activation_identity_ambiguous" if valid else "no_active_orchestration",
-            "candidate_count": len(valid),
-            "next_action": "resume the active host-bound coordinator session" if valid else "activate_orchestration",
-        }
-    record = activation_record(root, params)
-    return {"active": bool(record), "activation": record, "ledger_root": str(root), "identity_inferred": False}
 
 
 def classify_task(params: dict[str, Any]) -> dict[str, Any]:
@@ -2641,438 +2452,6 @@ def read_task_index(root: Path) -> dict[str, Any]:
     return db_task_index(root)
 
 
-def _host_session_bindings_path(root: Path) -> Path:
-    """Stable label only; host session bindings now reside in SQLite."""
-    return root / "cortex.db"
-
-
-def _host_session_bindings(root: Path) -> dict[str, Any]:
-    payload = db_get_global(root, "host_sessions", {"schema": HOST_SESSION_SCHEMA, "tasks": {}, "updated_at": now()})
-    if payload.get("schema") != HOST_SESSION_SCHEMA or not isinstance(payload.get("tasks"), dict):
-        raise ValueError("host session binding registry is invalid")
-    return payload
-
-
-def _active_host_session_task_ids(root: Path, bindings: dict[str, Any], session_id: str) -> list[str]:
-    active: list[str] = []
-    for raw_task_id, bound_session in bindings.get("tasks", {}).items():
-        if bound_session != session_id:
-            continue
-        try:
-            task_id = safe_id(str(raw_task_id))
-            loaded = _v3_task_state(root, task_id)
-        except (OSError, ValueError, json.JSONDecodeError, TypeError):
-            continue
-        if loaded is not None and loaded[1].get("status") in {"active", "blocked"}:
-            active.append(task_id)
-    return sorted(set(active))
-
-
-def bind_host_session_from_hook(project_root_value: object, task_ref_value: object, session_id_value: object) -> dict[str, Any]:
-    """Bind documented hook identity without changing task authorization."""
-    project = select_project_root({"project_root": str(project_root_value or "")})
-    task_ref_value = safe_id(str(task_ref_value or ""))
-    session_id = safe_id(str(session_id_value or ""))
-    root = ledger_root({"project_root": str(project)})
-    with state_lock(root):
-        registry = _operation_registry(root)
-        matches = [
-            str(task_id)
-            for task_id, record in registry.get("tasks", {}).items()
-            if isinstance(record, dict)
-            and isinstance(record.get("start"), dict)
-            and record["start"].get("task_ref") == task_ref_value
-        ]
-        if len(matches) != 1:
-            return {"bound": False, "reason": "task_ref_unavailable"}
-        task_id = safe_id(matches[0])
-        loaded = _v3_task_state(root, task_id)
-        if loaded is None or loaded[1].get("status") not in {"active", "blocked"}:
-            return {"bound": False, "reason": "task_inactive"}
-        bindings = _host_session_bindings(root)
-        previous = str(bindings["tasks"].get(task_id) or "")
-        if previous and previous != session_id:
-            return {"bound": False, "reason": "session_conflict"}
-        bindings["tasks"][task_id] = session_id
-        bindings["updated_at"] = now()
-        db_put_global(root, "host_sessions", bindings)
-        active = _active_host_session_task_ids(root, bindings, session_id)
-        return {"bound": True, "task_id": task_id, "ambiguous": len(active) != 1}
-
-
-def bind_host_worker_from_hook(
-    project_root_value: object,
-    task_id_value: object,
-    parent_session_id_value: object,
-    host_task_name_value: object,
-    host_agent_id_value: object,
-    host_model_value: object,
-) -> dict[str, Any]:
-    """Durably bind a documented SubagentStart event to one pending attempt.
-
-    Codex AttemptResults the parent session id, opaque native agent id, generic
-    ``agent_type=default``, and actual model for dynamically named workers. The
-    parent-session registry plus the required sequential spawn order assigns
-    that event to the first still-awaiting issued dispatch. Hosts that expose
-    the native task key are matched exactly instead. This lets compaction
-    recovery distinguish a pending dispatch from a worker that already exists
-    without reading a host transcript or trusting model-authored text.
-    """
-    project = select_project_root({"project_root": str(project_root_value or "")})
-    task_id = safe_id(str(task_id_value or ""))
-    parent_session_id = safe_id(str(parent_session_id_value or ""))
-    raw_host_task_name = str(host_task_name_value or "").strip()
-    host_task_name = safe_id(raw_host_task_name)
-    host_agent_id = str(host_agent_id_value or "").strip()
-    if not HOST_AGENT_ID_RE.fullmatch(host_agent_id):
-        return {"bound": False, "reason": "host_agent_id_invalid"}
-    # Native SubagentStart payloads are not required to include the model
-    # (Desktop omits it for configured-default routes).  An exact issued task
-    # name is already stronger identity than a model hint; infer the expected
-    # model only after the task-scoped dispatch match.  Generic ``default``
-    # events still require a model unless this task has exactly one pending
-    # dispatch, so ambiguity remains fail-closed.
-    host_model = _v3_model(host_model_value)
-    root = ledger_root({"project_root": str(project)})
-    bindings = _host_session_bindings(root)
-    if bindings.get("tasks", {}).get(task_id) != parent_session_id:
-        return {"bound": False, "reason": "parent_session_mismatch"}
-    loaded = _v3_task_state(root, task_id)
-    if loaded is None:
-        return {"bound": False, "reason": "task_unavailable"}
-    _, state, _ = loaded
-    if raw_host_task_name == "default":
-        matches = [
-            item for item in state.get("attempts", [])
-            if not item.get("invalidated")
-            and item.get("status") == AWAITING_HOST_SPAWN
-            and (not host_model or str(item.get("expected_model") or item.get("selected_model") or "") == host_model)
-        ]
-        if len(matches) == 1:
-            host_task_name = str((matches[0].get("spawn_request") or {}).get("task_name") or "")
-        elif len(matches) > 1:
-            return {"bound": False, "reason": "exact_dispatch_identity_required"}
-        else:
-            matches = [
-                item for item in state.get("attempts", [])
-                if not item.get("invalidated")
-                and item.get("status") == "running"
-                and str((item.get("host_spawn") or {}).get("agent_id") or "") == host_agent_id
-                and str((item.get("host_spawn") or {}).get("model") or "") == host_model
-            ]
-            if len(matches) == 1:
-                host_task_name = str((matches[0].get("spawn_request") or {}).get("task_name") or "")
-            elif len(matches) > 1:
-                return {"bound": False, "reason": "exact_dispatch_identity_required"}
-    else:
-        matches = [
-            item for item in state.get("attempts", [])
-            if not item.get("invalidated")
-            and str((item.get("spawn_request") or {}).get("task_name") or "") == host_task_name
-            and item.get("status") in {AWAITING_HOST_SPAWN, "running"}
-        ]
-    if len(matches) != 1:
-        return {"bound": False, "reason": "dispatch_identity_unavailable"}
-    attempt = matches[0]
-    if not host_model:
-        host_model = _v3_model(attempt.get("expected_model") or attempt.get("selected_model"))
-    if not host_model:
-        return {"bound": False, "reason": "host_model_unavailable"}
-    existing = attempt.get("host_spawn") or {}
-    if attempt.get("status") == "running":
-        if existing.get("agent_id") == host_agent_id and existing.get("task_name") == host_task_name:
-            if attempt.get("host_stop_outcome") == "awaiting_user":
-                with state_lock(root):
-                    resumed_loaded = _v3_task_state(root, task_id)
-                    if resumed_loaded is None:
-                        return {"bound": False, "reason": "task_unavailable"}
-                    resumed_task_dir, resumed_state, _ = resumed_loaded
-                    resumed_attempt = _attempt(resumed_state, str(attempt.get("attempt_id") or ""))
-                    if resumed_attempt.get("host_stop_outcome") == "awaiting_user" and _open_blocking_questions(
-                        resumed_task_dir, resumed_state, str(resumed_attempt.get("attempt_id") or "")
-                    ):
-                        return {"bound": False, "reason": "worker_question_still_open"}
-                    for field in (
-                        "host_stopped_at", "host_stop_outcome", "host_question_refs",
-                    ):
-                        resumed_attempt.pop(field, None)
-                    resumed_attempt["host_resumed_at"] = now()
-                    package = _delegation_package(resumed_task_dir, resumed_state["task_id"], str(resumed_attempt["attempt_id"]))
-                    package["spawn_status"] = "resumed_existing_worker"
-                    package["lifecycle_status"] = resumed_attempt.get("lifecycle_status")
-                    package["attempt_status"] = resumed_attempt.get("status")
-                    package["host_resumed_at"] = resumed_attempt["host_resumed_at"]
-                    db_put_worker_session(root, {
-                        "task_id": resumed_state["task_id"],
-                        "attempt_id": str(resumed_attempt["attempt_id"]),
-                        "host_agent_id": host_agent_id,
-                        "host_task_name": host_task_name,
-                        "host_tool": str((resumed_attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
-                        "status": "running",
-                        "resumable": True,
-                        "started_at": (resumed_attempt.get("host_spawn") or {}).get("confirmed_at"),
-                    })
-                    _write_delegation_package(resumed_task_dir, resumed_state["task_id"], str(resumed_attempt["attempt_id"]), package)
-                    save_state(
-                        resumed_task_dir,
-                        resumed_task_dir / "state.sqlite",
-                        resumed_state,
-                        "host_resume_after_question",
-                        str(resumed_attempt["attempt_id"]),
-                    )
-            with state_lock(root):
-                heartbeat_loaded = _v3_task_state(root, task_id)
-                if heartbeat_loaded is None:
-                    return {"bound": False, "reason": "task_unavailable"}
-                heartbeat_task_dir, heartbeat_state, _ = heartbeat_loaded
-                heartbeat_attempt = _attempt(heartbeat_state, str(attempt.get("attempt_id") or ""))
-                if heartbeat_attempt.get("status") != "running":
-                    return {"bound": False, "reason": "worker_no_longer_running"}
-                heartbeat_at = now()
-                lease_expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-                heartbeat_attempt["last_heartbeat_at"] = heartbeat_at
-                heartbeat_attempt["worker_lease_expires_at"] = lease_expires_at
-                heartbeat_attempt["lifecycle_status"] = "running_acknowledged"
-                if isinstance(heartbeat_attempt.get("host_spawn"), dict):
-                    heartbeat_attempt["host_spawn"]["lease_expires_at"] = lease_expires_at
-                db_put_worker_session(root, {
-                    "task_id": heartbeat_state["task_id"],
-                    "attempt_id": str(heartbeat_attempt["attempt_id"]),
-                    "host_agent_id": host_agent_id,
-                    "host_task_name": host_task_name,
-                    "host_tool": str((heartbeat_attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
-                    "status": "running",
-                    "resumable": True,
-                    "started_at": (heartbeat_attempt.get("host_spawn") or {}).get("confirmed_at"),
-                })
-                save_state(
-                    heartbeat_task_dir,
-                    heartbeat_task_dir / "state.sqlite",
-                    heartbeat_state,
-                    "host_heartbeat",
-                    str(heartbeat_attempt["attempt_id"]),
-                )
-            return {
-                "bound": True,
-                "idempotent": True,
-                "attempt_id": attempt.get("attempt_id"),
-                "host_agent_id": host_agent_id,
-            }
-        return {"bound": False, "reason": "running_dispatch_mismatch"}
-    result = confirm_host_spawn({
-        "project_root": str(project),
-        "task_id": task_id,
-        "principal": state.get("principal"),
-        "thread_id": state.get("thread_id"),
-        "expected_revision": state.get("revision"),
-        "attempt_id": attempt.get("attempt_id"),
-        "host_tool": (attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent",
-        "host_agent_id": host_agent_id,
-        "host_task_name": host_task_name,
-        "host_model": host_model,
-        "host_reasoning_effort": (attempt.get("spawn_request") or {}).get("reasoning_effort"),
-    })
-    return {
-        "bound": bool(result.get("confirmed")),
-        "idempotent": bool(result.get("idempotent")),
-        "attempt_id": attempt.get("attempt_id"),
-        "host_agent_id": host_agent_id,
-        **({"reason": result.get("reason") or "host_spawn_confirmation_failed"} if not result.get("confirmed") else {}),
-    }
-
-
-def finalize_host_worker_stop_from_hook(
-    project_root_value: object,
-    task_id_value: object,
-    parent_session_id_value: object,
-    host_agent_id_value: object,
-) -> dict[str, Any]:
-    """Persist a documented SubagentStop without trusting model-authored text.
-
-    A worker that has already committed its canonical AttemptResult is never
-    reclassified as failed merely because projection finalization is pending.
-    A published result remains eligible for normal progression, and a worker
-    paused on a durable question remains addressable through its persisted host
-    identity. Only a stop with no result or question is terminal.
-    """
-    project = select_project_root({"project_root": str(project_root_value or "")})
-    task_id = safe_id(str(task_id_value or ""))
-    parent_session_id = safe_id(str(parent_session_id_value or ""))
-    host_agent_id = str(host_agent_id_value or "").strip()
-    if not HOST_AGENT_ID_RE.fullmatch(host_agent_id):
-        return {"updated": False, "outcome": "host_agent_id_invalid", "reason": "host_agent_id_invalid"}
-    root = ledger_root({"project_root": str(project)})
-    with state_lock(root):
-        bindings = _host_session_bindings(root)
-        loaded = _v3_task_state(root, task_id)
-        if loaded is None:
-            return {"updated": False, "outcome": "task_unavailable", "reason": "task_unavailable"}
-        task_dir, state, _ = loaded
-        bound_parent_session = str(bindings.get("tasks", {}).get(task_id) or "").strip()
-        state_parent_session = str(state.get("thread_id") or "").strip()
-        if bound_parent_session != parent_session_id:
-            # The task state is the durable, task-scoped authority.  A missing
-            # global binding can be left behind by an interrupted host start or
-            # compaction; restore it only when the hook supplies that exact
-            # persisted parent session.  Never accept a different session.
-            if not bound_parent_session and state_parent_session == parent_session_id:
-                bindings["tasks"][task_id] = parent_session_id
-                bindings["updated_at"] = now()
-                db_put_global(root, "host_sessions", bindings)
-            else:
-                return {
-                    "updated": False,
-                    "outcome": "parent_session_mismatch",
-                    "reason": "parent_session_mismatch",
-                }
-        matches = [
-            item for item in state.get("attempts", [])
-            if not item.get("invalidated")
-            and str((item.get("host_spawn") or {}).get("agent_id") or "") == host_agent_id
-        ]
-        if len(matches) != 1:
-            return {
-                "updated": False,
-                "outcome": "host_worker_identity_unavailable",
-                "reason": "host_worker_identity_unavailable",
-            }
-        attempt = matches[0]
-        attempt_id = str(attempt.get("attempt_id") or "")
-        if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
-            return {
-                "updated": False,
-                "idempotent": True,
-                "outcome": str(attempt.get("host_stop_outcome") or "attempt_already_terminal"),
-                "reason": "attempt_already_terminal",
-                "attempt_id": attempt_id,
-                "status": attempt.get("status"),
-            }
-        if attempt.get("status") != "running":
-            return {
-                "updated": False,
-                "outcome": "attempt_not_running",
-                "reason": "attempt_not_running",
-                "attempt_id": attempt_id,
-            }
-
-        stopped_at = now()
-        open_questions = _open_blocking_questions(task_dir, state, attempt_id)
-        canonical_result = attempt_protocol.get_attempt_result(
-            root,
-            task_id=state["task_id"],
-            attempt_id=attempt_id,
-        )
-        finalization_pending = bool(
-            canonical_result
-            and canonical_result.get("status") == "completed"
-            and canonical_result.get("lifecycle_status")
-            in {attempt_protocol.LIFECYCLE_WORK_COMPLETED, attempt_protocol.LIFECYCLE_FINALIZING}
-        )
-        result_finalized = bool(
-            canonical_result
-            and canonical_result.get("lifecycle_status") == attempt_protocol.LIFECYCLE_COMPLETED
-            and str(canonical_result.get("result_ref") or "")
-        )
-        attempt["host_stopped_at"] = stopped_at
-        package = _delegation_package(task_dir, state["task_id"], attempt_id)
-        if result_finalized:
-            result_ref = str(canonical_result["result_ref"])
-            attempt["lifecycle_status"] = attempt_protocol.LIFECYCLE_COMPLETED
-            attempt.pop("worker_lease_expires_at", None)
-            attempt["host_stop_outcome"] = "result_finalized"
-            attempt["host_resumable"] = False
-            attempt["attempt_result_ref"] = result_ref
-            package["spawn_status"] = "stopped_after_result"
-            package["lifecycle_status"] = attempt.get("lifecycle_status")
-            package["attempt_status"] = attempt.get("status")
-            package["host_stopped_at"] = stopped_at
-            package["resumable"] = False
-            package["attempt_result_ref"] = result_ref
-            event = "host_stop_after_result"
-            detail = f"{attempt_id}: {result_ref}"
-            outcome = "result_finalized"
-        elif open_questions:
-            attempt["lifecycle_status"] = "paused_awaiting_user"
-            attempt.pop("worker_lease_expires_at", None)
-            question_refs = [str(item.get("question_id")) for item in open_questions]
-            attempt["host_stop_outcome"] = "awaiting_user"
-            attempt["host_resumable"] = True
-            attempt["host_question_refs"] = question_refs
-            package["spawn_status"] = "paused_for_question"
-            package["lifecycle_status"] = attempt.get("lifecycle_status")
-            package["attempt_status"] = attempt.get("status")
-            package["host_stopped_at"] = stopped_at
-            package["resumable"] = True
-            package["question_refs"] = question_refs
-            event = "host_stop_for_question"
-            detail = f"{attempt_id}: {', '.join(question_refs)}"
-            outcome = "awaiting_user"
-        elif finalization_pending:
-            lifecycle = str(canonical_result["lifecycle_status"]).lower()
-            attempt["lifecycle_status"] = lifecycle
-            attempt.pop("worker_lease_expires_at", None)
-            attempt["host_stop_outcome"] = "work_completed_finalization_pending"
-            attempt["host_resumable"] = False
-            attempt["attempt_result_ref"] = canonical_result.get("result_ref")
-            package["spawn_status"] = "stopped_finalization_pending"
-            package["lifecycle_status"] = attempt.get("lifecycle_status")
-            package["attempt_status"] = attempt.get("status")
-            package["host_stopped_at"] = stopped_at
-            package["resumable"] = False
-            package["attempt_result_ref"] = canonical_result.get("result_ref")
-            event = "host_stop_finalization_pending"
-            detail = f"{attempt_id}: {lifecycle}"
-            outcome = "work_completed_finalization_pending"
-        else:
-            reason = "native_worker_stopped_without_result"
-            attempt["status"] = "failed"
-            attempt["finalized_at"] = stopped_at
-            attempt["finalization_reason"] = reason
-            attempt["host_stop_outcome"] = reason
-            attempt["host_resumable"] = False
-            attempt["lifecycle_status"] = "needs_recovery"
-            attempt.pop("worker_lease_expires_at", None)
-            package["spawn_status"] = "stopped_without_result"
-            package["lifecycle_status"] = attempt.get("lifecycle_status")
-            package["attempt_status"] = attempt.get("status")
-            package["host_stopped_at"] = stopped_at
-            package["resumable"] = False
-            package["failure_reason"] = reason
-            package["dispatch_ref"] = str(attempt.get("dispatch_ref") or "")
-            event = "host_stop_without_result"
-            detail = f"{attempt_id}: {reason}"
-            outcome = reason
-        session_status = (
-            "completed" if result_finalized
-            else "idle_resumable" if open_questions
-            # The native child has stopped but finalization must be retried on
-            # the exact persisted AttemptResult.  ``completion_pending`` is a
-            # public lifecycle label, not a valid worker_sessions status;
-            # storing it here previously failed the SQLite status boundary and
-            # could leave a stale running row behind.
-            else "stopped_recoverable" if finalization_pending
-            else "terminated_unavailable"
-        )
-        db_put_worker_session(root, {
-            "task_id": state["task_id"], "attempt_id": attempt_id,
-            "host_agent_id": host_agent_id,
-            "host_task_name": str((attempt.get("host_spawn") or {}).get("task_name") or ""),
-            "host_tool": str((attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
-            "status": session_status, "resumable": bool(open_questions),
-            "started_at": (attempt.get("host_spawn") or {}).get("confirmed_at"),
-            **({"terminated_at": stopped_at} if result_finalized or not open_questions else {}),
-        })
-        _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        save_state(task_dir, task_dir / "state.sqlite", state, event, detail)
-        return {
-            "updated": True,
-            "attempt_id": attempt_id,
-            "outcome": outcome,
-            "attempt_result_ref": str(canonical_result.get("result_ref") or "") if canonical_result else None,
-            "question_refs": [str(item.get("question_id")) for item in open_questions],
-        }
-
-
 def task_paths(task_id: str, params: dict[str, Any]) -> tuple[Path, Path, Path]:
     root = ledger_root(params)
     normalized = safe_id(task_id)
@@ -3189,8 +2568,6 @@ def _tool_error_context(request: Any, request_id: Any, raw_line: str) -> dict[st
         value = request_id if key == "id" else source.get(key)
         if value not in (None, ""):
             ids[key] = redact(value, 256)
-    thread_id = source.get("thread_id") or request_dict.get("thread_id")
-    session_id = source.get("session_id") or source.get("chat_session_id") or request_dict.get("session_id") or thread_id
     if arguments:
         input_value, input_source = arguments, "arguments"
     elif params:
@@ -3200,8 +2577,6 @@ def _tool_error_context(request: Any, request_id: Any, raw_line: str) -> dict[st
     return {
         "method": redact(request_dict.get("method", ""), 128) or None,
         "tool": redact(params.get("name", ""), 128) or None,
-        "chat_session_id": redact(session_id, 256) if session_id else None,
-        "thread_id": redact(thread_id, 256) if thread_id else None,
         "request_id": redact(request_id, 256) if request_id is not None else None,
         "ids": ids,
         "input_summary": _tool_error_input_summary(input_value, source=input_source),
@@ -3212,13 +2587,19 @@ def log_tool_error(request: Any, request_id: Any, raw_line: str, error: BaseExce
     """Append a redacted MCP tool failure without masking the original error."""
     try:
         context = _tool_error_context(request, request_id, raw_line)
+        request_params = request.get("params") if isinstance(request, dict) and isinstance(request.get("params"), dict) else {}
+        request_arguments = request_params.get("arguments") if isinstance(request_params.get("arguments"), dict) else {}
+        supplied_coordinator_ref = str(request_arguments.get("coordinator_ref") or "").strip().lower()
+        error_text = redact(str(error), 2000)
+        if COORDINATOR_CAPABILITY_RE.fullmatch(supplied_coordinator_ref):
+            error_text = error_text.replace(supplied_coordinator_ref, "<REDACTED-COORDINATOR-REF>")
         record = {
             "timestamp": now(),
             "event": "tool_error",
             "server_version": SERVER_VERSION,
             "pid": os.getpid(),
             "error_type": type(error).__name__,
-            "error": redact(str(error), 2000),
+            "error": error_text,
             **context,
         }
         encoded = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
@@ -4651,6 +4032,7 @@ def _question_config(params: dict[str, Any]) -> dict[str, Any]:
         if not recommended_answer:
             raise ValueError("text questions require a concrete recommended_answer")
     return {
+        "question_type": "multi_select" if multiple else ("single_select" if options else "text"),
         "header": header,
         "options": options,
         "multiple": multiple,
@@ -6485,16 +5867,12 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         # the durable advisory projection instead of rejecting task creation.
         task_number, task_dir = allocate_task_directory(root, task_id)
         state_path = task_dir / "state.sqlite"
-        thread_id = str(params.get("thread_id", "")).strip()
-        principal = redact(params.get("principal") or thread_id or "local", 256)
+        principal = redact(params.get("principal") or "local", 256)
         baseline = capture_project_manifest(select_project_root(params))
         baseline_preflight = dict(baseline)
         baseline_preflight.pop("captured_at", None)
         _json_text(baseline_preflight, label="baseline manifest", max_bytes=MAX_MANIFEST_BYTES)
         user_language = normalize_user_language(params.get("user_language"), params.get("user_request", ""))
-        visible_thread_requested = params.get("visible_thread_requested", False)
-        if not isinstance(visible_thread_requested, bool):
-            raise ValueError("visible_thread_requested must be a boolean")
         plan_approval_policy = str(params.get("plan_approval") or "auto")
         if plan_approval_policy not in {"auto", "required"}:
             raise ValueError("plan_approval must be auto or required")
@@ -6522,10 +5900,10 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if not exact_user_request:
             raise ValueError("init_task requires the exact non-empty user request")
         exact_user_request_digest = digest_text(exact_user_request)
-        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "constraints": [redact(item, 1000) for item in init_constraints], "acceptance_criteria": [redact(item, 1000) for item in init_acceptance_criteria], "scope": [redact(item, 500) for item in init_scope], "allowed_paths": [redact(item, 500) for item in init_allowed_paths], "verification": [redact(item, 1000) for item in init_verification], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in init_pause_conditions], "plan_approval": plan_approval_policy, "plan_approval_user_requested": trusted_plan_review_requested, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
+        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "constraints": [redact(item, 1000) for item in init_constraints], "acceptance_criteria": [redact(item, 1000) for item in init_acceptance_criteria], "scope": [redact(item, 500) for item in init_scope], "allowed_paths": [redact(item, 500) for item in init_allowed_paths], "verification": [redact(item, 1000) for item in init_verification], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in init_pause_conditions], "plan_approval": plan_approval_policy, "plan_approval_user_requested": trusted_plan_review_requested, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "pending_plan" if trusted_plan_review_requested else "not_required", "user_requested": trusted_plan_review_requested, "history": []}, "plan_approval_user_requested": trusted_plan_review_requested, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "pending_plan" if trusted_plan_review_requested else "not_required", "user_requested": trusted_plan_review_requested, "history": []}, "plan_approval_user_requested": trusted_plan_review_requested, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         artifact_relative = str(task_dir.relative_to(root))
         db_create_task(root, task, state, artifact_relative)
         intent_artifact = store_immutable_artifact(
@@ -6552,14 +5930,6 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
             export_path="intent/user-request.txt",
             required=False,
         )
-        if thread_id and (
-            thread_id != principal
-            or not principal.startswith("orchestration-task-")
-        ):
-            bindings = _host_session_bindings(root)
-            bindings["tasks"][task_id] = thread_id
-            bindings["updated_at"] = now()
-            db_put_global(root, "host_sessions", bindings)
         activations = _activation_records(root)
         activation_id = activation_key(params)
         current_activation = activations.get(activation_id)
@@ -6584,7 +5954,7 @@ def status(params: dict[str, Any]) -> dict[str, Any]:
         "principal": state.get("principal", "local"),
         "revision": state["revision"],
     }))[:24]
-    active = activation_record(root, {"thread_id": state.get("thread_id"), "principal": state.get("principal")}, state["task_id"])
+    active = activation_record(root, {"principal": state.get("principal")}, state["task_id"])
     return {"task": task, "state": state, "active": bool(active), "status_receipt": receipt_id, "ledger_root": str(root)}
 
 
@@ -6593,33 +5963,6 @@ def _attempt(state: dict[str, Any], attempt_id: str) -> dict[str, Any]:
     if not attempt:
         raise ValueError("attempt_id does not belong to this task")
     return attempt
-
-
-def _attempt_identity_aliases(attempt: dict[str, Any]) -> set[str]:
-    """Return identities a native worker may use for its own active attempt.
-
-    The coordinator principal/thread remains the authorization boundary for
-    task mutations.  A worker result is the one scoped exception: after the
-    host confirms a spawn, the worker may identify itself by the returned
-    child/thread id as well as the canonical profile/task labels.  Keeping the
-    aliases derived from one attempt prevents a host id from being used to
-    publish for a different attempt.
-    """
-    spawn_request = attempt.get("spawn_request") or {}
-    host_spawn = attempt.get("host_spawn") or {}
-    values = (
-        attempt.get("agent"),
-        attempt.get("profile"),
-        attempt.get("display_name"),
-        spawn_request.get("task_name"),
-        host_spawn.get("agent_id"),
-        host_spawn.get("task_name"),
-    )
-    return {str(value).strip() for value in values if str(value or "").strip()}
-
-
-
-
 
 
 def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
@@ -6685,7 +6028,7 @@ def prepare_delegations(params: dict[str, Any]) -> dict[str, Any]:
             "state": current_state,
             "active": bool(activation_record(
                 root,
-                {"thread_id": current_state.get("thread_id"), "principal": current_state.get("principal")},
+                {"principal": current_state.get("principal")},
                 current_state["task_id"],
             )),
             "status_receipt": status_receipt,
@@ -6760,204 +6103,6 @@ def prepare_delegations(params: dict[str, Any]) -> dict[str, Any]:
         "state": prepared[-1]["state"],
     }
 
-
-def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
-    """Bind a ledger attempt to a native Codex worker dispatch after confirmation."""
-    root = ledger_root(params)
-    with state_lock(root):
-        _, task_dir, state = load_state(str(params["task_id"]), params)
-        authorize(state, params)
-        requested_revision = params.get("expected_revision")
-        revision_correction = (
-            {"requested": requested_revision, "used": state["revision"]}
-            if requested_revision is not None and requested_revision != state["revision"] else None
-        )
-        attempt_id = safe_id(str(params.get("attempt_id", "")))
-        attempt = _attempt(state, attempt_id)
-        host_agent_id = redact(str(params.get("host_agent_id", "")).strip(), 256)
-        host_task_name = redact(str(params.get("host_task_name", "")).strip(), 128)
-        expected_host_tool = str((attempt.get("spawn_request") or {}).get("host_tool", "spawn_agent"))
-        host_tool = redact(str(params.get("host_tool", "")).strip(), 64)
-        if not host_tool and expected_host_tool == "spawn_agent":
-            host_tool = "spawn_agent"
-        if not host_agent_id or not host_task_name or not host_tool:
-            return {
-                "confirmed": False,
-                "attempt_id": attempt_id,
-                "next_action": "retry confirm_host_spawn with the native host_tool, host_agent_id, and host_task_name",
-                "recoverable": True,
-                "revision_correction": revision_correction,
-                "state": state,
-            }
-        if host_tool != expected_host_tool:
-            return {
-                "confirmed": False,
-                "attempt_id": attempt_id,
-                "reason": "host_tool_mismatch",
-                "next_action": f"retry confirm_host_spawn with host_tool={expected_host_tool}",
-                "recoverable": True,
-                "revision_correction": revision_correction,
-                "state": state,
-            }
-        expected_task_name = str((attempt.get("spawn_request") or {}).get("task_name", ""))
-        # A host child can satisfy this attempt only when it was started from
-        # this exact server-issued dispatch.  Quietly correcting an arbitrary
-        # host task name here would let a coordinator-created generic child be
-        # attached to the pending Cortex attempt after the fact.  Keep the
-        # attempt awaiting the one durable dispatch instead.
-        if host_task_name != expected_task_name:
-            return {
-                "confirmed": False,
-                "attempt_id": attempt_id,
-                "reason": "host_task_name_mismatch",
-                "next_action": (
-                    "invoke the exact returned Cortex dispatch.call with its unmodified dispatch.arguments; "
-                    "a generic host spawn cannot satisfy this attempt"
-                ),
-                "recoverable": True,
-                "expected_task_name": expected_task_name,
-                "revision_correction": revision_correction,
-                "state": state,
-            }
-        for existing in state.get("attempts", []):
-            if existing.get("attempt_id") == attempt_id:
-                continue
-            existing_spawn = existing.get("host_spawn") or {}
-            if (
-                existing_spawn.get("tool") == host_tool
-                and existing_spawn.get("agent_id") == host_agent_id
-            ):
-                return {
-                    "confirmed": False,
-                    "attempt_id": attempt_id,
-                    "reason": "host_agent_id_reused",
-                    "detail": (
-                        f"host_agent_id {host_agent_id!r} is already bound to "
-                        f"attempt {existing.get('attempt_id')!r}"
-                    ),
-                    "next_action": (
-                        "retry confirm_host_spawn with the new native child id and "
-                        "the exact task_name returned for this attempt"
-                    ),
-                    "recoverable": True,
-                    "state": state,
-                }
-        task_name_correction = None
-        spawn_request = attempt.get("spawn_request") or {}
-        expected_model = str(
-            attempt.get("expected_model")
-            or spawn_request.get("expected_model")
-            or attempt.get("selected_model")
-            or spawn_request.get("model")
-            or ""
-        ).strip()
-        model_resolution = str(
-            attempt.get("model_resolution")
-            or spawn_request.get("model_resolution")
-            or ("explicit" if spawn_request.get("model") else "policy")
-        ).strip()
-        # An omitted native model is intentional for configured-default
-        # dispatch. Verify the actual host model against expected_model,
-        # while retaining requested_model only for explicit native overrides.
-        requested_model = str(spawn_request.get("model") or "").strip()
-        host_model = redact(str(params.get("host_model", "")).strip(), 128) or None
-        if expected_model and not host_model:
-            return {
-                "confirmed": False,
-                "attempt_id": attempt_id,
-                "reason": "host_model_required",
-                "next_action": "retry confirm_host_spawn with the actual host_model returned by the native host",
-                "required_fields": ["host_model"],
-                "recoverable": True,
-                "task_name_correction": task_name_correction,
-                "revision_correction": revision_correction,
-                "state": state,
-            }
-        host_spawn = {
-            "tool": host_tool,
-            "agent_id": host_agent_id,
-            "task_name": expected_task_name,
-            "model": host_model,
-            "reasoning_effort": redact(str(params.get("host_reasoning_effort", "")).strip(), 64) or None,
-            "requested_model": requested_model or None,
-            "expected_model": expected_model or None,
-            "model_resolution": model_resolution or None,
-            "confirmed_at": now(),
-            "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-        }
-        model_verification = "not_requested"
-        if expected_model:
-            model_verification = "verified" if host_model == expected_model else "mismatch"
-        host_spawn["model_verification"] = model_verification
-        if attempt.get("status") == "running":
-            existing = attempt.get("host_spawn") or {}
-            if all(existing.get(key) == host_spawn.get(key) for key in ("tool", "agent_id", "task_name", "model", "reasoning_effort", "requested_model", "expected_model", "model_resolution", "model_verification")):
-                return {"attempt_id": attempt_id, "idempotent": True, "revision_correction": revision_correction, "state": state}
-            raise ValueError("running attempt already has a different host spawn binding")
-        if attempt.get("status") != AWAITING_HOST_SPAWN or attempt.get("invalidated"):
-            raise ValueError("only an active attempt awaiting host spawn can be confirmed")
-        if model_verification == "mismatch":
-            mismatch_reason = f"host_model_mismatch: expected {expected_model}, actual {host_model}"
-            attempt["host_spawn"] = host_spawn
-            attempt["host_agent_id"] = host_agent_id
-            attempt["model_verification"] = model_verification
-            attempt["status"] = "failed"
-            attempt["finalized_at"] = host_spawn["confirmed_at"]
-            attempt["finalization_reason"] = mismatch_reason
-            package = _delegation_package(task_dir, state["task_id"], attempt_id)
-            package["spawn_status"] = "confirmed_model_mismatch"
-            package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
-            package["lifecycle_status"] = attempt.get("lifecycle_status")
-            package["attempt_status"] = attempt.get("status")
-            package["host_spawn"] = host_spawn
-            package["model_verification"] = model_verification
-            _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-            db_put_worker_session(root, {
-                "task_id": state["task_id"], "attempt_id": attempt_id,
-                "host_agent_id": host_agent_id, "host_task_name": expected_task_name, "host_tool": host_tool,
-                "status": "terminated_unavailable", "resumable": False,
-                "started_at": host_spawn["confirmed_at"], "terminated_at": host_spawn["confirmed_at"],
-            })
-            save_state(task_dir, task_dir / "state.sqlite", state, "host_spawn_model_mismatch", f"{attempt_id}: {mismatch_reason}")
-            return {
-                "confirmed": False,
-                "failed": True,
-                "attempt_id": attempt_id,
-                "reason": "host_model_mismatch",
-                "detail": mismatch_reason,
-                "expected_model": expected_model,
-                "actual_model": host_model,
-                "host_spawn": host_spawn,
-                "task_name_correction": task_name_correction,
-                "revision_correction": revision_correction,
-                "state": state,
-            }
-        attempt["host_spawn"] = host_spawn
-        # Retain the server-observed native identity directly on the attempt
-        # projection so compaction recovery never loses its exact wait target.
-        attempt["host_agent_id"] = host_agent_id
-        attempt["model_verification"] = model_verification
-        attempt["dispatch_correlation"] = "coordinator_recorded_host_spawn"
-        attempt["status"] = "running"
-        attempt["lifecycle_status"] = "running_acknowledged"
-        attempt["last_heartbeat_at"] = host_spawn["confirmed_at"]
-        attempt["worker_lease_expires_at"] = host_spawn["lease_expires_at"]
-        attempt.pop("spawn_lease_expires_at", None)
-        attempt["started_at"] = host_spawn["confirmed_at"]
-        package = _delegation_package(task_dir, state["task_id"], attempt_id)
-        package["spawn_status"] = "confirmed"
-        package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
-        package["lifecycle_status"] = attempt.get("lifecycle_status")
-        package["attempt_status"] = attempt.get("status")
-        package["host_spawn"] = host_spawn
-        _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        db_put_worker_session(root, {
-            "task_id": state["task_id"], "attempt_id": attempt_id,
-            "host_agent_id": host_agent_id, "host_task_name": expected_task_name, "host_tool": host_tool,
-            "status": "running", "resumable": True, "started_at": host_spawn["confirmed_at"],
-        })
-        save_state(task_dir, task_dir / "state.sqlite", state, "host_spawn", f"{attempt_id}: {expected_task_name}")
-        return {"confirmed": True, "attempt_id": attempt_id, "idempotent": False, "host_spawn": host_spawn, "task_name_correction": task_name_correction, "revision_correction": revision_correction, "state": state}
 
 
 def _attempt_evidence(state: dict[str, Any], attempt_id: str) -> list[dict[str, Any]]:
@@ -7065,16 +6210,6 @@ def finalize_attempt(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("cannot change the status of a terminal attempt")
         if attempt.get("status") not in {"running", AWAITING_HOST_SPAWN}:
             raise ValueError("cannot finalize a non-running attempt")
-        if attempt.get("status") == AWAITING_HOST_SPAWN and status == "passed":
-            return {
-                "recorded": False,
-                "attempt_id": attempt_id,
-                "reason": "host_spawn_confirmation_required",
-                "next_action": "confirm_host_spawn",
-                "recoverable": True,
-                "revision_correction": revision_correction,
-                "state": state,
-            }
         if attempt.get("invalidated") and status != "superseded":
             raise ValueError("an invalidated running attempt may only be finalized as superseded")
         reason = str(params.get("reason", "")).strip()
@@ -7817,7 +6952,12 @@ def close_audit(params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def resume_task(params: dict[str, Any]) -> dict[str, Any]:
+def reopen_blocked_lifecycle_state(params: dict[str, Any]) -> dict[str, Any]:
+    """Transition an authorized blocked v11 task back to active execution.
+
+    This is an engine implementation port, not a model-facing operation.
+    Public callers use the typed ``manage_orchestration`` resume intent.
+    """
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
@@ -8132,12 +7272,12 @@ def release_resource(params: dict[str, Any]) -> dict[str, Any]:
         return {"state": state}
 
 
-ORCHESTRATE_SCHEMA = "cortex/orchestration-runtime/v1"
+LIFECYCLE_RUNTIME_SCHEMA = "cortex/lifecycle-runtime/v11"
 ORCHESTRATION_TRANSACTION_SCHEMA = "cortex/orchestration-transaction/v1"
 ORCHESTRATION_PLAN_SCHEMA = "cortex/orchestration-plan/v1"
-ORCHESTRATE_OPERATIONS = {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
-ORCHESTRATE_MUTATING_OPERATIONS = {"start", "advance", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
-PUBLIC_ORCHESTRATION_SCHEMA = "cortex/orchestration/v5"
+V11_LIFECYCLES = frozenset({"start", "continue", "inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval"})
+V11_MUTATING_LIFECYCLES = frozenset({"start", "continue", "resume", "deactivate", "lane", "resource", "question", "plan_approval"})
+PUBLIC_ORCHESTRATION_SCHEMA = "cortex/orchestration/v11"
 # This prefix used to contain a visible ``COORDINATOR LOCK`` message.  That
 # leaked an internal routing guard into every public ``next_action`` and made
 # ordinary recoverable lifecycle work look like a Cortex blocker.  Keep the
@@ -8195,31 +7335,25 @@ def _validation_next_action(
         )
     if operation in {"manage_orchestration", "management_failed", "manage_orchestration_validation_failed"}:
         identity = (
-            f" Keep task_ref={task_ref!r}; Cortex derives its host-bound project_root." if task_ref else
-            " Include the exact project_root and task_ref returned by Cortex."
+            f" Keep task_ref={task_ref!r} and the exact unchanged coordinator_ref returned by start_orchestration."
+            if task_ref else
+            " Include the exact task_ref and coordinator_ref returned by start_orchestration."
         )
-        if project_root:
-            identity = f" Keep project_root={project_root!r}" + (f" and task_ref={task_ref!r}." if task_ref else ".")
         return (
-            "Retry manage_orchestration with the same intent and corrected payload."
+            "Retry manage_orchestration with the same intent and corrected explicit references."
             + identity
-            + " For resume, payload must be {future_waves: [{workers: [{phase, profile, objective, "
-              "allowed_paths, acceptance, verification, depends_on, context_files, context_result_refs, "
-              "strategy, model, user_requested_model, effort, visible, isolated_checkout}]}], rework?}; "
-              f"supported canonical phases are: {', '.join(sorted(AVAILABLE_GATES))}. "
-              "Use one canonical phase per wave; put parallel owners of one phase in the same wave; "
-              "depends_on may name only completed or earlier waves."
+            + " The request never accepts project_root, caller-authored replacement waves, completion bodies, "
+              "or project-wide maintenance authority."
             + path_text
             + suffix
         )
-    if operation in {"complete_attempt", "record_attempt_event", "repair_planning", "read_worker_result", "read_dispatch_briefing", "worker_question"}:
+    if operation in {"complete_attempt", "record_attempt_event", "read_worker_result", "read_dispatch_briefing", "worker_question"}:
         tool_fields = {
-            "complete_attempt": "status, summary, findings, decisions_needed, unresolved, claims, planning, or PATCH fields base_payload_digest and patches; worker identity is server-bound",
-            "record_attempt_event": "event_type, payload, and optional event_key; worker identity is server-bound",
-            "repair_planning": "base_payload_digest and non-empty diagnostic-scoped patches only; worker identity is server-bound",
-            "read_worker_result": "attempt_result_ref for a bound successor worker (identity is server-bound), or task_ref and attempt_result_ref for the coordinator",
-            "read_dispatch_briefing": "optional cursor; the server-bound worker session supplies task, attempt, profile, dispatch, and briefing digest",
-            "worker_question": "action, question/options, or the exact returned question_ref; worker identity is server-bound",
+            "complete_attempt": "exact task_ref and assignment_ref plus one compact plan or outcome, or repair_capsule, base_payload_digest, and diagnostic-scoped patches",
+            "record_attempt_event": "exact task_ref and assignment_ref, event_type, payload, and optional event_key",
+            "read_worker_result": "coordinator: task_ref, coordinator_ref, and current step; worker: task_ref, assignment_ref, and one granted predecessor attempt_result_ref",
+            "read_dispatch_briefing": "exact task_ref and assignment_ref plus optional cursor",
+            "worker_question": "exact task_ref and assignment_ref plus action, question/options, or the exact returned question_ref",
         }[operation]
         planning_nesting = ""
         if operation == "complete_attempt" and any(
@@ -8254,58 +7388,12 @@ def _validation_contract(
         "invalid_paths": [item.get("path") for item in diagnostics if isinstance(item, dict) and item.get("path")],
     }
     if operation in {"manage_orchestration", "management_failed", "manage_orchestration_validation_failed"}:
-        contract["request_schema"] = {
-            "tool": "manage_orchestration",
-            "type": "object",
-            "required": ["intent"],
-            "properties": {
-                "intent": {"type": "string", "enum": ["inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts"]},
-                "project_root": {"type": "string", "format": "absolute-path"},
-                "task_ref": {"type": "string", "description": "the exact current Cortex task_ref"},
-                "reason": {"type": "string"},
-                "payload": {"type": "object"},
-                "payload.future_waves": {
-                    "type": "array",
-                    "items": {"type": "object", "required": ["workers"], "properties": {"workers": {"type": "array"}}},
-                },
-                "payload.future_waves[].workers[].phase": {
-                    "type": "string",
-                    "enum": sorted(AVAILABLE_GATES),
-                },
-                "payload.future_waves[].workers[].profile": {
-                    "type": "string",
-                    "enum": sorted(AGENTS),
-                    "rule": "profile must own the selected phase",
-                },
-                "payload.future_waves[].workers[].depends_on": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": sorted(AVAILABLE_GATES)},
-                    "rule": "only completed or earlier-wave phases",
-                },
-            },
-        }
-        contract["request_schema"]["conditional_requirements"] = {
-            "task_scoped_intents": {
-                "if": {"properties": {"intent": {"enum": ["inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "artifacts"]}}},
-                "then": {"required": ["task_ref"]},
-                "description": "task-scoped calls may omit project_root because Cortex derives it from task_ref; prune and maintenance require project_root and omit task_ref",
-            },
-            "project_scoped_intents": {
-                "if": {"properties": {"intent": {"enum": ["prune", "maintenance"]}}},
-                "then": {"required": ["project_root"]},
-            }
-        }
-        contract["repair"] = {
-            "tool": "manage_orchestration",
-            "intent": "resume",
-            "arguments": {
-                "project_root": project_root,
-                "task_ref": task_ref,
-                "reason": "<concise reason>",
-                "payload": {"future_waves": "<same array with every listed path corrected>"},
-            },
-            "apply_all_diagnostics_atomically": True,
-        }
+        registry = globals().get("PUBLIC_SCHEMA_REGISTRY")
+        public_schema = registry.get("manage_orchestration") if isinstance(registry, dict) else None
+        if isinstance(public_schema, dict):
+            # Never maintain a reduced second schema in an error receipt: it
+            # silently omits terminal intents and payload discriminators.
+            contract["request_schema"] = {"tool": "manage_orchestration", **public_schema}
     else:
         # Start/continue and the worker-facing coordinator tools use the same
         # public JSON Schema advertised through MCP.  Returning that exact
@@ -8421,7 +7509,7 @@ def _start_exception_diagnostics(exc: BaseException, params: Mapping[str, Any]) 
     return [diagnostic]
 
 
-def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, Any]]:
+def _collect_lifecycle_diagnostics(lifecycle: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     """Validate the complete public facade envelope before any ledger write.
 
     The runtime handlers still perform authoritative checks, but this pass is
@@ -8431,23 +7519,15 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
     """
     diagnostics: list[dict[str, Any]] = []
     allowed_top_level = {
-        "operation", "submission_id", "project_root", "principal", "thread_id",
-        "task", "task_id", "wave_id", "waves", "host_capabilities", "completions", "payload",
-        "gate_outcomes", "future_waves", "allow_rework", "reason", "rework_gate", "terminal_recovery",
+        "submission_id", "project_root", "principal",
+        "task", "task_id", "wave_id", "waves", "host_capabilities", "result_refs", "payload",
+        "reason", "terminal_recovery",
         "_materialization_fence",
     }
     for key in sorted(set(params) - allowed_top_level):
-        diagnostics.append(_request_diagnostic(key, "unsupported orchestrate parameter", "a documented orchestrate parameter"))
-    operation = params.get("operation")
-    if not isinstance(operation, str) or operation.strip() not in ORCHESTRATE_OPERATIONS:
-        diagnostics.append(_request_diagnostic(
-            "operation",
-            "operation is required and must be one of start, advance, inspect, resume, deactivate, lane, resource, question, or plan_approval",
-            "a supported orchestrate operation",
-        ))
-        operation = str(operation or "").strip()
-    else:
-        operation = operation.strip()
+        diagnostics.append(_request_diagnostic(key, "unsupported lifecycle parameter", "a field accepted by this v11 lifecycle"))
+    if lifecycle not in V11_LIFECYCLES:
+        raise ValueError("unsupported internal v11 lifecycle")
 
     root = params.get("project_root")
     if not isinstance(root, str) or not root.strip():
@@ -8459,27 +7539,23 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
         diagnostics.append(_request_diagnostic("environment.CORTEX_ROOT", "CORTEX_ROOT is not supported; use project_root", "no CORTEX_ROOT override"))
 
     payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    mutating = operation in ORCHESTRATE_MUTATING_OPERATIONS
-    if operation == "lane" and str(payload.get("command", "")) == "inspect":
+    mutating = lifecycle in V11_MUTATING_LIFECYCLES
+    if lifecycle == "lane" and str(payload.get("command", "")) == "inspect":
         mutating = False
-    if operation == "question" and str(payload.get("command", "ask")) in {"list", "updates"}:
+    if lifecycle == "question" and str(payload.get("command", "ask")) in {"list", "updates"}:
         mutating = False
     if mutating:
         submission_id = params.get("submission_id")
         if not isinstance(submission_id, str) or not submission_id.strip():
-            diagnostics.append(_request_diagnostic("submission_id", f"{operation} requires submission_id", "a stable lowercase submission id"))
+            diagnostics.append(_request_diagnostic("submission_id", f"{lifecycle} requires submission_id", "a stable lowercase submission id"))
         else:
             require_submission = submission_id.strip()
             if "/" in require_submission or "\\" in require_submission or not SAFE_ID_RE.fullmatch(require_submission.lower()):
                 diagnostics.append(_request_diagnostic("submission_id", "submission_id is not a valid identifier", "lowercase letters, numbers, hyphens, or underscores only"))
 
-    if operation in {"start", "advance", "inspect", "resume", "lane", "resource", "question", "plan_approval"}:
+    if lifecycle in {"start", "continue", "inspect", "resume", "lane", "resource", "question", "plan_approval"}:
         if not isinstance(params.get("principal"), str) or not str(params.get("principal")).strip():
-            diagnostics.append(_request_diagnostic("principal", f"{operation} requires principal", "the bound coordinator principal"))
-    if operation == "start":
-        if not isinstance(params.get("thread_id"), str) or not str(params.get("thread_id")).strip():
-            diagnostics.append(_request_diagnostic("thread_id", "start requires thread_id", "the bound coordinator thread id"))
-
+            diagnostics.append(_request_diagnostic("principal", f"{lifecycle} requires principal", "the server-owned task principal"))
     def require_identifier(path: str, value: Any) -> None:
         raw = str(value or "").strip()
         if not raw:
@@ -8487,7 +7563,7 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
         elif "/" in raw or "\\" in raw or not SAFE_ID_RE.fullmatch(raw.lower()):
             diagnostics.append(_request_diagnostic(path, f"{path} is not a valid identifier: {raw!r}", "lowercase letters, numbers, hyphens, or underscores only"))
 
-    if operation == "start":
+    if lifecycle == "start":
         task = params.get("task")
         if not isinstance(task, dict):
             diagnostics.append(_request_diagnostic("task", "start requires a task object", "an object containing task_id, user_request, and complexity"))
@@ -8503,14 +7579,6 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
         if not isinstance(waves, list) or not waves:
             diagnostics.append(_request_diagnostic("waves", "start requires a non-empty waves array", "an ordered array of {wave_id, delegations} objects"))
         else:
-            allowed_wave_keys = {"wave_id", "delegations"}
-            allowed_delegation_keys = {
-                "gate", "agent", "task_kind", "risk", "requested_model", "configured_default_model",
-                "dispatch_mode", "thread_environment",
-                "requested_reasoning_effort", "user_requested_model", "retry", "parallel",
-                "objective", "ownership", "context_files", "context_result_refs", "context_gates", "allowed_paths",
-                "acceptance_criteria", "verification", "selection_reason",
-            }
             for index, wave in enumerate(waves, 1):
                 wave_path = f"waves[{index - 1}]"
                 if not isinstance(wave, dict):
@@ -8520,8 +7588,6 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
                     diagnostics.append(_request_diagnostic(f"{wave_path}.wave_id", "wave_id is required; do not use id", "a stable lowercase wave identifier"))
                 else:
                     require_identifier(f"{wave_path}.wave_id", wave.get("wave_id"))
-                for key in sorted(set(wave) - allowed_wave_keys):
-                    diagnostics.append(_request_diagnostic(f"{wave_path}.{key}", "unsupported wave parameter", "wave_id or delegations"))
                 delegations = wave.get("delegations")
                 if not isinstance(delegations, list) or not delegations:
                     diagnostics.append(_request_diagnostic(f"{wave_path}.delegations", "wave requires a non-empty delegations array", "an array of delegation objects"))
@@ -8531,8 +7597,6 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
                     if not isinstance(delegation, dict):
                         diagnostics.append(_request_diagnostic(delegation_path, "delegation must be an object", "{gate, agent, objective, ownership, allowed_paths, acceptance_criteria, verification}"))
                         continue
-                    for key in sorted(set(delegation) - allowed_delegation_keys):
-                        diagnostics.append(_request_diagnostic(f"{delegation_path}.{key}", "unsupported delegation parameter", "a documented delegation field"))
                     if not str(delegation.get("gate", "")).strip():
                         diagnostics.append(_request_diagnostic(f"{delegation_path}.gate", "delegation requires gate", "a supported pipeline gate"))
 
@@ -8543,48 +7607,70 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
             models = host.get("spawn_agent_models")
             if not isinstance(models, list) or not models:
                 diagnostics.append(_request_diagnostic("host_capabilities.spawn_agent_models", "host_capabilities requires a non-empty spawn_agent_models array", "exact native spawn_agent model identifiers"))
-            for key in ("spawn_agent_models", "create_thread_models"):
+            for key in ("spawn_agent_models",):
                 if key in host and not isinstance(host[key], list):
                     diagnostics.append(_request_diagnostic(f"host_capabilities.{key}", "model catalog must be an array", "an array of model identifiers"))
             if "spawn_agent_default_model" in host and not isinstance(host["spawn_agent_default_model"], str):
                 diagnostics.append(_request_diagnostic("host_capabilities.spawn_agent_default_model", "configured default model must be a string", "a supported model identifier"))
 
-    elif operation in {"advance", "inspect", "resume"}:
+    elif lifecycle in {"continue", "inspect", "resume"}:
         require_identifier("task_id", params.get("task_id"))
-        if operation == "advance":
+        if lifecycle == "continue":
             require_identifier("wave_id", params.get("wave_id"))
-            completions = params.get("completions")
-            if not isinstance(completions, list) or not completions:
-                diagnostics.append(_request_diagnostic("completions", "advance requires a non-empty completions array", "one terminal completion object per active attempt"))
-            elif any(not isinstance(item, dict) for item in completions):
-                diagnostics.append(_request_diagnostic("completions", "every completion must be an object", "completion objects with attempt_id and result_ref"))
+            result_refs = params.get("result_refs")
+            if not isinstance(result_refs, list) or not result_refs:
+                diagnostics.append(_request_diagnostic("result_refs", "continue requires a non-empty result_refs array", "one canonical AttemptResult ref per active attempt"))
+            elif any(not isinstance(item, dict) for item in result_refs):
+                diagnostics.append(_request_diagnostic("result_refs", "every result ref must be an object", "objects with attempt_id and attempt_result_ref only"))
+            else:
+                for index, item in enumerate(result_refs):
+                    unknown = sorted(set(item) - {"attempt_id", "attempt_result_ref"})
+                    for key in unknown:
+                        diagnostics.append(_request_diagnostic(
+                            f"result_refs[{index}].{key}",
+                            "caller-authored completion fields are forbidden",
+                            "attempt_id and attempt_result_ref only",
+                        ))
+                    require_identifier(f"result_refs[{index}].attempt_id", item.get("attempt_id"))
+                    if not str(item.get("attempt_result_ref") or "").strip():
+                        diagnostics.append(_request_diagnostic(
+                            f"result_refs[{index}].attempt_result_ref",
+                            "attempt_result_ref is required",
+                            "the exact canonical ref returned by read_worker_result",
+                        ))
 
-    elif operation in {"lane", "resource", "question", "plan_approval"} and not isinstance(params.get("payload"), dict):
-        diagnostics.append(_request_diagnostic("payload", f"{operation} requires an operation-specific payload object", "an object with a supported command"))
+    elif lifecycle in {"lane", "resource", "question", "plan_approval"} and not isinstance(params.get("payload"), dict):
+        diagnostics.append(_request_diagnostic("payload", f"{lifecycle} requires a lifecycle-specific payload object", "an object with a supported command"))
 
     return diagnostics
 
 
-def _engine_orchestrate(params: dict[str, Any]) -> dict[str, Any]:
-    """Call the canonical orchestration engine without a compatibility projection."""
-    from cortex_runtime.orchestration_engine import orchestrate as _orchestrate
-    return _orchestrate(params)
+def _engine_start_lifecycle(params: dict[str, Any]) -> dict[str, Any]:
+    from cortex_runtime.orchestration_engine import start_lifecycle
+    return start_lifecycle(params)
 
 
-# These helpers remain importable for the v5 projection and compaction module,
-# but their implementation belongs exclusively to the orchestration engine.
-# Keeping the late binding avoids a second partially initialized ``cortex``
-# module when Codex loads the executable through importlib.
+def _engine_continue_lifecycle(params: dict[str, Any]) -> dict[str, Any]:
+    from cortex_runtime.orchestration_engine import continue_lifecycle
+    return continue_lifecycle(params)
+
+
+def _engine_manage_lifecycle(intent: str, params: dict[str, Any]) -> dict[str, Any]:
+    from cortex_runtime.orchestration_engine import manage_lifecycle
+    return manage_lifecycle(intent, params)
+
+
+# These late-bound helpers keep the executable facade acyclic while the v11
+# lifecycle implementation remains in the extracted engine module.
 def _orchestrate_request_digest(params: dict[str, Any]) -> str:
     from cortex_runtime.orchestration_engine import _orchestrate_request_digest as _implementation
 
     return _implementation(params)
 
 
-def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
-    from cortex_runtime.orchestration_engine import _orchestrate_inspect as _implementation
-
-    return _implementation(params)
+def _engine_inspect_lifecycle(params: dict[str, Any]) -> dict[str, Any]:
+    from cortex_runtime.orchestration_engine import inspect_lifecycle
+    return inspect_lifecycle(params)
 
 
 def _load_orchestrate_plan(task_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
@@ -8634,7 +7720,7 @@ CANONICAL_PLAN_APPROVAL_POLICIES = {"auto", "required"}
 CANONICAL_STATUS_VALUES = set(TERMINAL_ATTEMPT_STATUSES)
 
 
-def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None, diagnostics: list[dict[str, Any]] | None = None, task_ref: str | None = None) -> dict[str, Any]:
+def _v11_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None, diagnostics: list[dict[str, Any]] | None = None, task_ref: str | None = None) -> dict[str, Any]:
     diagnostic_list = diagnostics or [{"code": code, "message": redact(message, 1000)}]
     result = {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -8657,7 +7743,7 @@ def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candi
     return result
 
 
-def _v3_envelope_error(
+def _v11_envelope_error(
     operation: str,
     diagnostics: list[dict[str, Any]],
     *,
@@ -8669,8 +7755,20 @@ def _v3_envelope_error(
     code = {
         "start_orchestration": "start_validation_failed",
     }.get(operation, f"{operation}_validation_failed")
-    complete_diagnostics = _enrich_validation_diagnostics(operation, diagnostics)
-    result = _v3_error(
+    # Several layers may independently observe the same malformed leaf
+    # (schema form and a semantic compiler).  One deterministic card per RFC
+    # 6901 pointer is actionable; duplicates merely make an LLM retry worse.
+    unique: list[dict[str, Any]] = []
+    seen_pointers: set[str] = set()
+    for item in diagnostics:
+        pointer = str(item.get("json_pointer") or item.get("path") or "") if isinstance(item, dict) else ""
+        if pointer and pointer in seen_pointers:
+            continue
+        if pointer:
+            seen_pointers.add(pointer)
+        unique.append(item)
+    complete_diagnostics = _enrich_validation_diagnostics(operation, unique)
+    result = _v11_error(
         code,
         "request failed envelope validation",
         diagnostics=complete_diagnostics,
@@ -8693,12 +7791,219 @@ def _v3_envelope_error(
     return result
 
 
-def _v3_collect_fields(params: Any, allowed: set[str], *, operation: str) -> list[dict[str, Any]]:
+def _v11_collect_fields(
+    params: Any,
+    allowed: set[str],
+    *,
+    operation: str,
+    public_schema: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     if not isinstance(params, dict):
         return [{"code": f"{operation}_validation_failed", "path": "request", "message": "request must be an object", "received": params, "expected": "object"}]
     for key in sorted(set(params) - allowed):
-        diagnostics.append({"code": f"{operation}_validation_failed", "path": key, "message": "unsupported field", "received": params.get(key)})
+        item: dict[str, Any] = {
+            "code": f"{operation}_validation_failed",
+            "path": key,
+            "json_pointer": "/" + key.replace("~", "~0").replace("/", "~1"),
+            "message": "unsupported field",
+            "received": params.get(key),
+        }
+        if isinstance(public_schema, Mapping):
+            card = _v11_schema_object_card(public_schema)
+            item["field_schema"] = card
+            item["expected"] = card
+        diagnostics.append(item)
+    return diagnostics
+
+
+def _v11_pointer_path(pointer: str) -> str:
+    """Render an RFC 6901 pointer as the familiar diagnostic dotted path."""
+    if not pointer:
+        return "request"
+    parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer.lstrip("/").split("/")]
+    rendered: list[str] = []
+    for part in parts:
+        if part.isdigit() and rendered:
+            rendered[-1] += f"[{part}]"
+        else:
+            rendered.append(part)
+    return ".".join(rendered)
+
+
+def _v11_schema_value_diagnostics(
+    value: Any,
+    schema: Mapping[str, Any],
+    *,
+    pointer: str,
+    operation: str,
+) -> list[dict[str, Any]]:
+    """Validate every *supplied* public JSON-schema leaf without side effects.
+
+    MCP's tools/list schema is the boundary authority.  The lifecycle
+    normalizers deliberately have stricter semantic checks later, but all
+    ordinary shape/type/enum/pattern/range failures must be returned together
+    before capability lookup.  This compact evaluator intentionally covers
+    the JSON-Schema vocabulary used by the public coordinator forms.
+    """
+    diagnostics: list[dict[str, Any]] = []
+
+    def add(
+        at: str,
+        message: str,
+        card: Mapping[str, Any],
+        received: Any,
+        sink: list[dict[str, Any]],
+    ) -> None:
+        # A diagnostic describes the violated leaf, not its whole descendants.
+        # This keeps array/object cards executable and stable while nested
+        # item failures retain their own exact item schema.
+        declared = card.get("type")
+        facets = [
+            "type", "enum", "const", "minLength", "maxLength", "pattern", "format",
+            "minimum", "maximum", "minItems", "maxItems", "uniqueItems",
+            "minProperties", "maxProperties",
+        ]
+        field_schema = {facet: card[facet] for facet in facets if facet in card}
+        if declared == "object" and card.get("additionalProperties") is False:
+            field_schema["additionalProperties"] = False
+            properties = card.get("properties")
+            field_schema["properties"] = sorted(properties) if isinstance(properties, Mapping) else properties
+        if not field_schema:
+            field_schema = dict(card)
+        sink.append({
+            "code": f"{operation}_validation_failed",
+            "phase": "payload",
+            "path": _v11_pointer_path(at),
+            "json_pointer": at,
+            "message": message,
+            "received": received,
+            "expected": field_schema,
+            "field_schema": field_schema,
+            "fix": f"Correct {at or '/'} according to field_schema and retry {operation} with unrelated fields unchanged.",
+        })
+
+    def type_matches(candidate: Any, declared: Any) -> bool:
+        types = declared if isinstance(declared, list) else [declared]
+        for kind in types:
+            if kind == "object" and isinstance(candidate, dict): return True
+            if kind == "array" and isinstance(candidate, list): return True
+            if kind == "string" and isinstance(candidate, str): return True
+            if kind == "boolean" and type(candidate) is bool: return True
+            if kind == "integer" and type(candidate) is int: return True
+            if kind == "number" and type(candidate) in {int, float}: return True
+            if kind == "null" and candidate is None: return True
+        return False
+
+    def variant_score(candidate: Any, node: Mapping[str, Any]) -> int:
+        """Prefer the branch whose explicit discriminators match the request."""
+        if not isinstance(candidate, dict):
+            return 0
+        properties = node.get("properties")
+        if not isinstance(properties, Mapping):
+            return 0
+        score = 0
+        for key, child in properties.items():
+            if not isinstance(child, Mapping) or "const" not in child or key not in candidate:
+                continue
+            score += 100 if candidate[key] == child["const"] else -100
+        return score
+
+    def visit(
+        candidate: Any,
+        node: Mapping[str, Any],
+        at: str,
+        sink: list[dict[str, Any]],
+    ) -> None:
+        variants = node.get("oneOf")
+        if isinstance(variants, list) and variants:
+            evaluated: list[tuple[int, list[dict[str, Any]]]] = []
+            for variant in variants:
+                if not isinstance(variant, Mapping):
+                    continue
+                branch_diagnostics: list[dict[str, Any]] = []
+                visit(candidate, variant, at, branch_diagnostics)
+                evaluated.append((variant_score(candidate, variant), branch_diagnostics))
+            matching = [item for _score, item in evaluated if not item]
+            if len(matching) == 1:
+                return
+            if evaluated:
+                highest = max(score for score, _items in evaluated)
+                candidates = [items for score, items in evaluated if score == highest]
+                best = min(candidates, key=len)
+                if best:
+                    sink.extend(best)
+                else:
+                    add(at, "must match exactly one published branch", node, candidate, sink)
+            return
+        declared = node.get("type")
+        if declared is not None and not type_matches(candidate, declared):
+            add(at, "must match the published type", node, candidate, sink)
+            return
+        if "enum" in node and candidate not in node["enum"]:
+            add(at, "must be one of the published enum values", node, candidate, sink)
+        if "const" in node and candidate != node["const"]:
+            add(at, "must equal the published constant", node, candidate, sink)
+        if isinstance(candidate, str):
+            if isinstance(node.get("minLength"), int) and len(candidate) < node["minLength"]:
+                add(at, "is shorter than the published minimum length", node, candidate, sink)
+            if isinstance(node.get("maxLength"), int) and len(candidate) > node["maxLength"]:
+                add(at, "is longer than the published maximum length", node, candidate, sink)
+            pattern = node.get("pattern")
+            if isinstance(pattern, str) and re.fullmatch(pattern, candidate) is None:
+                add(at, "does not match the published pattern", node, candidate, sink)
+        if type(candidate) is int:
+            if isinstance(node.get("minimum"), (int, float)) and candidate < node["minimum"]:
+                add(at, "is below the published minimum", node, candidate, sink)
+            if isinstance(node.get("maximum"), (int, float)) and candidate > node["maximum"]:
+                add(at, "is above the published maximum", node, candidate, sink)
+        if isinstance(candidate, list):
+            if isinstance(node.get("minItems"), int) and len(candidate) < node["minItems"]:
+                add(at, "contains fewer items than the published minimum", node, candidate, sink)
+            if isinstance(node.get("maxItems"), int) and len(candidate) > node["maxItems"]:
+                add(at, "contains more items than the published maximum", node, candidate, sink)
+            if node.get("uniqueItems") is True:
+                encoded = [json.dumps(item, sort_keys=True, default=str) for item in candidate]
+                if len(encoded) != len(set(encoded)):
+                    add(at, "must contain unique items", node, candidate, sink)
+            item_schema = node.get("items")
+            if isinstance(item_schema, Mapping):
+                for index, item in enumerate(candidate):
+                    visit(item, item_schema, f"{at}/{index}", sink)
+        if isinstance(candidate, dict):
+            if isinstance(node.get("minProperties"), int) and len(candidate) < node["minProperties"]:
+                add(at, "contains fewer properties than the published minimum", node, candidate, sink)
+            if isinstance(node.get("maxProperties"), int) and len(candidate) > node["maxProperties"]:
+                add(at, "contains more properties than the published maximum", node, candidate, sink)
+            properties = node.get("properties")
+            if isinstance(properties, Mapping):
+                for key in node.get("required", []):
+                    if key not in candidate:
+                        escaped = str(key).replace("~", "~0").replace("/", "~1")
+                        child_schema = properties.get(key)
+                        add(
+                            f"{at}/{escaped}", "is required",
+                            child_schema if isinstance(child_schema, Mapping) else {"type": "object"},
+                            None, sink,
+                        )
+                if node.get("additionalProperties") is False:
+                    for key in sorted(set(candidate) - set(properties)):
+                        escaped = str(key).replace("~", "~0").replace("/", "~1")
+                        add(f"{at}/{escaped}", "is not a supported field", {
+                            "type": "object", "additionalProperties": False,
+                            "properties": sorted(properties),
+                        }, candidate[key], sink)
+                elif isinstance(node.get("additionalProperties"), Mapping):
+                    additional = node["additionalProperties"]
+                    for key in sorted(set(candidate) - set(properties)):
+                        escaped = str(key).replace("~", "~0").replace("/", "~1")
+                        visit(candidate[key], additional, f"{at}/{escaped}", sink)
+                for key, child_schema in properties.items():
+                    if key in candidate and isinstance(child_schema, Mapping):
+                        escaped = str(key).replace("~", "~0").replace("/", "~1")
+                        visit(candidate[key], child_schema, f"{at}/{escaped}", sink)
+
+    visit(value, schema, pointer, diagnostics)
     return diagnostics
 
 
@@ -8741,8 +8046,7 @@ def _continue_form_diagnostics(params: Mapping[str, Any]) -> list[dict[str, Any]
     results = params.get("results")
     if not isinstance(results, list) or not results:
         return diagnostics
-    allowed_result = {"worker", "attempt_result_ref", "dispatch_ref", "status", "reason", "next_strategy"}
-    canonical_statuses = {"failed", "blocked", "cancelled", "superseded"}
+    allowed_result = {"worker", "attempt_result_ref"}
     for index, result in enumerate(results):
         path = f"results[{index}]"
         if not isinstance(result, dict):
@@ -8752,29 +8056,17 @@ def _continue_form_diagnostics(params: Mapping[str, Any]) -> list[dict[str, Any]
             add(f"{path}.{key}", "unsupported field", received=result.get(key), expected="one of the advertised result fields")
         if "worker" in result and (type(result["worker"]) is not int or result["worker"] < 1):
             add(f"{path}.worker", "must be an integer greater than or equal to 1", received=result.get("worker"), expected={"type": "integer", "minimum": 1})
-        for key in ("attempt_result_ref", "dispatch_ref", "reason", "next_strategy"):
-            if key in result and (not isinstance(result[key], str) or not result[key].strip()):
-                add(f"{path}.{key}", "must be a non-empty string when supplied", received=result.get(key), expected={"type": "string", "minLength": 1})
-        if "status" in result:
-            raw_status = result.get("status")
-            if not isinstance(raw_status, str) or raw_status.strip().lower() not in canonical_statuses:
-                add(
-                    f"{path}.status",
-                    "must be one canonical non-success status; omit it for a successful result",
-                    received=raw_status,
-                    expected={"type": "string", "enum": sorted(canonical_statuses)},
-                )
-    future_waves = params.get("future_waves")
-    if future_waves is not None and (not isinstance(future_waves, list) or not future_waves):
-        add("future_waves", "must be a non-empty array when supplied", received=future_waves, expected={"type": "array", "minItems": 1})
-    if "rework" in params and not isinstance(params.get("rework"), bool):
-        add("rework", "must be a boolean", received=params.get("rework"), expected={"type": "boolean"})
-    if "reason" in params and params.get("reason") is not None and (not isinstance(params.get("reason"), str) or not params.get("reason").strip()):
-        add("reason", "must be a non-empty string when supplied", received=params.get("reason"), expected={"type": "string", "minLength": 1})
+        if not isinstance(result.get("attempt_result_ref"), str) or not str(result.get("attempt_result_ref") or "").strip():
+            add(
+                f"{path}.attempt_result_ref",
+                "is required and must be the exact non-empty canonical result reference returned by Cortex",
+                received=result.get("attempt_result_ref"),
+                expected={"type": "string", "minLength": 1},
+            )
     return diagnostics
 
 
-def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
+def _v11_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
     """Turn a stale/foreign continuation into a resumable coordinator receipt.
 
     A coordinator that loses the response after a successful continuation may
@@ -8791,7 +8083,7 @@ def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
     result["stop_reason"] = reason
     result["next_action"] = (
         "Cortex detected a stale continuation and will reconcile it from the durable ledger. "
-        "Do not replay the consumed step/results, add future_waves, or spawn a replacement. "
+        "Do not replay the consumed step/results, supply a replacement pipeline, or spawn a replacement. "
         "If the caller must re-enter the lifecycle, call manage_orchestration exactly once "
         "with intent=inspect for this same task_ref and follow the returned server-owned "
         "receipt or exact task question."
@@ -8799,7 +8091,7 @@ def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
     return result
 
 
-def _v3_reconcile_stale_continue(params: dict[str, Any], error: dict[str, Any]) -> dict[str, Any]:
+def _v11_reconcile_stale_continue(params: dict[str, Any], error: dict[str, Any]) -> dict[str, Any]:
     """Reconcile a stale continuation from durable state in one server read.
 
     A lost/late coordinator receipt is an internal transport race, not a
@@ -8812,18 +8104,17 @@ def _v3_reconcile_stale_continue(params: dict[str, Any], error: dict[str, Any]) 
     waiting receipt.
     """
     try:
-        resolved = _v3_resolve_task(params, require_task_ref=True)
+        resolved = _v11_resolve_task(params, require_task_ref=True)
         if isinstance(resolved, dict):
-            return _v3_continue_stop(error, reason="stale_relative_step")
+            return _v11_continue_stop(error, reason="stale_relative_step")
         _, state, _, task_ref = resolved
         common = {
             "project_root": params["project_root"],
             "principal": state.get("principal"),
-            "thread_id": state.get("thread_id"),
             "task_id": state["task_id"],
         }
-        snapshot = _orchestrate_inspect(common)
-        response = _v3_response(snapshot, task_ref, include_result=True)
+        snapshot = _engine_inspect_lifecycle(common)
+        response = _v11_response(snapshot, task_ref, include_result=True)
         response["recovery"] = {
             "mode": "server_reconcile",
             "source": "stale_relative_step",
@@ -8845,10 +8136,10 @@ def _v3_reconcile_stale_continue(params: dict[str, Any], error: dict[str, Any]) 
         # The original diagnostic remains a retryable internal receipt if a
         # concurrent state mutation prevents the bounded read.  It must still
         # never be classified as a user decision or replacement authorization.
-        return _v3_continue_stop(error, reason="stale_relative_step")
+        return _v11_continue_stop(error, reason="stale_relative_step")
 
 
-def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
+def _v11_start_state_blocked_error(message: object) -> dict[str, Any]:
     """Return a resumable start result when no task was safely created.
 
     A registry instable happens before Cortex can reserve a task or
@@ -8856,7 +8147,7 @@ def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
     coordinators to call unscoped recovery, which could select an unrelated
     active task under the same project root.
     """
-    result = _v3_error("start_state_incompatible", message, outcome="needs_input")
+    result = _v11_error("start_state_incompatible", message, outcome="needs_input")
     result["retryable"] = True
     result["task_created"] = False
     result["recovery"] = "user_authorized_ledger_maintenance_required"
@@ -8869,9 +8160,9 @@ def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
     return result
 
 
-def _v3_start_materialization_pending(task_ref: str) -> dict[str, Any]:
+def _v11_start_materialization_pending(task_ref: str) -> dict[str, Any]:
     """Return a durable retry receipt while another caller owns materialization."""
-    result = _v3_error(
+    result = _v11_error(
         "start_materialization_pending",
         "the same transport start is currently being materialized by Cortex",
         outcome="materialization_pending",
@@ -8895,7 +8186,7 @@ def _v3_start_materialization_pending(task_ref: str) -> dict[str, Any]:
     return result
 
 
-def _v3_release_start_materialization_lease(
+def _v11_release_start_materialization_lease(
     root: Path,
     task_id: str,
     owner: str | None,
@@ -8933,9 +8224,9 @@ def _v3_release_start_materialization_lease(
         return
 
 
-def _v3_task_ref_required_error(operation: str) -> dict[str, Any]:
+def _v11_task_ref_required_error(operation: str) -> dict[str, Any]:
     """Refuse project-wide fallback selection for task-scoped public calls."""
-    result = _v3_error(
+    result = _v11_error(
         "task_ref_required",
         f"{operation} requires the exact task_ref returned by a successful Cortex lifecycle response.",
     )
@@ -8948,41 +8239,225 @@ def _v3_task_ref_required_error(operation: str) -> dict[str, Any]:
     return result
 
 
-def _v3_task_ref(task_id: str) -> str:
+def _v11_task_ref(task_id: str) -> str:
     return "task-" + digest_text(task_id)[:12]
+
+
+# v11 worker authority is carried only by an explicit, attempt-scoped bearer
+# delivered in the native spawn prompt.  Host sessions, hook receipts,
+# environment variables, and process identity are telemetry and never enter
+# this verifier.
+WORKER_ASSIGNMENT_SCHEMA = "cortex/worker-assignment/v1"
+WORKER_ASSIGNMENT_REF_RE = ASSIGNMENT_VALUE_RE
+WORKER_ASSIGNMENT_OPERATIONS = frozenset({
+    "worker_question",
+    "record_attempt_event",
+    "complete_attempt",
+    "read_dispatch_briefing",
+    "read_worker_result",
+})
+
+
+class WorkerAssignmentError(ValueError):
+    """Fail-closed worker authorization without an identity oracle."""
+
+    def __init__(self, code: str = "worker_assignment_unavailable") -> None:
+        self.code = code
+        super().__init__("worker assignment is unavailable; coordinator recovery is required")
+
+
+def _contains_embedded_assignment_ref(value: object, *, root: bool = True) -> bool:
+    """Reject bearer copies in semantic payloads before any durable write."""
+    if isinstance(value, str):
+        return WORKER_ASSIGNMENT_REF_RE.search(value) is not None
+    if isinstance(value, Mapping):
+        return any(
+            _contains_embedded_assignment_ref(item, root=False)
+            for key, item in value.items()
+            if not (root and str(key) == "assignment_ref")
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_embedded_assignment_ref(item, root=False) for item in value)
+    return False
+
+
+def _worker_assignment_payload(claim: Mapping[str, Any]) -> bytes:
+    """Return the exact HMAC audience for one durable non-secret claim."""
+    return json.dumps(
+        {
+            "schema": WORKER_ASSIGNMENT_SCHEMA,
+            "task_id": str(claim.get("task_id") or ""),
+            "task_ref": str(claim.get("task_ref") or ""),
+            "attempt_id": str(claim.get("attempt_id") or ""),
+            "dispatch_ref": str(claim.get("dispatch_ref") or ""),
+            "generation": int(claim.get("generation") or 0),
+            "profile": str(claim.get("profile") or ""),
+            "audience": str(claim.get("audience") or ""),
+            "sandbox": str(claim.get("sandbox") or ""),
+            "access_digest": str(claim.get("access_digest") or ""),
+            "operations": sorted(str(item) for item in (claim.get("operations") or [])),
+            "delivery_nonce": str(claim.get("delivery_nonce") or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def worker_assignment_ref(
+    project_root: str | Path,
+    claim: Mapping[str, Any],
+    *,
+    create_key: bool = False,
+) -> str:
+    """Derive the opaque bearer without storing or logging its raw value."""
+    root = ledger_root({"project_root": str(project_root)})
+    digest = hmac.new(
+        _governance_lifecycle_hmac_key(root, create=create_key),
+        b"cortex/worker-assignment/v1\0" + _worker_assignment_payload(claim),
+        hashlib.sha256,
+    ).hexdigest()
+    bearer = "assignment-v1-" + digest
+    if not create_key:
+        verifier = str(claim.get("verifier_sha256") or "")
+        observed = hashlib.sha256(bearer.encode("ascii")).hexdigest()
+        if not re.fullmatch(r"[0-9a-f]{64}", verifier) or not hmac.compare_digest(verifier, observed):
+            raise WorkerAssignmentError("legacy_worker_assignment_quarantined")
+    return bearer
+
+
+def issue_worker_assignment(
+    project_root: str | Path,
+    *,
+    task_id: str,
+    attempt_id: str,
+    dispatch_ref: str,
+    profile: str,
+    sandbox: str,
+    access: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Create one durable non-secret claim and its ephemeral native bearer."""
+    canonical_task_id = safe_id(task_id)
+    canonical_attempt_id = safe_id(attempt_id)
+    canonical_dispatch_ref = safe_id(dispatch_ref)
+    canonical_worker_profile = canonical_profile(profile)
+    canonical_sandbox = str(sandbox or "").strip()
+    access_digest = digest_text(json.dumps(dict(access), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    if not canonical_task_id or not canonical_attempt_id or not canonical_dispatch_ref or canonical_worker_profile not in AGENTS or not canonical_sandbox:
+        raise ValueError("worker assignment identity is incomplete")
+    claim = {
+        "schema": WORKER_ASSIGNMENT_SCHEMA,
+        "task_id": canonical_task_id,
+        "task_ref": _v11_task_ref(canonical_task_id),
+        "attempt_id": canonical_attempt_id,
+        "dispatch_ref": canonical_dispatch_ref,
+        "generation": 1,
+        "profile": canonical_worker_profile,
+        "audience": "worker",
+        "sandbox": canonical_sandbox,
+        "access_digest": access_digest,
+        "operations": sorted(WORKER_ASSIGNMENT_OPERATIONS),
+        # The nonce is not a bearer.  It is safe to persist because the HMAC
+        # key lives outside the ledger and is never model-facing.
+        "delivery_nonce": secrets.token_hex(32),
+        "issued_at": now(),
+    }
+    bearer = worker_assignment_ref(project_root, claim, create_key=True)
+    claim["verifier_sha256"] = hashlib.sha256(bearer.encode("ascii")).hexdigest()
+    return claim, bearer
+
+
+def authorize_worker_assignment(
+    params: Mapping[str, Any],
+    operation: str,
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any], str]:
+    """Resolve explicit refs to exactly one current v11 attempt, read-only.
+
+    A legacy attempt without a v11 claim is quarantined by construction: it
+    cannot be selected by task singleton, host session, hook arrival, or
+    environment identity and must be replaced through coordinator recovery.
+    """
+    task_ref = str(params.get("task_ref") or "").strip()
+    supplied = str(params.get("assignment_ref") or "").strip()
+    if operation not in WORKER_ASSIGNMENT_OPERATIONS:
+        raise WorkerAssignmentError()
+    if not re.fullmatch(r"task-[0-9a-f]{12}", task_ref) or not WORKER_ASSIGNMENT_REF_RE.fullmatch(supplied):
+        raise WorkerAssignmentError()
+    if _contains_embedded_assignment_ref(params):
+        raise WorkerAssignmentError("worker_assignment_exposure_rejected")
+    try:
+        bound = _bind_task_project_root({"task_ref": task_ref}, include_completed=True)
+        if not isinstance(bound, dict):
+            raise WorkerAssignmentError()
+        resolved = _v11_resolve_task(bound, require_task_ref=True)
+        if isinstance(resolved, dict):
+            raise WorkerAssignmentError()
+        task_dir, state, task, resolved_ref = resolved
+        project = select_project_root({"project_root": str(task.get("project_root") or "")})
+        if resolved_ref != task_ref:
+            raise WorkerAssignmentError()
+        matches: list[dict[str, Any]] = []
+        for candidate in state.get("attempts") or []:
+            if not isinstance(candidate, dict):
+                continue
+            claim = candidate.get("worker_assignment")
+            if not isinstance(claim, dict) or claim.get("schema") != WORKER_ASSIGNMENT_SCHEMA:
+                continue
+            if (
+                str(claim.get("task_id") or "") != str(state.get("task_id") or "")
+                or str(claim.get("task_ref") or "") != task_ref
+                or str(claim.get("attempt_id") or "") != str(candidate.get("attempt_id") or "")
+                or str(claim.get("dispatch_ref") or "") != str(candidate.get("dispatch_ref") or "")
+                or int(claim.get("generation") or 0) != 1
+                or str(claim.get("profile") or "") != str(candidate.get("profile") or candidate.get("agent") or "")
+                or str(claim.get("audience") or "") != "worker"
+                or str(claim.get("sandbox") or "") != str((candidate.get("spawn_request") or {}).get("sandbox") or "")
+                or str(claim.get("access_digest") or "") != digest_text(json.dumps({
+                    "allowed_paths": candidate.get("allowed_paths") or [],
+                    "route_category": (candidate.get("spawn_request") or {}).get("route_category"),
+                }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                or operation not in set(str(item) for item in (claim.get("operations") or []))
+            ):
+                continue
+            expected = worker_assignment_ref(project, claim, create_key=False)
+            if hmac.compare_digest(expected, supplied):
+                matches.append(candidate)
+        if len(matches) != 1:
+            raise WorkerAssignmentError("legacy_worker_assignment_quarantined")
+        attempt = matches[0]
+        if attempt.get("invalidated"):
+            raise WorkerAssignmentError()
+        profile = canonical_profile(str(attempt.get("profile") or attempt.get("agent") or ""))
+        if profile not in AGENTS:
+            raise WorkerAssignmentError()
+        return Path(project), task_dir, state, attempt, profile
+    except WorkerAssignmentError:
+        raise
+    except (ValueError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:
+        raise WorkerAssignmentError() from exc
 
 
 class OperationRegistryError(ValueError):
     """The project-wide replay registry cannot safely serve lifecycle calls."""
 
 
-COORDINATOR_CAPABILITY_RE = re.compile(r"^[0-9a-f]{64}$")
+COORDINATOR_CAPABILITY_RE = re.compile(COORDINATOR_REF_PATTERN)
 # A coordinator bearer is deliberately a short-lived verifier for a *single*
 # active task.  It is not a project administration credential merely because
 # it was returned by a project-local orchestration call.  Keep the claim
 # vocabulary local to this public-facade boundary: workers never receive it
 # and the governance domain is not asked to trust caller-authored roles.
-COORDINATOR_CAPABILITY_CLAIMS_SCHEMA = "cortex/coordinator-capability/v3"
+COORDINATOR_CAPABILITY_CLAIMS_SCHEMA = "cortex/coordinator-capability/v11"
 COORDINATOR_CAPABILITY_TTL_SECONDS = 8 * 60 * 60
 # Keep the ownership window longer than a normal engine start so concurrent
 # retries cannot take over while the original caller is still materializing;
 # an interrupted caller becomes recoverable after this bounded lease.
 START_MATERIALIZATION_LEASE_SECONDS = 5 * 60
 TASK_COORDINATOR_CAPABILITY_ACTIONS = frozenset({
-    "inspect", "inspect_initiative",
-    "history", "list_records", "snapshot", "snapshot_inspect",
-    "link_task", "link",
-    "add_dependency", "dependency", "transition", "transition_initiative",
-    "create_record", "record_create",
-    "evaluate_promotion", "promotion_evaluate", "promotion_inspect",
+    "inspect_initiative", "list_records", "snapshot", "link_task",
+    "add_dependency", "transition_initiative", "create_record",
+    "evaluate_promotion", "promotion_inspect",
 })
-PROJECT_ADMIN_CAPABILITY_ACTIONS = frozenset({"*"})
-CAPABILITY_RECOVERY_ACTIONS = frozenset({
-    "recover_coordinator_capability",
-    "acknowledge_coordinator_recovery",
-})
-COORDINATOR_RECOVERY_PROOF_RE = re.compile(r"^[0-9a-f]{64}$")
-COORDINATOR_RECOVERY_DELIVERY_SCHEMA = "cortex/coordinator-recovery-delivery/v1"
 
 
 def _operation_registry_path(root: Path) -> Path:
@@ -8999,36 +8474,6 @@ def _operation_registry(root: Path) -> dict[str, Any]:
         raise OperationRegistryError("orchestration operation registry schema is not supported")
     if not isinstance(registry.get("starts"), dict) or not isinstance(registry.get("tasks"), dict):
         raise OperationRegistryError("orchestration operation registry is invalid")
-    # 9.2.2 briefly persisted a reusable governance bearer in this project
-    # document. Remove and invalidate that retired material on first access;
-    # hashing a bearer that may already have been read would preserve a
-    # compromised credential. Affected active tasks therefore fail closed and
-    # require a fresh host activation to establish new server-owned claims.
-    scrubbed_retired_capability = False
-    for reservation in registry["starts"].values():
-        if isinstance(reservation, dict):
-            if "coordinator_capability" in reservation:
-                reservation.pop("coordinator_capability", None)
-                reservation.pop("coordinator_capability_digest", None)
-                scrubbed_retired_capability = True
-            if "coordinator_recovery_proof" in reservation:
-                reservation.pop("coordinator_recovery_proof", None)
-                reservation.pop("coordinator_recovery_proof_digest", None)
-                scrubbed_retired_capability = True
-    for record in registry["tasks"].values():
-        start = record.get("start") if isinstance(record, dict) else None
-        if isinstance(start, dict):
-            if "coordinator_capability" in start:
-                start.pop("coordinator_capability", None)
-                start.pop("coordinator_capability_digest", None)
-                scrubbed_retired_capability = True
-            if "coordinator_recovery_proof" in start:
-                start.pop("coordinator_recovery_proof", None)
-                start.pop("coordinator_recovery_proof_digest", None)
-                scrubbed_retired_capability = True
-    if scrubbed_retired_capability:
-        registry["updated_at"] = now()
-        db_put_global(root, "operation_registry", registry)
     return registry
 
 
@@ -9038,7 +8483,7 @@ def _write_operation_registry(root: Path, registry: dict[str, Any]) -> None:
     db_put_global(root, "operation_registry", registry)
 
 
-_PENDING_COORDINATOR_CAPABILITIES: dict[tuple[str, str], tuple[str, str]] = {}
+_PENDING_COORDINATOR_CAPABILITIES: dict[tuple[str, str], str] = {}
 _PENDING_COORDINATOR_CAPABILITIES_LOCK = threading.Lock()
 
 
@@ -9046,101 +8491,8 @@ def _coordinator_capability_digest(capability: str) -> str:
     return hashlib.sha256(str(capability).encode("ascii")).hexdigest()
 
 
-def _coordinator_recovery_proof_digest(proof: str) -> str:
-    """Return the durable verifier for the coordinator-only recovery proof."""
-    return hashlib.sha256(str(proof).encode("ascii")).hexdigest()
-
-
-def _host_bound_recovery_proof(root: Path, task_id: str) -> str:
-    """Derive recovery authority from the trusted host-private key.
-
-    Recovery is a host/session operation.  The project ledger retains only
-    the verifier, while the caller never supplies a principal, thread, or
-    bearer/proof credential.
-    """
-    key = _governance_lifecycle_hmac_key(root, create=True)
-    return hmac.new(
-        key,
-        b"cortex/host-bound-coordinator-recovery/v1\x00" + str(task_id).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-
 def _pending_coordinator_capability_key(root: Path, task_id: str) -> tuple[str, str]:
     return str(root.resolve()), str(task_id)
-
-
-def _pending_recovery_delivery_metadata(
-    task_id: str,
-    *,
-    source_generation: int,
-    recovery_proof: str,
-) -> dict[str, Any]:
-    """Derive a redeliverable pair and retain only non-secret metadata.
-
-    The current recovery proof is the HMAC key.  Cortex does not persist a
-    replacement bearer/proof: a retry that carries the same valid old proof
-    deterministically recomputes the same pair after a crash.  The ledger
-    retains only an opaque nonce and SHA-256 verifiers.
-    """
-    delivery_id = secrets.token_hex(32)
-    context = json.dumps({
-        "schema": COORDINATOR_RECOVERY_DELIVERY_SCHEMA,
-        "task_id": str(task_id),
-        "source_generation": int(source_generation),
-        "target_generation": int(source_generation) + 1,
-        "delivery_id": delivery_id,
-    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    key = bytes.fromhex(recovery_proof)
-    capability = hmac.new(key, b"cortex/recovery-capability/v1\x00" + context, hashlib.sha256).hexdigest()
-    next_proof = hmac.new(key, b"cortex/recovery-proof/v1\x00" + context, hashlib.sha256).hexdigest()
-    return {
-        "schema": COORDINATOR_RECOVERY_DELIVERY_SCHEMA,
-        "delivery_id": delivery_id,
-        "source_generation": int(source_generation),
-        "target_generation": int(source_generation) + 1,
-        "coordinator_capability_digest": _coordinator_capability_digest(capability),
-        "coordinator_recovery_proof_digest": _coordinator_recovery_proof_digest(next_proof),
-        "created_at": now(),
-    }
-
-
-def _pending_recovery_delivery_credentials(
-    task_id: str,
-    pending: object,
-    *,
-    recovery_proof: str,
-) -> dict[str, Any]:
-    """Recompute and verify a pending pair from a valid old recovery proof."""
-    if not isinstance(pending, dict) or pending.get("schema") != COORDINATOR_RECOVERY_DELIVERY_SCHEMA:
-        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
-    source_generation = pending.get("source_generation")
-    target_generation = pending.get("target_generation")
-    if not isinstance(source_generation, int) or not isinstance(target_generation, int) or target_generation != source_generation + 1:
-        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
-    delivery_id = str(pending.get("delivery_id") or "").lower()
-    if not COORDINATOR_CAPABILITY_RE.fullmatch(delivery_id):
-        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
-    context = json.dumps({
-        "schema": COORDINATOR_RECOVERY_DELIVERY_SCHEMA,
-        "task_id": str(task_id),
-        "source_generation": source_generation,
-        "target_generation": target_generation,
-        "delivery_id": delivery_id,
-    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    key = bytes.fromhex(recovery_proof)
-    capability = hmac.new(key, b"cortex/recovery-capability/v1\x00" + context, hashlib.sha256).hexdigest()
-    next_proof = hmac.new(key, b"cortex/recovery-proof/v1\x00" + context, hashlib.sha256).hexdigest()
-    expected_capability_digest = str(pending.get("coordinator_capability_digest") or "").lower()
-    expected_proof_digest = str(pending.get("coordinator_recovery_proof_digest") or "").lower()
-    if (
-        not COORDINATOR_CAPABILITY_RE.fullmatch(expected_capability_digest)
-        or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_proof_digest)
-        or not hmac.compare_digest(_coordinator_capability_digest(capability), expected_capability_digest)
-        or not hmac.compare_digest(_coordinator_recovery_proof_digest(next_proof), expected_proof_digest)
-    ):
-        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
-    return {"coordinator_capability": capability, "coordinator_recovery_proof": next_proof}
 
 
 def _coordinator_capability_expiry() -> str:
@@ -9154,10 +8506,7 @@ def _capability_action(value: object) -> str:
 def _capability_claims(
     *,
     task_id: str,
-    principal: str,
-    thread_id: str,
     initiative_ref: str | None,
-    kind: str = "task",
     allowed_actions: frozenset[str] | None = None,
     generation: int = 1,
 ) -> dict[str, Any]:
@@ -9168,18 +8517,14 @@ def _capability_claims(
     history, so diagnostics and normal registry reads cannot become a bearer
     recovery channel.
     """
-    selected_actions = (
-        PROJECT_ADMIN_CAPABILITY_ACTIONS
-        if kind == "project_admin"
-        else (allowed_actions or TASK_COORDINATOR_CAPABILITY_ACTIONS)
-    )
+    selected_actions = allowed_actions or TASK_COORDINATOR_CAPABILITY_ACTIONS
     issued_at = now()
     return {
         "schema": COORDINATOR_CAPABILITY_CLAIMS_SCHEMA,
-        "kind": kind,
+        "kind": "task",
+        "audience": "coordinator",
         "task_id": str(task_id),
-        "principal": str(principal),
-        "thread_id": str(thread_id),
+        "task_ref": _v11_task_ref(str(task_id)),
         "initiative_ref": str(initiative_ref or "") or None,
         "allowed_actions": sorted(selected_actions),
         "generation": int(generation),
@@ -9190,24 +8535,52 @@ def _capability_claims(
     }
 
 
-def _stage_coordinator_capability(root: Path, task_id: str) -> tuple[str, str, str]:
-    """Create a one-response bearer and recovery proof with durable verifiers.
+def _coordinator_claims_mac(
+    root: Path,
+    claims: Mapping[str, Any],
+    *,
+    create_key: bool = False,
+) -> str:
+    """Bind every authority-bearing coordinator claim to the host-private key."""
+    payload = json.dumps(
+        dict(claims), ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(
+        _governance_lifecycle_hmac_key(root, create=create_key),
+        b"cortex/coordinator-capability-claims/v1\0" + payload,
+        hashlib.sha256,
+    ).hexdigest()
 
-    Only digests enter the project ledger. The raw bearer and separate proof
-    live in this process just long enough for the successful start response;
-    a lost or cross-process response fails closed instead of making a reusable
-    secret recoverable from the worker-readable project database.
+
+def _coordinator_claims_match(
+    root: Path,
+    claims: object,
+    verifier: object,
+) -> bool:
+    if not isinstance(claims, Mapping):
+        return False
+    supplied = str(verifier or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied):
+        return False
+    try:
+        expected = _coordinator_claims_mac(root, claims)
+    except (ValueError, OSError, RuntimeError):
+        return False
+    return hmac.compare_digest(supplied, expected)
+
+
+def _stage_coordinator_capability(root: Path, task_id: str) -> tuple[str, str]:
+    """Create a one-response bearer and durable one-way verifier.
+
+    The raw bearer lives in this process only long enough for the successful
+    start response. A lost or cross-process response fails closed; no ambient
+    runtime recovery credential is created or retained.
     """
     capability = secrets.token_hex(32)
-    recovery_proof = _host_bound_recovery_proof(root, task_id)
     digest = _coordinator_capability_digest(capability)
-    recovery_proof_digest = _coordinator_recovery_proof_digest(recovery_proof)
     with _PENDING_COORDINATOR_CAPABILITIES_LOCK:
-        _PENDING_COORDINATOR_CAPABILITIES[_pending_coordinator_capability_key(root, task_id)] = (
-            capability,
-            recovery_proof,
-        )
-    return capability, digest, recovery_proof_digest
+        _PENDING_COORDINATOR_CAPABILITIES[_pending_coordinator_capability_key(root, task_id)] = capability
+    return capability, digest
 
 
 def _start_materialization_lease_expiry() -> str:
@@ -9221,7 +8594,7 @@ def _start_materialization_lease_active(value: object) -> bool:
         return False
 
 
-def _v3_materialization_fence(
+def _v11_materialization_fence(
     root: Path,
     task_id: str,
     owner: str | None,
@@ -9249,7 +8622,7 @@ def _v3_materialization_fence(
     )
 
 
-def _take_coordinator_capability(root: Path, task_id: str) -> tuple[str, str] | None:
+def _take_coordinator_capability(root: Path, task_id: str) -> str | None:
     with _PENDING_COORDINATOR_CAPABILITIES_LOCK:
         return _PENDING_COORDINATOR_CAPABILITIES.pop(
             _pending_coordinator_capability_key(root, task_id),
@@ -9266,7 +8639,11 @@ def _coordinator_capability_matches(root: Path, task_id: str, capability: str) -
     start = record.get("start") if isinstance(record, dict) else None
     expected_digest = str(start.get("coordinator_capability_digest") if isinstance(start, dict) else "").strip().lower()
     claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
-    if not _valid_coordinator_capability_claims(claims, task_id=task_id):
+    claims_mac = start.get("coordinator_capability_claims_mac") if isinstance(start, dict) else None
+    if (
+        not _valid_coordinator_capability_claims(claims, task_id=task_id)
+        or not _coordinator_claims_match(root, claims, claims_mac)
+    ):
         return False
     return bool(
         COORDINATOR_CAPABILITY_RE.fullmatch(expected_digest)
@@ -9284,11 +8661,11 @@ def _valid_coordinator_capability_claims(
         return False
     if claims.get("schema") != COORDINATOR_CAPABILITY_CLAIMS_SCHEMA:
         return False
-    if claims.get("kind") not in {"task", "project_admin"}:
+    if claims.get("kind") != "task":
+        return False
+    if claims.get("audience") != "coordinator" or str(claims.get("task_ref") or "") != _v11_task_ref(str(task_id)):
         return False
     if str(claims.get("task_id") or "") != str(task_id):
-        return False
-    if not str(claims.get("principal") or "").strip() or not str(claims.get("thread_id") or "").strip():
         return False
     actions = claims.get("allowed_actions")
     if not isinstance(actions, list) or not actions or any(not isinstance(item, str) for item in actions):
@@ -9309,167 +8686,40 @@ def _coordinator_capability_claims_for_task(root: Path, task_id: str) -> dict[st
     record = registry.get("tasks", {}).get(str(task_id))
     start = record.get("start") if isinstance(record, dict) else None
     claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
-    if not _valid_coordinator_capability_claims(claims, task_id=str(task_id)):
+    claims_mac = start.get("coordinator_capability_claims_mac") if isinstance(start, dict) else None
+    if (
+        not _valid_coordinator_capability_claims(claims, task_id=str(task_id))
+        or not _coordinator_claims_match(root, claims, claims_mac)
+    ):
         return None
     return dict(claims)
 
 
-def _record_capability_rotation(
-    claims: dict[str, Any],
-    *,
-    reason: str,
-) -> dict[str, Any]:
-    """Advance a claim generation without retaining a prior bearer verifier."""
-    generation = int(claims["generation"])
-    revoked = list(claims.get("revoked_generations") or [])[-31:]
-    revoked.append({"generation": generation, "revoked_at": now(), "reason": reason})
-    rotations = list(claims.get("rotation_audit") or [])[-31:]
-    rotations.append({
-        "event": "capability_rotated",
-        "reason": reason,
-        "from_generation": generation,
-        "to_generation": generation + 1,
-        "at": now(),
-    })
-    claims["generation"] = generation + 1
-    claims["issued_at"] = now()
-    claims["expires_at"] = _coordinator_capability_expiry()
-    claims["revoked_generations"] = revoked
-    claims["rotation_audit"] = rotations
-    return claims
-
-
-def _begin_coordinator_capability_recovery(
-    root: Path,
-    *,
-    task_id: str,
-    principal: str,
-    thread_id: str,
-    recovery_proof: str,
-    expected_generation: int | None = None,
-) -> tuple[dict[str, str], dict[str, Any], bool]:
-    """Create or redeliver a pending replacement without retiring old access.
-
-    This is intentionally not a rotation yet.  A response can be lost after
-    this durable operation; repeating it with the *same old proof* derives
-    precisely the same new pair.  The active bearer/proof remain authoritative
-    until :func:`_acknowledge_coordinator_capability_recovery` receives both
-    delivered replacement values.
-    """
-    with state_lock(root):
-        registry = _operation_registry(root)
-        record = registry.get("tasks", {}).get(str(task_id))
-        start = record.get("start") if isinstance(record, dict) else None
-        claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
-        if not _valid_coordinator_capability_claims(claims, task_id=str(task_id), require_unexpired=False):
-            raise GovernanceError("coordinator capability cannot be recovered for this task", code="coordinator_capability_invalid")
-        if str(claims.get("principal")) != principal or str(claims.get("thread_id")) != thread_id:
-            raise GovernanceError("capability recovery identity does not match its active task", code="coordinator_authorization_required")
-        supplied_proof = str(recovery_proof or "").strip().lower()
-        expected_proof_digest = str(start.get("coordinator_recovery_proof_digest") if isinstance(start, dict) else "").strip().lower()
-        if (
-            not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(supplied_proof)
-            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_proof_digest)
-            or not hmac.compare_digest(_coordinator_recovery_proof_digest(supplied_proof), expected_proof_digest)
-        ):
-            raise GovernanceError(
-                "coordinator capability recovery requires the original non-durable recovery proof",
-                code="coordinator_recovery_proof_required",
-            )
-        generation = int(claims["generation"])
-        if expected_generation is not None and int(expected_generation) != generation:
-            raise GovernanceError("capability recovery generation is stale", code="coordinator_capability_stale")
-        pending = start.get("pending_coordinator_recovery") if isinstance(start, dict) else None
-        redelivered = isinstance(pending, dict)
-        if redelivered:
-            if pending.get("source_generation") != generation:
-                raise GovernanceError("coordinator recovery delivery is stale", code="coordinator_capability_stale")
-        else:
-            pending = _pending_recovery_delivery_metadata(
-                task_id,
-                source_generation=generation,
-                recovery_proof=supplied_proof,
-            )
-            start["pending_coordinator_recovery"] = pending
-            record["start"] = start
-            registry["tasks"][str(task_id)] = record
-            for reservation in registry.get("starts", {}).values():
-                if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
-                    reservation["pending_coordinator_recovery"] = dict(pending)
-            _write_operation_registry(root, registry)
-        credentials = _pending_recovery_delivery_credentials(
-            task_id, pending, recovery_proof=supplied_proof,
-        )
-        return credentials, dict(claims), redelivered
-
-
-def _acknowledge_coordinator_capability_recovery(
-    root: Path,
-    *,
-    task_id: str,
-    principal: str,
-    thread_id: str,
-    replacement_capability: str,
-    replacement_recovery_proof: str,
-    previous_recovery_proof: str,
-    expected_generation: int | None = None,
-) -> dict[str, Any]:
-    """Activate a delivered pair and retire the old generation atomically."""
-    with state_lock(root):
-        registry = _operation_registry(root)
-        record = registry.get("tasks", {}).get(str(task_id))
-        start = record.get("start") if isinstance(record, dict) else None
-        claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
-        if not _valid_coordinator_capability_claims(claims, task_id=str(task_id), require_unexpired=False):
-            raise GovernanceError("coordinator capability cannot be acknowledged for this task", code="coordinator_capability_invalid")
-        if str(claims.get("principal")) != principal or str(claims.get("thread_id")) != thread_id:
-            raise GovernanceError("capability recovery identity does not match its active task", code="coordinator_authorization_required")
-        generation = int(claims["generation"])
-        if expected_generation is not None and int(expected_generation) != generation + 1:
-            raise GovernanceError("capability recovery generation is stale", code="coordinator_capability_stale")
-        pending = start.get("pending_coordinator_recovery") if isinstance(start, dict) else None
-        if not isinstance(pending, dict) or pending.get("source_generation") != generation or pending.get("target_generation") != generation + 1:
-            raise GovernanceError("coordinator recovery delivery is unavailable", code="coordinator_recovery_delivery_unavailable")
-        derived = _pending_recovery_delivery_credentials(task_id, pending, recovery_proof=previous_recovery_proof)
-        capability = str(replacement_capability or derived["coordinator_capability"]).strip().lower()
-        proof = str(replacement_recovery_proof or derived["coordinator_recovery_proof"]).strip().lower()
-        old_proof = str(previous_recovery_proof or "").strip().lower()
-        active_old_proof_digest = str(start.get("coordinator_recovery_proof_digest") or "").strip().lower()
-        expected_capability_digest = str(pending.get("coordinator_capability_digest") or "").strip().lower()
-        expected_proof_digest = str(pending.get("coordinator_recovery_proof_digest") or "").strip().lower()
-        if (
-            not COORDINATOR_CAPABILITY_RE.fullmatch(capability)
-            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(proof)
-            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(old_proof)
-            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(active_old_proof_digest)
-            or not COORDINATOR_CAPABILITY_RE.fullmatch(expected_capability_digest)
-            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_proof_digest)
-            or not hmac.compare_digest(_coordinator_recovery_proof_digest(old_proof), active_old_proof_digest)
-            or not hmac.compare_digest(_coordinator_capability_digest(capability), expected_capability_digest)
-            or not hmac.compare_digest(_coordinator_recovery_proof_digest(proof), expected_proof_digest)
-        ):
-            raise GovernanceError("coordinator recovery acknowledgement requires the delivered replacement pair", code="coordinator_recovery_acknowledgement_required")
-        derived = _pending_recovery_delivery_credentials(task_id, pending, recovery_proof=old_proof)
-        if (
-            not hmac.compare_digest(capability, derived["coordinator_capability"])
-            or not hmac.compare_digest(proof, derived["coordinator_recovery_proof"])
-        ):
-            raise GovernanceError("coordinator recovery acknowledgement is invalid", code="coordinator_recovery_acknowledgement_required")
-        rotated_claims = _record_capability_rotation(dict(claims), reason="lost_response_recovery_acknowledged")
-        start["coordinator_capability_digest"] = expected_capability_digest
-        start["coordinator_recovery_proof_digest"] = expected_proof_digest
-        start["coordinator_capability_claims"] = rotated_claims
-        start.pop("pending_coordinator_recovery", None)
-        record["start"] = start
-        registry["tasks"][str(task_id)] = record
-        for reservation in registry.get("starts", {}).values():
-            if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
-                reservation["coordinator_capability_digest"] = expected_capability_digest
-                reservation["coordinator_recovery_proof_digest"] = expected_proof_digest
-                reservation["coordinator_capability_claims"] = dict(rotated_claims)
-                reservation.pop("pending_coordinator_recovery", None)
-        _write_operation_registry(root, registry)
-        return dict(rotated_claims)
+def authorize_coordinator_ref(
+    params: Mapping[str, Any], operation: str,
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any], str]:
+    """Resolve one explicit coordinator bearer without ambient identity."""
+    task_ref = str(params.get("task_ref") or "").strip()
+    coordinator_ref = str(params.get("coordinator_ref") or "").strip().lower()
+    if operation not in {"continue_orchestration", "manage_orchestration", "manage_governance", "read_worker_result"}:
+        raise ValueError("coordinator_ref operation is unsupported")
+    if not re.fullmatch(r"task-[0-9a-f]{12}", task_ref) or not COORDINATOR_CAPABILITY_RE.fullmatch(coordinator_ref):
+        raise ValueError("coordinator authorization is unavailable")
+    bound = _bind_task_project_root({"task_ref": task_ref}, include_completed=True)
+    if not isinstance(bound, dict):
+        raise ValueError("coordinator authorization is unavailable")
+    resolved = _v11_resolve_task(bound, require_task_ref=True)
+    if isinstance(resolved, dict):
+        raise ValueError("coordinator authorization is unavailable")
+    task_dir, state, task, resolved_ref = resolved
+    project = select_project_root({"project_root": str(task.get("project_root") or "")})
+    root = ledger_root({"project_root": str(project)})
+    if resolved_ref != task_ref or not _coordinator_capability_matches(root, state["task_id"], coordinator_ref):
+        raise ValueError("coordinator authorization is unavailable")
+    claims = _coordinator_capability_claims_for_task(root, state["task_id"])
+    if not isinstance(claims, dict) or claims.get("audience") != "coordinator":
+        raise ValueError("coordinator authorization is unavailable")
+    return Path(project), task_dir, state, task, task_ref
 
 
 def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> None:
@@ -9492,8 +8742,6 @@ def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> 
             rotations.append({"event": "capability_revoked", "reason": reason, "at": now()})
             claims["rotation_audit"] = rotations
             start.pop("coordinator_capability_digest", None)
-            start.pop("coordinator_recovery_proof_digest", None)
-            start.pop("pending_coordinator_recovery", None)
             start["coordinator_capability_claims"] = claims
             record["start"] = start
             changed = True
@@ -9508,77 +8756,9 @@ def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> 
                 claims["rotation_audit"] = rotations
                 reservation["coordinator_capability_claims"] = claims
             reservation.pop("coordinator_capability_digest", None)
-            reservation.pop("coordinator_recovery_proof_digest", None)
-            reservation.pop("pending_coordinator_recovery", None)
             changed = True
         if changed:
             _write_operation_registry(root, registry)
-
-
-def _issue_project_admin_coordinator_capability(
-    root: Path,
-    *,
-    task_id: str,
-    principal: str,
-    thread_id: str,
-    explicit_server_grant: bool = False,
-) -> str:
-    """Issue a project-admin bearer only from an explicit trusted server grant.
-
-    There is deliberately no public MCP parameter that can request this.  The
-    helper exists for a future host-side administrator integration and tests;
-    ordinary task capabilities can never self-upgrade through caller JSON.
-    """
-    if not explicit_server_grant:
-        raise ValueError("project-admin capability requires an explicit trusted server grant")
-    with state_lock(root):
-        registry = _operation_registry(root)
-        record = registry.get("tasks", {}).get(str(task_id))
-        start = record.get("start") if isinstance(record, dict) else None
-        claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
-        if not _valid_coordinator_capability_claims(claims, task_id=str(task_id)):
-            raise ValueError("task has no active coordinator capability claims")
-        if str(claims.get("principal")) != principal or str(claims.get("thread_id")) != thread_id:
-            raise ValueError("project-admin grant identity does not match the active task")
-        bearer = secrets.token_hex(32)
-        digest = _coordinator_capability_digest(bearer)
-        admin_claims = _capability_claims(
-            task_id=str(task_id),
-            principal=principal,
-            thread_id=thread_id,
-            initiative_ref=None,
-            kind="project_admin",
-            generation=int(claims["generation"]) + 1,
-        )
-        admin_claims["revoked_generations"] = list(claims.get("revoked_generations") or [])[-31:] + [{
-            "generation": int(claims["generation"]),
-            "revoked_at": now(),
-            "reason": "explicit_server_project_admin_grant",
-        }]
-        admin_claims["rotation_audit"] = list(claims.get("rotation_audit") or [])[-31:] + [{
-            "event": "project_admin_capability_issued",
-            "from_generation": int(claims["generation"]),
-            "to_generation": int(claims["generation"]) + 1,
-            "at": now(),
-        }]
-        start["coordinator_capability_digest"] = digest
-        # A project-admin grant is issued only by a trusted server integration.
-        # It intentionally does not inherit a task-level lost-response proof.
-        # Retaining it could let an old task-session recovery credential rotate
-        # the newly elevated bearer.
-        start.pop("coordinator_recovery_proof_digest", None)
-        start.pop("pending_coordinator_recovery", None)
-        start["coordinator_capability_claims"] = admin_claims
-        record["start"] = start
-        registry["tasks"][str(task_id)] = record
-        for reservation in registry.get("starts", {}).values():
-            if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
-                reservation["coordinator_capability_digest"] = digest
-                reservation.pop("coordinator_recovery_proof_digest", None)
-                reservation.pop("pending_coordinator_recovery", None)
-                reservation["coordinator_capability_claims"] = dict(admin_claims)
-        _write_operation_registry(root, registry)
-        return bearer
 
 
 def _capability_scope_ref(value: object) -> str | None:
@@ -9599,14 +8779,11 @@ def _authorize_governance_capability_claim(
     """
     action = _capability_action(payload.get("action") or payload.get("intent"))
     allowed_actions = {str(item) for item in claims.get("allowed_actions", [])}
-    if "*" not in allowed_actions and action not in allowed_actions:
+    if action not in allowed_actions:
         raise GovernanceError(
             "coordinator capability is not authorized for this governance action",
             code="coordinator_capability_action_denied",
         )
-    if claims.get("kind") == "project_admin":
-        return
-
     # Task capabilities are never project policy/promotion/exception
     # authorities, even if a caller tries to reach them through the generic
     # record create action.
@@ -9620,7 +8797,7 @@ def _authorize_governance_capability_claim(
             "task-scoped coordinator capability cannot administer project governance",
             code="coordinator_capability_scope_denied",
         )
-    if action in {"create_record", "record_create"} and str(payload.get("record_type") or "").strip().lower() in {
+    if action == "create_record" and str(payload.get("record_type") or "").strip().lower() in {
         "policy", "promotion", "exception",
     }:
         raise GovernanceError(
@@ -9642,8 +8819,7 @@ def _authorize_governance_capability_claim(
         # It may record and inspect its own non-policy evidence, but it must
         # not turn that narrow scope into an initiative or project mutation.
         task_local_actions = {
-            "history", "list_records", "snapshot", "snapshot_inspect",
-            "create_record", "record_create",
+            "list_records", "snapshot", "create_record",
         }
         if (
             action not in task_local_actions
@@ -9660,12 +8836,12 @@ def _authorize_governance_capability_claim(
             "task-scoped coordinator capability must name its server-bound initiative",
             code="coordinator_capability_scope_denied",
         )
-    if action in {"link_task", "link"} and supplied_task != task_id:
+    if action == "link_task" and supplied_task != task_id:
         raise GovernanceError(
             "task link must name the capability's task",
             code="coordinator_capability_scope_denied",
         )
-    if action in {"add_dependency", "dependency"}:
+    if action == "add_dependency":
         source_type = _capability_action(payload.get("source_type") or "initiative")
         target_type = _capability_action(payload.get("target_type") or "initiative")
         source_ref = _capability_scope_ref(payload.get("source_ref"))
@@ -9680,153 +8856,6 @@ def _authorize_governance_capability_claim(
                 "task-scoped coordinator capability cannot add dependencies outside its task/initiative scope",
                 code="coordinator_capability_scope_denied",
             )
-
-
-def _recovery_task_identity(params: dict[str, Any], project: Path) -> tuple[Path, str, str, str, str]:
-    """Resolve the active task identity for either phase of recovery."""
-    principal = str(params.get("principal") or "").strip()
-    thread_id = str(params.get("thread_id") or "").strip()
-    task_ref = str(params.get("task_ref") or "").strip()
-    if not principal or not thread_id or not task_ref:
-        raise GovernanceError(
-            "capability recovery requires the exact task_ref, principal, and thread_id",
-            code="coordinator_authorization_required",
-        )
-    root = ledger_root({"project_root": str(project)})
-    registry = _operation_registry(root)
-    matching = [
-        str(task_id)
-        for task_id in registry.get("tasks", {})
-        if _v3_task_ref(str(task_id)) == task_ref
-    ]
-    if len(matching) != 1:
-        raise GovernanceError("capability recovery task_ref is not active", code="coordinator_capability_invalid")
-    task_id = matching[0]
-    try:
-        activation = require_activation(
-            {"project_root": str(project), "principal": principal, "thread_id": thread_id}, task_id,
-        )
-    except ValueError as exc:
-        raise GovernanceError(str(exc), code="coordinator_authorization_required") from exc
-    if str(activation.get("task_id") or "") != task_id:
-        raise GovernanceError("capability recovery task is not the active coordinator task", code="coordinator_authorization_required")
-    return root, task_id, task_ref, principal, thread_id
-
-
-def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> dict[str, Any]:
-    """Acknowledge host-owned recovery without redelivering credentials.
-
-    Recovery has a deliberately narrower identity contract than ordinary
-    governance calls: the exact task_ref must identify the active host-bound
-    activation. Public identifiers alone are never recovery authority. Callers
-    cannot request a project-admin elevation through this route.
-    """
-    task_ref = str(params.get("task_ref") or "").strip()
-    root = ledger_root({"project_root": str(project)})
-    bound = _host_bound_governance_activation(project, task_ref)
-    if bound is None:
-        raise GovernanceError("no unique active host-bound coordinator session matches this recovery request", code="coordinator_authorization_required")
-    task_id, principal, thread_id, _mode = bound
-    generation_raw = params.get("capability_generation")
-    if generation_raw is not None and (not isinstance(generation_raw, int) or generation_raw < 1):
-        raise GovernanceError("capability_generation must be a positive integer", code="coordinator_capability_invalid")
-    # There is no model-delivered credential to recover anymore. The host
-    # binding remains the authority, so recovery is an idempotent metadata
-    # acknowledgement rather than a secret redelivery protocol.
-    claims = _coordinator_capability_claims_for_task(root, task_id)
-    if claims is None:
-        raise GovernanceError(
-            "active host-bound coordinator session has no valid claims",
-            code="coordinator_authorization_required",
-        )
-    if generation_raw is not None and int(claims["generation"]) != generation_raw:
-        raise GovernanceError(
-            "capability generation is stale; continue from the current host-bound coordinator session",
-            code="coordinator_capability_stale",
-        )
-    return {
-        "schema": "cortex/governance/v1",
-        "ok": True,
-        "outcome": "coordinator_capability_recovered",
-        "action": "recover_coordinator_capability",
-        "task_ref": task_ref,
-        "authorization": {
-            "actor": "coordinator",
-            "source": "host_activation",
-            "principal": principal,
-            "thread_id": thread_id,
-            "capability_kind": claims["kind"],
-            "generation": claims["generation"],
-        },
-        "next_action": "Continue the same host-bound coordinator task; recovery was completed server-side.",
-    }
-
-
-def _acknowledge_coordinator_recovery(params: dict[str, Any], project: Path) -> dict[str, Any]:
-    """Return host-owned recovery metadata without accepting raw credentials."""
-    task_ref = str(params.get("task_ref") or "").strip()
-    root = ledger_root({"project_root": str(project)})
-    bound = _host_bound_governance_activation(project, task_ref)
-    if bound is None:
-        raise GovernanceError("no unique active host-bound coordinator session matches this recovery request", code="coordinator_authorization_required")
-    task_id, principal, thread_id, _mode = bound
-    generation_raw = params.get("capability_generation")
-    if generation_raw is not None and (not isinstance(generation_raw, int) or generation_raw < 1):
-        raise GovernanceError("capability_generation must be a positive integer", code="coordinator_capability_invalid")
-    claims = _coordinator_capability_claims_for_task(root, task_id)
-    if claims is None:
-        raise GovernanceError("active host-bound coordinator session has no valid claims", code="coordinator_authorization_required")
-    if generation_raw is not None and int(claims["generation"]) != generation_raw:
-        raise GovernanceError("capability generation is stale; continue from the current host-bound coordinator session", code="coordinator_capability_stale")
-    return {
-        "schema": "cortex/governance/v1",
-        "ok": True,
-        "outcome": "coordinator_capability_recovery_acknowledged",
-        "action": "acknowledge_coordinator_recovery",
-        "task_ref": task_ref,
-        "authorization": {
-            "actor": "coordinator",
-            "source": "host_activation",
-            "principal": principal,
-            "thread_id": thread_id,
-            "capability_kind": claims["kind"],
-            "generation": claims["generation"],
-        },
-    }
-
-
-def _coordinator_identity_for_capability(
-    root: Path,
-    capability: str,
-) -> tuple[str, str, str] | None:
-    """Resolve the one server-owned coordinator identity bound to a capability."""
-    supplied = str(capability or "").strip().lower()
-    if not COORDINATOR_CAPABILITY_RE.fullmatch(supplied):
-        return None
-    supplied_digest = _coordinator_capability_digest(supplied)
-    registry = _operation_registry(root)
-    matches: list[tuple[str, str, str]] = []
-    for task_id, record in registry.get("tasks", {}).items():
-        if not isinstance(record, dict):
-            continue
-        start = record.get("start")
-        expected_digest = str(
-            start.get("coordinator_capability_digest") if isinstance(start, dict) else ""
-        ).strip().lower()
-        claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
-        if (
-            not COORDINATOR_CAPABILITY_RE.fullmatch(expected_digest)
-            or not _valid_coordinator_capability_claims(claims, task_id=str(task_id))
-            or not hmac.compare_digest(expected_digest, supplied_digest)
-        ):
-            continue
-        principal = str(claims.get("principal") or "").strip()
-        thread_id = str(claims.get("thread_id") or principal).strip()
-        if principal and thread_id:
-            matches.append((str(task_id), principal, thread_id))
-    if len(matches) != 1:
-        return None
-    return matches[0]
 
 
 def _prune_timestamp(value: object) -> datetime | None:
@@ -9924,7 +8953,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
                 for task_id in read_task_index(root):
                     loaded = db_load_task(root, task_id)
                     if loaded is not None and loaded[1].get("status") in {"active", "blocked"}:
-                        active.append(_v3_task_ref(task_id))
+                        active.append(_v11_task_ref(task_id))
             if active:
                 return {
                     "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -10084,12 +9113,6 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
     # deletion is durably acknowledged.  The ledger API commits the globals,
     # lanes, task rows, manifests, operation records, and tombstone together.
     with state_lock(root):
-        host_bindings = _host_session_bindings(root)
-        host_bindings["tasks"] = {
-            key: value for key, value in host_bindings["tasks"].items() if key not in stale_ids
-        }
-        host_bindings["updated_at"] = now()
-
         activations = _activation_records(root)
         if not isinstance(activations, dict):
             raise ValueError("activation registry is invalid")
@@ -10133,7 +9156,6 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
                 lane_updates += 1
 
         global_updates = {
-            "host_sessions": host_bindings if host_bindings["tasks"] else None,
             "activations": activations if activations else None,
             "resource_claims": claims if claims else None,
             "operation_registry": registry,
@@ -10152,7 +9174,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
             "older_than_days": days,
             "cutoff": cutoff.isoformat(),
             "pruned_count": len(stale_ids),
-            "pruned_task_refs": [_v3_task_ref(task_id) for task_id in sorted(stale_ids)],
+            "pruned_task_refs": [_v11_task_ref(task_id) for task_id in sorted(stale_ids)],
             "pruned_statuses": {status: list(statuses.values()).count(status) for status in sorted(set(statuses.values()))},
             "removed_operations": finalized["removed_operations"],
             "removed_classification_receipts": finalized["removed_classifications"],
@@ -10164,7 +9186,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def _v3_task_state(root: Path, task_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
+def _v11_task_state(root: Path, task_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
     loaded = db_load_task(root, task_id)
     if loaded is None:
         return None
@@ -10182,11 +9204,11 @@ def _v3_task_state(root: Path, task_id: str) -> tuple[Path, dict[str, Any], dict
     return task_dir, state, task
 
 
-def _v3_task_candidates(params: dict[str, Any], *, include_completed: bool = False) -> list[dict[str, Any]]:
+def _v11_task_candidates(params: dict[str, Any], *, include_completed: bool = False) -> list[dict[str, Any]]:
     root = ledger_root(params)
     candidates: list[dict[str, Any]] = []
     for task_id in sorted(read_task_index(root)):
-        loaded = _v3_task_state(root, task_id)
+        loaded = _v11_task_state(root, task_id)
         if loaded is None:
             continue
         _, state, task = loaded
@@ -10194,7 +9216,7 @@ def _v3_task_candidates(params: dict[str, Any], *, include_completed: bool = Fal
             continue
         candidates.append({
             "task_id": task_id,
-            "task_ref": _v3_task_ref(task_id),
+            "task_ref": _v11_task_ref(task_id),
             "user_request": redact(task.get("user_request", ""), 300),
             "status": state.get("status"),
             "created_at": task.get("created_at"),
@@ -10202,36 +9224,36 @@ def _v3_task_candidates(params: dict[str, Any], *, include_completed: bool = Fal
     return candidates
 
 
-def _v3_resolve_task(
+def _v11_resolve_task(
     params: dict[str, Any],
     *,
     include_completed: bool = False,
     require_task_ref: bool = True,
 ) -> tuple[Path, dict[str, Any], dict[str, Any], str] | dict[str, Any]:
     root = ledger_root(params)
-    candidates = _v3_task_candidates(params, include_completed=include_completed)
+    candidates = _v11_task_candidates(params, include_completed=include_completed)
     requested = str(params.get("task_ref") or "").strip()
     if require_task_ref and not requested:
-        return _v3_task_ref_required_error("task-scoped Cortex call")
+        return _v11_task_ref_required_error("task-scoped Cortex call")
     if requested:
         selected = next((item for item in candidates if item["task_ref"] == requested), None)
         if selected is None:
-            return _v3_error("unknown_task_ref", "task_ref does not identify a selectable Cortex task")
+            return _v11_error("unknown_task_ref", "task_ref does not identify a selectable Cortex task")
     elif not candidates:
-        return _v3_error("no_active_task", "No active Cortex task exists in this project root.")
+        return _v11_error("no_active_task", "No active Cortex task exists in this project root.")
     else:
-        return _v3_error(
+        return _v11_error(
             "task_ref_required",
             "task-scoped Cortex calls require the exact task_ref returned by start_orchestration.",
         )
-    loaded = _v3_task_state(root, str(selected["task_id"]))
+    loaded = _v11_task_state(root, str(selected["task_id"]))
     if loaded is None:
-        return _v3_error("task_unavailable", "The selected Cortex task is unavailable.")
+        return _v11_error("task_unavailable", "The selected Cortex task is unavailable.")
     task_dir, state, task = loaded
     return task_dir, state, task, str(selected["task_ref"])
 
 
-def _v3_complexity(value: object) -> str:
+def _v11_complexity(value: object) -> str:
     raw = "C2" if value in {None, ""} else value
     if isinstance(raw, str) and raw in CANONICAL_COMPLEXITIES:
         return raw
@@ -10240,7 +9262,7 @@ def _v3_complexity(value: object) -> str:
     raise ValueError("task.complexity must be one of the canonical values C1, C2, C3" + suffix)
 
 
-def _v3_plan_approval(value: object, complexity: str) -> str:
+def _v11_plan_approval(value: object, complexity: str) -> str:
     """Normalize the post-plan review policy selected for a public task.
 
     Governance complexity is an assessment and must never silently turn into
@@ -10259,7 +9281,7 @@ def _v3_plan_approval(value: object, complexity: str) -> str:
     raise ValueError("task.plan_approval must be auto or required" + suffix)
 
 
-def _v3_model(value: object) -> str | None:
+def _v11_model(value: object) -> str | None:
     if value in {None, ""}:
         return None
     model = value
@@ -10270,13 +9292,215 @@ def _v3_model(value: object) -> str | None:
     raise ValueError("worker model must use a canonical supported model identifier" + suffix)
 
 
-def _v3_compact_waves(
+def _v11_start_public_schema_forms() -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any],
+]:
+    """Return the generated public authority for start/task/wave forms."""
+    registry = globals().get("PUBLIC_SCHEMA_REGISTRY")
+    start_schema = registry.get("start_orchestration") if isinstance(registry, dict) else None
+    start_properties = start_schema.get("properties") if isinstance(start_schema, dict) else None
+    task_schema = start_properties.get("task") if isinstance(start_properties, dict) else None
+    waves_schema = start_properties.get("waves") if isinstance(start_properties, dict) else None
+    wave_schema = waves_schema.get("items") if isinstance(waves_schema, dict) else None
+    wave_properties = wave_schema.get("properties") if isinstance(wave_schema, dict) else None
+    workers_schema = wave_properties.get("workers") if isinstance(wave_properties, dict) else None
+    worker_schema = workers_schema.get("items") if isinstance(workers_schema, dict) else None
+    task_properties = task_schema.get("properties") if isinstance(task_schema, dict) else None
+    worker_properties = worker_schema.get("properties") if isinstance(worker_schema, dict) else None
+    if not all(isinstance(value, dict) for value in (
+        start_schema, start_properties, task_schema, task_properties, waves_schema,
+        wave_schema, wave_properties, workers_schema, worker_schema, worker_properties,
+    )):
+        raise RuntimeError("public start schema forms are incomplete")
+    return start_schema, task_schema, waves_schema, wave_schema, worker_schema
+
+
+def _v11_schema_field_card(schema: Mapping[str, Any], *facets: str) -> dict[str, Any]:
+    """Select a minimal diagnostic card from one generated public field."""
+    return {facet: schema[facet] for facet in facets if facet in schema}
+
+
+def _v11_schema_object_card(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the public object-card used for unsupported nested fields."""
+    properties = schema.get("properties")
+    return {
+        "type": schema.get("type", "object"),
+        "additionalProperties": schema.get("additionalProperties", True),
+        "properties": sorted(properties) if isinstance(properties, dict) else [],
+    }
+
+
+def _v11_start_task_preflight(raw_task: object) -> list[dict[str, Any]]:
+    """Validate the public task form from the same registry as MCP tools/list."""
+    diagnostics: list[dict[str, Any]] = []
+    _start_schema, task_schema, _waves_schema, _wave_schema, _worker_schema = _v11_start_public_schema_forms()
+    task_properties = task_schema["properties"]
+
+    def add(pointer: str, message: str, field_schema: Mapping[str, Any], received: object = None) -> None:
+        card = dict(field_schema)
+        item: dict[str, Any] = {
+            "code": "start_orchestration_validation_failed",
+            "phase": "preflight",
+            "path": pointer.lstrip("/").replace("/", "."),
+            "json_pointer": pointer,
+            "message": message,
+            "field_schema": card,
+            "expected": card,
+            "fix": "Correct this exact start_orchestration field and preserve every unrelated valid field.",
+        }
+        if received is not None:
+            item["received"] = received
+        diagnostics.append(item)
+
+    if not isinstance(raw_task, dict):
+        add("/task", "must be an object", _v11_schema_object_card(task_schema), {"type": type(raw_task).__name__})
+        return diagnostics
+
+    # Schema-derived scalar and nested collection validation is deliberately
+    # first so e.g. a malformed boolean, enum, and text list are repairable
+    # in one request rather than leaking through to normalization one at a
+    # time.  Required/route rules remain below because they depend on anyOf.
+    diagnostics.extend(_v11_schema_value_diagnostics(
+        raw_task, task_schema, pointer="/task", operation="start_orchestration",
+    ))
+
+    user_request_schema = task_properties["user_request"]
+    if "user_request" not in raw_task or (isinstance(raw_task.get("user_request"), str) and not raw_task["user_request"].strip()):
+        add("/task/user_request", "is required", _v11_schema_field_card(user_request_schema, "type", "minLength"))
+
+    # The ordinary-task branch is encoded in the first public anyOf form;
+    # harvest remains the only alternate branch and is evaluated separately.
+    ordinary_required = next(
+        (
+            branch.get("required", [])
+            for branch in task_schema.get("anyOf", [])
+            if isinstance(branch, dict) and isinstance(branch.get("required"), list)
+        ),
+        [],
+    )
+    if not _is_knowledge_harvest_task(raw_task):
+        missing = [
+            field for field in ordinary_required
+            if raw_task.get(field) is None or (isinstance(raw_task.get(field), list) and not raw_task.get(field))
+        ]
+        if missing:
+            missing_text = ", ".join(f"task.{field}" for field in missing)
+            for field in missing:
+                field_schema = task_properties[field]
+                value = raw_task.get(field)
+                add(
+                    f"/task/{field}",
+                    f"{missing_text} are required and must contain at least one non-empty string",
+                    _v11_schema_field_card(field_schema, "type", "minItems", "items"),
+                    {"type": "null"} if value is None else {"type": "array", "length": 0},
+                )
+    return diagnostics
+
+
+def _v11_start_wave_preflight(raw_waves: object) -> list[dict[str, Any]]:
+    """Validate model-facing wave structure before opening or reserving state."""
+    diagnostics: list[dict[str, Any]] = []
+    _start_schema, _task_schema, waves_schema, wave_schema, worker_schema = _v11_start_public_schema_forms()
+    wave_properties = wave_schema["properties"]
+    workers_schema = wave_properties["workers"]
+    worker_properties = worker_schema["properties"]
+    allowed_paths_schema = worker_properties["allowed_paths"]
+    allowed_path_item_schema = allowed_paths_schema["items"]
+    allowed_path_pattern = str(allowed_path_item_schema["pattern"])
+    waves_field_card = _v11_schema_field_card(waves_schema, "type", "minItems")
+    workers_field_card = _v11_schema_field_card(workers_schema, "type", "minItems", "maxItems")
+    allowed_paths_field_card = _v11_schema_field_card(allowed_paths_schema, "type", "minItems")
+    allowed_path_item_card = _v11_schema_field_card(
+        allowed_path_item_schema, "type", "minLength", "pattern", "format",
+    )
+
+    def add(pointer: str, message: str, field_schema: dict[str, Any], received: object = None) -> None:
+        item: dict[str, Any] = {
+            "code": "start_orchestration_validation_failed",
+            "phase": "preflight",
+            "path": pointer.lstrip("/").replace("/", "."),
+            "json_pointer": pointer,
+            "message": message,
+            "field_schema": field_schema,
+            "expected": field_schema,
+            "fix": "Correct this exact start_orchestration field and preserve every unrelated valid field.",
+        }
+        if received is not None:
+            item["received"] = received
+        diagnostics.append(item)
+
+    if raw_waves is None:
+        return diagnostics
+    # Validate every declared public leaf (phase/profile/model/dependencies,
+    # boolean flags, and path constraints) from the same tools/list schema.
+    # The compiler below adds only cross-wave semantic rules.
+    diagnostics.extend(_v11_schema_value_diagnostics(
+        raw_waves, waves_schema, pointer="/waves", operation="start_orchestration",
+    ))
+    if not isinstance(raw_waves, list):
+        add("/waves", "must be an array", waves_field_card, {"type": type(raw_waves).__name__})
+        return diagnostics
+    if not raw_waves:
+        add("/waves", "must contain at least one wave", waves_field_card, {"type": "array", "length": 0})
+        return diagnostics
+    for wave_index, wave in enumerate(raw_waves):
+        wave_pointer = f"/waves/{wave_index}"
+        if not isinstance(wave, dict):
+            add(wave_pointer, "must be an object", _v11_schema_object_card(wave_schema), {"type": type(wave).__name__})
+            continue
+        for key in sorted(set(wave) - set(wave_properties)):
+            add(
+                f"{wave_pointer}/{key}",
+                "unsupported wave field",
+                _v11_schema_object_card(wave_schema),
+            )
+        workers = wave.get("workers")
+        workers_pointer = f"{wave_pointer}/workers"
+        if not isinstance(workers, list):
+            add(workers_pointer, "must be an array", workers_field_card, {"type": type(workers).__name__})
+            continue
+        if not workers:
+            add(workers_pointer, "must contain at least one worker", workers_field_card, {"type": "array", "length": 0})
+            continue
+        for worker_index, worker in enumerate(workers):
+            worker_pointer = f"{workers_pointer}/{worker_index}"
+            if not isinstance(worker, dict):
+                add(worker_pointer, "must be an object", _v11_schema_object_card(worker_schema), {"type": type(worker).__name__})
+                continue
+            for key in sorted(set(worker) - set(worker_properties)):
+                add(
+                f"{worker_pointer}/{key}",
+                "unsupported worker field",
+                _v11_schema_object_card(worker_schema),
+                )
+            if "allowed_paths" not in worker:
+                continue
+            allowed_paths = worker.get("allowed_paths")
+            allowed_pointer = f"{worker_pointer}/allowed_paths"
+            if not isinstance(allowed_paths, list):
+                add(allowed_pointer, "must be an array", allowed_paths_field_card, {"type": type(allowed_paths).__name__})
+                continue
+            if not allowed_paths:
+                add(allowed_pointer, "must contain at least one project-relative path", allowed_paths_field_card, {"type": "array", "length": 0})
+                continue
+            for path_index, value in enumerate(allowed_paths):
+                path_pointer = f"{allowed_pointer}/{path_index}"
+                if not isinstance(value, str) or re.fullmatch(allowed_path_pattern, value) is None:
+                    add(
+                        path_pointer,
+                        "must be a safe non-empty project-relative path without traversal or wildcards",
+                        allowed_path_item_card,
+                        {"type": type(value).__name__},
+                    )
+    return diagnostics
+
+
+def _v11_compact_waves(
     raw_waves: object,
     task: dict[str, Any],
     *,
     completed_gates: set[str] | None = None,
     project_root: Path | None = None,
-    allow_visible_threads: bool = False,
 ) -> list[dict[str, Any]]:
     # Validate the whole compact wave envelope before the mutating compiler
     # starts.  The compiler below intentionally remains strict, but this pass
@@ -10296,6 +9520,10 @@ def _v3_compact_waves(
             "code": "management_failed",
             "phase": "payload",
             "path": path,
+            "json_pointer": "/" + "/".join(
+                part.replace("~", "~0").replace("/", "~1")
+                for part in path.replace("[", ".").replace("]", "").split(".") if part
+            ),
             "message": redact(message, 1000),
             "fix": "Correct this field in the same manage_orchestration request; do not resend unrelated fields.",
         }
@@ -10312,7 +9540,7 @@ def _v3_compact_waves(
     seen_phases: dict[str, tuple[int, str]] = {}
     available_context_gates = set(completed_gates or set())
     for wave_index, raw_wave in enumerate(raw_waves, 1):
-        wave_path = f"future_waves[{wave_index - 1}]"
+        wave_path = f"waves[{wave_index - 1}]"
         if not isinstance(raw_wave, dict) or set(raw_wave) != {"workers"}:
             wave_diag(wave_path, "wave must contain only workers", "{workers: [...]}")
             continue
@@ -10426,12 +9654,6 @@ def _v3_compact_waves(
         raise ValidationFailure(wave_diagnostics)
 
     result: list[dict[str, Any]] = []
-    allowed_worker_keys = {
-        "phase", "profile", "objective", "paths", "allowed_paths", "acceptance", "verification",
-        "model", "user_requested_model", "effort", "visible", "isolated_checkout", "depends_on", "context_files",
-        "context_result_refs",
-        "strategy",
-    }
     phase_waves: dict[str, tuple[int, str]] = {}
     available_context_gates = set(completed_gates or set())
     for wave_index, raw_wave in enumerate(raw_waves, 1):
@@ -10445,9 +9667,6 @@ def _v3_compact_waves(
         for worker_index, worker in enumerate(workers, 1):
             if not isinstance(worker, dict):
                 raise ValueError(f"waves[{wave_index - 1}].workers[{worker_index - 1}] must be an object")
-            unknown = sorted(set(worker) - allowed_worker_keys)
-            if unknown:
-                raise ValueError(f"unsupported compact worker fields: {', '.join(unknown)}")
             raw_phase = str(worker.get("phase") or "").strip()
             if not raw_phase:
                 raise ValueError(f"waves[{wave_index - 1}].workers[{worker_index - 1}].phase is required")
@@ -10479,15 +9698,6 @@ def _v3_compact_waves(
                     f"worker profile {profile!r} cannot own phase {gate!r}; "
                     f"supported phase(s): {', '.join(supported)}"
                 )
-            visible = bool(worker.get("visible", False))
-            isolated = bool(worker.get("isolated_checkout", False))
-            if visible and not allow_visible_threads:
-                raise ValueError(
-                    "visible thread requires an explicit user-authorized task; "
-                    "set task.visible_thread_requested=true only when the user requested a visible task"
-                )
-            if isolated and not visible:
-                raise ValueError("isolated_checkout requires visible=true")
             spec: dict[str, Any] = {
                 "gate": gate,
                 "agent": profile,
@@ -10496,6 +9706,7 @@ def _v3_compact_waves(
                     if raw_profile else
                     f"`{profile}` is the canonical automatic owner for the `{gate}` phase."
                 ),
+                "dispatch_mode": "hidden_subagent",
             }
             if "depends_on" in worker:
                 raw_dependencies = worker["depends_on"]
@@ -10529,7 +9740,7 @@ def _v3_compact_waves(
                 ("objective", "objective"), ("paths", "allowed_paths"),
                 ("allowed_paths", "allowed_paths"),
                 ("acceptance", "acceptance_criteria"), ("verification", "verification"),
-                ("context_files", "context_files"), ("strategy", "strategy"),
+                ("context_files", "context_files"),
             ):
                 if source in worker:
                     if source == "context_files" and project_root is not None:
@@ -10545,10 +9756,10 @@ def _v3_compact_waves(
                         spec[target] = paths
                     else:
                         spec[target] = worker[source]
-            model = _v3_model(worker.get("model"))
+            model = _v11_model(worker.get("model"))
             if model:
                 spec["requested_model"] = model
-            user_requested_model = _v3_model(worker.get("user_requested_model"))
+            user_requested_model = _v11_model(worker.get("user_requested_model"))
             if user_requested_model:
                 if model and model != user_requested_model:
                     raise ValueError("worker model and user_requested_model must match")
@@ -10556,9 +9767,6 @@ def _v3_compact_waves(
                 spec["user_requested_model"] = user_requested_model
             if str(worker.get("effort") or "").strip():
                 spec["requested_reasoning_effort"] = str(worker["effort"]).strip().lower()
-            if visible:
-                spec["dispatch_mode"] = "visible_thread"
-                spec["thread_environment"] = "worktree" if isolated else "local"
             delegations.append(spec)
             wave_gates.add(gate)
         result.append({"wave_id": f"wave-{wave_index:02d}", "delegations": delegations})
@@ -10566,7 +9774,7 @@ def _v3_compact_waves(
     return result
 
 
-def _v3_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
+def _v11_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
     classification_params: dict[str, Any] = {
         "complexity": task["complexity"],
         "requirements": _task_routing_items(task),
@@ -10622,34 +9830,28 @@ def _append_governance_waves(waves: list[dict[str, Any]], task: dict[str, Any]) 
     return list(waves)
 
 
-def _v3_host_capabilities() -> dict[str, Any]:
+def _v11_host_capabilities() -> dict[str, Any]:
     return {
         "spawn_agent_models": sorted(SUPPORTED_MODELS),
         "spawn_agent_default_model": CONFIGURED_DEFAULT_MODEL,
-        "create_thread_models": ["gpt-5.6-luna"],
     }
 
 
-def _v3_native_arguments(request: dict[str, Any]) -> dict[str, Any]:
-    if request.get("host_tool") == "create_thread":
-        arguments: dict[str, Any] = {
-            "prompt": request.get("prompt") or request.get("message"),
-            "title": request.get("title") or request.get("task_name"),
-            "target": {"environment": {"type": request.get("thread_environment") or "local"}},
-        }
-    else:
-        arguments = {
-            "task_name": request.get("task_name"),
-            "message": request.get("message"),
-            "reasoning_effort": request.get("reasoning_effort"),
-            "fork_turns": request.get("fork_turns") or "none",
-        }
+def _v11_native_arguments(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("host_tool") not in {None, "", "spawn_agent"}:
+        raise WorkerAssignmentError("native_spawn_agent_transport_required")
+    arguments: dict[str, Any] = {
+        "task_name": request.get("task_name"),
+        "message": request.get("message"),
+        "reasoning_effort": request.get("reasoning_effort"),
+        "fork_turns": request.get("fork_turns") or "none",
+    }
     if request.get("model"):
         arguments["model"] = request["model"]
     return {key: value for key, value in arguments.items() if value is not None}
 
 
-def _v3_response(
+def _v11_response(
     old: dict[str, Any],
     task_ref: str,
     *,
@@ -10657,46 +9859,116 @@ def _v3_response(
     start_replayed: bool | None = None,
 ) -> dict[str, Any]:
     """Public delegating entrypoint for the orchestration response adapter."""
-    response = render_v3_response(
+    # Durable engine/operation receipts contain only logical dispatch
+    # templates.  Rehydrate the bearer-bearing native message at this final,
+    # non-persisted response boundary after the transaction has committed.
+    requests = old.get("spawn_requests") if isinstance(old, dict) else None
+    if isinstance(requests, list) and requests:
+        bound = _bind_task_project_root({"task_ref": task_ref}, include_completed=True)
+        if not isinstance(bound, dict):
+            raise WorkerAssignmentError("worker_dispatch_rehydration_unavailable")
+        root = ledger_root(bound)
+        # Native dispatch delivery is a one-shot durable fence.  The engine
+        # persists only a non-secret template; this final response boundary
+        # verifies exact template identity, renders the bearer once, then
+        # consumes delivery before any response can be replayed.  A lost
+        # response therefore fails closed and requires a fresh attempt.
+        with state_lock(root, operation="native_spawn_dispatch_delivery"):
+            resolved = _v11_resolve_task(bound, require_task_ref=True)
+            if isinstance(resolved, dict):
+                raise WorkerAssignmentError("worker_dispatch_rehydration_unavailable")
+            task_dir, state, _project, _resolved_ref = resolved
+            task_definition = load_task_definition(task_dir)
+            hydrated: list[dict[str, Any]] = []
+            delivered: list[dict[str, Any]] = []
+            seen: set[tuple[str, str]] = set()
+            for request in requests:
+                if not isinstance(request, dict):
+                    raise WorkerAssignmentError("worker_dispatch_rehydration_unavailable")
+                attempt_id = str(request.get("attempt_id") or "").strip()
+                dispatch_ref = str(request.get("dispatch_ref") or "").strip()
+                try:
+                    valid_attempt_id = bool(attempt_id and safe_id(attempt_id) == attempt_id)
+                except ValueError:
+                    valid_attempt_id = False
+                if not valid_attempt_id or not re.fullmatch(r"dispatch-[0-9a-f]{24}", dispatch_ref):
+                    raise WorkerAssignmentError("worker_dispatch_rehydration_unavailable")
+                identity = (attempt_id, dispatch_ref)
+                if identity in seen:
+                    raise WorkerAssignmentError("worker_dispatch_rehydration_unavailable")
+                seen.add(identity)
+                candidates = [
+                    item for item in state.get("attempts") or []
+                    if isinstance(item, dict)
+                    and str(item.get("attempt_id") or "") == attempt_id
+                    and str(item.get("dispatch_ref") or "") == dispatch_ref
+                ]
+                if (
+                    len(candidates) != 1
+                    or candidates[0].get("status") != AWAITING_HOST_SPAWN
+                    or candidates[0].get("assignment_delivery_status") != "pending"
+                ):
+                    raise WorkerAssignmentError("worker_dispatch_rehydration_unavailable")
+                hydrated.append({
+                    **_rehydrate_dispatch_spawn_request(task_dir, task_definition, candidates[0]),
+                    "attempt_id": attempt_id,
+                })
+                delivered.append(candidates[0])
+            for attempt in delivered:
+                attempt["assignment_delivery_status"] = "delivered"
+                attempt["assignment_delivered_at"] = now()
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "native_spawn_dispatch_delivery",
+                ", ".join(str(item.get("attempt_id") or "") for item in delivered),
+            )
+            old = {**old, "spawn_requests": hydrated}
+    response = render_v11_response(
         old,
         task_ref,
-        native_arguments=_v3_native_arguments,
+        native_arguments=_v11_native_arguments,
         public_schema=PUBLIC_ORCHESTRATION_SCHEMA,
         coordinator_lock=COORDINATOR_LOCK,
         include_result=include_result,
         start_replayed=start_replayed,
     )
-    if not response.get("ok", False):
-        response["attempt_budget_consumed"] = False
     return response
 
 
 
-def _v3_compact_continue_replay(response: dict[str, Any]) -> dict[str, Any]:
+def _v11_compact_continue_replay(response: dict[str, Any]) -> dict[str, Any]:
     """Turn a completed continue response into a non-dispatching receipt."""
-    compact = dict(response)
-    compact["dispatches"] = []
-    compact["replayed"] = True
-    task_ref = str(compact.get("task_ref") or "")
-    compact["next_action"] = (
-        f"{COORDINATOR_LOCK} continue_orchestration already completed for task_ref={task_ref}. Do not invoke or "
-        "repeat a worker dispatch from this replay. If the original response was lost before its native dispatches "
-        "were invoked, call manage_orchestration with intent inspect once and invoke only still-awaiting dispatches."
-    )
-    compact["next_action"] = _public_next_action(compact.get("next_action"))
-    return compact
+    task_ref = str(response.get("task_ref") or "")
+    return validate_v11_response("coordinator.lifecycle", {
+        "schema": "cortex/lifecycle-response/v11",
+        "ok": False,
+        "outcome": "failed",
+        "task_ref": task_ref,
+        "action": {"kind": "inspect_or_retry"},
+        "error": {
+            "code": "continue_response_already_consumed",
+            "category": "unavailable",
+            "message": "The exact continuation response was already delivered and cannot reissue native dispatches.",
+            "diagnostics": [{
+                "code": "continue_response_already_consumed",
+                "json_pointer": "",
+                "message": "The exact continuation response was already delivered and cannot reissue native dispatches.",
+                "field_schema": {"type": "object"},
+            }],
+        },
+        "recovery": {
+            "kind": "terminal_stop",
+            "operation": "continue_orchestration",
+            "retryable": False,
+            "state_mutated": False,
+        },
+    })
 
 
-def _v3_continue_receipt_digest(params: dict[str, Any]) -> str:
-    """Identify the consumed result slots independently of a replan proposal.
-
-    A successful continuation consumes the current wave's exact canonical
-    result/dispatch receipts.  ``future_waves`` and ``reason`` describe a
-    *possible successor*; they must never let a coordinator consume the same
-    worker result again merely by changing the proposed successor pipeline.
-    Keep this distinct from the full request digest, which is still used for
-    lossless replay of the original public response.
-    """
+def _v11_continue_receipt_digest(params: dict[str, Any]) -> str:
+    """Identify the exact canonical result slots consumed by one continuation."""
     slots: list[dict[str, Any]] = []
     raw_results = params.get("results")
     if isinstance(raw_results, list):
@@ -10721,9 +9993,9 @@ def _v3_continue_receipt_digest(params: dict[str, Any]) -> str:
     })
 
 
-def _v3_consumed_continue_error(task_ref: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def _v11_consumed_continue_error(task_ref: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return a deterministic server-reconciliation receipt for reused receipts."""
-    result = _v3_error(
+    result = _v11_error(
         "continue_receipts_already_consumed",
         "the submitted canonical result receipts were already consumed for this task wave; "
         "Cortex will not replan or dispatch from them again",
@@ -10736,7 +10008,7 @@ def _v3_consumed_continue_error(task_ref: str, params: dict[str, Any] | None = N
     result["retryable"] = True
     result["recovery"] = "inspect_exact_task"
     if isinstance(params, dict):
-        reconciled = _v3_reconcile_stale_continue(params, result)
+        reconciled = _v11_reconcile_stale_continue(params, result)
         reconciled["task_ref"] = task_ref
         reconciled["recovery"] = {
             "mode": "server_reconcile",
@@ -10751,7 +10023,7 @@ def _v3_consumed_continue_error(task_ref: str, params: dict[str, Any] | None = N
     return result
 
 
-def _v3_consumed_continue_replay(
+def _v11_consumed_continue_replay(
     params: dict[str, Any],
     task_id: str,
     task_ref: str,
@@ -10763,7 +10035,7 @@ def _v3_consumed_continue_replay(
     ``last_continue`` before this guard; a changed future-wave proposal gets a
     stable stop instead of a second state mutation.
     """
-    receipt_digest = _v3_continue_receipt_digest(params)
+    receipt_digest = _v11_continue_receipt_digest(params)
     record = _operation_registry(ledger_root(params)).get("tasks", {}).get(task_id, {})
     consumed = record.get("consumed_continue_receipts") if isinstance(record, dict) else None
     if not isinstance(consumed, list):
@@ -10772,7 +10044,7 @@ def _v3_consumed_continue_replay(
         isinstance(item, dict) and item.get("receipt_digest") == receipt_digest
         for item in consumed
     ):
-        return _v3_consumed_continue_error(task_ref, params)
+        return _v11_consumed_continue_error(task_ref, params)
     return None
 
 
@@ -10786,12 +10058,12 @@ class StartRequestConflict(ValueError):
         super().__init__("transport request identity was reused with a different start payload")
 
 
-def _v3_start_reservation(
+def _v11_start_reservation(
     params: dict[str, Any],
     task: dict[str, Any],
     *,
     request_digest: str,
-) -> tuple[str, str, str, str, str, bool, str | None, int, bool]:
+) -> tuple[str, str, str, bool, str | None, int, bool]:
     root = ledger_root(params)
     # Start idempotency belongs to the transport request, not to semantic
     # task text.  A new thread can legitimately submit the same task wording
@@ -10811,7 +10083,7 @@ def _v3_start_reservation(
                     received_digest=request_digest,
                 )
             task_id = str(prior.get("task_id") or "")
-            loaded = _v3_task_state(root, task_id) if task_id else None
+            loaded = _v11_task_state(root, task_id) if task_id else None
             # A reservation without a task ledger is not a successful replay:
             # the first caller may have died between reservation and engine
             # materialization. Re-stage fresh one-response credentials and
@@ -10827,8 +10099,6 @@ def _v3_start_reservation(
                     return (
                         task_id,
                         str(prior["task_ref"]),
-                        str(prior["principal"]),
-                        str(prior.get("thread_id") or prior["principal"]),
                         str(prior["submission_id"]),
                         False,
                         None,
@@ -10837,20 +10107,22 @@ def _v3_start_reservation(
                     )
                 owner = secrets.token_hex(16)
                 generation = int(prior.get("materialization_generation") or 0) + 1
-                _, capability_digest, recovery_proof_digest = _stage_coordinator_capability(root, task_id)
+                capability_claims = _capability_claims(
+                    task_id=task_id,
+                    initiative_ref=str(task.get("initiative_ref") or "") or None,
+                )
+                _, capability_digest = _stage_coordinator_capability(root, task_id)
+                capability_claims_mac = _coordinator_claims_mac(
+                    root, capability_claims, create_key=True,
+                )
                 prior.update({
                     "materialization_status": "reserved",
                     "materialization_owner": owner,
                     "materialization_generation": generation,
                     "materialization_lease_expires_at": _start_materialization_lease_expiry(),
                     "coordinator_capability_digest": capability_digest,
-                    "coordinator_recovery_proof_digest": recovery_proof_digest,
-                    "coordinator_capability_claims": _capability_claims(
-                        task_id=task_id,
-                        principal=str(prior.get("principal") or ""),
-                        thread_id=str(prior.get("thread_id") or prior.get("principal") or ""),
-                        initiative_ref=str(task.get("initiative_ref") or "") or None,
-                    ),
+                    "coordinator_capability_claims": capability_claims,
+                    "coordinator_capability_claims_mac": capability_claims_mac,
                     "updated_at": now(),
                 })
                 registry["starts"][transport_request_id] = prior
@@ -10862,8 +10134,8 @@ def _v3_start_reservation(
                     "materialization_generation": generation,
                     "materialization_lease_expires_at": prior["materialization_lease_expires_at"],
                     "coordinator_capability_digest": capability_digest,
-                    "coordinator_recovery_proof_digest": recovery_proof_digest,
                     "coordinator_capability_claims": prior["coordinator_capability_claims"],
+                    "coordinator_capability_claims_mac": capability_claims_mac,
                 })
                 try:
                     _write_operation_registry(root, registry)
@@ -10875,8 +10147,6 @@ def _v3_start_reservation(
                 return (
                     task_id,
                     str(prior["task_ref"]),
-                    str(prior["principal"]),
-                    str(prior.get("thread_id") or prior["principal"]),
                     str(prior["submission_id"]),
                     False,
                     owner,
@@ -10891,36 +10161,31 @@ def _v3_start_reservation(
                 return (
                     task_id,
                     str(prior["task_ref"]),
-                    str(prior["principal"]),
-                    str(prior.get("thread_id") or prior["principal"]),
                     str(prior["submission_id"]),
                     True,
                     None,
                     int(prior.get("materialization_generation") or 1),
                     False,
                 )
-        objective_slug = v3_task_slug(task["user_request"])
+        objective_slug = v11_task_slug(task["user_request"])
         task_id = safe_id(f"{objective_slug}-{secrets.token_hex(4)}")
-        task_ref = _v3_task_ref(task_id)
-        principal = safe_id("orchestration-" + task_ref)
-        thread_id = _codex_host_session_id() or principal
+        task_ref = _v11_task_ref(task_id)
         submission_id = safe_id("orchestration-start-" + secrets.token_hex(8))
-        _, capability_digest, recovery_proof_digest = _stage_coordinator_capability(root, task_id)
         capability_claims = _capability_claims(
             task_id=task_id,
-            principal=principal,
-            thread_id=thread_id,
             initiative_ref=str(task.get("initiative_ref") or "") or None,
+        )
+        _, capability_digest = _stage_coordinator_capability(root, task_id)
+        capability_claims_mac = _coordinator_claims_mac(
+            root, capability_claims, create_key=True,
         )
         reservation = {
             "task_id": task_id,
             "task_ref": task_ref,
-            "principal": principal,
-            "thread_id": thread_id,
             "submission_id": submission_id,
             "coordinator_capability_digest": capability_digest,
-            "coordinator_recovery_proof_digest": recovery_proof_digest,
             "coordinator_capability_claims": capability_claims,
+            "coordinator_capability_claims_mac": capability_claims_mac,
             "materialization_status": "reserved",
             "materialization_owner": secrets.token_hex(16),
             "materialization_generation": 1,
@@ -10945,10 +10210,10 @@ def _v3_start_reservation(
             # failed persistence path into raw-authorization delivery.
             _take_coordinator_capability(root, task_id)
             raise
-        return task_id, task_ref, principal, thread_id, submission_id, False, reservation["materialization_owner"], 1, False
+        return task_id, task_ref, submission_id, False, reservation["materialization_owner"], 1, False
 
 
-def _v3_start_request_digest(
+def _v11_start_request_digest(
     *,
     project_root: Path,
     task: dict[str, Any],
@@ -10973,134 +10238,53 @@ def _v3_start_request_digest(
     })
 
 
-def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+def _start_orchestration_impl(params: dict[str, Any]) -> dict[str, Any]:
     """Start public Cortex orchestration without caller-managed lifecycle identifiers."""
     staged_authorization_task_id: str | None = None
     reserved_task_id: str | None = None
     materialization_owner: str | None = None
     try:
-        envelope = _v3_collect_fields(
+        start_schema, task_form_schema, _waves_schema, _wave_schema, _worker_schema = _v11_start_public_schema_forms()
+        start_public_fields = set(start_schema["properties"])
+        task_public_fields = set(task_form_schema["properties"])
+        internal_start_fields = {"_follow_up", "_transport_request_id"}
+        envelope = _v11_collect_fields(
             params,
-            {"project_root", "task", "waves", "_follow_up", "_transport_request_id"},
+            start_public_fields | internal_start_fields,
             operation="start_orchestration",
+            public_schema=start_schema,
         )
+        if not isinstance(params, dict):
+            return _v11_envelope_error("start_orchestration", envelope)
+        project_root_schema = start_schema["properties"].get("project_root")
+        if "project_root" not in params:
+            envelope.append({
+                "code": "start_orchestration_validation_failed", "phase": "payload", "path": "project_root",
+                "json_pointer": "/project_root", "message": "is required", "received": None,
+                "expected": dict(project_root_schema or {"type": "string", "minLength": 1}),
+                "field_schema": dict(project_root_schema or {"type": "string", "minLength": 1}),
+                "fix": "Supply the exact absolute project_root for this start request.",
+            })
+        elif isinstance(project_root_schema, Mapping):
+            envelope.extend(_v11_schema_value_diagnostics(
+                params.get("project_root"), project_root_schema,
+                pointer="/project_root", operation="start_orchestration",
+            ))
         raw_task_probe = params.get("task") if isinstance(params, dict) else None
-        if not isinstance(raw_task_probe, dict):
-            envelope.append({"code": "start_orchestration_validation_failed", "path": "task", "message": "task must be an object"})
-        else:
-            allowed_probe = {
-                "user_request", "requirements", "constraints", "acceptance_criteria", "scope", "allowed_paths", "verification", "budget", "pause_conditions", "user_language", "complexity", "plan_approval", "initiative_ref", "governance_mode", "risk_triggers", "governance_triggers", "multiple_repositories", "related_tasks", "long_lived_lanes", "conflicting_resources", "multi_session_handoff", "communication_profile", "visible_thread_requested",
-            }
-            for key in sorted(set(raw_task_probe) - allowed_probe):
-                envelope.append({
-                    "code": "start_orchestration_validation_failed",
-                    "path": f"task.{key}",
-                    "message": f"unsupported task fields: {key}",
-                })
-            if not str(raw_task_probe.get("user_request") or "").strip():
-                envelope.append({"code": "start_orchestration_validation_failed", "path": "task.user_request", "message": "is required"})
-            complexity = raw_task_probe.get("complexity")
-            if complexity is not None and complexity not in ("C1", "C2", "C3", 1, 2, 3):
-                envelope.append({
-                    "code": "start_orchestration_validation_failed",
-                    "phase": "payload",
-                    "path": "task.complexity",
-                    "json_pointer": "/task/complexity",
-                    "message": "must use a canonical complexity value",
-                    "received": complexity,
-                    "expected": ["C1", "C2", "C3", 1, 2, 3],
-                    "field_schema": {"type": ["string", "integer"], "enum": ["C1", "C2", "C3", 1, 2, 3]},
-                    "fix": "Replace task.complexity with one canonical enum value and preserve unrelated task fields.",
-                })
-            # Validate nested task collections at the public boundary before
-            # normalization can raise a scalar ValueError.  The latter used
-            # to collapse `task.scope: "..."` into a bare message, so the
-            # caller could not see the failing path or the exact advertised
-            # field schema and models often retried the same malformed form.
-            task_schema = (
-                PUBLIC_SCHEMA_REGISTRY.get("start_orchestration", {})
-                .get("properties", {})
-                .get("task", {})
-                .get("properties", {})
-            )
-            for field in ("requirements", "constraints", "acceptance_criteria", "scope", "allowed_paths", "verification", "pause_conditions"):
-                value = raw_task_probe.get(field)
-                if value is None:
-                    continue
-                field_path = f"task.{field}"
-                field_schema = task_schema.get(field) if isinstance(task_schema, dict) else None
-                if not isinstance(value, list):
-                    envelope.append({
-                        "code": "start_orchestration_validation_failed",
-                        "phase": "preflight",
-                        "path": field_path,
-                        "message": "must be an array of non-empty strings",
-                        "received": {"type": type(value).__name__},
-                        "expected": field_schema or {"type": "array", "items": {"type": "string", "minLength": 1}},
-                        "field_schema": field_schema or {"type": "array", "items": {"type": "string", "minLength": 1}},
-                        "fix": f"Replace {field_path} with an array containing only non-empty strings; preserve every valid task field.",
-                    })
-                else:
-                    for index, item in enumerate(value):
-                        if not isinstance(item, str) or not item.strip():
-                            item_path = f"{field_path}[{index}]"
-                            envelope.append({
-                                "code": "start_orchestration_validation_failed",
-                                "phase": "preflight",
-                                "path": item_path,
-                                "message": "must be a non-empty string",
-                                "received": {"type": type(item).__name__},
-                                "expected": {"type": "string", "minLength": 1},
-                                "field_schema": {"type": "string", "minLength": 1},
-                                "fix": f"Replace {item_path} with a non-empty string and preserve every valid task field.",
-                            })
-            # The conditional task contract is also a nested form rule.  Keep
-            # missing/empty required controls in the same structured receipt
-            # as type errors, rather than allowing _required_task_result_contract
-            # to raise a generic ValueError after the boundary pass.
-            if not _is_knowledge_harvest_task(raw_task_probe):
-                missing_required_fields = [
-                    field for field in ("acceptance_criteria", "verification")
-                    if raw_task_probe.get(field) is None
-                    or (isinstance(raw_task_probe.get(field), list) and not raw_task_probe.get(field))
-                ]
-                for field in ("acceptance_criteria", "verification"):
-                    value = raw_task_probe.get(field)
-                    if value is None or (isinstance(value, list) and not value):
-                        field_path = f"task.{field}"
-                        field_schema = task_schema.get(field) if isinstance(task_schema, dict) else None
-                        missing_text = ", ".join(f"task.{item}" for item in missing_required_fields)
-                        envelope.append({
-                            "code": "start_orchestration_validation_failed",
-                            "phase": "preflight",
-                            "path": field_path,
-                            "message": f"{missing_text} are required and must contain at least one non-empty string",
-                            "received": ({"type": "null"} if value is None else {"type": "array", "length": 0}),
-                            "expected": field_schema or {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                            "field_schema": field_schema or {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                            "fix": f"Provide {field_path} as an array with at least one non-empty string; preserve every valid task field.",
-                        })
-        if "waves" in params and params.get("waves") is not None and not isinstance(params.get("waves"), list):
-            envelope.append({"code": "start_orchestration_validation_failed", "path": "waves", "message": "must be an array"})
+        envelope.extend(_v11_start_task_preflight(raw_task_probe))
+        if "waves" in params:
+            envelope.extend(_v11_start_wave_preflight(params.get("waves")))
         if envelope:
-            return _v3_envelope_error("start_orchestration", envelope)
+            return _v11_envelope_error("start_orchestration", envelope)
         selected_project_root = select_project_root(params)
-        if set(params) - {"project_root", "task", "waves", "_follow_up", "_transport_request_id"}:
+        if set(params) - (start_public_fields | internal_start_fields):
             raise ValueError("start_orchestration accepts only project_root, task, waves, and optional _follow_up")
         raw_task = params.get("task")
         if not isinstance(raw_task, dict):
             raise ValueError("task must be an object containing the exact user_request")
-        allowed_task = {
-            "user_request", "requirements", "constraints", "acceptance_criteria", "scope", "allowed_paths",
-            "verification", "budget", "pause_conditions", "user_language",
-            "complexity", "plan_approval", "initiative_ref", "governance_mode",
-            "risk_triggers", "governance_triggers", "multiple_repositories", "related_tasks",
-            "long_lived_lanes", "conflicting_resources", "multi_session_handoff",
-            "communication_profile", "visible_thread_requested",
-        }
-        unknown_task = sorted(set(raw_task) - allowed_task)
+        unknown_task = sorted(set(raw_task) - task_public_fields)
         if unknown_task:
-            raise ValueError("unsupported task fields: " + ", ".join(unknown_task))
+            raise RuntimeError("public start preflight admitted an unsupported task field")
         user_request = str(raw_task.get("user_request") or "").strip()
         if not user_request:
             raise ValueError(
@@ -11126,7 +10310,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(params["_follow_up"], dict):
                 raise ValueError("internal follow_up context must be an object")
             task["follow_up"] = sanitize_structured(params["_follow_up"])
-        task["complexity"] = _v3_complexity(raw_task.get("complexity"))
+        task["complexity"] = _v11_complexity(raw_task.get("complexity"))
         task["acceptance_criteria"], task["verification"] = _required_task_result_contract(task)
         governance = resolve_governance(
             ledger_root(params),
@@ -11145,40 +10329,36 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         task["plan_approval"] = (
             "auto"
             if _is_knowledge_harvest_task(task)
-            else _v3_plan_approval(raw_task.get("plan_approval"), task["complexity"])
+            else _v11_plan_approval(raw_task.get("plan_approval"), task["complexity"])
         )
         task["user_language"] = normalize_user_language(
             task.get("user_language"),
             user_request,
         )
         task["communication_profile"] = select_communication_profile(task)
-        visible_thread_requested = raw_task.get("visible_thread_requested", False)
-        if not isinstance(visible_thread_requested, bool):
-            raise ValueError("task.visible_thread_requested must be a boolean")
-        task["visible_thread_requested"] = visible_thread_requested
         waves = (
             _append_governance_waves(
-                _v3_compact_waves(
+                _v11_compact_waves(
                     params["waves"], task, project_root=selected_project_root,
-                    allow_visible_threads=visible_thread_requested,
                 ),
                 task,
             )
-            if params.get("waves") is not None else _v3_auto_waves(task)
+            if params.get("waves") is not None else _v11_auto_waves(task)
         )
-        request_digest = _v3_start_request_digest(
+        request_digest = _v11_start_request_digest(
             project_root=selected_project_root,
             task=task,
             waves=waves,
         )
-        task_id, task_ref, principal, thread_id, submission_id, replayed, materialization_owner, materialization_generation, materialization_pending = _v3_start_reservation(
+        task_id, task_ref, submission_id, replayed, materialization_owner, materialization_generation, materialization_pending = _v11_start_reservation(
             params,
             task,
             request_digest=request_digest,
         )
+        principal = safe_id("orchestration-" + task_ref)
         reserved_task_id = task_id
         if materialization_pending:
-            return _v3_start_materialization_pending(task_ref)
+            return _v11_start_materialization_pending(task_ref)
         if not replayed:
             staged_authorization_task_id = task_id
         if replayed:
@@ -11192,7 +10372,6 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 replay_params = {
                     "project_root": params["project_root"],
                     "principal": principal,
-                    "thread_id": thread_id,
                 }
                 if not activation_record(ledger_root(params), replay_params, task_id):
                     activated = activate_orchestration({
@@ -11201,7 +10380,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     })
                     if not activated.get("active"):
                         raise ValueError("linked corrective-task replay could not restore its Cortex activation")
-            loaded = _v3_task_state(ledger_root(params), task_id)
+            loaded = _v11_task_state(ledger_root(params), task_id)
             if loaded is None:
                 old = {
                     "ok": True,
@@ -11210,27 +10389,24 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     "spawn_requests": [],
                 }
             else:
-                old = _orchestrate_inspect({
+                old = _engine_inspect_lifecycle({
                     "project_root": params["project_root"],
                     "principal": principal,
-                    "thread_id": thread_id,
                     "task_id": task_id,
                 })
             # An idempotent start is a status replay, never a credential
             # delivery channel.  In particular, a worker that knows the user
             # request cannot race or retry a start to obtain coordinator-only
             # material staged for the original coordinator response.
-            return _v3_response(old, task_ref, start_replayed=True)
-        old = _engine_orchestrate({
-            "operation": "start",
+            return _v11_response(old, task_ref, start_replayed=True)
+        old = _engine_start_lifecycle({
             "submission_id": submission_id,
             "project_root": params["project_root"],
             "principal": principal,
-            "thread_id": thread_id,
             "task": {**task, "task_id": task_id},
             "waves": waves,
-            "host_capabilities": _v3_host_capabilities(),
-            "_materialization_fence": lambda: _v3_materialization_fence(
+            "host_capabilities": _v11_host_capabilities(),
+            "_materialization_fence": lambda: _v11_materialization_fence(
                 ledger_root(params), task_id, materialization_owner, materialization_generation,
             ),
         })
@@ -11275,28 +10451,28 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 _write_operation_registry(ledger_root(params), registry)
         if isinstance(old, dict):
             old["governance"] = governance
-        response = _v3_response(old, task_ref, start_replayed=replayed)
+        response = _v11_response(old, task_ref, start_replayed=replayed)
         authorization = _take_coordinator_capability(ledger_root(params), task_id)
         staged_authorization_task_id = None
-        # Coordinator authorization is host/session-owned. Never publish the
-        # staged bearer or recovery proof in a model-facing start receipt;
-        # normal governance derives both from the active host binding.
-        if authorization and not response.get("ok"):
-            _revoke_coordinator_capability(
-                ledger_root(params), task_id, reason="start_authorization_response_unavailable"
-            )
-        del authorization
+        if authorization and response.get("ok"):
+            # This is the sole explicit coordinator-capability delivery path.
+            response["coordinator_ref"] = authorization
+            response = validate_v11_response("coordinator.start", response)
+        elif authorization:
+            _revoke_coordinator_capability(ledger_root(params), task_id, reason="start_authorization_response_unavailable")
+        elif response.get("ok"):
+            raise RuntimeError("successful start could not deliver its coordinator capability")
         return response
     except OperationRegistryError as exc:
         if reserved_task_id and materialization_owner:
-            _v3_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
+            _v11_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
         if staged_authorization_task_id:
             _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
             _revoke_coordinator_capability(
                 ledger_root(params), staged_authorization_task_id,
                 reason="start_authorization_response_unavailable",
             )
-        return _v3_start_state_blocked_error(exc)
+        return _v11_start_state_blocked_error(exc)
     except StartRequestConflict as exc:
         diagnostic = {
             "code": "start_request_identity_conflict",
@@ -11309,34 +10485,34 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "field_schema": {"type": "object", "additionalProperties": False},
             "fix": "Resend the original payload unchanged for this request identity, or issue a new transport request with a new request id to create a new task.",
         }
-        response = _v3_envelope_error("start_orchestration", [diagnostic])
+        response = _v11_envelope_error("start_orchestration", [diagnostic])
         response["outcome"] = "needs_correction"
         response["retryable"] = True
         response["task_created"] = False
         return response
     except ValidationFailure as exc:
         if reserved_task_id and materialization_owner:
-            _v3_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
+            _v11_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
         if staged_authorization_task_id:
             _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
             _revoke_coordinator_capability(
                 ledger_root(params), staged_authorization_task_id,
                 reason="start_authorization_response_unavailable",
             )
-        return _v3_envelope_error("start_orchestration", _start_exception_diagnostics(exc, params))
+        return _v11_envelope_error("start_orchestration", _start_exception_diagnostics(exc, params))
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         if reserved_task_id and materialization_owner:
-            _v3_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
+            _v11_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
         if staged_authorization_task_id:
             _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
             _revoke_coordinator_capability(
                 ledger_root(params), staged_authorization_task_id,
                 reason="start_authorization_response_unavailable",
             )
-        return _v3_envelope_error("start_orchestration", _start_exception_diagnostics(exc, params))
+        return _v11_envelope_error("start_orchestration", _start_exception_diagnostics(exc, params))
 
 
-def _v3_status(value: object, *, has_attempt_result: bool) -> str:
+def _v11_status(value: object, *, has_attempt_result: bool) -> str:
     if value in {None, ""} and has_attempt_result:
         return "passed"
     raw = value
@@ -11347,7 +10523,7 @@ def _v3_status(value: object, *, has_attempt_result: bool) -> str:
     raise ValueError("result status must be one of the canonical terminal values" + suffix)
 
 
-def _v3_active_wave_context(
+def _v11_active_wave_context(
     params: dict[str, Any],
     task_dir: Path,
     state: dict[str, Any],
@@ -11425,7 +10601,7 @@ def _v3_active_wave_context(
     return wave, attempt_ids, expected_step
 
 
-def _v3_continue_context(
+def _v11_continue_context(
     params: dict[str, Any],
     task_dir: Path,
     state: dict[str, Any],
@@ -11449,14 +10625,12 @@ def _v3_continue_context(
                 # same in-flight submission.
                 raise ValueError("A different continue payload is already recovering this active wave; retry the original payload first.")
             return dict(inflight["old_params"]), list(inflight["attempt_ids"]), str(inflight["wave_id"]), request_digest, None
-        wave, attempt_ids, _ = _v3_active_wave_context(params, task_dir, state)
+        wave, attempt_ids, _ = _v11_active_wave_context(params, task_dir, state)
         submission_id = safe_id("orchestration-continue-" + digest_text(state["task_id"] + ":" + str(wave["wave_id"]) + ":" + request_digest)[:20])
         old_params = {
-            "operation": "advance",
             "submission_id": submission_id,
             "project_root": params["project_root"],
             "principal": state.get("principal"),
-            "thread_id": state.get("thread_id"),
             "task_id": state["task_id"],
             "wave_id": wave["wave_id"],
         }
@@ -11472,7 +10646,7 @@ def _v3_continue_context(
         return old_params, attempt_ids, str(wave["wave_id"]), request_digest, None
 
 
-def _v3_store_continue(params: dict[str, Any], task_id: str, request_digest: str, response: dict[str, Any], *, clear_only: bool = False) -> None:
+def _v11_store_continue(params: dict[str, Any], task_id: str, request_digest: str, response: dict[str, Any], *, clear_only: bool = False) -> None:
     root = ledger_root(params)
     with state_lock(root):
         registry = _operation_registry(root)
@@ -11481,14 +10655,12 @@ def _v3_store_continue(params: dict[str, Any], task_id: str, request_digest: str
         if not clear_only:
             task_record["last_continue"] = {
                 "digest": request_digest,
-                "response": _v3_compact_continue_replay(response),
+                "response": _v11_compact_continue_replay(response),
                 "completed_at": now(),
             }
-            # A full request digest deliberately includes replan input, but a
-            # worker receipt is single-use.  Persist a separate bounded
-            # consumption record so a coordinator cannot submit the exact
-            # same wave result again with a different reason/future_waves.
-            receipt_digest = _v3_continue_receipt_digest(params)
+            # A worker receipt is single-use. Persist a separate bounded
+            # consumption record so reordered retries cannot consume it twice.
+            receipt_digest = _v11_continue_receipt_digest(params)
             consumed = task_record.setdefault("consumed_continue_receipts", [])
             if not any(
                 isinstance(item, dict) and item.get("receipt_digest") == receipt_digest
@@ -11506,16 +10678,16 @@ def _v3_store_continue(params: dict[str, Any], task_id: str, request_digest: str
         _write_operation_registry(root, registry)
 
 
-def _v3_completed_replay(params: dict[str, Any]) -> dict[str, Any] | None:
+def _v11_completed_replay(params: dict[str, Any]) -> dict[str, Any] | None:
     """Replay a final continue after task completion removed the active mapping."""
-    if _v3_task_candidates(params):
+    if _v11_task_candidates(params):
         return None
     request_digest = _orchestrate_request_digest({key: value for key, value in params.items() if key != "task_ref"})
     requested_ref = str(params.get("task_ref") or "").strip()
     registry = _operation_registry(ledger_root(params))
     matches = []
     for task_id, record in registry.get("tasks", {}).items():
-        if requested_ref and _v3_task_ref(str(task_id)) != requested_ref:
+        if requested_ref and _v11_task_ref(str(task_id)) != requested_ref:
             continue
         last = record.get("last_continue") if isinstance(record, dict) else None
         if isinstance(last, dict) and last.get("digest") == request_digest and isinstance(last.get("response"), dict):
@@ -11523,7 +10695,7 @@ def _v3_completed_replay(params: dict[str, Any]) -> dict[str, Any] | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _v3_active_replay(params: dict[str, Any], task_id: str) -> dict[str, Any] | None:
+def _v11_active_replay(params: dict[str, Any], task_id: str) -> dict[str, Any] | None:
     request_digest = _orchestrate_request_digest({key: value for key, value in params.items() if key != "task_ref"})
     record = _operation_registry(ledger_root(params)).get("tasks", {}).get(task_id, {})
     last = record.get("last_continue") if isinstance(record, dict) else None
@@ -11537,7 +10709,6 @@ def _governance_boundary_recheck(
     task: dict[str, Any],
     state: dict[str, Any],
     *,
-    future_waves: Any = None,
     results: Any = None,
 ) -> dict[str, Any]:
     """Re-resolve governance triggers as an advisory boundary assessment.
@@ -11585,7 +10756,7 @@ def _governance_boundary_recheck(
                 found.extend(explicit_triggers(item))
         return found
 
-    boundary_triggers = explicit_triggers(future_waves) + explicit_triggers(results)
+    boundary_triggers = explicit_triggers(results)
     if not boundary_triggers:
         return current
     task_probe = dict(task)
@@ -11623,56 +10794,45 @@ def _governance_boundary_recheck(
     return resolved
 
 
-def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+def _continue_orchestration_impl(params: dict[str, Any]) -> dict[str, Any]:
     """Advance exactly the active Cortex wave using relative worker slots."""
-    resolved_task_ref = str(params.get("task_ref") or "").strip() or None
+    resolved_task_ref = str(params.get("task_ref") or "").strip() or None if isinstance(params, dict) else None
     try:
-        envelope = _v3_collect_fields(params, {"task_ref", "step", "results", "future_waves", "rework", "reason"}, operation="continue_orchestration")
-        if not str(params.get("task_ref") or "").strip():
-            envelope.append({"code": "continue_orchestration_validation_failed", "path": "task_ref", "message": "is required"})
-        if not isinstance(params.get("results"), list) or not params.get("results"):
-            envelope.append({"code": "continue_orchestration_validation_failed", "path": "results", "message": "must be a non-empty array"})
-        if params.get("future_waves") is not None and not isinstance(params.get("future_waves"), list):
-            envelope.append({"code": "continue_orchestration_validation_failed", "path": "future_waves", "message": "must be an array"})
+        schema = PUBLIC_SCHEMA_REGISTRY.get("continue_orchestration", {})
+        envelope = _v11_schema_value_diagnostics(params, schema, pointer="", operation="continue_orchestration")
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        if not isinstance(params, dict):
+            return _v11_envelope_error("continue_orchestration", envelope)
+        for field in ("task_ref", "coordinator_ref"):
+            if not isinstance(params.get(field), str) or not params.get(field, "").strip():
+                envelope.append({
+                    "code": "continue_orchestration_validation_failed", "phase": "payload", "path": field,
+                    "json_pointer": f"/{field}", "message": "is required", "received": params.get(field),
+                    "expected": dict(properties.get(field) or {"type": "string", "minLength": 1}),
+                    "field_schema": dict(properties.get(field) or {"type": "string", "minLength": 1}),
+                    "fix": f"Set /{field} to the exact Cortex-issued reference; do not synthesize a replacement value.",
+                })
+        if "results" not in params:
+            card = dict(properties.get("results") or {"type": "array", "minItems": 1})
+            envelope.append({"code": "continue_orchestration_validation_failed", "phase": "payload", "path": "results", "json_pointer": "/results", "message": "is required", "received": None, "expected": card, "field_schema": card, "fix": "Supply only the server-derived result refs returned by Cortex."})
+        envelope.extend(_continue_form_diagnostics(params))
         if envelope:
-            response = _v3_envelope_error(
+            response = _v11_envelope_error(
                 "continue_orchestration", envelope, task_ref=resolved_task_ref,
             )
             response["outcome"] = "needs_correction"
             return response
-        allowed = {"task_ref", "step", "results", "future_waves", "rework", "reason"}
-        unknown = sorted(set(params) - allowed)
-        if unknown:
-            diagnostics = _continue_form_diagnostics(params)
-            diagnostics.extend(
-                {
-                    "code": "continue_orchestration_validation_failed",
-                    "phase": "payload",
-                    "path": field,
-                    "json_pointer": "/" + field,
-                    "message": "unsupported field",
-                    "received": params.get(field),
-                    "expected": "only task_ref, step, results, future_waves, rework, and reason",
-                    "field_schema": {"type": "object", "additionalProperties": False},
-                    "fix": f"Remove {field} and retry continue_orchestration with unrelated fields unchanged.",
-                }
-                for field in unknown
-            )
-            response = _v3_envelope_error("continue_orchestration", diagnostics, task_ref=resolved_task_ref)
-            response["outcome"] = "needs_correction"
-            return response
         if not resolved_task_ref:
-            return _v3_task_ref_required_error("continue_orchestration")
-        form_diagnostics = _continue_form_diagnostics(params)
-        if form_diagnostics:
-            response = _v3_envelope_error("continue_orchestration", form_diagnostics, task_ref=resolved_task_ref)
-            response["outcome"] = "needs_correction"
-            return response
+            return _v11_task_ref_required_error("continue_orchestration")
+        coordinator_project, _coordinator_task_dir, _coordinator_state, _coordinator_task, _ = authorize_coordinator_ref(
+            params, "continue_orchestration",
+        )
+        params = {**params, "project_root": str(coordinator_project)}
         bound_params = _bind_task_project_root(params)
         if bound_params is None:
-            return _v3_error(
+            return _v11_error(
                 "task_scope_unavailable",
-                "task_ref could not be resolved to one host-bound project root; use the exact task_ref returned by start_orchestration",
+                "task_ref could not be resolved to one canonical project root; use the exact task_ref returned by start_orchestration",
                 outcome="needs_input",
                 task_ref=resolved_task_ref,
             )
@@ -11680,17 +10840,17 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         results = params.get("results")
         if not isinstance(results, list) or not results:
             raise ValueError("results must be a non-empty array")
-        completed_replay = _v3_completed_replay(params)
+        completed_replay = _v11_completed_replay(params)
         if completed_replay is not None:
             return completed_replay
-        resolved = _v3_resolve_task(params, require_task_ref=True)
+        resolved = _v11_resolve_task(params, require_task_ref=True)
         if isinstance(resolved, dict):
             if resolved.get("code") in {"unknown_task_ref", "no_active_task", "task_unavailable", "task_ref_required"}:
-                return _v3_continue_stop(resolved, reason="task_identity_or_lifecycle_mismatch")
+                return _v11_continue_stop(resolved, reason="task_identity_or_lifecycle_mismatch")
             return resolved
         task_dir, state, task, task_ref = resolved
         resolved_task_ref = task_ref
-        active_replay = _v3_active_replay(params, state["task_id"])
+        active_replay = _v11_active_replay(params, state["task_id"])
         if active_replay is not None:
             return active_replay
         if _plan_approval_is_pending(state):
@@ -11698,12 +10858,12 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "the completed plan is awaiting explicit user approval; use manage_orchestration "
                 "with intent=plan_approval before continuing"
             )
-        _, attempt_ids, _ = _v3_active_wave_context(params, task_dir, state)
+        _, attempt_ids, _ = _v11_active_wave_context(params, task_dir, state)
         # Check the current relative step before the receipt-consumption
         # guard.  A stale prior step has its own terminal diagnostic; the
         # single-use receipt guard handles the pathological case where a
         # replacement plan retains the same numeric relative step.
-        consumed_replay = _v3_consumed_continue_replay(params, state["task_id"], task_ref)
+        consumed_replay = _v11_consumed_continue_replay(params, state["task_id"], task_ref)
         if consumed_replay is not None:
             return consumed_replay
         open_questions = [
@@ -11716,17 +10876,10 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 f"active wave has unanswered blocking worker question(s): {refs}; "
                 "surface each question to the user and resume the same worker before continue_orchestration"
             )
-        if params.get("future_waves") is not None and not str(params.get("reason") or "").strip():
-            raise ValueError(
-                "future_waves requires a concise reason identifying the new evidence or coordinator decision"
-            )
-        if params.get("rework") and params.get("future_waves") is None:
-            raise ValueError("rework=true requires explicit future_waves; Cortex never guesses a replacement pipeline")
         governance_assessment = _governance_boundary_recheck(
             params,
             task,
             state,
-            future_waves=params.get("future_waves"),
             results=results,
         )
         if isinstance(governance_assessment, dict) and isinstance(governance_assessment.get("advisory"), dict):
@@ -11737,34 +10890,6 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "governance_advisory",
                 "recorded a governance recommendation without replacing the chosen pipeline",
             )
-        future_waves = (
-            _v3_compact_waves(
-                params["future_waves"],
-                task,
-                completed_gates=(
-                    set(state.get("completed_gates", []))
-                    | set(state.get("skipped_gates", []))
-                    | set(active_gates(state))
-                ),
-                project_root=select_project_root(params),
-                allow_visible_threads=bool(task.get("visible_thread_requested", False)),
-            )
-            if params.get("future_waves") is not None else None
-        )
-        rework_scope = (
-            set(state.get("completed_gates", []))
-            | set(state.get("skipped_gates", []))
-            | set(active_gates(state))
-        )
-        inferred_rework = bool(
-            future_waves
-            and rework_scope.intersection(
-                str(delegation.get("gate") or "")
-                for wave in future_waves
-                for delegation in wave.get("delegations", [])
-            )
-        )
-        effective_rework = bool(params.get("rework", False)) or inferred_rework
         if len(results) != len(attempt_ids):
             raise ValueError(f"active wave requires exactly {len(attempt_ids)} result(s)")
         slots: dict[int, dict[str, Any]] = {}
@@ -11772,7 +10897,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         for index, result in enumerate(results, 1):
             if not isinstance(result, dict):
                 raise ValueError("every result must be an object")
-            allowed_result = {"worker", "attempt_result_ref", "dispatch_ref", "status", "reason", "next_strategy"}
+            allowed_result = {"worker", "attempt_result_ref"}
             unknown_result = sorted(set(result) - allowed_result)
             if unknown_result:
                 raise ValueError("unsupported result fields: " + ", ".join(unknown_result))
@@ -11787,83 +10912,44 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             if slot < 1 or slot > len(attempt_ids) or slot in slots:
                 raise ValueError("worker slots must be unique members of the active wave")
             result_ref = str(result.get("attempt_result_ref") or "").strip()
-            has_result = bool(result_ref)
-            status_value = _v3_status(result.get("status"), has_attempt_result=has_result)
-            if status_value == "passed":
-                if not result_ref:
-                    raise ValueError("successful results require attempt_result_ref from complete_attempt")
-                if str(result.get("dispatch_ref") or "").strip():
-                    raise ValueError("successful results use attempt_result_ref only; do not supply dispatch_ref")
-                attempt = _attempt(state, attempt_ids[slot - 1])
-                if result_ref != str(attempt.get("attempt_result_ref") or ""):
-                    raise ValueError("successful result does not match the exact active attempt")
-                canonical = attempt_protocol.get_attempt_result(
-                    _task_document_root(task_dir, state["task_id"]),
-                    task_id=state["task_id"], attempt_id=attempt_ids[slot - 1],
-                )
-                if (
-                    canonical is None
-                    or canonical.get("result_ref") != result_ref
-                    or canonical.get("lifecycle_status") != attempt_protocol.LIFECYCLE_COMPLETED
-                ):
-                    raise ValueError("successful results require a finalized canonical attempt result")
-                if str(result.get("reason") or "").strip():
-                    raise ValueError("successful results must not include reason")
-                if str(result.get("next_strategy") or "").strip():
-                    raise ValueError("successful results must not include next_strategy")
-            else:
-                if result_ref:
-                    raise ValueError("non-success results must omit attempt_result_ref")
-                if not str(result.get("reason") or "").strip():
-                    raise ValueError("non-success results require reason")
-                dispatch_ref = str(result.get("dispatch_ref") or "").strip()
-                if not dispatch_ref:
-                    raise ValueError(
-                        "non-success results require the exact dispatch_ref returned for that worker; "
-                        "this prevents a stale failed result from being applied to a replacement attempt"
-                    )
-                attempt = next(
-                    (item for item in state.get("attempts", []) if item.get("attempt_id") == attempt_ids[slot - 1]),
-                    None,
-                )
-                if not isinstance(attempt, dict) or dispatch_ref != str(attempt.get("dispatch_ref") or ""):
-                    raise ValueError("non-success dispatch_ref does not match the exact active worker attempt")
+            if not result_ref:
+                raise ValueError("every result requires attempt_result_ref from read_worker_result")
+            attempt = _attempt(state, attempt_ids[slot - 1])
+            if result_ref != str(attempt.get("attempt_result_ref") or ""):
+                raise ValueError("result does not match the exact active attempt")
+            canonical = attempt_protocol.get_attempt_result(
+                _task_document_root(task_dir, state["task_id"]),
+                task_id=state["task_id"], attempt_id=attempt_ids[slot - 1],
+            )
+            if (
+                canonical is None
+                or canonical.get("result_ref") != result_ref
+                or canonical.get("lifecycle_status") not in {
+                    attempt_protocol.LIFECYCLE_COMPLETED,
+                    attempt_protocol.LIFECYCLE_FAILED,
+                    attempt_protocol.LIFECYCLE_BLOCKED,
+                }
+            ):
+                raise ValueError("result requires a finalized canonical AttemptResult")
             slots[slot] = result
-        # Reserve the server-owned transaction only after all slots, canonical results,
-        # statuses, and future-wave overrides pass validation.
-        old_params, reserved_attempt_ids, _, request_digest, replay = _v3_continue_context(params, task_dir, state, task_ref)
+        # Reserve the server-owned transaction only after every immutable
+        # canonical result ref has passed task/attempt/lifecycle validation.
+        old_params, reserved_attempt_ids, _, request_digest, replay = _v11_continue_context(params, task_dir, state, task_ref)
         if replay is not None:
             return replay
         if reserved_attempt_ids != attempt_ids:
             raise ValueError("the active wave changed while continue was being validated; retry with the latest step")
-        completions: list[dict[str, Any]] = []
+        result_refs: list[dict[str, Any]] = []
         for slot, attempt_id in enumerate(attempt_ids, 1):
             result = slots[slot]
             result_ref = str(result.get("attempt_result_ref") or "").strip()
-            status_value = _v3_status(
-                result.get("status"),
-                has_attempt_result=bool(result_ref),
-            )
-            completion = {
+            result_refs.append({
                 "attempt_id": attempt_id,
-                "host_observation_source": "unattested_parent_result",
-                "status": status_value,
-            }
-            if status_value == "passed":
-                completion["attempt_result_ref"] = result_ref
-            else:
-                completion["reason"] = str(result["reason"])
-                if str(result.get("next_strategy") or "").strip():
-                    completion["next_strategy"] = redact(result["next_strategy"], 1000)
-            completions.append(completion)
-        old_params["completions"] = completions
-        if future_waves is not None:
-            old_params["future_waves"] = future_waves
-            old_params["allow_rework"] = effective_rework
-        if params.get("reason") is not None:
-            old_params["reason"] = params["reason"]
-        old = _engine_orchestrate(old_params)
-        response = _v3_response(
+                "attempt_result_ref": result_ref,
+            })
+        old_params["result_refs"] = result_refs
+        old = _engine_continue_lifecycle(old_params)
+        response = _v11_response(
             old,
             task_ref,
             include_result=(
@@ -11878,12 +10964,12 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             ),
         )
         if old.get("ok"):
-            _v3_store_continue(params, state["task_id"], request_digest, response)
+            _v11_store_continue(params, state["task_id"], request_digest, response)
         elif str(old.get("phase")) in {"preflight", "started", "validation"}:
-            _v3_store_continue(params, state["task_id"], request_digest, response, clear_only=True)
+            _v11_store_continue(params, state["task_id"], request_digest, response, clear_only=True)
         return response
     except ValidationFailure as exc:
-        response = _v3_envelope_error(
+        response = _v11_envelope_error(
             "continue_orchestration",
             [dict(item) for item in exc.diagnostics],
             task_ref=resolved_task_ref,
@@ -11892,7 +10978,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         return response
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         try:
-            resolved = _v3_resolve_task(params, require_task_ref=True)
+            resolved = _v11_resolve_task(params, require_task_ref=True)
             if not isinstance(resolved, dict):
                 _, state, _, _ = resolved
                 root = ledger_root(params)
@@ -11902,15 +10988,15 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     _write_operation_registry(root, registry)
         except Exception:
             pass
-        error = _v3_error("continue_validation_failed", exc)
+        error = _v11_error("continue_validation_failed", exc)
         if str(exc).startswith("continue step must match the active relative step"):
-            return _v3_reconcile_stale_continue(params, error)
+            return _v11_reconcile_stale_continue(params, error)
         if resolved_task_ref:
             error["task_ref"] = resolved_task_ref
         return error
 
 
-def _v3_question_management_payload(value: object) -> dict[str, Any]:
+def _v11_question_management_payload(value: object) -> dict[str, Any]:
     """Normalize the compact coordinator question contract.
 
     The public path accepts only a durable ``question_ref`` plus optional
@@ -11921,7 +11007,7 @@ def _v3_question_management_payload(value: object) -> dict[str, Any]:
         raise ValueError("question management requires payload with question_ref")
     payload = dict(value)
     forbidden_identity = sorted(
-        set(payload) & {"task_id", "principal", "thread_id", "attempt_id", "profile", "submission_id"}
+        set(payload) & {"task_id", "principal", "attempt_id", "profile", "submission_id"}
     )
     if forbidden_identity:
         raise ValueError(
@@ -11955,14 +11041,14 @@ def _v3_question_management_payload(value: object) -> dict[str, Any]:
     return payload
 
 
-def _v3_question_resume_contract(
+def _v11_question_resume_contract(
     result: dict[str, Any],
     state: dict[str, Any],
 ) -> tuple[dict[str, str] | None, str | None]:
-    """Derive the only resumable worker identity from a durable answer record.
+    """Derive the only resumable assignment target from a durable answer record.
 
     A coordinator can route the already-existing native child, but it must not
-    reconstruct or choose its worker identity.  In particular, an answered
+    reconstruct or choose assignment authority.  In particular, an answered
     stale question is useful audit history, not an authorization to wake a
     replacement or an old worker.  The public response therefore carries a
     contract only when the answer record and current active slot agree.
@@ -12013,461 +11099,243 @@ def _v3_question_resume_contract(
 QUESTION_RESUME_CONTRACT_SCHEMA = "cortex/question-resume-contract/v1"
 
 
-def _ordinary_chat_question_candidates(
-    params: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Find one server-owned open question without trusting model identity.
-
-    The ordinary user-message ingress deliberately does not accept either a
-    task ref or a question ref.  It searches only host-private ledgers and
-    requires one unambiguous question whose native session is resumable.  A
-    caller-provided project root narrows the search, but it is never used as
-    task identity and the question/attempt binding is still checked below.
-    """
-    requested_root = str(params.get("project_root") or "").strip()
-    roots: list[Path] = []
-    if requested_root:
-        roots.append(existing_ledger_root({"project_root": requested_root}))
-    else:
-        projects = _host_control_projects_for_lookup()
-        if projects is None or not projects.exists():
-            return []
-        for candidate in sorted(projects.iterdir(), key=lambda item: item.name):
-            try:
-                if candidate.is_dir() and not candidate.is_symlink():
-                    roots.append(_assert_private_directory(candidate, "Cortex host project ledger"))
-            except (OSError, ValueError):
+def _v11_question_display(result: dict[str, Any]) -> dict[str, Any] | None:
+    interaction = result.get("chat_interaction") if isinstance(result.get("chat_interaction"), dict) else {}
+    user_view = interaction.get("user_view") if isinstance(interaction.get("user_view"), dict) else {}
+    prompt = str(user_view.get("question") or user_view.get("message") or result.get("question") or "").strip()
+    if not prompt:
+        return None
+    question: dict[str, Any] = {"prompt": prompt[:8000]}
+    raw_options = user_view.get("options")
+    if isinstance(raw_options, list):
+        options: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_options[:16], 1):
+            if not isinstance(raw, dict):
                 continue
-
-    session_id = str(
-        params.get("session_id")
-        or params.get("thread_id")
-        or next((os.environ.get(key) for key in CODEX_SESSION_ENV_KEYS if os.environ.get(key)), "")
-    ).strip()
-    candidates: list[dict[str, Any]] = []
-    for root in roots:
-        try:
-            for task_id in sorted(read_task_index(root)):
-                loaded = _v3_task_state(root, task_id)
-                if loaded is None:
-                    continue
-                task_dir, state, task = loaded
-                if state.get("status") not in {"active", "blocked", "needs_input"}:
-                    continue
-                bindings = _host_session_bindings(root)
-                bound_session = str(bindings.get("tasks", {}).get(task_id) or "").strip()
-                if session_id and bound_session and bound_session != session_id:
-                    continue
-                open_questions = _open_blocking_questions(task_dir, state)
-                if not open_questions:
-                    continue
-                for question in open_questions:
-                    attempt_id = safe_id(str(question.get("attempt_id") or ""))
-                    attempt = _attempt(state, attempt_id)
-                    if attempt.get("invalidated") or attempt.get("status") != "running":
-                        continue
-                    sessions = [
-                        item for item in db_list_worker_sessions(root, task_id)
-                        if str(item.get("attempt_id") or "") == attempt_id
-                        and item.get("status") == "idle_resumable"
-                        and bool(item.get("resumable"))
-                    ]
-                    if len(sessions) != 1:
-                        continue
-                    candidates.append({
-                        "root": root,
-                        "task_dir": task_dir,
-                        "task": task,
-                        "state": state,
-                        "task_id": task_id,
-                        "question": question,
-                        "attempt": attempt,
-                        "session": sessions[0],
-                        "bound_session": bound_session,
-                    })
-        except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error):
-            # A stale or partially initialized project ledger cannot become a
-            # user-visible blocker and cannot be guessed into a resume target.
-            continue
-    return candidates
-
-
-def _ordinary_chat_answer_submission_id(task_id: str, question_id: str, answer: object) -> str:
-    """Return the host-owned identity used for ordinary-chat answer delivery."""
-    return "chat-question-" + digest_text(canonical_json.dumps({
-        "task_id": task_id,
-        "question_id": question_id,
-        "answer": answer,
-    }))[:32]
-
-
-def _ordinary_chat_question_replay_candidates(
-    params: dict[str, Any],
-    answer: object,
-) -> list[dict[str, Any]]:
-    """Find an already-answered ordinary-chat message for receipt replay.
-
-    The open-question lookup intentionally stops seeing a question after its
-    durable answer transition.  A transport retry of that same chat message
-    must nevertheless replay the server-owned receipt instead of being
-    misclassified as a new task.  Matching is exact on the task/question
-    pair and the host-derived submission id; no model-supplied identity is
-    accepted.
-    """
-    requested_root = str(params.get("project_root") or "").strip()
-    roots: list[Path] = []
-    if requested_root:
-        roots.append(existing_ledger_root({"project_root": requested_root}))
-    else:
-        projects = _host_control_projects_for_lookup()
-        if projects is None or not projects.exists():
-            return []
-        for candidate in sorted(projects.iterdir(), key=lambda item: item.name):
-            try:
-                if candidate.is_dir() and not candidate.is_symlink():
-                    roots.append(_assert_private_directory(candidate, "Cortex host project ledger"))
-            except (OSError, ValueError):
+            label = str(raw.get("label") or "").strip()
+            if not label:
                 continue
-
-    session_id = str(
-        params.get("session_id")
-        or params.get("thread_id")
-        or next((os.environ.get(key) for key in CODEX_SESSION_ENV_KEYS if os.environ.get(key)), "")
-    ).strip()
-    candidates: list[dict[str, Any]] = []
-    for root in roots:
-        try:
-            for task_id in sorted(read_task_index(root)):
-                loaded = _v3_task_state(root, task_id)
-                if loaded is None:
-                    continue
-                task_dir, state, task = loaded
-                if state.get("status") not in {"active", "blocked", "needs_input"}:
-                    continue
-                bindings = _host_session_bindings(root)
-                bound_session = str(bindings.get("tasks", {}).get(task_id) or "").strip()
-                if session_id and bound_session and bound_session != session_id:
-                    continue
-                for question in _question_records(question_bus_paths(task_dir), state):
-                    if question.get("status") != "answered":
-                        continue
-                    question_id = str(question.get("question_id") or "").strip()
-                    submission_id = _ordinary_chat_answer_submission_id(task_id, question_id, answer)
-                    if str(question.get("answer_submission_id") or "") != submission_id:
-                        continue
-                    attempt_id = safe_id(str(question.get("attempt_id") or ""))
-                    attempt = _attempt(state, attempt_id)
-                    if attempt.get("invalidated"):
-                        continue
-                    sessions = [
-                        item for item in db_list_worker_sessions(root, task_id)
-                        if str(item.get("attempt_id") or "") == attempt_id
-                    ]
-                    if len(sessions) != 1:
-                        continue
-                    candidates.append({
-                        "root": root,
-                        "task_dir": task_dir,
-                        "task": task,
-                        "state": state,
-                        "task_id": task_id,
-                        "question": question,
-                        "attempt": attempt,
-                        "session": sessions[0],
-                        "bound_session": bound_session,
-                    })
-        except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error):
-            continue
-    return candidates
-
-
-def resume_question_from_ordinary_chat(params: dict[str, Any]) -> dict[str, Any]:
-    """Record a normal user message and prepare exact-child continuation.
-
-    This is a host ingress, not a model-facing identity protocol.  The input
-    contains only the user's task-domain message (and optional host routing
-    context); task, attempt, question, and native child identity are derived
-    from the durable question/session binding.  With no open question the
-    message is explicitly classified as a new task instead of being attached
-    to stale orchestration state.
-    """
-    raw_answer = params.get("message", params.get("answer"))
-    forced_candidate = params.get("_candidate")
-    if isinstance(raw_answer, (dict, list)):
-        answer = raw_answer
-        answer_text = json.dumps(raw_answer, ensure_ascii=False, sort_keys=True)
-    else:
-        answer_text = str(raw_answer or "").strip()
-        answer = answer_text
-    if not answer_text:
-        raise ValueError("ordinary chat message is required")
-    replay = False
-    candidates = [forced_candidate] if isinstance(forced_candidate, dict) else _ordinary_chat_question_candidates(params)
-    if not candidates and not isinstance(forced_candidate, dict):
-        candidates = _ordinary_chat_question_replay_candidates(params, answer)
-        replay = bool(candidates)
-    if not candidates:
-        return {
-            "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
-            "ok": True,
-            "outcome": "new_task",
-            "requires_user_decision": False,
-            "user_view": {
-                "message_type": "new_task",
-                "message": "Я готов начать новую задачу с вашего сообщения." if str(params.get("user_language") or "en").lower().startswith("ru") else "I’m ready to start a new task from your message.",
-                "requires_user_decision": False,
-            },
-            "next_action": "Route this message through normal task creation.",
-        }
-    if len(candidates) != 1:
-        # A host may submit an answer map for one or more parallel question
-        # pauses.  Keys are matched only against server-returned durable
-        # records; the model never chooses an attempt or manufactures refs.
-        if len(candidates) > 1 and isinstance(raw_answer, dict):
-            answer_map = raw_answer.get("answers") if isinstance(raw_answer.get("answers"), dict) else raw_answer
-            if isinstance(answer_map, dict):
-                matched = [
-                    item for item in candidates
-                    if str(item["question"].get("question_id") or "") in answer_map
-                    or str(item["attempt"].get("attempt_id") or "") in answer_map
-                ]
-                if matched:
-                    resumed: list[dict[str, Any]] = []
-                    for item in matched:
-                        question_key = str(item["question"].get("question_id") or "")
-                        if question_key in answer_map:
-                            value = answer_map[question_key]
-                        else:
-                            value = answer_map[str(item["attempt"].get("attempt_id") or "")]
-                        resumed.append(resume_question_from_ordinary_chat({
-                            **params,
-                            "message": value,
-                            "_candidate": item,
-                        }))
-                    return {
-                        "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
-                        "ok": True,
-                        "outcome": "question_answered",
-                        "requires_user_decision": False,
-                        "resume_contracts": [item.get("resume_contract") for item in resumed if item.get("resume_contract")],
-                        "dispatches": [dispatch for item in resumed for dispatch in item.get("dispatches", [])],
-                        "user_view": {
-                            "message_type": "progress",
-                            "message": "Ответы записаны. Продолжаю задачи." if str(params.get("user_language") or "en").lower().startswith("ru") else "Your answers were recorded. I’m continuing the tasks.",
-                            "requires_user_decision": False,
-                        },
-                        "internal": {"answered_count": len(resumed)},
-                    }
-        if len(candidates) > 1:
-            language = str(params.get("user_language") or "en")
-            return {
-                "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
-                "ok": True,
-                "outcome": "question_clarification_required",
-                "requires_user_decision": True,
-                "user_view": {
-                    "message_type": "decision_required",
-                    "message": "Уточните, к какому решению относится ваш ответ." if language.lower().startswith("ru") else "Please clarify which task decision your answer addresses.",
-                    "question": "Выберите решение, которое нужно продолжить." if language.lower().startswith("ru") else "Choose the task decision to continue.",
-                    "requires_user_decision": True,
-                },
-                "internal": {"open_question_count": len(candidates)},
+            item: dict[str, Any] = {
+                "number": raw.get("number") if isinstance(raw.get("number"), int) else index,
+                "label": label[:1000],
             }
-        # Ambiguous durable state is not permission to guess.  Keep the
-        # visible result neutral; diagnostics remain server-side only.
-        return {
-            "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
-            "ok": True,
-            "outcome": "new_task",
-            "requires_user_decision": False,
-            "user_view": {
-                "message_type": "new_task",
-                "message": "Я готов начать новую задачу с вашего сообщения." if str(params.get("user_language") or "en").lower().startswith("ru") else "I’m ready to start a new task from your message.",
-                "requires_user_decision": False,
+            description = str(raw.get("description") or "").strip()
+            if description:
+                item["description"] = description[:2000]
+            options.append(item)
+        if options:
+            question["options"] = options
+    return question
+
+
+def _v11_question_progress(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    answered = value.get("answered")
+    total = value.get("total")
+    if isinstance(answered, bool) or not isinstance(answered, int) or answered < 0:
+        return None
+    if isinstance(total, bool) or not isinstance(total, int) or total < 1:
+        return None
+    progress: dict[str, Any] = {"answered": answered, "total": total}
+    next_key = str(value.get("next_question_key") or "").strip()
+    if next_key:
+        progress["next_question_key"] = next_key[:160]
+    return progress
+
+
+def _v11_question_management_failure(
+    task_ref: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    code: str = "question_management_unavailable",
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    safe_diagnostics = diagnostics or [{
+        "code": code,
+        "json_pointer": "",
+        "message": redact(message, 1000),
+        "field_schema": {"type": "object"},
+    }]
+    allowed_changes: list[dict[str, Any]] = []
+    seen_pointers: set[str] = set()
+    for diagnostic in safe_diagnostics:
+        pointer = str(diagnostic.get("json_pointer") or "")
+        if not pointer.startswith("/") or pointer in seen_pointers:
+            continue
+        message_lower = str(diagnostic.get("message") or "").lower()
+        operation = (
+            "remove" if any(marker in message_lower for marker in ("forbidden", "unsupported", "remove ")) else
+            "add" if any(marker in message_lower for marker in ("is required", "requires ", "missing")) else
+            "replace"
+        )
+        seen_pointers.add(pointer)
+        allowed_changes.append({"json_pointer": pointer, "allowed_ops": [operation]})
+    effective_retryable = bool(retryable and allowed_changes)
+    recovery: dict[str, Any] = {
+        "kind": "same_operation" if effective_retryable else "terminal_stop",
+        "operation": "manage_orchestration",
+        "retryable": effective_retryable,
+        "state_mutated": False,
+    }
+    if effective_retryable:
+        recovery["allowed_changes"] = allowed_changes
+    return validate_v11_response("coordinator.question_management", {
+        "schema": "cortex/question-management/v11",
+        "ok": False,
+        "outcome": "needs_correction",
+        "error": {
+                "code": code,
+                "category": "validation" if effective_retryable else "unavailable",
+                "message": redact(message, 512),
+                "diagnostics": safe_diagnostics,
             },
-            "next_action": "Route this message through normal task creation.",
-            "internal": {"resume_rejected": "ambiguous_open_question"},
-        }
-
-    candidate = candidates[0]
-    state = candidate["state"]
-    question = candidate["question"]
-    task_id = str(candidate["task_id"])
-    question_id = safe_id(str(question.get("question_id") or ""))
-    attempt_id = safe_id(str(question.get("attempt_id") or ""))
-    language = str(params.get("user_language") or state.get("user_language") or "en")
-    submission_id = _ordinary_chat_answer_submission_id(task_id, question_id, answer)
-    answer_params = {
-        "project_root": str(candidate["task"].get("project_root") or params.get("project_root") or ""),
-        "task_id": task_id,
-        "principal": state.get("principal"),
-        "thread_id": state.get("thread_id"),
-        "question_id": question_id,
-        "submission_id": submission_id,
-        "answer": answer,
-        **({"answer_en": str(params.get("answer_en") or "").strip()} if str(params.get("answer_en") or "").strip() else {}),
-        "resume_context": {
-            "source": "ordinary_chat_message",
-            "interaction_ref": question_id,
-            "user_language": language,
-        },
-    }
-    # ``answer_worker_question`` performs the authoritative state-locked
-    # transition and emits both question_answered and decision_resolved.
-    answered = {"status": "answered", "idempotent": replay}
-    if not replay:
-        answered = answer_worker_question(answer_params)
-    try:
-        db_append_attempt_message(candidate["root"], {
-            "message_id": "question-answer-" + digest_text(canonical_json.dumps({
-                "task_id": task_id,
-                "question_id": question_id,
-                "answer": answer,
-            }))[:40],
-            "task_id": task_id,
-            "attempt_id": attempt_id,
-            "source": "user",
-            "kind": "question_answer",
-            "original_text": answer_text,
-            "original_language": language,
-            "canonical_en": str(params.get("answer_en") or answer_text).strip(),
-            "task_revision": max(1, int(state.get("revision") or 1)),
-        })
-    except sqlite3.IntegrityError:
-        # A replay of the same ordinary message is an idempotent answer, not
-        # a second delivery to the worker.
-        pass
-    attempt = candidate["attempt"]
-    session = candidate["session"]
-    host_agent_id = str(session.get("host_agent_id") or (attempt.get("host_spawn") or {}).get("agent_id") or "")
-    host_task_name = str(session.get("host_task_name") or (attempt.get("host_spawn") or {}).get("task_name") or "")
-    if not host_agent_id or not host_task_name:
-        # The answer remains durable, but no follow-up target is fabricated.
-        return {
-            "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
-            "ok": True,
-            "outcome": "question_answered_not_resumable",
-            "requires_user_decision": False,
-            "user_view": {
-                "message_type": "progress",
-                "message": "Ваш ответ записан. Продолжение задачи будет восстановлено автоматически." if language.lower().startswith("ru") else "Your answer was recorded. The task will continue from its saved state.",
-                "requires_user_decision": False,
-            },
-            "internal": {"resume_rejected": "native_session_identity_unavailable"},
-        }
-    contract = {
-        "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
-        "question_ref": question_id,
-        "attempt_id": attempt_id,
-        "profile": canonical_profile(attempt.get("profile") or ""),
-        "dispatch_ref": str(attempt.get("dispatch_ref") or ""),
-    }
-    message = (
-        "Cortex recorded the user's answer for this exact question. Resume this same attempt; first poll "
-        f"worker_question(action='poll', question_ref={question_id!r}), then continue the existing work."
-    )
-    return {
-        "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
-        "ok": True,
-        "outcome": "question_answered",
-        "requires_user_decision": False,
-        "resume_contract": contract,
-        "idempotent": bool(replay),
-        "user_view": {
-            "message_type": "progress",
-            "message": "Ответ записан. Продолжаю задачу." if language.lower().startswith("ru") else "Your answer was recorded. I’m continuing the task.",
-            "requires_user_decision": False,
-        },
-        "dispatches": [] if replay else [{
-            "call": "followup_task",
-            "target": host_agent_id,
-            "arguments": {"target": host_agent_id, "message": message},
-        }],
-        "internal": {
-            "task_id": task_id,
-            "attempt_id": attempt_id,
-            "host_agent_id": host_agent_id,
-            "host_task_name": host_task_name,
-            "answer_status": answered.get("status"),
-        },
-    }
+        "recovery": recovery,
+    })
 
 
-def _v3_question_response(response: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+def _v11_question_response(response: dict[str, Any], state: dict[str, Any], task_ref: str) -> dict[str, Any]:
+    if not response.get("ok"):
+        # Question rendering validates a localized display projection only; a
+        # failed projection must remain a same-operation correction rather
+        # than becoming a terminal unavailable state.  In particular, a
+        # non-English task may need the coordinator to supply the four
+        # display-only localization fields under ``payload``.  The durable
+        # question itself remains unchanged and no answer/mutation occurred.
+        raw_diagnostics = response.get("diagnostics")
+        if bool(response.get("recoverable")) and isinstance(raw_diagnostics, list):
+            localized_fields = {
+                "localized_question": {"type": "string", "minLength": 1},
+                "localized_header": {"type": "string", "minLength": 1},
+                "localized_options": {"type": "array", "minItems": 1},
+                "localized_custom_label": {"type": "string", "minLength": 1},
+            }
+            diagnostics: list[dict[str, Any]] = []
+            seen_pointers: set[str] = set()
+            for raw in raw_diagnostics[:16]:
+                message = redact(
+                    str(raw.get("message") or "question display input is invalid")
+                    if isinstance(raw, dict) else str(raw),
+                    1000,
+                )
+                raw_pointer = str(raw.get("json_pointer") or "") if isinstance(raw, dict) else ""
+                field = next((name for name in localized_fields if name in message or name in raw_pointer), None)
+                pointer = raw_pointer if raw_pointer.startswith("/payload/") else (
+                    f"/payload/{field}" if field else "/payload"
+                )
+                if pointer in seen_pointers:
+                    continue
+                seen_pointers.add(pointer)
+                diagnostics.append({
+                    "code": "question_management_validation_failed",
+                    "json_pointer": pointer,
+                    "message": message,
+                    "field_schema": dict(raw.get("field_schema") or localized_fields.get(field, {"type": "object"})) if isinstance(raw, dict) else localized_fields.get(field, {"type": "object"}),
+                })
+            if diagnostics:
+                return _v11_question_management_failure(
+                    task_ref,
+                    "question display input is invalid",
+                    retryable=True,
+                    code="question_management_validation_failed",
+                    diagnostics=diagnostics,
+                )
+        return _v11_question_management_failure(task_ref, "The question operation could not be completed.")
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     status_value = str(result.get("status") or "").strip()
     if status_value == "answered":
-        resume_contract, resume_reason = _v3_question_resume_contract(result, state)
+        resume_contract, resume_reason = _v11_question_resume_contract(result, state)
         if resume_contract is None:
-            response["outcome"] = "question_answered_not_resumable"
-            response["resume_reason"] = resume_reason
-            response["next_action"] = (
-                "The durable answer is not bound to a current active worker slot. Cortex records this lifecycle "
-                "diagnostic and derives the next server-owned recovery route; do not use followup_task, spawn a "
-                "replacement, or advance the wave from this response."
-            )
-            return response
-        response["outcome"] = "question_answered"
-        response["resume_contract"] = resume_contract
-        response["next_action"] = (
-            f"{COORDINATOR_LOCK} Resume the exact same already-existing native worker with followup_task; the parent "
-            "retains its original native target. Copy resume_contract verbatim into worker_question and require that "
-            "exact poll on the same attempt. Do not supply a host target, reconstruct any field, spawn a replacement, "
-            "or advance the wave before its result is recorded."
+            question_ref = str(result.get("question_id") or "").strip()
+            if not question_ref.startswith("question-"):
+                return _v11_question_management_failure(
+                    task_ref, resume_reason or "The answered question is not resumable.",
+                )
+            return validate_v11_response("coordinator.question_management", {
+                "schema": "cortex/question-management/v11",
+                "ok": True,
+                "outcome": "question_answered_not_resumable",
+                "question_ref": question_ref,
+            })
+        resume = (
+            {"kind": "poll_batch", "batch_ref": resume_contract["batch_ref"]}
+            if resume_contract.get("poll_action") == "poll_batch" else
+            {"kind": "poll", "question_ref": resume_contract["question_ref"]}
         )
+        return validate_v11_response("coordinator.question_management", {
+            "schema": "cortex/question-management/v11",
+            "ok": True,
+            "outcome": "question_answered",
+            "resume": resume,
+        })
     elif status_value == "awaiting_translation":
-        response["outcome"] = "awaiting_translation"
-        question_ref = str(result.get("batch_ref") or result.get("question_id") or "")
+        batch_ref = str(result.get("batch_ref") or "").strip()
+        question_ref = str(result.get("question_id") or "").strip()
+        translation: dict[str, Any]
         if result.get("batch_ref"):
             required_keys = [str(item) for item in result.get("translation_required_for") or []]
-            translation_payload: dict[str, Any] = {
-                "question_ref": question_ref,
-                "canonical_answers": {
-                    key: "<canonical English translation of that free-text answer or custom response>"
-                    for key in required_keys
-                },
-                "translated_by": "coordinator",
+            originals = result.get("answer_custom_original")
+            originals = originals if isinstance(originals, dict) else result.get("answer_original")
+            originals = originals if isinstance(originals, dict) else {}
+            source_text_by_question = {
+                key: str(originals.get(key) or "")[:8000]
+                for key in required_keys
+                if str(originals.get(key) or "").strip()
             }
+            if not source_text_by_question:
+                return _v11_question_management_failure(task_ref, "Translation source text is unavailable.")
+            translation = {"batch_ref": batch_ref, "source_text_by_question": source_text_by_question}
         else:
-            translation_payload = {
-                "question_ref": question_ref,
-                "answer": result.get("answer_original"),
-                "answer_en": "<canonical English translation of the free-text answer>",
-            }
-        response["translation_request"] = {
-            "intent": "question",
-            "payload": translation_payload,
-            "answer_option_ids": result.get("answer_option_ids") or [],
-            "answer_custom_original": result.get("answer_custom_original") or {},
-        }
-        response["next_action"] = (
-            f"{COORDINATOR_LOCK} Translate only result.answer_original free text and result.answer_custom_original custom responses into canonical English, preserve "
-            "result.answer_option_ids, then call manage_orchestration exactly once with translation_request. "
-            "Do not inspect skills, plugin source/cache, or runtime code to infer fields, and do not resume the worker "
-            "until Cortex records both representations."
-        )
+            source_text = result.get("answer_original")
+            if isinstance(source_text, (dict, list)):
+                source_text = json.dumps(source_text, ensure_ascii=False, sort_keys=True)
+            translation = {"question_ref": question_ref, "source_text": str(source_text or "")[:8000]}
+        return validate_v11_response("coordinator.question_management", {
+            "schema": "cortex/question-management/v11",
+            "ok": True,
+            "outcome": "awaiting_translation",
+            "translation": translation,
+        })
     elif status_value == "superseded":
-        response["outcome"] = "batch_superseded"
-        response["next_action"] = (
-            f"{COORDINATOR_LOCK} Do not resume the worker from this superseded batch. Keep the durable task revision "
-            "as the source of truth and wait for its current dispatch or question batch."
-        )
+        batch_ref = str(result.get("batch_ref") or "").strip()
+        if not batch_ref:
+            return _v11_question_management_failure(task_ref, "The superseded question is not resumable.")
+        return validate_v11_response("coordinator.question_management", {
+            "schema": "cortex/question-management/v11",
+            "ok": True,
+            "outcome": "batch_superseded",
+            "batch_ref": batch_ref,
+        })
     elif status_value in {"invalid_answer", "pending_user_input", "pending_user_message"}:
-        response["outcome"] = "awaiting_user"
-        if isinstance(result.get("chat_interaction"), dict):
-            response["chat_interaction"] = result["chat_interaction"]
-        response["next_action"] = (
-            f"{COORDINATOR_LOCK} Render result.chat_interaction.user_view only in the user's language as one ordinary "
-            "final assistant message. Show one concrete decision, its options, trade-offs, and recommendation; do not "
-            "copy question keys, IDs, cursors, tool instructions, or the remaining batch. Do not call a UI/input/"
-            "approval/elicitation tool. End this turn. On the user's next message, preserve the exact answer, record it "
-            "against this same durable question_ref, then resume the exact same worker; never replace it or advance the "
-            "wave first."
-        )
-    return response
+        question = _v11_question_display(result)
+        if question is None:
+            return _v11_question_management_failure(task_ref, "The display question is unavailable.")
+        batch_ref = str(result.get("batch_ref") or "").strip()
+        if batch_ref:
+            progress = _v11_question_progress(result.get("progress"))
+            if progress is None:
+                return _v11_question_management_failure(task_ref, "Question batch progress is unavailable.")
+            return validate_v11_response("coordinator.question_management", {
+                "schema": "cortex/question-management/v11",
+                "ok": True,
+                "outcome": "awaiting_user",
+                "batch_ref": batch_ref,
+                "progress": progress,
+                "question": question,
+            })
+        question_ref = str(result.get("question_id") or "").strip()
+        return validate_v11_response("coordinator.question_management", {
+            "schema": "cortex/question-management/v11",
+            "ok": True,
+            "outcome": "awaiting_user",
+            "question_ref": question_ref,
+            "question": question,
+        })
+    return _v11_question_management_failure(task_ref, "Question management returned no supported public state.")
 
 
-def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
+def _v11_plan_approval_payload(value: object) -> dict[str, Any]:
     if value is None:
         value = {}
     if not isinstance(value, dict):
@@ -12514,7 +11382,7 @@ def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
     return normalized
 
 
-def _v3_plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -> str:
+def _v11_plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -> str:
     """Derive the opaque id bound to one pending plan approval revision."""
     pending_basis = approval.get("pending_basis")
     if not isinstance(pending_basis, dict):
@@ -12531,7 +11399,7 @@ def _v3_plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]
         "task_id": str(state.get("task_id") or ""),
         "pending_basis": pending_basis,
     }
-    return "plan-approval-" + digest_text(canonical_json.dumps(seed))[:32]
+    return "approval-" + digest_text(canonical_json.dumps(seed))[:32]
 
 
 PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str, str]] = {
@@ -12552,7 +11420,7 @@ PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str, str]] = {
 }
 
 
-def _v3_plan_approval_copy(state: dict[str, Any], localization: dict[str, Any]) -> tuple[str, str, str, str, str]:
+def _v11_plan_approval_copy(state: dict[str, Any], localization: dict[str, Any]) -> tuple[str, str, str, str, str]:
     language = str(state.get("user_language") or "en").lower().split("-", 1)[0]
     translated = PLAN_APPROVAL_TRANSLATIONS.get(language)
     supplied = tuple(
@@ -12574,7 +11442,7 @@ def _v3_plan_approval_copy(state: dict[str, Any], localization: dict[str, Any]) 
     return translated or PLAN_APPROVAL_TRANSLATIONS["en"]
 
 
-def _v3_prompt_plan_approval(
+def _v11_prompt_plan_approval(
     state: dict[str, Any],
     task_ref: str,
     localization: dict[str, Any],
@@ -12587,8 +11455,8 @@ def _v3_prompt_plan_approval(
     if approval.get("status") != "awaiting_user":
         raise ValueError("there is no pending plan approval for this task")
     review = dict(approval.get("review") or {})
-    prompt, title, approve_label, cancel_label, custom_label = _v3_plan_approval_copy(state, localization)
-    request_id = str(approval.get("request_id") or _v3_plan_approval_request_id(state, approval))
+    prompt, title, approve_label, cancel_label, custom_label = _v11_plan_approval_copy(state, localization)
+    request_id = str(approval.get("request_id") or _v11_plan_approval_request_id(state, approval))
     planner_recommendation = str(review.get("recommendation") or "approve").strip().lower()
     recommendation_actions = list(review.get("recommendation_actions") or [])
     # The planner owns the recommendation. Findings/uncertainty are not a
@@ -12793,7 +11661,7 @@ def _v3_prompt_plan_approval(
     }
 
 
-def _v3_follow_up_payload(value: object) -> dict[str, Any]:
+def _v11_follow_up_payload(value: object) -> dict[str, Any]:
     """Normalize a user-authored corrective task without reopening its source."""
     if not isinstance(value, dict):
         raise ValueError("follow_up requires payload with the exact corrective user_request")
@@ -12819,7 +11687,7 @@ def _v3_follow_up_payload(value: object) -> dict[str, Any]:
     return {"task": task, "result_refs": normalized_refs}
 
 
-def _v3_follow_up_context(
+def _v11_follow_up_context(
     source_dir: Path,
     source_state: dict[str, Any],
     source_task: dict[str, Any],
@@ -12938,7 +11806,7 @@ def _revision_replacement_waves(
     return replacement
 
 
-def _v3_active_steer(
+def _v11_active_steer(
     params: dict[str, Any],
     task_dir: Path,
     state: dict[str, Any],
@@ -12967,7 +11835,7 @@ def _v3_active_steer(
 
     root = ledger_root(params)
     with state_lock(root):
-        loaded = _v3_task_state(root, state["task_id"])
+        loaded = _v11_task_state(root, state["task_id"])
         if loaded is None:
             raise ValueError("active steer task is unavailable")
         task_dir, state, task_definition = loaded
@@ -13156,38 +12024,317 @@ def _v3_active_steer(
     }
 
 
-def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+def _v11_finalize_bootstrap_failure(
+    *,
+    task_dir: Path,
+    state: dict[str, Any],
+    task_ref: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Terminally close the one never-authorized native worker after bootstrap loss.
+
+    This is intentionally narrower than ordinary recovery: no worker was
+    authorized to call Cortex, so it must not manufacture an AttemptResult,
+    briefing receipt, event, repair escrow, or replacement dispatch.  The
+    coordinator can only bind the server-issued dispatch already awaiting its
+    native spawn acknowledgement.
+    """
+    payload = params.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("finalize_bootstrap_failure requires payload")
+    unknown = sorted(set(payload) - {"dispatch_ref", "reason_code"})
+    if unknown:
+        raise ValueError("finalize_bootstrap_failure payload has unsupported fields")
+    dispatch_ref = str(payload.get("dispatch_ref") or "").strip()
+    reason_code = str(payload.get("reason_code") or "").strip()
+    if not re.fullmatch(r"dispatch-[0-9a-f]{24}", dispatch_ref):
+        raise ValueError("finalize_bootstrap_failure requires the exact server-issued dispatch_ref")
+    if reason_code != "bootstrap_missing_identity":
+        raise ValueError("finalize_bootstrap_failure reason_code is invalid")
+
+    root = ledger_root(params)
+    task_id = str(state.get("task_id") or "")
+    with state_lock(root, operation="finalize_bootstrap_failure", task_id=task_id):
+        # Resolution happened before taking the mutation lock. Reload the
+        # canonical projection while holding it so a stale coordinator cannot
+        # terminalize a different/replaced attempt.
+        fresh = _v11_task_state(root, task_id)
+        if fresh is None:
+            raise ValueError("bootstrap failure task is unavailable")
+        fresh_dir, fresh_state, _fresh_task = fresh
+        if fresh_dir != task_dir:
+            raise ValueError("bootstrap failure task projection is inconsistent")
+        matching = [
+            item for item in fresh_state.get("attempts") or []
+            if isinstance(item, dict) and str(item.get("dispatch_ref") or "") == dispatch_ref
+        ]
+        prior = fresh_state.get("bootstrap_terminal_failure")
+        if isinstance(prior, dict) and prior == {
+            "dispatch_ref": dispatch_ref,
+            "reason_code": reason_code,
+        }:
+            return {
+                "schema": LIFECYCLE_RUNTIME_SCHEMA,
+                "ok": True,
+                "lifecycle": "finalize_bootstrap_failure",
+                "transaction_id": None,
+                "task_id": task_id,
+                "wave_id": None,
+                "state": "bootstrap_terminal_failure",
+                "spawn_requests": [],
+                "diagnostics": [],
+                "result": {"finalized": True, "idempotent": True},
+                "code": "bootstrap_terminal_failure",
+                "recoverable": False,
+                "next_action": "Bootstrap failure is already terminal; do not spawn, continue, or read a worker result for this dispatch.",
+            }
+        if len(matching) != 1:
+            raise ValueError("bootstrap failure dispatch does not identify exactly one task attempt")
+        attempt = matching[0]
+        # A server-issued briefing receipt proves that this is no longer a
+        # bootstrap-only failure.  Never let the coordinator relabel a later
+        # worker tool/schema problem as missing bootstrap identity: that would
+        # discard a valid explicit authorization and strand the real protocol
+        # state under the wrong terminal reason.
+        attempt_id = str(attempt.get("attempt_id") or "")
+        receipts = attempt_protocol.attempt_receipts(
+            root,
+            task_id=task_id,
+            attempt_id=attempt_id,
+        )
+        post_bootstrap_evidence = (
+            bool(receipts.get("briefing_receipt"))
+            or bool(attempt_protocol.list_attempt_events(root, task_id=task_id, attempt_id=attempt_id))
+            or db_get_pending_repair_escrow(root, task_id=task_id, attempt_id=attempt_id) is not None
+        )
+        if (
+            fresh_state.get("status") != "active"
+            or attempt.get("status") != AWAITING_HOST_SPAWN
+            or attempt.get("lifecycle_status") != "awaiting_spawn_ack"
+            or attempt.get("assignment_delivery_status") not in {"pending", "delivered"}
+            or post_bootstrap_evidence
+        ):
+            raise ValueError("bootstrap failure target has post-bootstrap server evidence; follow the returned structured recovery on the same worker")
+
+        terminal_at = now()
+        attempt["status"] = "failed"
+        attempt["lifecycle_status"] = "bootstrap_terminal_failure"
+        attempt["assignment_delivery_status"] = "bootstrap_terminal_failure"
+        attempt["host_resumable"] = False
+        attempt["finalized_at"] = terminal_at
+        attempt["finalization_reason"] = reason_code
+        fresh_state["status"] = "blocked"
+        fresh_state["blocked_gate"] = str(attempt.get("gate") or "")
+        fresh_state["blocked_reason"] = reason_code
+        fresh_state["bootstrap_terminal_failure"] = {
+            "dispatch_ref": dispatch_ref,
+            "reason_code": reason_code,
+        }
+        # Both writes run in the state_lock-owned SQLite transaction: a
+        # coordinator cannot observe a blocked task with a resumable native
+        # worker (or vice versa).
+        db_put_worker_session(root, {
+            "task_id": task_id,
+            "attempt_id": str(attempt.get("attempt_id") or ""),
+            "host_task_name": str((attempt.get("spawn_request") or {}).get("task_name") or ""),
+            "host_tool": str((attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent"),
+            "status": "terminated_unavailable",
+            "resumable": False,
+            "started_at": attempt.get("spawn_requested_at"),
+            "terminated_at": terminal_at,
+        })
+        save_state(
+            fresh_dir,
+            fresh_dir / "state.sqlite",
+            fresh_state,
+            "bootstrap_terminal_failure",
+            "awaiting native worker bootstrap could not be authorized",
+        )
+    return {
+        "schema": LIFECYCLE_RUNTIME_SCHEMA,
+        "ok": True,
+        "lifecycle": "finalize_bootstrap_failure",
+        "transaction_id": None,
+        "task_id": task_id,
+        "wave_id": None,
+        "state": "bootstrap_terminal_failure",
+        "spawn_requests": [],
+        "diagnostics": [],
+        "result": {"finalized": True, "idempotent": False},
+        "code": "bootstrap_terminal_failure",
+        "recoverable": False,
+        "next_action": "Bootstrap failure is terminal; do not spawn, continue, or read a worker result for this dispatch.",
+    }
+
+
+def _v11_finalize_worker_failure(
+    *,
+    task_dir: Path,
+    state: dict[str, Any],
+    task_ref: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Close the exact current worker after a true nonretryable child terminal."""
+    if str(params.get("reason") or "").strip():
+        raise ValueError("finalize_worker_failure accepts only the fixed sanitized reason_code")
+    payload = params.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("finalize_worker_failure requires payload")
+    if sorted(set(payload) - {"dispatch_ref", "reason_code"}):
+        raise ValueError("finalize_worker_failure payload has unsupported fields")
+    dispatch_ref = str(payload.get("dispatch_ref") or "").strip()
+    reason_code = str(payload.get("reason_code") or "").strip()
+    if not re.fullmatch(r"dispatch-[0-9a-f]{24}", dispatch_ref):
+        raise ValueError("finalize_worker_failure requires the exact server-issued dispatch_ref")
+    if reason_code != "worker_nonretryable_terminal":
+        raise ValueError("finalize_worker_failure reason_code is invalid")
+
+    root = ledger_root(params)
+    task_id = str(state.get("task_id") or "")
+    terminal_record = {"dispatch_ref": dispatch_ref, "reason_code": reason_code}
+    with state_lock(root, operation="finalize_worker_failure", task_id=task_id):
+        fresh = _v11_task_state(root, task_id)
+        if fresh is None:
+            raise ValueError("worker failure task is unavailable")
+        fresh_dir, fresh_state, _fresh_task = fresh
+        if fresh_dir != task_dir:
+            raise ValueError("worker failure task projection is inconsistent")
+        prior = fresh_state.get("worker_terminal_failure")
+        if isinstance(prior, dict) and prior == terminal_record:
+            return {
+                "schema": LIFECYCLE_RUNTIME_SCHEMA,
+                "ok": True,
+                "lifecycle": "finalize_worker_failure",
+                "transaction_id": None,
+                "task_id": task_id,
+                "wave_id": None,
+                "state": "worker_terminal_failure",
+                "spawn_requests": [],
+                "diagnostics": [],
+                "result": {"finalized": True, "idempotent": True},
+                "code": "worker_terminal_failure",
+                "recoverable": False,
+                "next_action": "Worker failure is already terminal; do not continue or read a worker result for this dispatch.",
+            }
+        matching = [
+            item for item in fresh_state.get("attempts") or []
+            if isinstance(item, dict) and str(item.get("dispatch_ref") or "") == dispatch_ref
+        ]
+        if len(matching) != 1:
+            raise ValueError("worker failure dispatch does not identify exactly one task attempt")
+        attempt = matching[0]
+        attempt_id = str(attempt.get("attempt_id") or "")
+        sessions = [
+            item for item in db_list_worker_sessions(root, task_id)
+            if str(item.get("attempt_id") or "") == attempt_id
+        ]
+        if (
+            fresh_state.get("status") != "active"
+            or attempt.get("invalidated")
+            or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running", "waiting_question"}
+            or attempt.get("assignment_delivery_status") != "delivered"
+            or str(attempt.get("gate") or "") not in set(active_gates(fresh_state))
+            or attempt.get("attempt_result_ref")
+            or attempt_protocol.get_attempt_result(root, task_id=task_id, attempt_id=attempt_id) is not None
+            or not sessions
+            or not any(bool(item.get("resumable")) for item in sessions)
+        ):
+            raise ValueError("worker failure target is not the current bound nonterminal assignment")
+
+        terminal_at = now()
+        attempt["status"] = "failed"
+        attempt["lifecycle_status"] = "worker_terminal_failure"
+        attempt["assignment_delivery_status"] = "worker_terminal_failure"
+        attempt["host_resumable"] = False
+        attempt["finalized_at"] = terminal_at
+        attempt["finalization_reason"] = reason_code
+        fresh_state["status"] = "blocked"
+        fresh_state["blocked_gate"] = str(attempt.get("gate") or "")
+        fresh_state["blocked_reason"] = reason_code
+        fresh_state["worker_terminal_failure"] = terminal_record
+        for session in sessions:
+            db_put_worker_session(root, {
+                **session,
+                "status": "terminated_unavailable",
+                "resumable": False,
+                "terminated_at": terminal_at,
+            })
+        save_state(
+            fresh_dir,
+            fresh_dir / "state.sqlite",
+            fresh_state,
+            "worker_terminal_failure",
+            "current native worker returned a nonretryable terminal failure",
+        )
+    return {
+        "schema": LIFECYCLE_RUNTIME_SCHEMA,
+        "ok": True,
+        "lifecycle": "finalize_worker_failure",
+        "transaction_id": None,
+        "task_id": task_id,
+        "wave_id": None,
+        "state": "worker_terminal_failure",
+        "spawn_requests": [],
+        "diagnostics": [],
+        "result": {"finalized": True, "idempotent": False},
+        "code": "worker_terminal_failure",
+        "recoverable": False,
+        "next_action": "Worker failure is terminal; do not continue or read a worker result for this dispatch.",
+    }
+
+
+def _manage_orchestration_input_diagnostics(params: Any) -> list[dict[str, Any]]:
+    """Validate the exact selected public management-union branch."""
+    schema = PUBLIC_SCHEMA_REGISTRY.get("manage_orchestration", {})
+    diagnostics = _v11_schema_value_diagnostics(
+        params, schema, pointer="", operation="manage_orchestration",
+    )
+    if not isinstance(params, dict):
+        return diagnostics
+
+    branches = schema.get("oneOf") if isinstance(schema, Mapping) else None
+    intents = sorted({
+        str(intent_schema["const"])
+        for branch in branches or []
+        if isinstance(branch, Mapping)
+        for properties in [branch.get("properties")]
+        if isinstance(properties, Mapping)
+        for intent_schema in [properties.get("intent")]
+        if isinstance(intent_schema, Mapping) and isinstance(intent_schema.get("const"), str)
+    })
+    intent = params.get("intent")
+    if "intent" in params and (not isinstance(intent, str) or intent not in intents):
+        diagnostics = [item for item in diagnostics if item.get("json_pointer") != "/intent"]
+        intent_schema = {"type": "string", "enum": intents}
+        diagnostics.insert(0, {
+            "code": "manage_orchestration_validation_failed", "phase": "payload",
+            "path": "intent", "json_pointer": "/intent",
+            "message": "must be one canonical published intent", "received": intent,
+            "expected": intent_schema, "field_schema": intent_schema,
+            "fix": "Replace /intent with one exact enum value; aliases are not accepted.",
+        })
+    return diagnostics
+
+
+def _manage_orchestration_impl(params: dict[str, Any]) -> dict[str, Any]:
     """Keep recovery and rare control-plane capabilities outside the normal flow."""
-    resolved_task_ref = str(params.get("task_ref") or "").strip() or None
+    resolved_task_ref = str(params.get("task_ref") or "").strip() or None if isinstance(params, dict) else None
+    caller_supplied_project_root = isinstance(params, dict) and "project_root" in params
     try:
-        envelope = _v3_collect_fields(params, {"project_root", "intent", "task_ref", "reason", "payload"}, operation="manage_orchestration")
-        if "payload" in params and params.get("payload") is not None and not isinstance(params.get("payload"), dict):
-            envelope.append({"code": "manage_orchestration_validation_failed", "path": "payload", "message": "must be an object"})
+        envelope = _manage_orchestration_input_diagnostics(params)
         if envelope:
-            response = _v3_envelope_error("manage_orchestration", envelope)
+            response = _v11_envelope_error("manage_orchestration", envelope)
             response["outcome"] = "needs_correction"
             return response
-        allowed = {"project_root", "intent", "task_ref", "reason", "payload"}
-        unknown = sorted(set(params) - allowed)
-        if unknown:
-            diagnostics = [{
-                "code": "manage_orchestration_validation_failed",
-                "phase": "payload",
-                "path": field,
-                "json_pointer": "/" + field,
-                "message": "unsupported field",
-                "received": params.get(field),
-                "expected": "only project_root, intent, task_ref, reason, and payload",
-                "field_schema": {"type": "object", "additionalProperties": False},
-                "fix": f"Remove {field} and retry manage_orchestration with unrelated fields unchanged.",
-            } for field in unknown]
-            response = _v3_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
-            response["outcome"] = "needs_correction"
-            return response
+        management_schema = PUBLIC_SCHEMA_REGISTRY.get("manage_orchestration", {})
         canonical_intents = {
-            "inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane",
-            "resource", "question", "plan_approval", "follow_up", "steer", "prune",
-            "maintenance", "artifacts",
+            str(intent_schema["const"])
+            for branch in management_schema.get("oneOf", [])
+            if isinstance(branch, Mapping)
+            for properties in [branch.get("properties")]
+            if isinstance(properties, Mapping)
+            for intent_schema in [properties.get("intent")]
+            if isinstance(intent_schema, Mapping) and isinstance(intent_schema.get("const"), str)
         }
         if not isinstance(params.get("intent"), str) or not params.get("intent").strip():
             diagnostics = [{
@@ -13201,7 +12348,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "field_schema": {"type": "string", "enum": sorted(canonical_intents)},
                 "fix": "Set intent to one canonical value from diagnostics.expected; do not omit it.",
             }]
-            response = _v3_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
+            response = _v11_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
             response["outcome"] = "needs_correction"
             return response
         # Canonical public enum values are case- and punctuation-sensitive;
@@ -13221,16 +12368,13 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "field_schema": {"type": "string", "enum": sorted(canonical_intents)},
                 "fix": "Replace intent with one canonical value from diagnostics.expected; aliases are not accepted.",
             }]
-            response = _v3_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
+            response = _v11_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
             response["outcome"] = "needs_correction"
             return response
-        implicit_question_answer = (
-            intent == "question"
-            and not str(params.get("task_ref") or "").strip()
-            and isinstance(params.get("payload"), dict)
-            and str((params.get("payload") or {}).get("command") or "").strip() == "answer"
-            and not str((params.get("payload") or {}).get("question_ref") or "").strip()
+        coordinator_project, _coordinator_task_dir, _coordinator_state, _coordinator_task, _ = authorize_coordinator_ref(
+            params, "manage_orchestration",
         )
+        params = {**params, "project_root": str(coordinator_project)}
         if intent == "recover_blocked" and "payload" in params:
             diagnostics = [{
                 "code": "manage_orchestration_validation_failed",
@@ -13241,60 +12385,28 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "received": params.get("payload"),
                 "expected": "omit payload; Cortex derives the recovery scope from task_ref",
                 "field_schema": {"not": {"required": ["payload"]}},
-                "fix": "Remove payload and retry recover_blocked with the same task_ref; do not provide future_waves or select a replacement worker.",
+                "fix": "Remove payload and retry recover_blocked with the same task_ref and coordinator_ref; Cortex derives the corrective dispatch.",
             }]
-            response = _v3_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
+            response = _v11_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
             response["outcome"] = "needs_correction"
             return response
-        if intent not in {"prune", "maintenance", "question"} and "project_root" in params:
-            diagnostics = [{
-                "code": "manage_orchestration_validation_failed",
-                "phase": "identity",
-                "path": "project_root",
-                "json_pointer": "/project_root",
-                "message": "task-scoped management derives project_root from task_ref; project_root is not accepted",
-                "received": params.get("project_root"),
-                "expected": "omit project_root and provide the exact task_ref",
-                "field_schema": {"not": {"required": ["project_root"]}},
-                "fix": "Remove project_root and retry the same task-scoped intent with task_ref; Cortex resolves the bound workspace.",
-            }]
-            response = _v3_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
-            response["outcome"] = "needs_correction"
-            return response
-        if intent == "prune":
-            select_project_root(params)
-            return prune_orchestration_state(params)
-        if intent == "maintenance":
-            # Health inspection must not initialize or migrate a missing
-            # ledger. The controlled module validates the existing root and
-            # permits writes only through explicit, confirmed actions.
-            root = existing_ledger_root(params)
-            return manage_health_maintenance(root, params.get("payload"))
-        if implicit_question_answer:
-            payload = params.get("payload") or {}
-            return resume_question_from_ordinary_chat({
-                "project_root": params.get("project_root"),
-                "message": payload.get("answers", payload.get("answer")),
-                "answer_en": payload.get("answer_en"),
-                "user_language": payload.get("user_language"),
-            })
         if not str(params.get("task_ref") or "").strip():
-            return _v3_task_ref_required_error(f"manage_orchestration intent '{intent}'")
+            return _v11_task_ref_required_error(f"manage_orchestration intent '{intent}'")
         bound_params = _bind_task_project_root(
             params,
-            include_completed=intent in {"inspect", "recover_inspect", "deactivate", "follow_up"},
+            include_completed=intent in {"inspect", "recover_inspect", "deactivate", "follow_up", "finalize_bootstrap_failure", "finalize_worker_failure"},
         )
         if bound_params is None:
-            return _v3_error(
+            return _v11_error(
                 "task_scope_unavailable",
-                "task_ref could not be resolved to one host-bound project root; use the exact task_ref returned by start_orchestration",
+                "task_ref could not be resolved to one canonical project root; use the exact task_ref returned by start_orchestration",
                 outcome="needs_input",
                 task_ref=resolved_task_ref,
             )
         params = bound_params
-        resolved = _v3_resolve_task(
+        resolved = _v11_resolve_task(
             params,
-            include_completed=bool(str(params.get("task_ref") or "").strip()) and intent in {"inspect", "recover_inspect", "deactivate", "follow_up"},
+            include_completed=bool(str(params.get("task_ref") or "").strip()) and intent in {"inspect", "recover_inspect", "deactivate", "follow_up", "finalize_bootstrap_failure", "finalize_worker_failure"},
             require_task_ref=True,
         )
         if isinstance(resolved, dict):
@@ -13303,11 +12415,27 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         resolved_task_ref = task_ref
         if intent == "artifacts":
             return manage_task_artifacts(params, task_dir, state, task_ref)
+        if intent == "finalize_bootstrap_failure":
+            finalized = _v11_finalize_bootstrap_failure(
+                task_dir=task_dir,
+                state=state,
+                task_ref=task_ref,
+                params=params,
+            )
+            return _v11_response(finalized, task_ref, include_result=True)
+        if intent == "finalize_worker_failure":
+            finalized = _v11_finalize_worker_failure(
+                task_dir=task_dir,
+                state=state,
+                task_ref=task_ref,
+                params=params,
+            )
+            return _v11_response(finalized, task_ref, include_result=True)
         if intent == "steer":
-            return _v3_active_steer(params, task_dir, state, task_definition, task_ref)
+            return _v11_active_steer(params, task_dir, state, task_definition, task_ref)
         if intent == "follow_up":
-            follow_up = _v3_follow_up_payload(params.get("payload"))
-            source_context = _v3_follow_up_context(
+            follow_up = _v11_follow_up_payload(params.get("payload"))
+            source_context = _v11_follow_up_context(
                 task_dir,
                 state,
                 task_definition,
@@ -13333,59 +12461,41 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "_follow_up": source_context,
                 "_transport_request_id": follow_up_request_id,
             })
-            if not started.get("ok"):
-                return started
-            started["follow_up"] = {
-                "source_task_ref": task_ref,
-                "source_handoff_path": source_context["source_handoff_path"],
-                "source_result_refs": source_context["source_result_refs"],
-                "new_task_ref": started["task_ref"],
-            }
-            if started.get("replayed"):
-                started["next_action"] = (
-                    f"{COORDINATOR_LOCK} The linked corrective task_ref={started['task_ref']} already exists; this is an idempotent replay. "
-                    "Do not create or dispatch it again. Do not modify or reopen the source task. "
-                    "If the original dispatch response was lost, inspect the corrective task once and invoke only its still-awaiting dispatches, "
-                    "then follow its normal plan approval, verification, and close flow."
-                )
-            else:
-                started["next_action"] = (
-                    f"{COORDINATOR_LOCK} A new corrective task was created for completed source task_ref={task_ref}. "
-                    "Do not modify or reopen the source task. Execute only the returned dispatches for the new task, "
-                    "then follow its normal plan approval, verification, and close flow."
-                )
+            # ``start_orchestration`` already returns the only admissible
+            # start-delivery envelope.  Do not append source-task metadata or
+            # prose: that would invalidate the closed union and could strip
+            # the new task's one-shot coordinator capability on re-projection.
             return started
         common = {
             "project_root": params["project_root"],
             "principal": state.get("principal"),
-            "thread_id": state.get("thread_id"),
             "task_id": state["task_id"],
         }
         if intent == "inspect":
-            return _v3_response(_orchestrate_inspect(common), task_ref, include_result=True)
+            return _v11_response(_engine_inspect_lifecycle(common), task_ref, include_result=True)
         if intent == "recover_inspect":
             # Lifecycle recovery is deliberately distinct from ordinary
             # inspection: status reads must not contend on the mutation lock
             # or silently expire/retire attempts.  The server derives the
             # exact repair scope from current durable state; callers cannot
             # select attempts, receipts, or identities to mutate.
-            return _v3_response(
-                _orchestrate_inspect({**common, "payload": {"mode": "recover_lifecycle"}}),
+            return _v11_response(
+                _engine_inspect_lifecycle({**common, "payload": {"mode": "recover_lifecycle"}}),
                 task_ref,
                 include_result=True,
             )
         normalized_payload = None
         if intent == "question":
-            normalized_payload = _v3_question_management_payload(params.get("payload"))
+            normalized_payload = _v11_question_management_payload(params.get("payload"))
             if normalized_payload.get("command") == "answer":
                 normalized_payload["resume_context"] = {
                     "source": "manage_orchestration",
                     "user_language": str(state.get("user_language") or "en"),
                 }
         elif intent == "plan_approval":
-            normalized_payload = _v3_plan_approval_payload(params.get("payload"))
+            normalized_payload = _v11_plan_approval_payload(params.get("payload"))
             if normalized_payload["decision"] == "prompt":
-                normalized_payload, prompt_response = _v3_prompt_plan_approval(
+                normalized_payload, prompt_response = _v11_prompt_plan_approval(
                     state,
                     task_ref,
                     normalized_payload,
@@ -13410,54 +12520,18 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 }
         submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload"), **operation_context}, sort_keys=True, default=str))[:16])
         if intent in {"resume", "recover_blocked", "deactivate"}:
-            recovery: dict[str, Any] = {}
             if intent == "recover_blocked":
-                old = _engine_orchestrate({
+                old = _engine_manage_lifecycle("resume", {
                     **common,
-                    "operation": "resume",
                     "submission_id": submission_id,
                     "reason": params.get("reason") or "Server-derived corrective recovery for terminal worker result.",
                     "terminal_recovery": True,
                 })
-            elif intent == "resume" and params.get("payload") is not None:
-                raw_recovery = params.get("payload")
-                if not isinstance(raw_recovery, dict):
-                    raise ValueError("resume payload must be an object")
-                unknown_recovery = sorted(set(raw_recovery) - {"future_waves", "rework"})
-                if unknown_recovery:
-                    raise ValueError("unsupported resume recovery fields: " + ", ".join(unknown_recovery))
-                if raw_recovery.get("future_waves") is None:
-                    raise ValueError("resume recovery payload requires future_waves")
-                if not str(params.get("reason") or "").strip():
-                    raise ValueError("resume recovery future_waves requires a concise reason")
-                recovery["future_waves"] = _v3_compact_waves(
-                    raw_recovery["future_waves"],
-                    task_definition,
-                    completed_gates=(
-                        set(state.get("completed_gates", []))
-                        | set(state.get("skipped_gates", []))
-                        | set(active_gates(state))
-                    ),
-                    project_root=select_project_root(params),
-                    allow_visible_threads=bool(task_definition.get("visible_thread_requested", False)),
-                )
-                recovery["allow_rework"] = True
-                if raw_recovery.get("rework") is not None:
-                    requested_rework = canonical_pipeline_gate(str(raw_recovery["rework"]).strip())
-                    if requested_rework not in AVAILABLE_GATES:
-                        raise ValueError("resume recovery rework must name a supported gate")
-                    recovery["rework_gate"] = requested_rework
-                old = _engine_orchestrate({
-                    **common,
-                    "operation": intent,
-                    "submission_id": submission_id,
-                    "reason": params.get("reason"),
-                    **recovery,
-                })
             else:
-                old = _engine_orchestrate({
+                if intent == "resume" and params.get("payload") is not None:
+                    raise ValueError("resume is server-derived and does not accept a caller-authored payload")
+                old = _engine_manage_lifecycle(intent, {
                     **common,
-                    "operation": intent,
                     "submission_id": submission_id,
                     "reason": params.get("reason"),
                 })
@@ -13465,17 +12539,14 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             payload = normalized_payload if normalized_payload is not None else params.get("payload")
             if not isinstance(payload, dict):
                 raise ValueError(f"{intent} management requires payload")
-            old = _engine_orchestrate({
+            old = _engine_manage_lifecycle(intent, {
                 **common,
-                "operation": intent,
                 "submission_id": submission_id,
                 "payload": payload,
             })
-        response = _v3_response(old, task_ref, include_result=True)
         if intent == "question":
-            response = _v3_question_response(response, state)
-            response["next_action"] = _public_next_action(response.get("next_action"))
-            return response
+            return _v11_question_response(old, state, task_ref)
+        response = _v11_response(old, task_ref, include_result=True)
         if intent == "plan_approval" and (old.get("result") or {}).get("decision") == "approved":
             response["approval_message"] = "Plan approved."
             response["next_action"] = (
@@ -13490,7 +12561,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "phase": "management",
             "message": redact(str(exc), 1000),
         }]
-        error = _v3_error("management_failed", "management request validation failed", diagnostics=diagnostics)
+        error = _v11_error("management_failed", "management request validation failed", diagnostics=diagnostics)
         error["retryable"] = True
         error["attempt_budget_consumed"] = False
         error["worker_replacement_authorized"] = False
@@ -13511,115 +12582,67 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         return error
 
 
-def _manage_governance_input_diagnostics(params: Any) -> list[dict[str, Any]]:
-    """Collect caller-correctable governance form errors before any ledger read/write.
+def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+    """Return only the closed start response and its one-shot capability."""
+    return project_public_response(
+        "start_orchestration", _start_orchestration_impl(params), arguments=params,
+    )
 
-    This is deliberately a pure boundary check.  Its paths and field schemas
-    mirror the public MCP contract so a client can apply one correction pass,
-    rather than discovering one malformed field per retry.
-    """
+
+def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+    """Return only the closed coordinator lifecycle response."""
+    return project_public_response(
+        "continue_orchestration", _continue_orchestration_impl(params), arguments=params,
+    )
+
+
+def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+    """Return only the selected closed lifecycle or question-management response."""
+    return project_public_response(
+        "manage_orchestration", _manage_orchestration_impl(params), arguments=params,
+    )
+
+
+def _manage_governance_input_diagnostics(params: Any) -> list[dict[str, Any]]:
+    """Validate the exact selected public governance-union branch."""
     schema = MANAGE_GOVERNANCE_SCHEMA if isinstance(globals().get("MANAGE_GOVERNANCE_SCHEMA"), dict) else {}
-    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-    allowed = set(properties) or {
-        "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof",
-        "previous_coordinator_recovery_proof", "task_ref", "capability_generation", "submission_id", "entity",
-        "initiative_ref", "parent_ref", "title", "goal", "owner", "risk", "acceptance_oracle_artifact_ref", "task_id",
-        "lane_id", "relationship", "milestone", "deliverable", "corrective", "expected_revision", "status", "evidence",
-        "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref",
-        "record_type", "content", "created_by", "supersedes", "expires_at", "approval_basis", "content_artifact_ref",
-        "link_ref", "finding_fingerprint", "evidence_ref", "fingerprint", "findings", "threshold", "window_days",
-        "limit", "offset", "proposal_ref", "trigger", "reason",
-    }
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics = _v11_schema_value_diagnostics(params, schema, pointer="", operation="manage_governance")
     if not isinstance(params, dict):
-        return [{
-            "code": "manage_governance_validation_failed", "path": "request", "json_pointer": "",
-            "message": "request must be an object", "received": params, "expected": "object",
-            "field_schema": {"type": "object", "additionalProperties": False},
-            "fix": "Submit one JSON object matching the manage_governance input schema.",
-        }]
-    for key in sorted(set(params) - allowed):
-        diagnostics.append({
-            "code": "manage_governance_validation_failed", "path": key, "json_pointer": f"/{key}",
-            "message": "unsupported field", "received": params.get(key),
-            "expected": "one of the fields declared by manage_governance",
-            "field_schema": {"type": "object", "additionalProperties": False},
-            "fix": f"Remove field {key!r} and retry without mutating other fields.",
-        })
-    def add_required(path: str, message: str) -> None:
-        field = path.rsplit(".", 1)[-1]
-        diagnostics.append({
-            "code": "manage_governance_validation_failed", "path": path, "json_pointer": "/" + path.replace(".", "/"),
-            "message": message, "received": params.get(field), "expected": "a non-empty value",
-            "field_schema": dict(properties.get(field) or {"type": "string", "minLength": 1}),
-            "fix": f"Set {path} to a valid value from the published manage_governance schema.",
-        })
+        return diagnostics
+    branches = schema.get("oneOf") if isinstance(schema, Mapping) else None
+    actions = sorted({
+        str(action_schema["const"])
+        for branch in branches or []
+        if isinstance(branch, Mapping)
+        for properties in [branch.get("properties")]
+        if isinstance(properties, Mapping)
+        for action_schema in [properties.get("action")]
+        if isinstance(action_schema, Mapping) and isinstance(action_schema.get("const"), str)
+    })
     action = params.get("action")
-    action_schema = dict(properties.get("action") or {"type": "string", "minLength": 1})
-    actions = list(action_schema.get("enum") or [])
-    if not isinstance(action, str) or not action.strip():
-        diagnostics.append({
-            "code": "manage_governance_validation_failed", "path": "action", "json_pointer": "/action",
-            "message": "action is required", "received": action, "expected": actions,
-            "field_schema": action_schema,
-            "fix": "Set action to one of the enum values in diagnostics.expected, then retry the same request.",
+    if "action" in params and (not isinstance(action, str) or action not in actions):
+        diagnostics = [
+            item for item in diagnostics
+            if item.get("json_pointer") != "/action"
+            and (
+                item.get("json_pointer") in {"/task_ref", "/coordinator_ref"}
+                or item.get("received") is not None
+            )
+        ]
+        action_schema = {"type": "string", "enum": actions}
+        diagnostics.insert(0, {
+            "code": "manage_governance_validation_failed", "phase": "payload",
+            "path": "action", "json_pointer": "/action",
+            "message": "must be one canonical published action", "received": action,
+            "expected": action_schema, "field_schema": action_schema,
+            "fix": "Replace /action with one exact enum value; compatibility aliases are not accepted.",
         })
-    elif actions and action.strip().lower().replace("-", "_") not in actions:
-        diagnostics.append({
-            "code": "manage_governance_validation_failed", "path": "action", "json_pointer": "/action",
-            "message": "action is not supported", "received": action, "expected": actions,
-            "field_schema": action_schema,
-            "fix": "Replace action with one enum value listed in diagnostics.expected.",
-        })
-    if (
-        not isinstance(params.get("project_root"), str)
-        or not str(params.get("project_root") or "").strip()
-    ) and not str(params.get("task_ref") or "").strip():
-        add_required(
-            "project_root",
-            "project_root is required unless task_ref identifies the server-bound task",
-        )
-    if str(params.get("project_root") or "").strip() and str(params.get("task_ref") or "").strip():
-        diagnostics.append({
-            "code": "manage_governance_validation_failed",
-            "path": "project_root",
-            "json_pointer": "/project_root",
-            "message": "task-bound governance derives project_root from task_ref; do not send both",
-            "received": params.get("project_root"),
-            "expected": "omit project_root when task_ref is supplied",
-            "field_schema": {"not": {"required": ["project_root"]}},
-            "fix": "Remove project_root and retry with the same task_ref; Cortex resolves the immutable bound workspace.",
-        })
-    normalized_action = str(action or "").strip().lower().replace("-", "_")
-    recovery_actions = {
-        "recover_coordinator_capability",
-        "acknowledge_coordinator_recovery",
-    }
-    required_by_action = {
-        "create_initiative": ("title", "goal"),
-        "create_record": ("record_type", "content"), "record_create": ("record_type", "content"),
-        "add_dependency": ("source_type", "source_ref", "target_type", "target_ref", "dependency_type"),
-        "dependency": ("source_type", "source_ref", "target_type", "target_ref", "dependency_type"),
-        "request_exception": ("trigger", "reason"), "exception_request": ("trigger", "reason"),
-    }
-    for field in required_by_action.get(normalized_action, ()):
-        value = params.get(field)
-        if value is None or (isinstance(value, str) and not value.strip()):
-            add_required(field, f"{field} is required for action {normalized_action}")
-    if normalized_action in CAPABILITY_RECOVERY_ACTIONS:
-        # Recovery is deliberately allowed through to the host-bound handler
-        # without any caller-authored bearer or proof. The server owns both
-        # identity and recovery state; the model receives metadata only.
-        for field in ("task_ref",):
-            value = params.get(field)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                add_required(field, f"{field} is required for recovery action {normalized_action}")
     return diagnostics
 
 
 def _manage_governance_validation_error(params: Any) -> dict[str, Any]:
     diagnostics = _manage_governance_input_diagnostics(params)
-    result = _v3_envelope_error("manage_governance", diagnostics)
+    result = _v11_envelope_error("manage_governance", diagnostics)
     result["schema"] = "cortex/validation-error/v1"
     result["outcome"] = "needs_correction"
     result["code"] = "manage_governance_validation_failed"
@@ -13629,7 +12652,7 @@ def _manage_governance_validation_error(params: Any) -> dict[str, Any]:
         "No ledger mutation was performed."
     )
     result["validation"] = {
-        "schema": "cortex/validation-error/v1", "diagnostics_are_complete": True,
+        **_validation_contract("manage_governance", diagnostics),
         "apply_all_diagnostics_atomically": True, "retry_same_request": True,
         "patch_paths": [item.get("json_pointer") for item in diagnostics if item.get("json_pointer")],
     }
@@ -13637,10 +12660,10 @@ def _manage_governance_validation_error(params: Any) -> dict[str, Any]:
 
 
 _GOVERNANCE_DIAGNOSTIC_FIELDS: dict[str, tuple[str, dict[str, Any], str]] = {
-    "task_scope_unavailable": ("task_ref", {"type": "string", "minLength": 1}, "Provide the exact active task_ref or the project_root for the intended task."),
-    "coordinator_authorization_required": ("task_ref", {"type": "string", "minLength": 1}, "Retry the same action from the active host-bound coordinator session; do not invent principal or thread_id."),
-    "coordinator_capability_required": ("action", {"type": "string", "minLength": 1}, "Retry the same normal governance action without caller-authored identity fields; Cortex derives authorization from the host activation."),
-    "coordinator_capability_invalid": ("action", {"type": "string", "minLength": 1}, "Retry the same action from the active host-bound coordinator session, or use the separate recovery form only when the authorization response was actually lost."),
+    "task_scope_unavailable": ("task_ref", {"type": "string", "minLength": 1}, "Provide the exact active task_ref returned by start_orchestration."),
+    "coordinator_authorization_required": ("coordinator_ref", {"type": "string", "pattern": COORDINATOR_REF_PATTERN}, "Retry with the exact task_ref and coordinator_ref returned by start_orchestration."),
+    "coordinator_capability_required": ("coordinator_ref", {"type": "string", "pattern": COORDINATOR_REF_PATTERN}, "Provide the exact coordinator_ref returned by start_orchestration; no ambient identity can replace it."),
+    "coordinator_capability_invalid": ("coordinator_ref", {"type": "string", "pattern": COORDINATOR_REF_PATTERN}, "Retry with the exact unmodified coordinator_ref for this task or fail closed with coordinator_capability_lost."),
     "coordinator_capability_scope_denied": ("action", {"type": "string", "minLength": 1}, "Choose an action allowed by the server-bound coordinator scope and retry the same task."),
     "coordinator_capability_action_denied": ("action", {"type": "string", "minLength": 1}, "Choose an action allowed by the server-bound coordinator scope and retry the same task."),
     "unknown_action": ("action", {"type": "string", "minLength": 1}, "Set action to one of the enum values published in the manage_governance tool schema."),
@@ -13672,7 +12695,7 @@ def _governance_error_receipt(exc: GovernanceError) -> dict[str, Any]:
         "field_schema": field_schema,
         "fix": fix,
     }
-    result = _v3_envelope_error("manage_governance", [diagnostic])
+    result = _v11_envelope_error("manage_governance", [diagnostic])
     result.update({
         "schema": "cortex/validation-error/v1",
         "outcome": "needs_correction" if not code.startswith("ledger_") else "recovery_advice",
@@ -13692,100 +12715,41 @@ def _governance_error_receipt(exc: GovernanceError) -> dict[str, Any]:
     return result
 
 
-def _host_bound_governance_activation(project: Path, task_ref: str | None = None) -> tuple[str, str, str, str] | None:
-    """Resolve one active coordinator from server-owned activation state.
-
-    MCP callers do not need to echo principal/thread/capability.  A supplied
-    task_ref narrows the lookup; otherwise exactly one active task is required.
-    The host/session binding and activation records are both server-owned.
-    """
-    root = ledger_root({"project_root": str(project)})
-    requested = str(task_ref or "").strip()
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    for key, record in _activation_records(root).items():
-        if not isinstance(record, dict) or record.get("schema") != SCHEMA:
-            continue
-        task_id = str(record.get("task_id") or "").strip()
-        if not task_id or (requested and _v3_task_ref(task_id) != requested):
-            continue
-        candidates.append((task_id, record))
-    if len(candidates) != 1:
-        return None
-    task_id, activation = candidates[0]
-    principal = str(activation.get("principal") or "").strip()
-    thread_id = str(activation.get("thread_id") or "").strip()
-    if not principal or not thread_id:
-        return None
-    return task_id, principal, thread_id, str(activation.get("mode") or "")
-
-
-def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
+def _manage_governance_impl(params: dict[str, Any]) -> dict[str, Any]:
     """Expose the additive v11 governance ledger without widening lifecycle calls."""
     try:
         preflight = _manage_governance_input_diagnostics(params)
         if preflight:
             return _manage_governance_validation_error(params)
+        governance_schema = PUBLIC_SCHEMA_REGISTRY.get("manage_governance", {})
+        action = params.get("action")
+        selected_branches = [
+            branch
+            for branch in governance_schema.get("oneOf", [])
+            if isinstance(branch, Mapping)
+            and isinstance(branch.get("properties"), Mapping)
+            and isinstance(branch["properties"].get("action"), Mapping)
+            and branch["properties"]["action"].get("const") == action
+        ]
         governance_allowed = {
-            "project_root", "action", "entity", "initiative_ref", "parent_ref", "title", "goal", "owner", "risk", "acceptance_oracle_artifact_ref", "task_id", "lane_id", "relationship", "milestone", "deliverable", "corrective", "expected_revision", "status", "evidence", "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref", "record_type", "content", "created_by", "supersedes", "expires_at", "approval_basis", "content_artifact_ref", "link_ref", "finding_fingerprint", "evidence_ref", "fingerprint", "findings", "threshold", "window_days", "proposal_ref", "trigger", "reason", "limit", "offset", "task_ref", "capability_generation", "submission_id",
+            field
+            for branch in selected_branches
+            for field in branch["properties"]
         }
-        envelope = _v3_collect_fields(params, governance_allowed, operation="manage_governance")
+        envelope = _v11_collect_fields(params, governance_allowed, operation="manage_governance")
         if not str(params.get("action") or "").strip():
             envelope.append({"code": "manage_governance_validation_failed", "path": "action", "message": "is required"})
         if envelope:
-            return _v3_envelope_error("manage_governance", envelope)
-        bound_params = _bind_task_project_root(params, include_completed=True)
-        if bound_params is None:
-            raise GovernanceError(
-                "task_ref could not be resolved to one host-bound project root; use the exact task_ref returned by start_orchestration",
-                code="task_scope_unavailable",
-            )
-        params = bound_params
-        project = select_project_root(params)
-        allowed = {
-            "project_root", "action", "entity", "initiative_ref", "parent_ref", "title", "goal",
-            "owner", "risk", "acceptance_oracle_artifact_ref", "task_id", "lane_id", "relationship", "milestone",
-            "deliverable", "corrective", "expected_revision", "status", "evidence", "source_type", "source_ref",
-            "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref", "record_type", "content",
-            "created_by", "supersedes", "expires_at", "approval_basis", "content_artifact_ref", "link_ref", "finding_fingerprint", "evidence_ref", "fingerprint",
-            "findings", "threshold", "window_days", "proposal_ref", "trigger", "reason",
-            "limit", "offset", "task_ref", "capability_generation", "submission_id",
-        }
-        unknown = sorted(set(params) - allowed)
+            return _v11_envelope_error("manage_governance", envelope)
+        project, _task_dir, state, _task, _task_ref = authorize_coordinator_ref(
+            params, "manage_governance",
+        )
+        unknown = sorted(set(params) - governance_allowed)
         if unknown:
             raise GovernanceError("unsupported governance fields: " + ", ".join(unknown), code="unsupported_fields")
-        requested_action = _capability_action(params.get("action"))
-        if requested_action in CAPABILITY_RECOVERY_ACTIONS:
-            if requested_action == "acknowledge_coordinator_recovery":
-                return _acknowledge_coordinator_recovery(params, project)
-            return _recover_coordinator_capability(params, project)
-        bound_identity = _host_bound_governance_activation(
-            project, str(params.get("task_ref") or "").strip() or None
-        )
-        if bound_identity is None:
-            raise GovernanceError(
-                "no unique active host-bound coordinator session matches this governance request",
-                code="coordinator_authorization_required",
-            )
-        bound_task_id, principal, thread_id, _activation_mode = bound_identity
-        try:
-            activation = require_activation(
-                {"project_root": str(project), "principal": principal, "thread_id": thread_id},
-                bound_task_id,
-            )
-        except ValueError as exc:
-            raise GovernanceError(str(exc), code="coordinator_authorization_required") from exc
-        bound_principal = str(activation.get("principal") or "").strip()
-        bound_thread = str(activation.get("thread_id") or "").strip()
-        if not bound_principal or not bound_thread:
-            raise GovernanceError("active coordinator activation has no bound identity", code="coordinator_authorization_required")
-        if principal != bound_principal or thread_id != bound_thread:
-            raise GovernanceError(
-                "governance request identity does not match the active coordinator activation",
-                code="coordinator_authorization_required",
-            )
         claims = _coordinator_capability_claims_for_task(
             ledger_root({"project_root": str(project)}),
-            bound_task_id,
+            str(state["task_id"]),
         )
         if claims is None:
             raise GovernanceError(
@@ -13795,11 +12759,9 @@ def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
         payload = {
             key: value
             for key, value in params.items()
-            if key not in {"project_root", "principal", "thread_id", "coordinator_capability"}
+            if key not in {"task_ref", "coordinator_ref"}
         }
-        # The active server activation, never caller JSON, owns the actor
-        # identity used in immutable governance rows and approvals.
-        payload["created_by"] = bound_principal
+        payload["created_by"] = str(claims.get("principal") or "coordinator")
         _authorize_governance_capability_claim(claims, payload)
         result = manage_governance_service(
             ledger_root({"project_root": str(project)}), payload, actor_role="coordinator"
@@ -13811,9 +12773,7 @@ def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
             "action": payload.get("action"),
             "authorization": {
                 "actor": "coordinator",
-                "source": "server_activation",
-                "principal": bound_principal,
-                "thread_id": bound_thread,
+                "source": "explicit_coordinator_ref",
                 "capability_kind": claims["kind"],
                 "generation": claims["generation"],
             },
@@ -13827,6 +12787,13 @@ def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
             "diagnostics": [{"code": "governance_failed", "message": redact(str(exc), 1000)}],
             "next_action": f"{COORDINATOR_LOCK} Correct the governance request or result the bounded ledger error.",
         }
+
+
+def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
+    """Return one closed governance receipt or explicit inspection projection."""
+    return project_public_response(
+        "manage_governance", _manage_governance_impl(params), arguments=params,
+    )
 
 
 # ``sync-cortex.sh`` validates the server through ``importlib`` without
@@ -13849,6 +12816,7 @@ bind_runtime_dependencies(globals())
 from cortex_runtime.briefings import (
     codebase_memory_project_key_from_root,
     dispatch_briefing_review_marker,
+    host_bootstrap_repair_message,
     host_spawn_bootstrap,
     host_spawn_prompt,
 )
@@ -13881,7 +12849,6 @@ from cortex_runtime.dispatch_briefing import (
 from cortex_runtime import attempt_protocol
 from cortex_runtime.attempt_facade import (
     complete_attempt as complete_worker_attempt,
-    repair_planning,
     record_attempt_event as record_worker_attempt_event,
     read_worker_result,
 )
@@ -13900,11 +12867,10 @@ QUESTION_TOOL_SCHEMA = {
     "properties": {
         "task_id": {"type": "string", "minLength": 1},
         "principal": {"type": "string", "minLength": 1},
-        "thread_id": {"type": "string"},
         "turn_id": {"type": "string"},
         "question_id": {"type": "string", "description": "Existing worker question to surface and answer in the main chat."},
         "user_language": {"type": "string", "description": "Language requested by the user for the main-chat projection."},
-        "communication_profile": {"type": "string", "enum": ["natural", "neutral", "compact", "technical"], "default": "natural", "description": "User-facing message style for direct question projections; task state remains authoritative on the managed route."},
+        "communication_profile": {"type": "string", "enum": ["natural", "compact", "technical"], "default": "natural", "description": "User-facing message style for direct question projections; task state remains authoritative on the managed route."},
         "localized_question": {"type": "string", "description": "Main-coordinator display translation into the task's original user language; durable worker content remains English and unchanged."},
         "localized_header": {"type": "string"},
         "localized_options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA},
@@ -13925,153 +12891,6 @@ QUESTION_TOOL_SCHEMA = {
     },
     "required": ["task_id", "principal"],
 }
-ORCHESTRATE_TASK_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "task_id": {"type": "string", "minLength": 1, "description": "Required durable lowercase task identifier."},
-        "user_request": {"type": "string", "minLength": 1, "description": "Exact user-authored task text."},
-        "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]},
-        "requirements": {"type": "array", "items": {"type": "string"}},
-        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-        "scope": {"type": "array", "items": {"type": "string"}},
-        "allowed_paths": {"type": "array", "items": {"type": "string"}},
-        "verification": {"type": "array", "items": {"type": "string"}},
-        "budget": {"type": "string"},
-        "pause_conditions": {"type": "array", "items": {"type": "string"}},
-        "plan_approval": {"type": "string", "enum": ["auto", "required"]},
-        "initiative_ref": {"type": "string"},
-        "governance_mode": {"type": "string", "enum": ["auto", "required", "off"]},
-        "governance": {"type": "object"},
-        "risk_triggers": {"type": ["array", "object"]},
-        "governance_triggers": {"type": ["array", "object"]},
-        "multiple_repositories": {"type": "boolean"},
-        "related_tasks": {"type": "boolean"},
-        "long_lived_lanes": {"type": "boolean"},
-        "conflicting_resources": {"type": "boolean"},
-        "multi_session_handoff": {"type": "boolean"},
-        "user_language": {"type": "string"},
-        "visible_thread_requested": {
-            "type": "boolean",
-            "default": False,
-            "description": "Explicit user authorization for visible task creation; hidden subagents remain the default.",
-        },
-    },
-    "required": ["task_id", "user_request", "complexity"],
-}
-ORCHESTRATE_DELEGATION_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "gate": {"type": "string", "minLength": 1, "enum": sorted(AVAILABLE_GATES)},
-        "agent": {"type": "string", "enum": sorted(AGENTS)},
-        "task_kind": {"type": "string"},
-        "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]},
-        "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)},
-        "user_requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)},
-        "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)},
-        "dispatch_mode": {"type": "string", "enum": ["hidden_subagent", "visible_thread"]},
-        "thread_environment": {"type": "string", "enum": ["local", "worktree"]},
-        "requested_reasoning_effort": {"type": "string"},
-        "retry": {"type": "integer", "minimum": 0},
-        "parallel": {"type": "boolean"},
-        "objective": {"type": "string"},
-        "ownership": {"type": "string", "minLength": 1},
-        "context_files": {"type": "array", "items": {"type": "string"}},
-        "context_result_refs": {"type": "array", "items": {"type": "string"}},
-        "context_gates": {"type": "array", "items": {"type": "string"}},
-        "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "selection_reason": {"type": "string", "minLength": 1},
-    },
-    "required": ["gate"],
-}
-ORCHESTRATE_WAVE_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "wave_id": {"type": "string", "minLength": 1, "description": "Stable wave identifier; do not use id."},
-        "delegations": {"type": "array", "minItems": 1, "maxItems": 32, "items": ORCHESTRATE_DELEGATION_SCHEMA},
-    },
-    "required": ["wave_id", "delegations"],
-}
-ORCHESTRATE_HOST_CAPABILITIES_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "spawn_agent_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "spawn_agent_default_model": {"type": "string", "enum": sorted(SUPPORTED_MODELS)},
-        "create_thread_models": {"type": "array", "items": {"type": "string", "minLength": 1}},
-    },
-    "required": ["spawn_agent_models"],
-}
-ORCHESTRATE_COMPLETION_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "attempt_id": {"type": "string", "minLength": 1},
-        "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]},
-        "host_agent_id": {"type": "string", "minLength": 1},
-        "host_task_name": {"type": "string", "minLength": 1},
-        "host_model": {"type": "string", "minLength": 1},
-        "host_reasoning_effort": {"type": "string", "minLength": 1},
-        "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)},
-        "reason": {"type": "string"},
-        "attempt_result_ref": {"type": "string", "minLength": 1},
-    },
-    "required": ["attempt_id", "host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort", "status"],
-}
-ORCHESTRATE_PAYLOAD_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "command": {"type": "string", "enum": ["ask", "answer", "list", "updates", "inspect", "claim", "release", "status"]},
-        "question_ref": {"type": "string", "minLength": 1},
-        "question_id": {"type": "string", "minLength": 1},
-        "answer": {},
-        "answer_en": {"type": "string", "minLength": 1},
-        "canonical_answers": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
-        "decision": {"type": "string", "enum": ["prompt", "approve", "cancel", "revise"]},
-        "feedback": {"type": "string"},
-        "request_id": {"type": "string", "minLength": 1},
-        "resource": {"type": "string", "minLength": 1},
-        "resource_ref": {"type": "string", "minLength": 1},
-        "lane_id": {"type": "string", "minLength": 1},
-        "lane": {"type": "string", "minLength": 1},
-        "scope": {"type": "string"},
-        "user_message": {"type": "string"},
-        "message_en": {"type": "string"},
-        "canonical_en": {"type": "string"},
-        "localized_question": {"type": "string"},
-        "localized_header": {"type": "string"},
-        "localized_options": {"type": "array", "items": QUESTION_OPTION_SCHEMA},
-        "localized_custom_label": {"type": "string"},
-    },
-}
-ORCHESTRATE_TOOL_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "operation": {"type": "string", "enum": sorted(ORCHESTRATE_OPERATIONS)},
-        "submission_id": {"type": "string", "description": "Required for every mutating operation; identical retries are replayed exactly."},
-        "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Absolute project workspace. Cortex derives its opaque host-private control state from this path; callers cannot select a ledger directory."},
-        "principal": {"type": "string", "minLength": 1},
-        "thread_id": {"type": "string"},
-        "task_id": {"type": "string"},
-        "wave_id": {"type": "string"},
-        "task": {**ORCHESTRATE_TASK_SCHEMA, "description": "Start-only immutable task contract."},
-        "waves": {"type": "array", "minItems": 1, "items": ORCHESTRATE_WAVE_SCHEMA, "description": "Start-only full ordered execution-wave plan."},
-        "host_capabilities": {**ORCHESTRATE_HOST_CAPABILITIES_SCHEMA, "description": "Start-only native model catalogs plus the optional confirmed spawn_agent_default_model."},
-        "completions": {"type": "array", "minItems": 1, "items": ORCHESTRATE_COMPLETION_SCHEMA, "description": "Advance-only host completions with canonical attempt_result_ref values created by complete_attempt."},
-        "gate_outcomes": {"type": "object", "description": "Optional explicit gate outcome overrides for advance."},
-        "future_waves": {"type": "array", "minItems": 1, "items": ORCHESTRATE_WAVE_SCHEMA, "description": "Optional complete replacement for not-yet-started waves during advance. Every wave contains explicit delegations; unknown nested fields are rejected before lifecycle mutation."},
-        "allow_rework": {"type": "boolean", "default": False},
-        "reason": {"type": "string"},
-        "payload": {**ORCHESTRATE_PAYLOAD_SCHEMA, "description": "Operation-specific lane, resource, or question payload. Use only the fields documented here."},
-    },
-    "required": ["operation", "project_root"],
-}
 PUBLIC_SCHEMA_REGISTRY = build_public_schemas(
     agents=AGENTS,
     max_work_packages=MAX_WORK_PACKAGES,
@@ -14087,44 +12906,34 @@ MANAGE_GOVERNANCE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["manage_governance"]
 WORKER_QUESTION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["worker_question"]
 WORKER_RECORD_ATTEMPT_EVENT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["record_attempt_event"]
 WORKER_COMPLETE_ATTEMPT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["complete_attempt"]
-WORKER_COMPLETE_ATTEMPT_SCHEMA["properties"].update({
-    "planning": {**WORKER_COMPLETE_ATTEMPT_SCHEMA["properties"].get("planning", {}), "description": "Initial planner submission only. After a planning validation diagnostic, omit this full object and use base_payload_digest plus diagnostic-scoped patches."},
-    "base_payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Digest returned with a rejected planner draft; required for same-attempt PATCH repair."},
-    "patches": {"type": "array", "minItems": 1, "description": "PATCH-only planner repair. Every path must be a returned diagnostic path or descendant; unrelated fields are preserved server-side.", "items": {"type": "object", "additionalProperties": False, "properties": {"op": {"type": "string", "enum": ["replace", "add", "remove"]}, "path": {"type": "string", "pattern": "^/"}, "value": {}}, "required": ["op", "path"]}},
-})
 READ_DISPATCH_BRIEFING_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_dispatch_briefing"]
 READ_WORKER_RESULT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_worker_result"]
-WORKER_READ_WORKER_RESULT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["worker_read_worker_result"]
 
 
 TOOLS = {
     "start_orchestration": (start_orchestration, START_ORCHESTRATION_SCHEMA),
     "continue_orchestration": (continue_orchestration, CONTINUE_ORCHESTRATION_SCHEMA),
     "manage_orchestration": (manage_orchestration, MANAGE_ORCHESTRATION_SCHEMA),
-    "activate_orchestration": (activate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/cortex"}, "thread_id": {"type": "string", "minLength": 1}, "principal": {"type": "string", "minLength": 1}}, "required": ["user_command", "thread_id", "principal"]}),
-    "deactivate_orchestration": (deactivate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/normal"}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["user_command"]}),
-    "get_activation_status": (activation_status, {"type": "object", "properties": {"thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": []}),
-    "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["complexity"]}),
-    "init_task": (init_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "user_request": {"type": "string", "description": "Exact user-authored task text."}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "classification_id": {"type": "string"}, "requirements": {"type": "array", "items": {"type": "string"}}, "acceptance_criteria": {"type": "array", "items": {"type": "string"}}, "scope": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "items": {"type": "string"}}, "verification": {"type": "array", "items": {"type": "string"}}, "budget": {"type": "string"}, "pause_conditions": {"type": "array", "items": {"type": "string"}}, "plan_approval": {"type": "string", "enum": ["auto", "required"]}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "thread_id": {"type": "string"}, "principal": {"type": "string"}, "user_language": {"type": "string"}}, "required": ["task_id", "user_request", "classification_id"]}),
-    "get_task_status": (status, {"type": "object", "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}}, "required": ["task_id", "principal"]}),
+    "activate_orchestration": (activate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/cortex"}, "principal": {"type": "string", "minLength": 1}}, "required": ["user_command", "principal"]}),
+    "deactivate_orchestration": (deactivate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/normal"}, "principal": {"type": "string"}}, "required": ["user_command"]}),
+    "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "principal": {"type": "string"}}, "required": ["complexity"]}),
+    "init_task": (init_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "user_request": {"type": "string", "description": "Exact user-authored task text."}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "classification_id": {"type": "string"}, "requirements": {"type": "array", "items": {"type": "string"}}, "acceptance_criteria": {"type": "array", "items": {"type": "string"}}, "scope": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "items": {"type": "string"}}, "verification": {"type": "array", "items": {"type": "string"}}, "budget": {"type": "string"}, "pause_conditions": {"type": "array", "items": {"type": "string"}}, "plan_approval": {"type": "string", "enum": ["auto", "required"]}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "principal": {"type": "string"}, "user_language": {"type": "string"}}, "required": ["task_id", "user_request", "classification_id"]}),
+    "get_task_status": (status, {"type": "object", "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["task_id", "principal"]}),
     "resolve_dispatch_route": (resolve_dispatch_route, {"type": "object", "additionalProperties": False, "properties": {"agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "user_requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Exact model explicitly requested by the user; required for non-security Sol."}, "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Host-configured agents.default_subagent_model used when native model is omitted."}, "requested_reasoning_effort": {"type": "string"}}, "required": ["agent", "task_kind", "risk"]}),
-    "record_delegation": (record_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "status_receipt": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "user_requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Exact model explicitly requested by the user; required for non-security Sol."}, "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Confirmed host agents.default_subagent_model used when native model is omitted."}, "dispatch_mode": {"type": "string", "enum": ["hidden_subagent", "visible_thread"], "description": "visible_thread is an explicit user-owned task request and is never an automatic fallback."}, "luna_fallback": {"type": "string", "enum": ["terra"], "description": "Unavailable Luna hidden dispatches fall back to an explicit hidden Terra spawn_agent request."}, "thread_environment": {"type": "string", "enum": ["local", "worktree"], "default": "local", "description": "Workspace for an explicitly requested visible_thread."}, "requested_reasoning_effort": {"type": "string"}, "retry": {"type": "integer"}, "parallel": {"type": "boolean"}, "objective": {"type": "string"}, "ownership": {"type": "string", "minLength": 1}, "context_files": {"type": "array", "items": {"type": "string"}}, "context_result_refs": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "verification": {"type": "array", "items": {"type": "string", "minLength": 1}}}, "required": ["task_id", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"]}),
-    "prepare_delegation": (prepare_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "delegation": {"type": "object"}}, "required": ["task_id", "principal", "delegation"]}),
-    "prepare_delegations": (prepare_delegations, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "delegations": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object"}}}, "required": ["task_id", "principal", "delegations"]}),
-    "confirm_host_spawn": (confirm_host_spawn, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string", "minLength": 1, "description": "Native child id; for create_thread pass the returned threadId here."}, "host_task_name": {"type": "string", "minLength": 1}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "host_agent_id", "host_task_name"]}),
-    "finalize_attempt": (finalize_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "status"]}),
+    "record_delegation": (record_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "status_receipt": {"type": "string"}, "principal": {"type": "string"}, "gate": {"type": "string"}, "agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "user_requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Exact model explicitly requested by the user; required for non-security Sol."}, "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Confirmed host agents.default_subagent_model used when native model is omitted."}, "dispatch_mode": {"type": "string", "enum": ["hidden_subagent"], "description": "Native hidden spawn_agent dispatch; alternate worker transports are unsupported."}, "luna_fallback": {"type": "string", "enum": ["terra"], "description": "Unavailable Luna hidden dispatches fall back to an explicit hidden Terra spawn_agent request."}, "thread_environment": {"type": "string", "enum": ["local"], "default": "local", "description": "Native hidden subagents share the current workspace."}, "requested_reasoning_effort": {"type": "string"}, "retry": {"type": "integer"}, "parallel": {"type": "boolean"}, "objective": {"type": "string"}, "ownership": {"type": "string", "minLength": 1}, "context_files": {"type": "array", "items": {"type": "string"}}, "context_result_refs": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "verification": {"type": "array", "items": {"type": "string", "minLength": 1}}}, "required": ["task_id", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"]}),
+    "prepare_delegation": (prepare_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "delegation": {"type": "object"}}, "required": ["task_id", "principal", "delegation"]}),
+    "prepare_delegations": (prepare_delegations, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "delegations": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object"}}}, "required": ["task_id", "principal", "delegations"]}),
+    "finalize_attempt": (finalize_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "status"]}),
     "cortex.question": (cortex_question, QUESTION_TOOL_SCHEMA),
-    "publish_worker_question": (publish_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "submission_id": {"type": "string"}, "question": {"type": "string", "minLength": 1}, "header": {"type": "string"}, "options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA}, "multiple": {"type": "boolean"}, "custom_label": {"type": "string"}, "context": {}, "blocking": {"type": "boolean"}}, "required": ["task_id", "principal", "attempt_id", "submission_id", "question"]}),
-    "list_worker_questions": (list_worker_questions, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": ["open", "answered"]}}, "required": ["task_id", "principal"]}),
-    "answer_worker_question": (answer_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "question_id": {"type": "string"}, "submission_id": {"type": "string"}, "answer": {"type": "string", "minLength": 1}, "resume_context": {}}, "required": ["task_id", "principal", "question_id", "submission_id", "answer", "resume_context"]}),
-    "get_worker_question_updates": (get_worker_question_updates, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "after_sequence": {"type": "integer", "minimum": 0}}, "required": ["task_id", "principal", "attempt_id"]}),
-    "record_evidence": (record_evidence, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "kind": {"type": "string"}, "summary": {"type": "string"}, "digest": {"type": "string"}, "command": {"type": "string"}, "exit_code": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "governance_obligations": {"type": ["string", "array"], "items": {"type": "string"}}, "governance_scope_ref": {"type": "string"}, "scope_ref": {"type": "string"}, "reviewer_identity": {"type": "string"}, "reviewer_role": {"type": "string"}, "independent_reviewer": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "gate", "summary"]}),
-    "execute_verification_command": (execute_verification, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["task_id", "expected_revision", "gate", "summary", "verification_id"]}),
-    "record_gate_outcome": (record_gate, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "gate": {"type": "string"}, "outcome": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]}, "summary": {"type": "string"}, "skip_reason": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline_reason": {"type": "string"}, "pipeline_operations": {"type": "array", "items": PIPELINE_OPERATION_SCHEMA}, "allow_rework": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "gate", "outcome"]}),
-    "commit_gate": (commit_gate, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "gate": {"type": "string"}, "mode": {"type": "string", "enum": ["verification", "documentation"]}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "outcome": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]}}, "required": ["task_id", "principal", "gate", "summary"]}),
-    "resume_task": (resume_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision"]}),
+    "publish_worker_question": (publish_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "attempt_id": {"type": "string"}, "submission_id": {"type": "string"}, "question": {"type": "string", "minLength": 1}, "header": {"type": "string"}, "options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA}, "multiple": {"type": "boolean"}, "custom_label": {"type": "string"}, "context": {}, "blocking": {"type": "boolean"}}, "required": ["task_id", "principal", "attempt_id", "submission_id", "question"]}),
+    "list_worker_questions": (list_worker_questions, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": ["open", "answered"]}}, "required": ["task_id", "principal"]}),
+    "answer_worker_question": (answer_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "question_id": {"type": "string"}, "submission_id": {"type": "string"}, "answer": {"type": "string", "minLength": 1}, "resume_context": {}}, "required": ["task_id", "principal", "question_id", "submission_id", "answer", "resume_context"]}),
+    "get_worker_question_updates": (get_worker_question_updates, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "attempt_id": {"type": "string"}, "after_sequence": {"type": "integer", "minimum": 0}}, "required": ["task_id", "principal", "attempt_id"]}),
+    "record_evidence": (record_evidence, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "gate": {"type": "string"}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "kind": {"type": "string"}, "summary": {"type": "string"}, "digest": {"type": "string"}, "command": {"type": "string"}, "exit_code": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "governance_obligations": {"type": ["string", "array"], "items": {"type": "string"}}, "governance_scope_ref": {"type": "string"}, "scope_ref": {"type": "string"}, "reviewer_identity": {"type": "string"}, "reviewer_role": {"type": "string"}, "independent_reviewer": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "gate", "summary"]}),
+    "execute_verification_command": (execute_verification, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "gate": {"type": "string"}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["task_id", "expected_revision", "gate", "summary", "verification_id"]}),
+    "commit_gate": (commit_gate, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "expected_revision": {"type": "integer"}, "gate": {"type": "string"}, "mode": {"type": "string", "enum": ["verification", "documentation"]}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "outcome": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]}}, "required": ["task_id", "principal", "gate", "summary"]}),
     "update_pipeline": (update_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "operations": {"type": "array", "items": PIPELINE_OPERATION_SCHEMA}, "signals": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}}, "required": ["task_id", "expected_revision"]}),
-    "reassess_pipeline": (reassess_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full replacement selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Executable waves selected by the orchestrator."}, "intent": {"type": "string", "enum": ["add_specialist", "resequence", "rework_gate", "stop"]}, "decision": {"type": "string", "enum": ["unchanged", "updated", "stop"]}, "gate": {"type": "string"}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}, "apply": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "signals"]}),
+    "reassess_pipeline": (reassess_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full replacement selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Executable waves selected by the orchestrator."}, "intent": {"type": "string", "enum": ["add_specialist", "resequence", "rework_gate", "stop"]}, "decision": {"type": "string", "enum": ["unchanged", "updated", "stop"]}, "gate": {"type": "string"}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}, "apply": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "signals"]}),
     "acquire_lock": (acquire_lock, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "path": {"type": "string"}, "owner": {"type": "string"}, "gate": {"type": "string"}, "expires_at": {"type": "string"}, "advisory": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "path", "owner"]}),
     "release_lock": (release_lock, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "path": {"type": "string"}, "owner": {"type": "string"}}, "required": ["task_id", "expected_revision", "path", "owner"]}),
     "create_handoff": (handoff, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "name": {"type": "string"}, "completed": {"type": "array", "items": {"type": "string"}}, "files": {"type": "array", "items": {"type": "string"}}, "decisions": {"type": "array", "items": {"type": "string"}}, "risks": {"type": "array", "items": {"type": "string"}}, "next_action": {"type": "string"}}, "required": ["task_id", "expected_revision"]}),
@@ -14155,7 +12964,6 @@ PUBLIC_TOOLS = build_public_tools(
     read_dispatch_briefing_schema=READ_DISPATCH_BRIEFING_SCHEMA,
     read_worker_result=read_worker_result,
     read_worker_result_schema=READ_WORKER_RESULT_SCHEMA,
-    worker_read_worker_result_schema=WORKER_READ_WORKER_RESULT_SCHEMA,
     manage_governance=manage_governance,
     manage_governance_schema=MANAGE_GOVERNANCE_SCHEMA,
 )
@@ -14184,27 +12992,14 @@ def main() -> None:
     # already-running process still serves a host session.
     import cortex_runtime.orchestration_engine  # noqa: F401
 
-    # A native worker may use the default MCP audience (the desktop host does
-    # not always launch a role-specific server).  The launch-time binding is
-    # therefore consumed independently of the audience; absent binding keeps
-    # the normal coordinator form unchanged, while a bound process exposes
-    # the strict worker identity to the shared read_worker_result handler.
-    binding = binding_from_environment()
-    if binding is None:
-        # The native Codex spawn host cannot attach a per-child environment
-        # value.  The trusted SubagentStart hook records the child identity
-        # in the private worker-session ledger, which is the equivalent
-        # server-owned transport boundary for this host.
-        binding = _worker_binding_from_host_session()
-    with worker_binding(binding):
-        serve_stdio(
-            public_tools=public_tools_for_audience(PUBLIC_TOOLS, audience),
-            internal_handlers=TOOLS,
-            server_version=SERVER_VERSION,
-            instructions=MCP_SERVER_INSTRUCTIONS,
-            log_tool_error=log_tool_error,
-            audience=audience,
-        )
+    serve_stdio(
+        public_tools=public_tools_for_audience(PUBLIC_TOOLS, audience),
+        internal_handlers=TOOLS,
+        server_version=SERVER_VERSION,
+        instructions=MCP_SERVER_INSTRUCTIONS,
+        log_tool_error=log_tool_error,
+        audience=audience,
+    )
 
 
 if __name__ == "__main__":

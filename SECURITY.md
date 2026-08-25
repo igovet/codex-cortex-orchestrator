@@ -2,18 +2,25 @@
 
 ## Scope
 
-This repository contains the Cortex 10.0.7 Codex plugin. The runtime is
+This repository contains the Cortex 11.0.1 Codex plugin. The runtime is
 opt-in, runs locally, and stores orchestration state in a host-private SQLite
-v15 ledger. The supported public contract is the fresh v10 protocol only.
+v17 ledger. The supported public contract is the v11 task and capability
+protocol.
 
 ## Supported security boundary
 
 Cortex treats the following as authoritative:
 
-- server-issued opaque task, dispatch, and attempt identities;
-- a host-owned launch binding for each dispatch; its internal session identity
-  binds every worker MCP call to that one server-owned attempt without exposing
-  caller-authorable identity fields;
+- server-issued opaque task, coordinator, assignment, dispatch, and attempt
+  identities;
+- `start_orchestration` as the sole task creator and initial coordinator
+  capability issuer;
+- coordinator calls carrying the exact `task_ref` and `coordinator_ref`, and
+  worker calls carrying the exact `task_ref` and `assignment_ref`;
+- Cortex as the sole issuer of those opaque refs; models only byte-copy and
+  serialize issued values, never derive them from host or session state;
+- native `spawn_agent` and exact `wait` targets as the only worker lifecycle;
+  session/environment variables are never authorization;
 - immutable dispatch briefings scoped to the exact task and attempt;
 - SQLite AttemptEvent rows and one canonical AttemptResult per attempt;
 - server-observed timestamps, native identity, changed files, checks,
@@ -32,6 +39,39 @@ manage_governance, and read_worker_result. Worker calls are worker_question,
 record_attempt_event, complete_attempt, read_dispatch_briefing, and
 read_worker_result.
 
+Every public response is a closed v11 union. Lifecycle responses expose a
+typed action and only the route-specific dispatch, wait, question, approval,
+handoff, or top-level `error` + `recovery` branch. Governance exposes a typed receipt or
+an explicit-inspect typed inspection. Worker briefing, question, event,
+completion, and result responses carry only their minimal canonical fields. A
+successful completion is terminal and does not expose an `attempt_result_ref`;
+the worker's final message is exactly `ATTEMPT_COMPLETED`. Coordinator result
+reads use the exact `task_ref`/`coordinator_ref`/`step` tuple and derive the
+current wave from canonical server state, rather than accepting a child-carried
+result reference.
+Generic `user_message`, `user_view`, `internal`, full pipeline/governance
+state, and prose `next_action` fields are not public output. Error and recovery
+responses retain patch-critical diagnostics, original JSON Pointer paths,
+exact semantic repair pointers, bounded nested field schemas, signed opaque
+repair handles, base payload digests, and allowed patch paths; state mutation
+is explicitly false for those branches. Expected validation and domain
+failures are MCP tool-execution-error results (`isError=true`) with concise
+sanitized text plus the Cortex `ok=false`, `error`, and `recovery` structure
+when the transport preserves structured content. They are not raw JSON-RPC
+argument errors. Callers use only that public contract and never inspect
+source, cache, logs, ledger, session, environment, or hidden paths.
+`same_operation` is valid only when the returned response or an already-held
+canonical server contract provides explicit `allowed_changes` and makes a legal
+retry deterministic. A terminal
+`recovery.kind=terminal_stop` has action `none`, never a contradictory retry,
+inspection, or continuation action.
+
+For these branches, `state_mutated=false` means no canonical task, revision,
+attempt, result, event, workspace, or project mutation. Cortex may create or
+reuse one immutable private repair-escrow row needed for same-attempt repair;
+that row is not public evidence and exposes neither the rejected draft nor the
+raw bearer.
+
 ## Data handling
 
 Do not place credentials, access tokens, personal data, private task content,
@@ -47,11 +87,34 @@ timestamps, task revision, profile, phase, changed paths, executed checks,
 workspace observations, and verification metadata. Missing observations remain
 explicit and cannot be converted into a successful verification claim.
 
-The native worker process receives its exact host-owned launch binding through
-`CORTEX_WORKER_BINDING_JSON`. It is private transport data: never log, return,
-reuse across dispatches, or include it in an AttemptResult, evidence view, or
-user-visible report. Cortex keeps the server-owned session binding internal;
-worker requests contain semantic fields only.
+Worker requests contain compact semantic fields only. Identity, changed paths,
+timestamps, checks, workspace observations, and verification metadata are
+backend-derived. Capabilities are preserved only in bounded, digest-checked
+handoffs. A missing or lost capability fails closed; Cortex never falls back
+to `CORTEX_WORKER_BINDING_JSON`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, or any
+other ambient session/environment value.
+
+Planning and outcome repair use only a digest- and capsule-bound patch through
+`complete_attempt`. Bootstrap repair may be applied once to the same native
+child by byte-copying the server-built `bootstrap_repair_message` unchanged;
+if that repair fails, `finalize_bootstrap_failure` performs terminal cleanup.
+After an already-started child returns exact
+`CORTEX_ATTEMPT_FAILED retryable=false`, `finalize_worker_failure` accepts only
+the original structured `dispatch_ref` and fixed sanitized reason code. It
+terminalizes that exact current assignment atomically, keeps its briefing
+receipt, events, and repair escrow, and creates no result or replacement.
+Arbitrary child prose is never stored as the reason.
+An issued completion repair is immutable for its active attempt: full draft
+replay and caller-correctable patch errors return the same handle, digest, and
+diagnostic path scope. A malformed model copy of the handle is caller-correctable
+and reissues that same repair; a structurally valid handle with a failed MAC is
+tampering and remains terminal. Repair cards must be self-contained, so workers
+never inspect source, schemas, logs, or ledger state to invent values. Only
+capability/identity tampering, base-integrity mismatch, or terminal-attempt
+authorization failure is nonretryable.
+`repair_planning`, server-owned CLI/executor launches,
+`create_thread`, and manually authored `advance`/`completions` payloads are
+not supported v11 surfaces.
 
 Read observations are idempotent and scoped to the exact task, attempt,
 dispatch, result identity, and digest. A read from one task cannot satisfy
@@ -74,10 +137,14 @@ creates a second worker for the same work.
 When a new task opens a host ledger whose migration history or schema is not
 the exact current canonical record, Cortex privately quarantines the complete
 old namespace as one archive (SQLite database and sidecars, task/lane files,
-coordination files, and the lifecycle key) and starts a fresh schema-v15
-ledger. It never migrates or imports that state, and this recovery is not
-returned as a user-visible form error. Symlinked, non-regular, or unsafe
-filesystem targets remain fail-closed and are not quarantined automatically.
+coordination files, and the lifecycle key) and starts a fresh schema-v17
+ledger only when the namespace is the exact canonical v16 predecessor. That
+v16 namespace is quarantined as a unit and no row, migration, task, lane,
+coordination file, sidecar, or lifecycle key is adopted into v17. It never
+migrates or imports that state, and this recovery is not returned as a
+user-visible form error. V15 and older, unknown, tampered, symlinked,
+non-regular, or unsafe filesystem targets remain fail-closed and are not
+quarantined automatically.
 
 Backups and pruning must be SQLite-aware. A tombstone is committed before
 removing a view. Never use a broad recursive deletion command for Cortex state,
@@ -85,14 +152,14 @@ and never copy a database between users or unrelated projects.
 
 ## Lifecycle and hooks
 
-The six hooks bind native sessions and workers to the exact server-issued
-dispatch. They do not infer a task by scanning directories or accept prose as
-proof. A stopped child before WORK_COMPLETED is recovered by its exact
-attempt; a canonical WORK_COMPLETED result continues through FINALIZING and
-COMPLETED.
-An active dispatch without a finalized canonical result cannot authorize a
-gate, handoff, terminal completion, or coordinator stop. A host child binding
-is recovery metadata, not a proof that work completed.
+The five hooks observe native spawn/wait lifecycle events without binding them
+to capability authority. They do not authorize a worker from ambient session
+data, infer a task by scanning directories, recover a stopped child, or accept
+prose as proof. An active dispatch without a finalized canonical result cannot
+authorize a gate, handoff, terminal completion, or coordinator stop. A host
+child binding is private telemetry, not authorization and not proof that work
+completed; the coordinator follows only the server-returned public lifecycle
+branch for its exact capability pair.
 
 Review hook commands before trust. They must invoke the installed cache's
 bundled scripts/cortex-launcher and scripts/cortex_hook.py, and the content
@@ -101,11 +168,13 @@ installation or update.
 
 ## Prompt and plugin integrity
 
-Prompt Contract v3 is the sole stable prompt path. Dispatch-controlled values
+Prompt Contract v3 remains the sole stable prompt path. Dispatch-controlled values
 are fenced assignment data; static policy remains in the bundled skill and
 profile sources. Prompt lint, deterministic prompt evaluation, marketplace
 validation, and source-mode package checks are required before release. The
-package manifest is version 10.0.7 and the ledger schema is v15.
+release label is 11.0.1 and the ledger schema remains v17. Prompt Contract v3
+and independent question-schema versions are retained as their own schema
+histories, not treated as public task-protocol versions.
 
 ## Vulnerability reporting
 
@@ -128,14 +197,14 @@ or operational data before committing it.
 
 ## Release safety checklist
 
-Before publishing 10.0.7 or a later release:
+Before publishing 11.0.1 or a later release:
 
 1. Run the focused protocol, lifecycle, context, handoff, governance, and
    packaging tests.
 2. Run the full source test suite and record exact counts.
 3. Run prompt lint/evaluation and marketplace validation.
 4. Run git diff --check, inspect links and commands, and verify manifest
-   version, public operation count, and schema v15.
+   version, public operation count, and schema v17.
 5. Verify that no private data, credentials, temporary state, or generated
    cache files enter the package.
 6. State any unavailable host-installation or live-model checks explicitly.

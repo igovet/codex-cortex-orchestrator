@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,8 +12,12 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
-from cortex_runtime import worker_identity
 from cortex_runtime import gate_transitions
+
+
+_BOOTSTRAP_AUTHORITY = re.compile(
+    r'read_dispatch_briefing\(\{"task_ref":"([^"]+)","assignment_ref":"([^"]+)"\}\)'
+)
 
 
 class RuntimeBindingRegressionTests(unittest.TestCase):
@@ -46,19 +51,27 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
             "waves": [{"workers": [{"phase": "plan"}]}],
         })
         self.assertTrue(started["ok"], started)
+        match = _BOOTSTRAP_AUTHORITY.search(str(started["dispatches"][0]["arguments"]["message"]))
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assignment_authority = {
+            "task_ref": match.group(1),
+            "assignment_ref": match.group(2),
+        }
         task_dir = next((self.ledger / "tasks").iterdir())
         return task_dir, control.load_task_state_for_artifact(task_dir)
 
     def test_sqlite_question_blocks_without_a_question_projection_directory(self) -> None:
         task_dir, state = self._started_task()
-        attempt = state["attempts"][0]
-        with worker_identity.worker_binding({"project_root": str(self.project), "task_id": state["task_id"], "attempt_id": attempt["attempt_id"], "profile": attempt["profile"]}):
-            asked = control.worker_question({
+        asked = control.worker_question({
+            **self.assignment_authority,
             "action": "ask",
+            "question_type": "text",
+            "decision_scope": "user_choice",
             "question": "Which externally visible behavior is authoritative?",
             "recommendation": "Preserve the currently documented public behavior unless repository evidence proves it is incorrect.",
             "recommended_answer": "Preserve the currently documented public behavior.",
-            })
+        })
         self.assertTrue(asked["ok"], asked)
         self.assertFalse((task_dir / "questions").exists())
         self.assertTrue(asked.get("ok"))
@@ -76,14 +89,13 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         handoff.assert_called_once()
         payload = handoff.call_args.args[0]
         self.assertEqual(payload["principal"], state["principal"])
-        self.assertEqual(payload["thread_id"], state["thread_id"])
+        self.assertNotIn("thread_id", payload)
 
     def _handoff_params(self, state: dict) -> dict:
         return {
             "project_root": str(self.project),
             "task_id": state["task_id"],
             "principal": state["principal"],
-            "thread_id": state["thread_id"],
             "expected_revision": state["revision"],
             "completed": ["coordinator checkpoint"],
             "files": [],
@@ -186,7 +198,6 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
             "project_root": str(self.project),
             "task_id": state["task_id"],
             "principal": state["principal"],
-            "thread_id": state["thread_id"],
             "expected_revision": state["revision"],
             "attempt_id": attempt["attempt_id"],
             "status": "passed",

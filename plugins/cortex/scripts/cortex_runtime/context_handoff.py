@@ -17,7 +17,7 @@ bind_symbols(
         "_open_blocking_questions",
         "_orchestrate_pipeline_snapshot",
         "_orchestrate_summary",
-        "_v3_task_ref",
+        "_v11_task_ref",
         "active_gates",
         "db_list_worker_sessions",
         "now",
@@ -52,10 +52,9 @@ def _context_handoff(
     active_workers: list[dict[str, Any]] = []
     stopped_workers: list[dict[str, Any]] = []
     open_questions: list[dict[str, Any]] = []
-    # The state projection is normally sufficient, but the SQLite worker
-    # session table is the server-owned identity source.  Keep it as the
-    # recovery fallback for task projections written before host_spawn was
-    # persisted into the attempt record.
+    # The state projection is normally sufficient. The SQLite worker session
+    # table is a task-scoped lifecycle-telemetry fallback for native
+    # spawn/wait/stop observations; it never grants worker authority.
     session_by_attempt: dict[str, dict[str, Any]] = {}
     try:
         ledger_root = task_dir.parent.parent
@@ -155,13 +154,13 @@ def _context_handoff(
     else:
         next_action = "Follow the current canonical lifecycle state; use only attempt_result_ref values for completed predecessors."
     return {
-        "schema": "cortex/context-handoff/v3",
+        "schema": "cortex/context-handoff/v11",
         # ``task_ref`` is the opaque public identity derived from the exact
         # task id.  Passing the whole state projection here hashes its string
         # representation and manufactures a different reference after every
         # state change, which can make a compacted coordinator recover the
         # wrong task identity.
-        "task_ref": _v3_task_ref(str(state.get("task_id") or "")),
+        "task_ref": _v11_task_ref(str(state.get("task_id") or "")),
         "task_id": redact(state.get("task_id", ""), 128),
         "generated_at": now(),
         "goal": redact(task.get("user_request_projection") or task.get("user_request", ""), 4000),

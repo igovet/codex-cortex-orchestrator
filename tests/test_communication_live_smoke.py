@@ -1,7 +1,6 @@
 """Small end-to-end smoke for delegation, result persistence, and natural UX."""
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
@@ -13,7 +12,11 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
 import cortex as control
 from cortex_runtime.communication import render_lifecycle, select_profile
-from cortex_runtime import worker_identity
+
+
+_BOOTSTRAP_AUTHORITY = re.compile(
+    r'read_dispatch_briefing\(\{"task_ref":"([^"]+)","assignment_ref":"([^"]+)"\}\)'
+)
 
 
 class CommunicationLiveSmokeTests(unittest.TestCase):
@@ -52,51 +55,48 @@ class CommunicationLiveSmokeTests(unittest.TestCase):
                 "allowed_paths": ["."],
                 "complexity": "C1",
                 "user_language": "ru",
-                "communication_profile": "neutral",
+                "communication_profile": "natural",
                 "plan_approval": "auto",
             },
             "waves": [{"workers": [{"phase": "discover"}]}],
         })
         self.assertTrue(started.get("ok"), started)
         dispatch = started["dispatches"][0]
-        briefing = Path(dispatch["briefing_path"]).read_text(encoding="utf-8")
-        assignment_match = re.search(r"```json\n(.*?)\n```", briefing, re.S)
+        message = str(dispatch["arguments"]["message"])
+        assignment_match = _BOOTSTRAP_AUTHORITY.search(message)
         self.assertIsNotNone(assignment_match)
-        assignment = json.loads(assignment_match.group(1))
-        required_lists = (
-            "allowed_paths", "acceptance_criteria", "verification",
-        )
-        for field in required_lists:
-            with self.subTest(field=field):
-                self.assertIsInstance(assignment.get(field), list)
-                self.assertTrue(assignment[field])
+        assert assignment_match is not None
+        assignment_authority = {
+            "task_ref": assignment_match.group(1),
+            "assignment_ref": assignment_match.group(2),
+        }
+        self.assertEqual(assignment_authority["task_ref"], started["task_ref"])
 
-        ledger = control.ledger_root_path({"project_root": str(self.project)})
-        task_dir = next((ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        attempt = state["attempts"][0]
-        task = control.load_task_definition(task_dir, state)
-        binding = {"project_root": str(self.project), "task_id": state["task_id"], "attempt_id": attempt["attempt_id"], "profile": attempt["profile"], "dispatch_ref": attempt["dispatch_ref"], "briefing_digest": attempt["briefing_digest"]}
-        with worker_identity.worker_binding(binding):
-            briefing_read = control.read_dispatch_briefing({})
+        briefing_read = control.read_dispatch_briefing(assignment_authority)
         self.assertTrue(briefing_read.get("ok"), briefing_read)
-        with worker_identity.worker_binding(binding):
-            recorded = control.complete_worker_attempt({
-            "status": "completed",
-            "summary": "Smoke check completed and persisted.",
-            "findings": [],
-            "decisions_needed": [],
-            "unresolved": [],
-            })
+        recorded = control.complete_worker_attempt({
+            **assignment_authority,
+            "outcome": {
+                "status": "completed",
+                "summary": "Smoke check completed and persisted.",
+                "findings": [],
+                "decisions_needed": [],
+                "unresolved": [],
+                "claims": [],
+            },
+        })
         self.assertTrue(recorded.get("ok"), recorded)
-        self.assertEqual(recorded.get("outcome"), "attempt_completed")
-        self.assertNotEqual(recorded.get("code"), "attempt_validation_failed")
+        self.assertEqual(recorded, {
+            "schema": "cortex/worker-completion/v11",
+            "ok": True,
+            "terminal": True,
+        })
 
         rendered = render_lifecycle(
             "completed",
-            config={"communication_profile": "neutral", "user_language": "ru"},
+            config={"communication_profile": "natural", "user_language": "ru"},
         )
-        self.assertEqual(select_profile({"communication_profile": "neutral"}), "natural")
+        self.assertEqual(select_profile({"communication_profile": "natural"}), "natural")
         self.assertEqual(rendered["profile"], "natural")
         self.assertTrue(rendered["message"].startswith("Задача завершена"))
         self.assertTrue(rendered["quality"]["ok"], rendered)

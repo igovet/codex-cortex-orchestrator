@@ -4,13 +4,13 @@
 
 ## Purpose
 
-Cortex 10.0.7 is packaged as a repository-local Codex plugin. Marketplace
+Cortex 11.0.1 is packaged as a repository-local Codex plugin. Marketplace
 metadata, the MCP server, profiles, skills, hooks, schemas, and validators must
-describe the same fresh v10 contract.
+describe the same v11 task and capability contract.
 
 ## Package files
 
-- [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) declares version 10.0.7 and bundled components.
+- [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) carries the release version and bundled components; the v11 release label is 11.0.1.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) is the repository marketplace entry.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates package structure.
@@ -32,14 +32,23 @@ checks, verification observations, and result links. `ContextCompiler` and
 `HandoffCompiler` expose complete, target-specific context. Result views
 are rebuildable and cannot authorize lifecycle transitions.
 
-The validator checks the v10 registry, schema v15, strict coordinator and
-worker projections, profile TOML parity, prompt contract v3, the six hooks,
+The validator checks the v11 registry, schema v17, strict coordinator and
+worker projections, profile TOML parity, Prompt Contract v3, the five hooks,
 launcher paths, and the knowledge-route inventory. The prompt contract has one
 stable v3 renderer and no alternate prompt format or comparison runner.
 
 All package commands are source-mode checks unless explicitly documented as
 installation checks. They do not claim that a user's installed cache is
 updated or trusted.
+
+The v11 release label is 11.0.1. The package must not expose `create_thread`,
+session/environment authorization, server-owned CLI or executor launches,
+`repair_planning`, or manually authored `advance`/`completions`. The only
+worker lifecycle is the exact server-issued `spawn_agent` target, exact `wait`,
+`read_worker_result`, and server-derived continuation. Legacy rows are
+quarantined and fail closed. The SQLite schema history and independent Prompt
+Contract/question schema histories remain storage/documentation history, not
+alternate public task protocols.
 
 ## Security-sensitive packaging rules
 

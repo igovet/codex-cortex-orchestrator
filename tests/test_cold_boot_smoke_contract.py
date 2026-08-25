@@ -20,11 +20,5 @@ def test_cold_boot_fixture_uses_only_canonical_phases() -> None:
         for worker in wave["workers"]
     ]
 
-    assert phases == [
-        "discover",
-        "architecture",
-        "database_architecture",
-        "implementation",
-        "qa",
-        "review",
-    ]
+    assert phases == ["discover"]
+    assert SMOKE.cortex.DATABASE_SCHEMA_VERSION == 17

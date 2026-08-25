@@ -89,16 +89,15 @@ bind_symbols(
         "MAX_CONTEXT_RESULTS",
         "MAX_WORK_PACKAGES",
         "NORMAL_COMMAND",
-        "ORCHESTRATE_MUTATING_OPERATIONS",
-        "ORCHESTRATE_OPERATIONS",
-        "ORCHESTRATE_SCHEMA",
+        "LIFECYCLE_RUNTIME_SCHEMA",
+        "V11_LIFECYCLES",
         "ORCHESTRATION_PLAN_SCHEMA",
         "ORCHESTRATION_TRANSACTION_SCHEMA",
         "PIPELINE_CONTRACT_VERSION",
         "SUPPORTED_MODELS",
         "TERMINAL_ATTEMPT_STATUSES",
         "_attempt",
-        "_collect_orchestrate_diagnostics",
+        "_collect_lifecycle_diagnostics",
         "_context_handoff_service",
         "_delegation_package",
         "_activate_closure_rework",
@@ -176,7 +175,7 @@ bind_symbols(
         "render_lifecycle",
         "quality_checks",
         "resolve_dispatch_route",
-        "resume_task",
+        "reopen_blocked_lifecycle_state",
         "retire_lane",
         "safe_id",
         "sanitize_structured",
@@ -191,29 +190,29 @@ bind_symbols(
     ),
 )
 
-def _orchestrate_error(
-    operation: str,
+def _lifecycle_error(
+    lifecycle: str,
     code: str,
     message: object,
     *,
     phase: str = "validation",
     recoverable: bool = True,
-    next_operation: str | None = None,
+    next_lifecycle: str | None = None,
     task_id: str | None = None,
     diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    resolved_next_operation = next_operation or (operation if operation in ORCHESTRATE_OPERATIONS else None)
+    resolved_next_lifecycle = next_lifecycle or (lifecycle if lifecycle in V11_LIFECYCLES else None)
     # A recoverable validation failure is a machine-retryable error, not a
     # request for a user decision.  Keeping it in ``needs_input`` causes the
     # public adapter to render a Question/user_message even when an active
     # worker is merely protected from a malformed coordinator payload (for
-    # example a future_waves replacement).  Preserve the diagnostic and
+    # example a server-derived successor route). Preserve the diagnostic and
     # retryability, but expose the correct non-question lifecycle state.
     validation_error = code == "orchestrate_validation_failed"
     return _segregate_orchestration_output({
-        "schema": ORCHESTRATE_SCHEMA,
+        "schema": LIFECYCLE_RUNTIME_SCHEMA,
         "ok": False,
-        "operation": operation,
+        "lifecycle": lifecycle,
         "transaction_id": None,
         "task_id": task_id,
         "wave_id": None,
@@ -227,11 +226,11 @@ def _orchestrate_error(
         "code": code,
         "diagnostics": diagnostics or [{"code": code, "phase": phase, "message": redact(message, 1000)}],
         "recoverable": recoverable,
-        "next_operation": resolved_next_operation,
+        "next_lifecycle": resolved_next_lifecycle,
         "next_action": (
-            f"retry orchestrate(operation={resolved_next_operation}) with a new submission_id after correcting the diagnostic"
-            if recoverable and resolved_next_operation else
-            "retry orchestrate with a supported operation" if recoverable else
+            f"retry the {resolved_next_lifecycle} Cortex lifecycle with a new submission_id after correcting the diagnostic"
+            if recoverable and resolved_next_lifecycle else
+            "retry the explicit Cortex lifecycle after correcting the diagnostic" if recoverable else
             "inspect the Cortex installation"
         ),
     })
@@ -543,16 +542,23 @@ def _orchestrate_request_digest(params: dict[str, Any]) -> str:
     return digest_text(canonical_json.dumps(semantic_params))
 
 
-def _begin_orchestrate_transaction(root: Path, params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
+def _begin_orchestrate_transaction(
+    root: Path,
+    params: dict[str, Any],
+    lifecycle: str,
+) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
     submission_id = safe_id(str(params.get("submission_id", "")))
     path = _orchestrate_transaction_path(root, submission_id)
-    request_digest = _orchestrate_request_digest(params)
+    request_digest = digest_text(canonical_json.dumps({
+        "lifecycle": lifecycle,
+        "request_digest": _orchestrate_request_digest(params),
+    }))
     receipt = db_get_operation(root, submission_id)
     if receipt is not None:
         if receipt.get("schema") != ORCHESTRATION_TRANSACTION_SCHEMA:
-            raise ValueError("orchestrate submission_id was reused with different content")
+            raise ValueError("lifecycle submission_id was reused with different content")
         if receipt.get("request_digest") != request_digest:
-            raise ValueError("orchestrate submission_id was reused with different content")
+            raise ValueError("lifecycle submission_id was reused with different content")
         if receipt.get("status") == "committed" and isinstance(receipt.get("result"), dict):
             replay = dict(receipt["result"])
             replay["idempotent"] = True
@@ -565,7 +571,7 @@ def _begin_orchestrate_transaction(root: Path, params: dict[str, Any]) -> tuple[
         "schema": ORCHESTRATION_TRANSACTION_SCHEMA,
         "transaction_id": f"transaction-{submission_id}",
         "submission_id": submission_id,
-        "operation": params["operation"],
+        "lifecycle": lifecycle,
         "request_digest": request_digest,
         "task_id": str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None,
         "status": "running",
@@ -588,25 +594,6 @@ def _checkpoint_orchestrate_transaction(path: Path, receipt: dict[str, Any], pha
 def _commit_orchestrate_transaction(path: Path, receipt: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     result = {**result, "transaction_id": receipt["transaction_id"], "idempotent": False}
     receipt.update({"status": "committed", "phase": "committed", "result": result, "updated_at": now(), "committed_at": now()})
-    db_put_operation(path, safe_id(str(receipt["submission_id"])), receipt)
-    return result
-
-
-def _leave_orchestrate_transaction_retryable(
-    path: Path,
-    receipt: dict[str, Any],
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    """Return a recoverable host-bound result without caching it as success."""
-    result = {**result, "transaction_id": receipt["transaction_id"], "idempotent": False}
-    receipt.update(
-        {
-            "status": "retryable",
-            "phase": "awaiting_host_capability",
-            "result": result,
-            "updated_at": now(),
-        }
-    )
     db_put_operation(path, safe_id(str(receipt["submission_id"])), receipt)
     return result
 
@@ -691,7 +678,6 @@ def _normalize_orchestrate_waves(
         "parallel_groups": proposed_groups,
     })
     spawn_models = host_capabilities.get("spawn_agent_models")
-    thread_models = host_capabilities.get("create_thread_models")
     configured_default_model = str(
         host_capabilities.get("spawn_agent_default_model")
         or host_capabilities.get("configured_default_model")
@@ -712,6 +698,8 @@ def _normalize_orchestrate_waves(
         for gate in group:
             specs = [spec for spec in raw_specs if canonical_pipeline_gate(spec.get("gate") or "") == gate] or [{"gate": gate}]
             for spec_index, raw_spec in enumerate(specs, 1):
+                if str(raw_spec.get("dispatch_mode") or "hidden_subagent") != "hidden_subagent":
+                    raise ValueError("native spawn_agent dispatch is the only supported worker transport")
                 agent = str(raw_spec.get("agent") or _default_profile_for_gate(gate))
                 if agent not in AGENTS:
                     raise ValueError(f"unknown Cortex profile: {agent}")
@@ -736,6 +724,7 @@ def _normalize_orchestrate_waves(
                     "facade_managed": True,
                     "orchestration_wave_id": wave_id,
                     "orchestration_delegation_key": f"{wave_id}-{gate}-{spec_index:02d}",
+                    "dispatch_mode": "hidden_subagent",
                 }
                 route = resolve_dispatch_route({
                     **spec,
@@ -743,11 +732,6 @@ def _normalize_orchestrate_waves(
                     "_security_gate": gate == "security",
                     "project_root": project_root_value,
                 })
-                if (
-                    str(spec.get("dispatch_mode", "hidden_subagent")) == "visible_thread"
-                    and (not isinstance(thread_models, list) or "gpt-5.6-luna" not in thread_models)
-                ):
-                    raise ValueError("visible_thread requires create_thread_models to include gpt-5.6-luna")
                 delegations.append(spec)
         normalized.append({"wave_id": wave_id, "gates": list(group), "delegations": delegations, "status": "pending"})
     classification = {
@@ -1602,13 +1586,13 @@ def _orchestrate_response(
     # direct inspection/replay responses.
     facade_state = "recovery_pending" if ledger_state == "blocked" else ledger_state
     if facade_state == "ready_to_spawn":
-        next_action = "invoke every returned native spawn request, wait for the wave, then call orchestrate(operation=advance) once"
+        next_action = "invoke every returned native spawn request, wait for the wave, then use the server-derived continue_orchestration result-ref flow once"
     elif facade_state == "waiting_workers":
-        next_action = "wait for every worker in the current wave, then call orchestrate(operation=advance) once"
+        next_action = "wait for every worker in the current wave, then use the server-derived continue_orchestration result-ref flow once"
     elif facade_state == "completion_pending":
         next_action = (
             "read the verified stopped-worker result candidates, then explicitly select exactly one immutable "
-            "attempt_result_ref for each affected worker slot when calling orchestrate(operation=advance); do not wait, "
+            "attempt_result_ref for each affected worker slot when calling continue_orchestration; do not wait, "
             "respawn, or resume the stopped worker"
         )
     elif facade_state == "completed":
@@ -1634,9 +1618,9 @@ def _orchestrate_response(
     else:
         next_action = "inspect the returned diagnostics or provide the required completion data"
     response = {
-        "schema": ORCHESTRATE_SCHEMA,
+        "schema": LIFECYCLE_RUNTIME_SCHEMA,
         "ok": True,
-        "operation": operation,
+        "lifecycle": operation,
         "transaction_id": None,
         "task_id": state.get("task_id"),
         "wave_id": wave_id,
@@ -1710,9 +1694,8 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
     if not user_request:
         raise ValueError("start task.user_request is required")
     principal = str(params.get("principal", "")).strip()
-    thread_id = str(params.get("thread_id", "")).strip()
-    if not principal or not thread_id:
-        raise ValueError("start requires principal and thread_id")
+    if not principal:
+        raise ValueError("start requires the server-owned principal")
     host_capabilities = params.get("host_capabilities")
     if not isinstance(host_capabilities, dict):
         raise ValueError("start requires host_capabilities")
@@ -2445,7 +2428,7 @@ def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any], plan: dict[st
 def _validate_retry_strategy(
     state: dict[str, Any],
     attempt: dict[str, Any],
-    completion: dict[str, Any],
+    outcome: dict[str, Any],
 ) -> None:
     # Strategy remains optional for an ordinary evidence-backed retry. Once
     # repeated failures are recorded, recovery still retries the selected
@@ -2458,15 +2441,15 @@ def _normalized_failure_reason(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
-def _failure_class_from_completion(completion: dict[str, Any]) -> str:
-    """Classify a non-success host outcome without trusting worker routing.
+def _failure_class_from_outcome(outcome: dict[str, Any]) -> str:
+    """Classify a canonical non-success outcome without trusting worker routing.
 
-    Public v3 completions intentionally expose only a reason, not an
-    authority-bearing failure-class field.  This conservative projection is
+    The compact worker outcome intentionally exposes only a reason, not an
+    authority-bearing failure-class field. This conservative projection is
     used exclusively for liveness messaging and evidence grouping; it never
     changes a gate decision or weakens a canonical gate result.
     """
-    reason = _normalized_failure_reason(completion.get("reason"))
+    reason = _normalized_failure_reason(outcome.get("reason"))
     categories = (
         ("infrastructure", ("infrastructure", "network", "transport", "connection", "timeout", "rate limit", "service unavailable", "host unavailable", "mcp")),
         ("environment", ("environment", "dependency", "permission", "missing binary", "configuration", "sandbox", "disk full", "toolchain")),
@@ -2487,7 +2470,7 @@ def _corrective_evidence(
     state: dict[str, Any],
     gate: str,
     gate_attempts: list[dict[str, Any]],
-    completions: list[dict[str, Any]],
+    attempt_outcomes: list[dict[str, Any]],
     unresolved_rework: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Return the bounded, durable evidence projection for retry liveness.
@@ -2551,7 +2534,7 @@ def _corrective_evidence(
     ]
     raw_reasons = [
         _normalized_failure_reason(item.get("reason"))
-        for item in completions
+        for item in attempt_outcomes
         if str(item.get("status") or "").lower() != "passed"
     ]
     # A passed worker result with unresolved canonical findings is still a
@@ -2560,8 +2543,8 @@ def _corrective_evidence(
     if not raw_reasons and finding_fingerprints:
         raw_reasons = ["unresolved canonical findings"]
     failure_classes = sorted({
-        _failure_class_from_completion(item)
-        for item in completions
+        _failure_class_from_outcome(item)
+        for item in attempt_outcomes
         if str(item.get("status") or "").lower() != "passed"
     })
     if not failure_classes and finding_fingerprints:
@@ -2571,9 +2554,9 @@ def _corrective_evidence(
         for status_value, failure_class in sorted({
             (
                 str(item.get("status") or "").strip().lower(),
-                _failure_class_from_completion(item),
+                _failure_class_from_outcome(item),
             )
-            for item in completions
+            for item in attempt_outcomes
             if str(item.get("status") or "").lower() != "passed"
         })
     ]
@@ -2581,7 +2564,7 @@ def _corrective_evidence(
         failure_observations = [{"status": "canonical_rework", "failure_class": "product"}]
     strategy_values = sorted({
         str(item.get("next_strategy") or item.get("strategy") or "default").strip()
-        for item in relevant_attempts + completions
+        for item in relevant_attempts + attempt_outcomes
         if str(item.get("next_strategy") or item.get("strategy") or "default").strip()
     })
     evidence = {
@@ -2635,7 +2618,7 @@ def _record_corrective_progress(
     state: dict[str, Any],
     gate: str,
     gate_attempts: list[dict[str, Any]],
-    completions: list[dict[str, Any]],
+    attempt_outcomes: list[dict[str, Any]],
     unresolved_rework: list[dict[str, Any]],
     *,
     outcome: str,
@@ -2650,7 +2633,7 @@ def _record_corrective_progress(
         return None
     if outcome != "failed":
         return None
-    evidence = _corrective_evidence(root, state, gate, gate_attempts, completions, unresolved_rework)
+    evidence = _corrective_evidence(root, state, gate, gate_attempts, attempt_outcomes, unresolved_rework)
     prior = progress.get(gate) if isinstance(progress.get(gate), dict) else {}
     same = prior.get("signature") == evidence["signature"]
     consecutive = int(prior.get("consecutive_identical_iterations") or 0) + 1 if same else 1
@@ -2702,7 +2685,7 @@ def _apply_pending_revision_impact(
 ) -> tuple[dict[str, Any], bool]:
     """Apply a durable semantic steer impact only after its worker completes.
 
-    ``cortex._v3_active_steer`` keeps the native worker alive and writes this
+    ``cortex._v11_active_steer`` keeps the native worker alive and writes this
     receipt.  The engine consumes it at the next safe gate boundary, reopening
     the earliest affected gate and every downstream receipt atomically before
     it can dispatch a stale successor.
@@ -2758,21 +2741,27 @@ def _apply_pending_revision_impact(
     return state, True
 
 
-def _preflight_orchestrate_completion(
+def _preflight_attempt_outcome(
     task_dir: Path,
     state: dict[str, Any],
-    completion: dict[str, Any],
+    outcome: dict[str, Any],
 ) -> None:
-    """Validate a host completion without mutating the task ledger."""
-    attempt_id = safe_id(str(completion.get("attempt_id", "")))
+    """Validate a canonical attempt outcome without mutating the task ledger.
+
+    Native spawn/wait observations are lifecycle telemetry only. They may be
+    absent or unknown and never authorize, attest, or block semantic
+    continuation; the exact active attempt and its finalized canonical
+    AttemptResult are the authoritative evidence.
+    """
+    attempt_id = safe_id(str(outcome.get("attempt_id", "")))
     attempt = _attempt(state, attempt_id)
-    requested_status = str(completion.get("status", "passed")).strip().lower()
+    requested_status = str(outcome.get("status", "passed")).strip().lower()
     if requested_status not in TERMINAL_ATTEMPT_STATUSES:
-        raise ValueError("completion status must be passed, failed, blocked, cancelled, or superseded")
-    _validate_retry_strategy(state, attempt, completion)
+        raise ValueError("outcome status must be passed, failed, blocked, cancelled, or superseded")
+    _validate_retry_strategy(state, attempt, outcome)
     if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
         if attempt.get("status") != requested_status:
-            raise ValueError("completion status does not match the terminal ledger attempt")
+            raise ValueError("outcome status does not match the terminal ledger attempt")
         return
     open_questions = _open_blocking_questions(task_dir, state, attempt_id)
     if open_questions:
@@ -2781,34 +2770,12 @@ def _preflight_orchestrate_completion(
             f"attempt has unanswered blocking worker question(s): {refs}; "
             "answer the question and resume the same worker before completion"
         )
-    observation_source = str(completion.get("host_observation_source") or "").strip()
-    if observation_source != "unattested_parent_result":
-        required_host_fields = ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort")
-        missing_host = [field for field in required_host_fields if not str(completion.get(field, "")).strip()]
-        if missing_host:
-            raise ValueError("completion requires actual host fields: " + ", ".join(missing_host))
-        spawn_request = attempt.get("spawn_request") or {}
-        expected = {
-            "host_tool": spawn_request.get("host_tool") or "spawn_agent",
-            "host_task_name": spawn_request.get("task_name") or attempt.get("agent"),
-            # `model` is absent for configured-default requests.  The host still
-            # AttemptResults its effective model and it is checked against the durable
-            # expected_model metadata instead.
-            "host_model": spawn_request.get("model") or spawn_request.get("expected_model") or attempt.get("expected_model"),
-            "host_reasoning_effort": spawn_request.get("reasoning_effort"),
-        }
-        mismatches = [
-            field for field, expected_value in expected.items()
-            if expected_value is not None and str(completion.get(field)) != str(expected_value)
-        ]
-        if mismatches:
-            raise ValueError("host completion mismatch for: " + ", ".join(mismatches))
     if requested_status == "passed":
-        result_ref = str(completion.get("attempt_result_ref") or "").strip()
+        result_ref = str(outcome.get("attempt_result_ref") or "").strip()
         if not result_ref:
-            raise ValueError("passed completion requires attempt_result_ref from complete_attempt")
+            raise ValueError("passed outcome requires attempt_result_ref from complete_attempt")
         if result_ref != str(attempt.get("attempt_result_ref") or ""):
-            raise ValueError("passed completion must select the canonical result for its exact attempt")
+            raise ValueError("passed outcome must select the canonical result for its exact attempt")
         result = attempt_protocol.get_attempt_result(
             _ledger_root_for_artifact(task_dir),
             task_id=state["task_id"], attempt_id=attempt_id,
@@ -2818,15 +2785,15 @@ def _preflight_orchestrate_completion(
             or str(result.get("result_ref") or "") != result_ref
             or str(result.get("lifecycle_status") or "") != attempt_protocol.LIFECYCLE_COMPLETED
         ):
-            raise ValueError("passed completion requires a finalized canonical attempt result")
-    elif not str(completion.get("reason", "")).strip():
-        raise ValueError("non-success completion requires an explicit reason")
+            raise ValueError("passed outcome requires a finalized canonical attempt result")
+    elif not str(outcome.get("reason", "")).strip():
+        raise ValueError("non-success outcome requires an explicit reason")
 
 
 def _apply_next_retry_strategies(
     wave: dict[str, Any],
     state: dict[str, Any],
-    completions: list[dict[str, Any]],
+    attempt_outcomes: list[dict[str, Any]],
 ) -> None:
     """Carry an explicitly revised strategy into only the matching retry slot."""
     by_key = {
@@ -2834,11 +2801,11 @@ def _apply_next_retry_strategies(
         for spec in wave.get("delegations", [])
         if isinstance(spec, dict)
     }
-    for completion in completions:
-        next_strategy = str(completion.get("next_strategy") or "").strip()
+    for outcome in attempt_outcomes:
+        next_strategy = str(outcome.get("next_strategy") or "").strip()
         if not next_strategy:
             continue
-        attempt = _attempt(state, safe_id(str(completion.get("attempt_id", ""))))
+        attempt = _attempt(state, safe_id(str(outcome.get("attempt_id", ""))))
         key = str(attempt.get("orchestration_delegation_key") or "")
         spec = by_key.get(key)
         if spec is None:
@@ -2854,16 +2821,15 @@ def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any],
         f"{gate}: {state.get('gates', {}).get(gate, {}).get('summary') or state.get('gates', {}).get(gate, {}).get('outcome', 'completed')}"
         for gate in state.get("completed_gates", [])
     ] or [f"Prepared handoff for {primary_gate(state)}"]
-    # A v3 caller has no task principal: it owns only the opaque task_ref.
-    # Reconstruct the durable task identity here instead of forwarding a
-    # coordinator/session alias into the authorization boundary.  Resolve the
-    # public handoff seam at call time so host integrations (and stable
-    # tests) can replace that facade adapter without re-importing this engine.
+    # The lifecycle runner carries only the durable task record at this
+    # internal seam; explicit coordinator capability authorization has already
+    # completed at the public facade. Resolve the handoff seam at call time so
+    # stable tests can replace the facade adapter without re-importing this
+    # engine.
     return bound_symbol("orchestration_engine", "handoff")({
         **params,
         "task_id": state["task_id"],
         "principal": state.get("principal"),
-        "thread_id": state.get("thread_id"),
         "expected_revision": state["revision"],
         "name": f"orchestrate-{primary_gate(state)}-{state['revision'] + 1}",
         "completed": completed,
@@ -2874,22 +2840,22 @@ def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any],
     })
 
 
-def _complete_orchestrate_attempt(
+def _consume_attempt_outcome(
     params: dict[str, Any],
     task_dir: Path,
     state: dict[str, Any],
-    completion: dict[str, Any],
+    outcome: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    attempt_id = safe_id(str(completion.get("attempt_id", "")))
+    attempt_id = safe_id(str(outcome.get("attempt_id", "")))
     attempt = _attempt(state, attempt_id)
-    requested_status = str(completion.get("status", "passed")).strip().lower()
+    requested_status = str(outcome.get("status", "passed")).strip().lower()
     if requested_status not in TERMINAL_ATTEMPT_STATUSES:
-        raise ValueError("completion status must be passed, failed, blocked, cancelled, or superseded")
+        raise ValueError("outcome status must be passed, failed, blocked, cancelled, or superseded")
     if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
         if attempt.get("status") != requested_status:
-            raise ValueError("completion status does not match the terminal ledger attempt")
+            raise ValueError("outcome status does not match the terminal ledger attempt")
         return state, None
-    result_ref = str(completion.get("attempt_result_ref") or "").strip()
+    result_ref = str(outcome.get("attempt_result_ref") or "").strip()
     if requested_status == "passed" and result_ref:
         if result_ref != str(attempt.get("attempt_result_ref") or ""):
             raise ValueError("attempt_result_ref does not belong to the active worker attempt")
@@ -3008,37 +2974,15 @@ def _complete_orchestrate_attempt(
         package["attempt_status"] = finalized_attempt.get("status")
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
         return finalized_state, None
-    observation_source = str(completion.get("host_observation_source") or "").strip()
-    completion_fields = dict(completion)
-    if observation_source == "unattested_parent_result" and attempt.get("status") == AWAITING_HOST_SPAWN:
-        # V3 deliberately does not ask Luna to echo host metadata.  A returned
-        # parent result proves that the dispatch ran, but it is not independent
-        # evidence of the effective model or reasoning effort.
-        attempt["status"] = "running"
-        attempt["dispatch_correlation"] = observation_source
-        attempt["expected_route"] = {
-            "tool": (attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent",
-            "model": (attempt.get("spawn_request") or {}).get("model"),
-            "expected_model": (attempt.get("spawn_request") or {}).get("expected_model") or attempt.get("expected_model"),
-            "reasoning_effort": (attempt.get("spawn_request") or {}).get("reasoning_effort"),
-        }
-        package = _delegation_package(task_dir, state["task_id"], attempt_id)
-        package["spawn_status"] = "parent_result_received"
-        package["dispatch_correlation"] = observation_source
-        package["expected_route"] = attempt["expected_route"]
-        _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        save_state(task_dir, task_dir / "state.sqlite", state, "parent_result", attempt_id)
-        for field in ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort"):
-            completion_fields.pop(field, None)
     if requested_status == "passed":
-        raise ValueError("passed completion requires attempt_result_ref from complete_attempt")
+        raise ValueError("passed outcome requires attempt_result_ref from complete_attempt")
     finalized = finalize_attempt({
         **params,
-        **completion_fields,
+        **outcome,
         "task_id": state["task_id"],
         "attempt_id": attempt_id,
         "status": requested_status,
-        "reason": str(completion.get("reason") or "host adapter reported terminal non-success"),
+        "reason": str(outcome.get("reason") or "canonical worker result reported terminal non-success"),
     })
     if finalized.get("recorded") is False:
         raise ValueError(str(finalized.get("reason") or "attempt finalization failed"))
@@ -3123,255 +3067,64 @@ def _ensure_attempt_evidence(
     return result["state"]
 
 
-def _replace_future_orchestrate_waves(
-    params: dict[str, Any],
-    task_dir: Path,
-    state: dict[str, Any],
-    plan: dict[str, Any],
-    raw_future: object,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    task = load_task_definition(task_dir, state)
-    host_capabilities = plan.get("host_capabilities") or {}
-    future, classification = _normalize_orchestrate_waves(raw_future, task, host_capabilities, str(params["project_root"]))
-    old_semantic_pipeline = _semantic_future_pipeline(plan)
-    old_semantic_digest = _semantic_future_pipeline_digest(plan)
-    candidate_plan = {**plan, "waves": [
-        *[wave for wave in plan.get("waves", []) if wave.get("status") == "completed"],
-        *future,
-    ]}
-    new_semantic_digest = _semantic_future_pipeline_digest(candidate_plan)
-    semantic_changed = old_semantic_digest != new_semantic_digest
-    completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
-    approval_before = _plan_approval(state)
-    explicit_plan_review = bool(
-        _plan_approval_user_requested(state)
-        or params.get("plan_approval_user_requested")
-        or params.get("user_requested_plan_approval")
-        or params.get("plan_review_requested")
-    )
-    # A changed future route is the orchestrator's chosen decision. Keep the
-    # previous approval in history for audit, but never turn a policy refresh
-    # into a second user-facing approval gate.
-    # A material route change only reopens a plan review when the user
-    # explicitly requested visible plan approval.  Governance defaults and
-    # policy ``required`` values are internal recommendations; they
-    # cannot turn a coordinator-selected future-wave update into a Cortex
-    # pause.
-    invalidate_approval = bool(semantic_changed and explicit_plan_review)
-    requested_future_gates = {gate for wave in future for gate in wave["gates"]}
-    rework_gates = sorted(completed_set & requested_future_gates)
-    # Reopening/reordering a completed gate is valid coordinator control flow;
-    # the server records the rework and preserves the immutable old evidence.
-    rework_request_digest = digest_text(canonical_json.dumps({
-        "completed_gate_rework": rework_gates,
-        "future_pipeline": _semantic_future_pipeline(candidate_plan),
-    })) if rework_gates else ""
-    rework_history = state.get("rework_history")
-    rework_history = [
-        dict(item) for item in rework_history
-        if isinstance(item, dict) and str(item.get("request_digest") or "").strip()
-    ] if isinstance(rework_history, list) else []
-    matching_history = next(
-        (item for item in reversed(rework_history)
-         if str(item.get("request_digest") or "") == rework_request_digest),
-        None,
-    ) if rework_request_digest else None
-    # A completed gate is not a license to repeatedly reopen the same plan.
-    # The first semantically identical request is a safe no-op.  A materially
-    # changed request is admitted once (and may begin with any executable
-    # worker selected by the orchestrator); replaying
-    # that same material digest is paused before update_pipeline can invalidate
-    # any receipt or mint a successor attempt. Failed-result retries do not
-    # enter this path because their gate is not in completed_set.
-    if matching_history is not None:
-        if matching_history.get("material_change"):
-            # This is an idempotent replay of a material rework that the
-            # server has already accepted.  It is not a user decision and it
-            # must not reopen the same gate or mint another worker.  Keep a
-            # durable reconciliation receipt; the already accepted
-            # The chosen route remains the sole owner of any next dispatch.
-            state.pop("blocked_reason", None)
-            state.pop("rework_pauses", None)
-            state["status"] = "active" if state.get("status") in {"blocked", "needs_input"} else state.get("status", "active")
-            state.setdefault("rework_recovery", {})
-            state["rework_recovery"].update({
-                "schema": "cortex/recovery-contract/v1",
-                "mode": "chosen_pipeline",
-                "status": "idempotent_replay",
-                "request_digest": rework_request_digest,
-                "rework_gates": list(rework_gates),
-                "replacement_worker_authorized": False,
-                "at": now(),
-            })
-            state.setdefault("rework_history", []).append({
-                "request_digest": rework_request_digest,
-                "rework_gates": list(rework_gates),
-                "semantic_future_pipeline_digest": new_semantic_digest,
-                "material_change": True,
-                "outcome": "idempotent_replay",
-                "at": now(),
-            })
-            state["rework_history"] = [
-                item for item in state["rework_history"][-32:]
-                if isinstance(item, dict)
-            ]
-            save_state(
-                task_dir,
-                task_dir / "state.sqlite",
-                state,
-                "rework_reconciled",
-                "reconciled repeated material rework to the existing server-owned Planner route",
-            )
-            return state, plan
-        raise ReworkRequestIdempotent(state, plan, rework_request_digest)
-    if rework_request_digest and not semantic_changed:
-        state.setdefault("rework_history", []).append({
-            "request_digest": rework_request_digest,
-            "rework_gates": list(rework_gates),
-            "semantic_future_pipeline_digest": new_semantic_digest,
-            "material_change": False,
-            "outcome": "idempotent",
-            "at": now(),
-        })
-        state["rework_history"] = [
-            item for item in state["rework_history"][-32:]
-            if isinstance(item, dict)
-        ]
-        save_state(
-            task_dir,
-            task_dir / "state.sqlite",
-            state,
-            "rework_idempotent",
-            "recorded identical completed-gate rework without invalidation",
-        )
-        raise ReworkRequestIdempotent(state, plan, rework_request_digest)
-    material_rework = bool(semantic_changed)
-    if semantic_changed and not explicit_plan_review:
-        advice = {
-            "code": "material_pipeline_change_advisory",
-            "severity": "warning",
-            "message": "The coordinator selected a materially different future route; no user plan approval was requested, so execution continues with the chosen pipeline.",
-            "recommended_next": "record_or_review_plan_evidence",
-            "chosen_pipeline_unchanged": True,
-            "at": now(),
-        }
-        existing_advice = state.setdefault("pipeline_advice", [])
-        if isinstance(existing_advice, list) and advice not in existing_advice:
-            existing_advice.append(advice)
-    # Planner recovery is a recommendation only. The selected future
-    # waves may begin with whichever executable worker the orchestrator chose.
-    if rework_gates:
-        # Rework is a chosen-pipeline decision. Retain immutable evidence but
-        # clear only the explicitly reopened gates; no policy-owned or
-        # governance promotion is inserted by the backend.
-        completed_set -= set(rework_gates)
-    completed_waves = [wave for wave in plan.get("waves", []) if set(wave.get("gates", [])).issubset(completed_set)]
-    relative_v3 = any(
-        item.get("host_observation_source") == "unattested_parent_result"
-        for item in params.get("completions", [])
-        if isinstance(item, dict)
-    )
-    if relative_v3:
-        for index, wave in enumerate(future, len(completed_waves) + 1):
-            wave["wave_id"] = f"wave-{index:02d}"
-            for delegation_index, delegation in enumerate(wave.get("delegations", []), 1):
-                delegation["orchestration_wave_id"] = wave["wave_id"]
-                delegation["orchestration_delegation_key"] = (
-                    f"{wave['wave_id']}-{delegation['gate']}-{delegation_index:02d}"
-                )
-    full_pipeline = [gate for gate in state["current_pipeline"] if gate in completed_set]
-    chosen_future_pipeline = [gate for wave in future for gate in wave.get("gates", [])]
-    for gate in chosen_future_pipeline:
-        if gate not in full_pipeline:
-            full_pipeline.append(gate)
-    full_groups = [[gate] for gate in full_pipeline if gate in completed_set] + [list(wave["gates"]) for wave in future]
-    normalized_current_groups = [list(group) for group in state.get("parallel_groups") or []]
-    normalized_future_groups = [list(group) for group in full_groups]
-    pipeline_or_group_change = (
-        full_pipeline != state["current_pipeline"]
-        or normalized_future_groups != normalized_current_groups
-    )
-    if pipeline_or_group_change or rework_gates:
-        state = _record_chosen_pipeline(
-            task_dir,
-            state,
-            full_pipeline,
-            full_groups,
-            recommended_pipeline=list(classification.get("pipeline") or []),
-            recommended_parallel_groups=[list(group) for group in classification.get("parallel_groups") or []],
-            reason="Coordinator replaced future waves; Cortex recommendation retained as advisory.",
-            reset_gates=rework_gates,
-        )
-    plan["waves"] = completed_waves + future
-    if semantic_changed:
-        previous_version = int(plan.get("semantic_pipeline_version") or 1)
-        plan.setdefault("history", []).append({
-            "event": "semantic_pipeline_replaced",
-            "at": now(),
-            "reason": redact(params.get("reason") or "Coordinator replaced future waves.", 2000),
-            "semantic_pipeline_version": previous_version,
-            "semantic_future_pipeline_digest": old_semantic_digest,
-            "semantic_future_pipeline": old_semantic_pipeline,
-            **({"approval": json.loads(json.dumps(approval_before))} if invalidate_approval else {}),
-        })
-        plan["semantic_pipeline_version"] = previous_version + 1
-    if invalidate_approval:
-        approval = _plan_approval(state)
-        approval.setdefault("history", []).append({
-            "event": "material_pipeline_change",
-            "at": now(),
-            "reason": redact(params.get("reason") or "Coordinator recorded a material future-wave change.", 2000),
-            "previous_plan_review": dict(approval_before.get("review") or {}),
-            "previous_approved_basis": dict(approval_before.get("approved_basis") or {}),
-        })
-        for key in (
-            "review", "plan_result_ref", "pending_basis", "approved_basis",
-            "requested_at", "approved_at",
-        ):
-            approval.pop(key, None)
-        approval.update({"policy": "required", "status": "pending_plan", "feedback": None})
-        state["plan_approval"] = approval
-        save_state(
-            task_dir,
-            task_dir / "state.sqlite",
-            state,
-            "plan_approval",
-            "material future-wave change requires a replacement plan and approval",
-        )
-    if rework_request_digest:
-        history_entry = {
-            "request_digest": rework_request_digest,
-            "rework_gates": list(rework_gates),
-            "semantic_future_pipeline_digest": new_semantic_digest,
-            "material_change": material_rework,
-            "outcome": "applied",
-            "at": now(),
-        }
-        state.setdefault("rework_history", []).append(history_entry)
-        state["rework_history"] = [
-            item for item in state["rework_history"][-32:]
-            if isinstance(item, dict)
-        ]
-        save_state(
-            task_dir,
-            task_dir / "state.sqlite",
-            state,
-            "rework_request",
-            "recorded canonical completed-gate rework digest before dispatch",
-        )
-    _write_orchestrate_plan(task_dir, plan)
-    return state, plan
-
-
-def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
+def _orchestrate_continue(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
     task_id = safe_id(str(params.get("task_id", "")))
-    completions = params.get("completions")
-    if not isinstance(completions, list) or not completions:
-        raise ValueError("advance requires a non-empty completions array")
+    submitted_refs = params.get("result_refs")
+    if not isinstance(submitted_refs, list) or not submitted_refs:
+        raise ValueError("continue requires a non-empty result_refs array")
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(task_id, params)
         authorize(state, params)
+        attempt_outcomes: list[dict[str, Any]] = []
+        for index, submitted in enumerate(submitted_refs):
+            if not isinstance(submitted, dict) or set(submitted) != {"attempt_id", "attempt_result_ref"}:
+                raise ValueError(
+                    f"result_refs[{index}] must contain only attempt_id and attempt_result_ref"
+                )
+            attempt_id = safe_id(str(submitted.get("attempt_id") or ""))
+            result_ref = str(submitted.get("attempt_result_ref") or "").strip()
+            attempt = _attempt(state, attempt_id)
+            if not result_ref or result_ref != str(attempt.get("attempt_result_ref") or ""):
+                raise ValueError("attempt_result_ref does not belong to the exact active attempt")
+            canonical = attempt_protocol.get_attempt_result(
+                root,
+                task_id=state["task_id"],
+                attempt_id=attempt_id,
+            )
+            if canonical is None or str(canonical.get("result_ref") or "") != result_ref:
+                raise ValueError("attempt_result_ref is not a canonical AttemptResult")
+            semantic_status = str(
+                canonical.get("result_status") or canonical.get("status") or ""
+            ).strip().lower()
+            requested_status = {
+                "completed": "passed",
+                "passed": "passed",
+                "failed": "failed",
+                "blocked": "blocked",
+                "cancelled": "cancelled",
+                "canceled": "cancelled",
+                "superseded": "superseded",
+            }.get(semantic_status)
+            if requested_status is None:
+                raise ValueError("canonical AttemptResult has no supported terminal semantic status")
+            lifecycle = str(canonical.get("lifecycle_status") or "")
+            if lifecycle not in {
+                attempt_protocol.LIFECYCLE_COMPLETED,
+                attempt_protocol.LIFECYCLE_FAILED,
+                attempt_protocol.LIFECYCLE_BLOCKED,
+            }:
+                raise ValueError("attempt_result_ref is not finalized")
+            outcome = {
+                "attempt_id": attempt_id,
+                "attempt_result_ref": result_ref,
+                "status": requested_status,
+            }
+            if requested_status != "passed":
+                outcome["reason"] = str(
+                    canonical.get("summary") or canonical.get("failure_class") or "semantic worker non-success"
+                )
+            attempt_outcomes.append(outcome)
         plan = _load_orchestrate_plan(task_dir, state)
         task = load_task_definition(task_dir, state)
         # Do this before completing the current worker or recording a gate.
@@ -3379,23 +3132,6 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
         # validation must never be the first operation that discovers an
         # invalid durable task after the source wave has been consumed.
         _preflight_dispatch_context(task, state)
-        if params.get("future_waves") is not None:
-            try:
-                _governance_boundary_recheck(
-                    params,
-                    task,
-                    state,
-                    future_waves=params.get("future_waves"),
-                    results=params.get("completions"),
-                )
-            except ValueError as exc:
-                state.setdefault("orchestration_advice", []).append({
-                    "code": "governance_recommendation",
-                    "severity": "warning",
-                    "message": redact(str(exc), 1600),
-                    "at": now(),
-                })
-                save_state(task_dir, task_dir / "state.sqlite", state, "governance_advice", "recorded governance recommendation without veto")
         current_wave = _wave_for_gates(plan, active_gates(state))
         executable_gates = list(current_wave.get("executable_gates") or current_wave.get("gates", [])) if current_wave else []
         requested_wave_id = safe_id(str(params.get("wave_id", "")))
@@ -3407,12 +3143,10 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 or prior_wave.get("status") not in {"completed", "blocked"}
                 or transaction_phase not in {"gates_recorded", "next_wave_prepared"}
             ):
-                raise ValueError("advance wave_id does not match the active Cortex wave")
+                raise ValueError("continue wave_id does not match the active Cortex wave")
             # The prior call crossed the gate boundary but crashed before its
             # transaction receipt was committed. Continue only the remaining
-            # post-gate phases; never replay its completions into the new wave.
-            if transaction_phase == "gates_recorded" and params.get("future_waves") is not None and state.get("status") == "active":
-                state, plan = _replace_future_orchestrate_waves(params, task_dir, state, plan, params["future_waves"])
+            # post-gate phases; never replay its result refs into the new wave.
             if state.get("status") == "completed":
                 audited = close_audit({**params, "task_id": task_id})
                 if audited["state"].get("status") != "completed":
@@ -3430,17 +3164,17 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                     if recovery is not None:
                         recovered_state, recovered_plan, prepared, receipt = recovery
                         return _orchestrate_response(
-                            "advance",
+                            "continue",
                             recovered_state,
                             wave_id=prepared["wave_id"],
                             spawn_requests=prepared["spawn_requests"],
                             result={"recovery": receipt},
                             plan=recovered_plan,
                         )
-                return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"result_count": audited["result_count"]}, plan=plan)
+                return _orchestrate_response("continue", audited["state"], wave_id=requested_wave_id, result={"result_count": audited["result_count"]}, plan=plan)
             if state.get("status") == "blocked":
                 if state.get("user_stop_requested"):
-                    return _orchestrate_response("advance", state, wave_id=requested_wave_id, plan=plan)
+                    return _orchestrate_response("continue", state, wave_id=requested_wave_id, plan=plan)
                 # A technical blocked projection is an internal recovery
                 # checkpoint, never a reason to stop the coordinator. Reopen
                 # it and retry the orchestrator-selected frontier immediately.
@@ -3470,7 +3204,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 if recovery is not None:
                     recovered_state, recovered_plan, prepared, receipt = recovery
                     return _orchestrate_response(
-                        "advance",
+                        "continue",
                         recovered_state,
                         wave_id=prepared["wave_id"],
                         spawn_requests=prepared["spawn_requests"],
@@ -3478,7 +3212,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                         plan=recovered_plan,
                     )
                 return _orchestrate_response(
-                    "advance",
+                    "continue",
                     state,
                     wave_id=requested_wave_id,
                     result={"recovery": {"status": "reconciliation_pending", "automatic": True}},
@@ -3487,13 +3221,13 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             review = _hold_for_plan_approval(task_dir, state, plan)
             if review is not None:
                 return _orchestrate_response(
-                    "advance", state, wave_id=requested_wave_id,
+                    "continue", state, wave_id=requested_wave_id,
                     result={"plan_review": review}, plan=plan,
                 )
             prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
             _checkpoint_orchestrate_transaction(transaction_path, transaction, "next_wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
             return _orchestrate_response(
-                "advance",
+                "continue",
                 prepared["state"],
                 wave_id=prepared["wave_id"],
                 spawn_requests=prepared["spawn_requests"],
@@ -3513,54 +3247,26 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             item["attempt_id"] for item in state.get("attempts", [])
             if item.get("gate") in executable_gates and not item.get("invalidated")
         ])
-        provided_attempt_ids = {safe_id(str(item.get("attempt_id", ""))) for item in completions if isinstance(item, dict)}
-        if len(provided_attempt_ids) != len(completions):
-            raise ValueError("advance completion attempt_ids must be unique")
+        provided_attempt_ids = {safe_id(str(item.get("attempt_id", ""))) for item in attempt_outcomes if isinstance(item, dict)}
+        if len(provided_attempt_ids) != len(attempt_outcomes):
+            raise ValueError("continue result-ref attempt_ids must be unique")
         unexpected = sorted(provided_attempt_ids - expected_attempt_ids)
         if unexpected:
-            raise ValueError("advance contains attempts outside the active wave: " + ", ".join(unexpected))
+            raise ValueError("continue contains attempts outside the active wave: " + ", ".join(unexpected))
         missing = sorted(expected_attempt_ids - provided_attempt_ids - {
             item["attempt_id"] for item in state.get("attempts", []) if item.get("status") in TERMINAL_ATTEMPT_STATUSES
         })
         if missing:
-            raise ValueError("advance is missing completions for: " + ", ".join(missing))
-        for completion in completions:
-            if not isinstance(completion, dict):
-                raise ValueError("completion entries must be objects")
-            if params.get("future_waves") is not None:
-                completion["pipeline_replanned"] = True
-            _preflight_orchestrate_completion(task_dir, state, completion)
-        if params.get("future_waves") is not None:
-            task = load_task_definition(task_dir, state)
-            future_preview, _ = _normalize_orchestrate_waves(
-                params["future_waves"], task, plan.get("host_capabilities") or {}, str(params["project_root"])
-            )
-            prospective_completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])) | set(executable_gates)
-            requested_future_gates = {gate for wave in future_preview for gate in wave["gates"]}
-            reintroduced = sorted(prospective_completed & requested_future_gates)
-            # Reintroduced gates are an explicit chosen-pipeline rework, not a
-            # policy violation. Immutable prior evidence remains in the ledger.
-            # Validate the complete approval/rework shape before recording any
-            # attempt or gate.  Previously this check happened only inside
-            # _replace_future_orchestrate_waves after the current gate and a
-            # reintroduced Planner had already been durably mutated, leaving
-            # an active task with plan=approved and no dispatch on rejection.
-            preview_completed_waves = [
-                wave
-                for wave in plan.get("waves", [])
-                if wave.get("status") == "completed"
-                or set(wave.get("gates", [])).issubset(prospective_completed)
-            ]
-            preview_plan = {**plan, "waves": [*preview_completed_waves, *future_preview]}
-            semantic_changed = (
-                _semantic_future_pipeline_digest(preview_plan)
-                != _semantic_future_pipeline_digest(plan)
-            )
-        for completion in completions:
-            if not isinstance(completion, dict):
-                raise ValueError("completion entries must be objects")
-            state, _unused = _complete_orchestrate_attempt(params, task_dir, state, completion)
-        _apply_next_retry_strategies(current_wave, state, completions)
+            raise ValueError("continue is missing result refs for: " + ", ".join(missing))
+        for outcome in attempt_outcomes:
+            if not isinstance(outcome, dict):
+                raise ValueError("outcome entries must be objects")
+            _preflight_attempt_outcome(task_dir, state, outcome)
+        for outcome in attempt_outcomes:
+            if not isinstance(outcome, dict):
+                raise ValueError("outcome entries must be objects")
+            state, _unused = _consume_attempt_outcome(params, task_dir, state, outcome)
+        _apply_next_retry_strategies(current_wave, state, attempt_outcomes)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "attempts_completed", attempt_ids=sorted(provided_attempt_ids))
         if state.get("require_delegation") and not state.get("reassessment_receipts") and "close" in executable_gates:
             reassessed = reassess_pipeline({
@@ -3574,10 +3280,9 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 "apply": False,
             })
             state = reassessed["state"]
-        gate_outcomes = params.get("gate_outcomes") if isinstance(params.get("gate_outcomes"), dict) else {}
         completions_by_attempt = {
             safe_id(str(item.get("attempt_id") or "")): item
-            for item in completions
+            for item in attempt_outcomes
             if isinstance(item, dict)
         }
         no_progress_pauses = _active_no_progress_pauses(state)
@@ -3623,7 +3328,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 # finding as a failed attempt; unbounded corrective handling
                 # dispatches another worker with progressively higher effort.
                 default_outcome = "failed"
-            outcome = str(gate_outcomes.get(gate, default_outcome))
+            outcome = default_outcome
             if outcome == "blocked":
                 # Worker/gate ``blocked`` is a technical observation, not a
                 # Cortex lifecycle state. Preserve the attempt evidence and
@@ -3780,7 +3485,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                         f"{gate}: dispatched server-owned corrective target {target_gate}",
                     )
                     return _orchestrate_response(
-                        "advance",
+                        "continue",
                         state,
                         wave_id=prepared["wave_id"],
                         spawn_requests=prepared["spawn_requests"],
@@ -3789,9 +3494,9 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                     ) | {
                         "next_action": (
                             "Invoke only the returned native corrective dispatch request(s) from this "
-                            "cortex/orchestration/v5 response for the same task, wait for those exact "
-                            "workers, read each canonical AttemptResult, then call orchestrate(operation=advance) "
-                            "with the server-returned completion(s)."
+                            "cortex/orchestration/v11 response for the same task, wait for those exact "
+                            "workers, read each canonical AttemptResult, then call continue_orchestration "
+                            "with only the server-returned result ref(s)."
                         ),
                     }
                 raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
@@ -3867,23 +3572,14 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
         current_wave["executable_gates"] = list(active_gates(state))
         _write_orchestrate_plan(task_dir, plan)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=original_gates)
-        # A coordinator may discover a bounded defect in the final close
-        # result and explicitly reintroduce documentation/review/close. The
-        # close gate transitions the task to completed before this replacement
-        # is applied, so accepting future waves only while active silently
-        # discarded the authorized rework and produced a false terminal
-        # success. update_pipeline(allow_rework=True) intentionally reopens a
-        # completed task and invalidates every downstream receipt.
-        if params.get("future_waves") is not None and state.get("status") in {"active", "completed"}:
-            state, plan = _replace_future_orchestrate_waves(params, task_dir, state, plan, params["future_waves"])
         if state.get("status") == "completed":
             audited = close_audit({**params, "task_id": task_id})
-            return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"result_count": audited["result_count"]}, plan=plan)
+            return _orchestrate_response("continue", audited["state"], wave_id=requested_wave_id, result={"result_count": audited["result_count"]}, plan=plan)
         if state.get("status") == "blocked":
             # A terminal worker result is recoverable orchestration evidence,
             # not a terminal state for Cortex itself.  Derive the corrective
             # route on the server immediately; the coordinator must never
-            # manufacture ``future_waves`` or issue a second, replacement
+            # manufacture a successor pipeline or issue a second, replacement
             # dispatch just to get the task moving again.
             dispatched = _dispatch_server_owned_recovery(
                 params,
@@ -3895,7 +3591,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             if dispatched is not None:
                 state, plan, prepared, recovery_receipt = dispatched
                 return _orchestrate_response(
-                    "advance",
+                    "continue",
                     state,
                     wave_id=prepared["wave_id"],
                     spawn_requests=prepared["spawn_requests"],
@@ -3924,7 +3620,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 "recorded an internal reconciliation receipt for a missing gate frontier",
             )
             return _orchestrate_response(
-                "advance", state, wave_id=requested_wave_id,
+                "continue", state, wave_id=requested_wave_id,
                 result={
                     "recovery": dict(state["diagnostic_recovery"]),
                 },
@@ -3946,7 +3642,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             if dispatched is not None:
                 state, plan, prepared, recovery_receipt = dispatched
                 return _orchestrate_response(
-                    "advance", state, wave_id=prepared["wave_id"],
+                    "continue", state, wave_id=prepared["wave_id"],
                     spawn_requests=prepared["spawn_requests"],
                     result={"recovery": recovery_receipt}, plan=plan,
                 )
@@ -3967,19 +3663,19 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 "reconciled stale needs_input projection without user decision",
             )
             return _orchestrate_response(
-                "advance", state, wave_id=requested_wave_id,
+                "continue", state, wave_id=requested_wave_id,
                 result={"recovery": dict(state["diagnostic_recovery"])}, plan=plan,
             )
         review = _hold_for_plan_approval(task_dir, state, plan)
         if review is not None:
             return _orchestrate_response(
-                "advance", state, wave_id=requested_wave_id,
+                "continue", state, wave_id=requested_wave_id,
                 result={"plan_review": review}, plan=plan,
             )
         prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "next_wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
         return _orchestrate_response(
-            "advance",
+            "continue",
             prepared["state"],
             wave_id=prepared["wave_id"],
             spawn_requests=prepared["spawn_requests"],
@@ -4582,7 +4278,7 @@ def _dispatch_server_owned_recovery(
 
 def _ensure_technical_forward_progress(
     params: dict[str, Any],
-    operation: str,
+    lifecycle: str,
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """Normalize every technical lifecycle stop into forward progress.
@@ -4594,7 +4290,7 @@ def _ensure_technical_forward_progress(
     idempotent corrective route used by explicit recovery, preserving accepted
     results and issuing at most one selected-route dispatch.
     """
-    if operation not in {"advance", "resume", "recover_inspect", "recover_blocked"}:
+    if lifecycle not in {"continue", "resume", "recover_inspect", "recover_blocked"}:
         return result
     if not result.get("ok") or str(result.get("state") or "") not in {
         "needs_input", "blocked", "recovery_pending", "rework_preflight_required",
@@ -4624,7 +4320,7 @@ def _ensure_technical_forward_progress(
             if dispatched is not None:
                 state, plan, prepared, receipt = dispatched
                 return _orchestrate_response(
-                    operation,
+                    lifecycle,
                     state,
                     wave_id=prepared["wave_id"],
                     spawn_requests=prepared["spawn_requests"],
@@ -4637,7 +4333,7 @@ def _ensure_technical_forward_progress(
                 state["technical_reconciliation"] = {
                     "schema": "cortex/recovery-contract/v1",
                     "status": "reconciled",
-                    "operation": operation,
+                    "lifecycle": lifecycle,
                     "replacement_worker_authorized": False,
                     "at": now(),
                 }
@@ -4649,7 +4345,7 @@ def _ensure_technical_forward_progress(
                     "reconciled a technical lifecycle stop without a user decision",
                 )
                 return _orchestrate_response(
-                    operation,
+                    lifecycle,
                     state,
                     wave_id=None,
                     result={"recovery": dict(state["technical_reconciliation"])},
@@ -4665,7 +4361,8 @@ def _ensure_technical_forward_progress(
 
 def _recover_internal_lifecycle_exception(
     params: dict[str, Any],
-    operation: str,
+    lifecycle: str,
+    mutating: bool,
     task_id: str | None,
     transaction: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -4677,7 +4374,7 @@ def _recover_internal_lifecycle_exception(
     event: persist it in the ledger and continue through the server-owned
     corrective route instead of returning ``management_failed``/``needs_input``.
     """
-    if operation not in ORCHESTRATE_MUTATING_OPERATIONS or not task_id:
+    if not mutating or not task_id:
         return None
     phase = str((transaction or {}).get("phase") or "started")
     if phase in {"started", "activated", "classified"}:
@@ -4706,7 +4403,7 @@ def _recover_internal_lifecycle_exception(
                 "replacement_worker_authorized": False,
             }
             return _orchestrate_response(
-                operation,
+                lifecycle,
                 state,
                 wave_id=prepared["wave_id"],
                 spawn_requests=prepared["spawn_requests"],
@@ -4725,10 +4422,7 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
     plan = _load_orchestrate_plan(task_dir, state)
     terminal_recovery_requested = bool(params.get("terminal_recovery"))
     terminal_recovery: dict[str, Any] | None = None
-    # If the orchestrator supplied a chosen route together with a recovery
-    # hint, the chosen route wins. Terminal recovery remains a server-owned
-    # audit record, not an input-shape veto.
-    if terminal_recovery_requested and params.get("future_waves") is None:
+    if terminal_recovery_requested:
         dispatched = _dispatch_server_owned_recovery(
             params,
             task_dir,
@@ -4764,33 +4458,16 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             ),
             "next_action": (
                 "invoke the returned corrective selected-route dispatch exactly once; it is server-derived and idempotent. "
-                "Do not provide future_waves, spawn a replacement worker, or dispatch the origin gate directly."
+                "Do not supply a replacement pipeline, spawn a replacement worker, or dispatch the origin gate directly."
             ),
         }
-    # Resume can replace a recovery plan and invalidate blocked attempts.
-    # Validate dispatch context before either durable transition, so a
-    # compiler rejection keeps the exact recovery state available for retry.
+    # Resume invalidates blocked attempts and retries only the server-owned
+    # durable pipeline. Validate dispatch context before any transition so a
+    # compiler rejection preserves the exact recovery state for retry.
     _preflight_dispatch_context(task, state)
-    if params.get("future_waves") is not None:
-        try:
-            _governance_boundary_recheck(
-                params,
-                task,
-                state,
-                future_waves=params.get("future_waves"),
-            )
-        except ValueError as exc:
-            state.setdefault("orchestration_advice", []).append({
-                "code": "governance_recommendation",
-                "severity": "warning",
-                "message": redact(str(exc), 1600),
-                "at": now(),
-            })
-            save_state(task_dir, task_dir / "state.sqlite", state, "governance_advice", "recorded governance recommendation without veto")
     original_status = str(state.get("status") or "")
     active_recovery = (
         original_status in {"active", "needs_input"}
-        and params.get("future_waves") is not None
         and bool(active_gates(state))
         and not any(
             attempt.get("gate") in active_gates(state)
@@ -4799,54 +4476,6 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             for attempt in state.get("attempts", [])
         )
     )
-    if original_status == "active" and params.get("future_waves") is not None and not active_recovery:
-        # A live/pending worker owns the current attempt. Preserve it and
-        # ignore a replacement route for this resume call; the orchestrator
-        # can submit its chosen route after the current result is consumed.
-        params = {key: value for key, value in params.items() if key != "future_waves"}
-    closure_rework = state.get("closure_rework") if isinstance(state.get("closure_rework"), dict) else {}
-    no_progress_pauses = _active_no_progress_pauses(state)
-    requested_rework_gate = str(params.get("rework_gate") or "").strip()
-    if requested_rework_gate and requested_rework_gate not in no_progress_pauses:
-        requested_rework_gate = ""
-    if len(no_progress_pauses) > 1 and not requested_rework_gate:
-        # Choose deterministically; all pauses remain durable evidence and can
-        # be addressed by subsequent worker corrections.
-        requested_rework_gate = sorted(no_progress_pauses)[0]
-    no_progress_pause = (
-        no_progress_pauses.get(requested_rework_gate)
-        if requested_rework_gate else next(iter(no_progress_pauses.values()), None)
-    )
-    # Identical failures are advisory evidence. Resume may retry the chosen
-    # route; the server records the pause and does not ask the user to invent a
-    # Planner strategy.
-    exhausted_closure_rework = any(
-        isinstance(item, dict) and item.get("status") == "rework_required"
-        for item in closure_rework.values()
-    ) and str(state.get("blocked_reason") or "").startswith("automatic close rework budget exhausted")
-    # Closure/no-progress budgets are retained as diagnostics only. Never
-    # synthesize a policy-owned route or require a new user-authored plan.
-    if params.get("future_waves") is not None:
-        state, plan = _replace_future_orchestrate_waves(
-            params, task_dir, state, plan, params["future_waves"]
-        )
-        for item in (state.get("closure_rework") or {}).values():
-            if isinstance(item, dict) and item.get("status") == "rework_required":
-                item["target_gate"] = "plan"
-        state.pop("blocked_reason", None)
-        if no_progress_pause:
-            resumed_pause = {**no_progress_pause, "resumed_at": now(), "resume_reason": redact(params.get("reason") or "", 1000)}
-            state.setdefault("no_progress_pause_history", []).append(resumed_pause)
-            state["no_progress_pause_history"] = state["no_progress_pause_history"][-32:]
-            no_progress_pauses.pop(str(no_progress_pause.get("gate") or requested_rework_gate), None)
-            _store_no_progress_pauses(state, no_progress_pauses)
-        save_state(
-            task_dir,
-            task_dir / "state.sqlite",
-            state,
-            "resume_replan",
-            "recorded an atomic recovery plan before resuming the blocked task",
-        )
     if active_recovery or original_status in {"active", "needs_input"}:
         state.setdefault("resume_events", []).append({
             "reason": redact(
@@ -4870,7 +4499,7 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
         )
         resumed_state = state
     else:
-        resumed = resume_task({
+        resumed = reopen_blocked_lifecycle_state({
             **params,
             "task_id": task_id,
             "expected_revision": state["revision"],
@@ -4879,16 +4508,8 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
         resumed_state = resumed["state"]
     failure_counts = resumed_state.setdefault("orchestrate_gate_failure_counts", {})
     resume_state_changed = False
-    if params.get("future_waves") is not None:
-        recovered_failure_gates = (
-            {str(gate) for gate in closure_rework}
-            if exhausted_closure_rework else set(active_gates(resumed_state))
-        )
-        for gate in recovered_failure_gates:
-            resume_state_changed = failure_counts.pop(gate, None) is not None or resume_state_changed
-    else:
-        for gate in active_gates(resumed_state):
-            resume_state_changed = failure_counts.pop(gate, None) is not None or resume_state_changed
+    for gate in active_gates(resumed_state):
+        resume_state_changed = failure_counts.pop(gate, None) is not None or resume_state_changed
     invalidated = False
     for attempt in resumed_state.get("attempts", []):
         if attempt.get("gate") in active_gates(resumed_state) and attempt.get("status") == "blocked" and not attempt.get("invalidated"):
@@ -4928,9 +4549,9 @@ def _orchestrate_lane(params: dict[str, Any]) -> dict[str, Any]:
     result = handlers[command]({**params, **payload})
     state = result.get("state") or {}
     return {
-        "schema": ORCHESTRATE_SCHEMA,
+        "schema": LIFECYCLE_RUNTIME_SCHEMA,
         "ok": True,
-        "operation": "lane",
+        "lifecycle": "lane",
         "transaction_id": None,
         "task_id": state.get("task_id") or params.get("task_id"),
         "wave_id": None,
@@ -4938,7 +4559,7 @@ def _orchestrate_lane(params: dict[str, Any]) -> dict[str, Any]:
         "spawn_requests": [],
         "diagnostics": [],
         "result": result,
-        "next_action": "continue the lane lifecycle with orchestrate(operation=lane) when needed",
+        "next_action": "continue the lane lifecycle with manage_orchestration intent lane when needed",
     }
 
 
@@ -4978,7 +4599,7 @@ def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
     # able to guess task/principal/thread values until one happens to pass.
     reserved = {
         key: params[key]
-        for key in ("project_root", "task_id", "principal", "thread_id", "submission_id")
+        for key in ("project_root", "task_id", "principal", "submission_id")
         if key in params
     }
     reserved["user_language"] = str(state.get("user_language") or "en")
@@ -5002,76 +4623,41 @@ def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
     return _orchestrate_response("question", state, result=result)
 
 
-def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
-    """Single public Cortex state-machine facade."""
-    operation = str(params.get("operation", "")).strip()
-    if operation not in ORCHESTRATE_OPERATIONS:
-        return _orchestrate_error(operation or "unknown", "unsupported_operation", "operation must be start, advance, inspect, resume, deactivate, lane, resource, question, or plan_approval", recoverable=True)
+def _run_v11_lifecycle(
+    params: dict[str, Any],
+    lifecycle: str,
+    handler: Callable[[dict[str, Any], Path | None, dict[str, Any] | None], dict[str, Any]],
+    *,
+    mutating: bool,
+) -> dict[str, Any]:
+    """Execute one code-selected v11 lifecycle; request JSON cannot select another."""
+    transaction_path: Path | None = None
+    transaction: dict[str, Any] | None = None
     try:
-        preflight_diagnostics = _collect_orchestrate_diagnostics(params)
+        preflight_diagnostics = _collect_lifecycle_diagnostics(lifecycle, params)
         if preflight_diagnostics:
-            return _orchestrate_error(
-                operation,
-                "orchestrate_validation_failed",
+            return _lifecycle_error(
+                lifecycle,
+                "lifecycle_validation_failed",
                 "request failed preflight validation",
                 phase="preflight",
                 recoverable=True,
-                next_operation=operation,
+                next_lifecycle=lifecycle,
                 task_id=str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None,
                 diagnostics=preflight_diagnostics,
             )
         select_project_root(params)
-        if operation == "inspect":
-            return _orchestrate_inspect(params)
-        mutating = operation in ORCHESTRATE_MUTATING_OPERATIONS
-        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-        if operation == "lane" and str(payload.get("command", "")) == "inspect":
-            mutating = False
-        if operation == "question" and str(payload.get("command", "ask")) in {"list", "updates"}:
-            mutating = False
-        transaction_path = None
-        transaction = None
         if mutating:
             if not str(params.get("submission_id", "")).strip():
-                raise ValueError(f"{operation} requires submission_id")
+                raise ValueError(f"{lifecycle} requires submission_id")
             root = ledger_root(params)
-            transaction_path, transaction, replay = _begin_orchestrate_transaction(root, params)
+            transaction_path, transaction, replay = _begin_orchestrate_transaction(
+                root, params, lifecycle,
+            )
             if replay is not None:
                 return _materialize_response_result_projection(params, replay)
-        if operation == "start":
-            result = _orchestrate_start(params, transaction_path, transaction)
-        elif operation == "advance":
-            result = _orchestrate_advance(params, transaction_path, transaction)
-        elif operation == "resume":
-            result = _orchestrate_resume(params)
-        elif operation == "deactivate":
-            result = {
-                "schema": ORCHESTRATE_SCHEMA,
-                "ok": True,
-                "operation": "deactivate",
-                "transaction_id": None,
-                "task_id": params.get("task_id"),
-                "wave_id": None,
-                "state": "completed",
-                "spawn_requests": [],
-                "diagnostics": [],
-                "result": deactivate_orchestration({**params, "user_command": NORMAL_COMMAND}),
-                "next_action": "Cortex orchestration is inactive for this coordinator",
-            }
-        elif operation == "lane":
-            result = _orchestrate_lane(params)
-        elif operation == "resource":
-            result = _orchestrate_resource(params)
-        elif operation == "plan_approval":
-            result = _orchestrate_plan_approval(params)
-        else:
-            result = _orchestrate_question(params)
-        # One low-level boundary owns technical-stop normalization across all
-        # mutating lifecycle operations. Validation errors and real user
-        # questions remain explicit; every other empty/needs_input projection
-        # is reconciled into a server-owned corrective dispatch before the
-        # transaction response is exposed.
-        result = _ensure_technical_forward_progress(params, operation, result)
+        result = handler(params, transaction_path, transaction)
+        result = _ensure_technical_forward_progress(params, lifecycle, result)
         if mutating:
             committed = _commit_orchestrate_transaction(transaction_path, transaction, result)
             return _materialize_response_result_projection(params, committed)
@@ -5080,9 +4666,8 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             {**result, "transaction_id": None, "idempotent": False},
         )
     except ReworkRequestIdempotent as exc:
-        task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
         result = _orchestrate_response(
-            operation,
+            lifecycle,
             exc.state,
             wave_id=None,
             spawn_requests=[],
@@ -5095,28 +4680,115 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             },
             plan=exc.plan,
         )
-        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
+        if transaction_path is not None and transaction is not None:
             committed = _commit_orchestrate_transaction(transaction_path, transaction, result)
             return _materialize_response_result_projection(params, committed)
         return result
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
-        recovered = _recover_internal_lifecycle_exception(params, operation, task_id, transaction if "transaction" in locals() else None)
+        recovered = _recover_internal_lifecycle_exception(
+            params, lifecycle, mutating, task_id, transaction,
+        )
         if recovered is not None:
-            if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
+            if transaction_path is not None and transaction is not None:
                 return _commit_orchestrate_transaction(transaction_path, transaction, recovered)
             return recovered
-        error = _orchestrate_error(
-            operation,
-            "orchestrate_validation_failed",
+        collected = getattr(exc, "diagnostics", None)
+        error = _lifecycle_error(
+            lifecycle,
+            "lifecycle_validation_failed",
             exc,
-            phase=(transaction or {}).get("phase", "preflight") if "transaction" in locals() else "preflight",
+            phase=(transaction or {}).get("phase", "preflight"),
             recoverable=True,
-            next_operation=operation,
+            next_lifecycle=lifecycle,
             task_id=task_id,
+            diagnostics=[dict(item) for item in collected] if isinstance(collected, list) and collected else None,
         )
-        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
-            transaction.update({"status": "failed", "result": error, "updated_at": now(), "failed_at": now()})
-            db_put_operation(transaction_path, safe_id(str(transaction["submission_id"])), transaction)
+        if transaction_path is not None and transaction is not None:
+            transaction.update({
+                "status": "failed",
+                "result": error,
+                "updated_at": now(),
+                "failed_at": now(),
+            })
+            db_put_operation(
+                transaction_path,
+                safe_id(str(transaction["submission_id"])),
+                transaction,
+            )
             error["transaction_id"] = transaction.get("transaction_id")
         return error
+
+
+def start_lifecycle(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_v11_lifecycle(
+        params,
+        "start",
+        lambda payload, path, receipt: _orchestrate_start(payload, path, receipt),
+        mutating=True,
+    )
+
+
+def continue_lifecycle(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_v11_lifecycle(
+        params,
+        "continue",
+        lambda payload, path, receipt: _orchestrate_continue(payload, path, receipt),
+        mutating=True,
+    )
+
+
+def inspect_lifecycle(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_v11_lifecycle(
+        params,
+        "inspect",
+        lambda payload, _path, _receipt: _orchestrate_inspect(payload),
+        mutating=False,
+    )
+
+
+def manage_lifecycle(intent: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Execute one schema-validated management intent without a generic operation field."""
+    if intent == "resume":
+        handler = lambda payload, _path, _receipt: _orchestrate_resume(payload)
+        mutating = True
+    elif intent == "deactivate":
+        def handler(
+            payload: dict[str, Any],
+            _path: Path | None,
+            _receipt: dict[str, Any] | None,
+        ) -> dict[str, Any]:
+            return {
+                "schema": LIFECYCLE_RUNTIME_SCHEMA,
+                "ok": True,
+                "lifecycle": "deactivate",
+                "transaction_id": None,
+                "task_id": payload.get("task_id"),
+                "wave_id": None,
+                "state": "completed",
+                "spawn_requests": [],
+                "diagnostics": [],
+                "result": deactivate_orchestration({
+                    **payload,
+                    "user_command": NORMAL_COMMAND,
+                }),
+                "next_action": "Cortex orchestration is inactive for this coordinator",
+            }
+        mutating = True
+    elif intent == "lane":
+        handler = lambda payload, _path, _receipt: _orchestrate_lane(payload)
+        command = str((params.get("payload") or {}).get("command") or "")
+        mutating = command != "inspect"
+    elif intent == "resource":
+        handler = lambda payload, _path, _receipt: _orchestrate_resource(payload)
+        mutating = True
+    elif intent == "question":
+        handler = lambda payload, _path, _receipt: _orchestrate_question(payload)
+        command = str((params.get("payload") or {}).get("command") or "ask")
+        mutating = command not in {"list", "updates"}
+    elif intent == "plan_approval":
+        handler = lambda payload, _path, _receipt: _orchestrate_plan_approval(payload)
+        mutating = True
+    else:
+        raise ValueError("unsupported v11 management lifecycle")
+    return _run_v11_lifecycle(params, intent, handler, mutating=mutating)

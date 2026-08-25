@@ -1,66 +1,62 @@
 ---
 name: context-compaction
-description: Internal Cortex recovery overlay. Load only for an explicitly activated Cortex task after compaction, reset, or a required bounded handoff; never select for ordinary work.
+description: Internal Cortex v11 recovery overlay. Load only for an explicitly activated Cortex task after compaction, reset, or a required bounded handoff; never select for ordinary work.
 ---
 
 # Context Handoff
 
-Do not pass raw transcripts by default. Create a compact handoff containing only:
+Do not pass raw transcripts by default. A bounded private handoff contains
+only the current goal and acceptance criteria, verified repository facts and
+source references, decisions, changed files, commands and decisive outputs,
+open task questions, and the next server-derived action. Never summarize
+secrets, credentials, raw worker reports, private logs, or raw tool streams.
 
-1. Goal and acceptance criteria.
-2. Verified repository facts with file and symbol references.
-3. Decisions made and alternatives rejected.
-4. Changed files or current diff state.
-5. Commands run and decisive outputs.
-6. Open questions, blockers, and next action.
+Compactness is prompt guidance, not a data limit. Preserve material task,
+result, question, answer, and artifact content through the authorized public
+reference when it cannot fit safely in a concise handoff.
 
-Use short summaries for older logs and results. Preserve exact error output only when the next agent needs it to reproduce or diagnose the issue. Never summarize secrets into the handoff. The parent thread should integrate the handoff; do not depend on private host databases or resume a failed subagent session.
+## Cortex v11 compaction rule
 
-Compactness is a prompt-writing preference, not a data limit. Keep a handoff
-concise when the information remains complete, but never truncate, omit, or
-reject material task, plan, result, event, question, answer, or artifact data
-to meet a byte, character, or file-size target. When the complete content is
-large, include it intact or use the exact authorized artifact/reference that
-contains it; the backend stores the complete submitted content.
+For an active coordinator task, the private handoff must preserve the exact
+pair returned by start:
 
-## Cortex recovery after context reset or compaction
+```text
+task_ref + coordinator_ref
+```
 
-When the coordinator resumes after automatic/manual compaction or a host
-`clear` context reset,
-do not assume that the active skill version, transient protocol reminders, or
-the last visible lifecycle response survived. Preserve the opaque `task_ref`
-and call `manage_orchestration` with `intent="inspect"` exactly once for that
-task. Treat the returned `context_handoff`, current pipeline, result refs, and
-relative step as the authoritative recovery snapshot. Reconcile
-`pending_dispatches` against the top-level inspect `dispatches` and invoke only
-those exact still-unstarted requests. Treat `active_workers[].host_agent_id` as
-the exact persisted native wait targets; never respawn them. A host wait-any
-form may omit explicit targets only while one of those bound workers is
-running. If an exact targeted wait receives a host identity-unavailable proof,
-the `PostToolUse` hook records only that child as a terminal resultless recovery
-state; inspect it once, then invoke the server-owned `recover_inspect` action.
-A timeout, transport
-failure, generic error, or ambiguous multi-target error does not prove a child
-ended and never authorizes a replacement. Treat `stopped_workers` as non-waitable: consume their persisted
-result refs, surface durable question refs, or invoke the exact server-returned
-recovery action. `recover_inspect` derives the stopped attempt, dispatch, and
-rework scope from the ledger; the coordinator must not synthesize, submit, or
-replay a failed result and must not construct a replacement payload. Never use
-`followup_task` to repair a stopped worker's result error; it is permitted only
-for the same question-paused worker after the durable answer is recorded. Each pending dispatch retains its `dispatch_ref`, immutable
-`briefing_path`, and `briefing_digest`, but the coordinator must not read or
-inline the briefing. Do not call
-`start_orchestration` again, replay completed dispatches, or reconstruct state
-from a raw transcript. After rehydration, continue the existing task. Consume
-only the exact server-returned AttemptResult refs and completion summary; do
-not create, publish, or republish a separate human projection artifact during
-recovery.
+Keep the pair together only in the coordinator's bounded private handoff. Do
+not write the raw capability to durable task state, a result, worker bootstrap,
+event, diagnostic, path, artifact, tool argument, or user-facing text. Also
+retain only the exact native child IDs already returned and bound by the
+runtime, canonical result refs, and the most recent server-derived step.
 
-When the resumed session is a worker (`SubagentStart`/worker `SessionStart`),
-the lifecycle hook rehydrates only the exact attempt-bound immutable briefing
-(assignment), compiled plan unit, and user-intent artifact, each with its
-SHA-256 digest. The worker must verify those artifacts and continue the same
-attempt; ambiguous identity or missing artifacts is internal recovery evidence
-that Cortex routes to a diagnostic worker. It must not
-reconstruct assignment, plan, intent, or result contract from the transcript,
-or read the shared ledger.
+If both values survive, a coordinator may call
+`manage_orchestration({task_ref, coordinator_ref, intent:"inspect"})` once
+when it needs the current lifecycle state. Follow only returned exact native
+dispatches, exact eligible live waits, durable question paths, canonical result
+reads, continuations, or terminal outcomes. Do not replay a completed dispatch,
+infer an identity, or use a generic collaboration tool.
+
+If either `task_ref` or `coordinator_ref` is absent, fail closed. Do not
+inspect, recover, query a ledger, bind a session, scan an environment, infer a
+task from an active worker, construct a result, synthesize a replacement, or
+start a task merely because an older task is visible. Obtain fresh user
+direction and fresh route activation before starting a new task.
+
+Workers do not preserve a coordinator capability. They resume only when their
+native bootstrap still provides the exact `task_ref + assignment_ref` pair.
+Each worker operation preserves that pair; predecessor reads additionally use
+the explicitly granted `attempt_result_ref`. Loss or mismatch fails closed and
+is reported as a neutral limitation to the coordinator. Hooks are telemetry
+only and never rehydrate assignment authority, briefing paths, ledger paths, or
+bearers.
+
+Before any Cortex/project call, an initial native child missing either worker
+ref returns only `CORTEX_WORKER_BOOTSTRAP_MISSING missing_fields=[...] retryable=true`
+and makes zero calls, including no `worker_question`. A
+coordinator that retained the exact original server dispatch may use one
+`followup_task` on that same child by byte-copying its server-built
+`bootstrap_repair_message` unchanged. It never reconstructs a pair or message
+from compaction, session, environment, thread, path, database, or hook state
+and never spawns a replacement. A second missing/invalid result—or loss of the
+server-built message—is terminal and fail-closed.

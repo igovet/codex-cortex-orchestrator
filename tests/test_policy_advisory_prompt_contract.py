@@ -31,9 +31,9 @@ def test_route_and_visible_output_corrections_are_machine_or_task_scoped():
     orchestrator_lower = " ".join(orchestrator.lower().split())
     assert "machine-readable route validation diagnostic" in orchestrator_lower
     assert 'path: "route"' in orchestrator_lower
-    assert '["empty", "help", "harvest", "harvest-refresh", "prune", "normal"]' in orchestrator_lower
+    assert '["empty", "help", "harvest", "harvest-refresh", "normal"]' in orchestrator_lower
     assert "ask the user to choose" not in orchestrator_lower
-    assert "ask the user to make a cortex recovery decision" in orchestrator_lower
+    assert "ask the user to make an orchestration recovery decision" in orchestrator_lower
     assert "task question" in orchestrator_lower
 
     control = (ROOT / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
@@ -126,35 +126,6 @@ def test_plan_approval_defaults_to_auto_and_requires_explicit_user_intent():
     assert "follow the returned corrective planner dispatch" not in control_skill
     assert "orchestrator's chosen pipeline" in control_skill
     assert "never forces a planner wave" in control_skill
-
-
-def test_plan_approval_is_exposed_only_as_the_canonical_user_decision_state():
-    import sys
-
-    sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
-    from cortex_runtime import mcp_api
-
-    canonical = {
-        "ok": False,
-        "state": "awaiting_plan_approval",
-        "code": "plan_approval_required",
-        "next_action": "Call manage_orchestration with intent=plan_approval.",
-        "result": {"requires_user_decision": True},
-    }
-    response = mcp_api.v3_response(
-        canonical,
-        "task-plan-review",
-        native_arguments=lambda request: {},
-        public_schema="cortex/test/v1",
-        coordinator_lock="internal-only",
-        include_result=True,
-    )
-    assert response["outcome"] == "awaiting_plan_approval"
-    assert response["code"] == "plan_approval_required"
-    assert response["requires_user_decision"] is True
-    assert response["user_view"]["requires_user_decision"] is True
-    assert "intent=plan_approval" in response["next_action"]
-    assert "advisory" not in response
 
 
 def test_governance_briefing_routes_internal_evidence_gaps_to_correction():

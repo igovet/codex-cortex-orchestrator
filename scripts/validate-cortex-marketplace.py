@@ -125,8 +125,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "10.0.7":
-        fail("plugin manifest must identify cortex at release version 10.0.7")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "11.0.1":
+        fail("plugin manifest must identify cortex at release version 11.0.1")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -247,8 +247,8 @@ def main() -> int:
         fail("shared worker contract must define unbounded rework with model/effort escalation")
     prompt_compaction_guidance = shared.get("prompt_compaction_guidance")
     if prompt_compaction_guidance != {
-        "bootstrap_target_bytes": 1500,
-        "ordinary_briefing_target_bytes": 16384,
+        "bootstrap_target_bytes": 1024,
+        "ordinary_briefing_target_bytes": 12288,
         "harvest_briefing_target_bytes": 18432,
         "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
     }:
@@ -286,30 +286,33 @@ def main() -> int:
         fail("workers must receive scoped reads, question, attempt event, and completion operations")
     question_resume_contract = str(shared.get("question_resume_contract") or "")
     for marker in (
-        "QUESTION_RECORDED", "followup_task", "worker_question(action=poll)",
+        "QUESTION_RECORDED", "followup_task", "worker_question({action:'poll'",
         "record_attempt_event", "complete_attempt", "OTHER_TERMINAL",
     ):
         if marker not in question_resume_contract:
             fail("shared worker contract must define the complete question resume route")
     if (
         shared.get("dispatch_briefing_fallback")
-        != "scoped_paged_read_dispatch_briefing_with_server_owned_worker_binding_and_returned_cursor_only_when_host_file_read_is_unavailable"
+        != "only an actual host-file-unavailable read failure returns one exact host path with max_reads=1"
     ):
-        fail("worker briefing fallback must use the server-owned worker binding")
+        fail("worker briefing fallback must be failure-only, exact-path, and one-read bounded")
     if set(shared.get("coordinator_operations", [])) != {
         "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance",
         "read_worker_result",
     }:
         fail("coordinator operations must own lifecycle and result reading")
-    if shared.get("worker_final_response") != "compact_generated_attempt_result_ref_and_at_most_two_sentence_summary_or_exact_error":
-        fail("worker final response must be compact and must not contain projection JSON")
+    if (
+        shared.get("worker_final_response")
+        != "complete_attempt_ok_true_terminal_true_requires_worker_final_exactly_ATTEMPT_COMPLETED_with_no_attempt_result_ref_handoff; retryable_false_stops_task_scoped_calls_and_returns_exactly_CORTEX_ATTEMPT_FAILED_retryable_false_for_fixed_coordinator_cleanup"
+    ):
+        fail("worker final response must select the exact success or nonretryable terminal marker")
     if (
         shared.get("result_lifecycle")
         != "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker"
         or shared.get("result_projection")
         != "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord"
         or shared.get("caller_correctable_tool_errors")
-        != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
+        != "retry_same_operation_only_when_retryable_state_unmutated_and_allowed_changes_nonempty_otherwise_stop"
         or shared.get("read_only_workspace_delta")
         != "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified"
     ):
@@ -342,22 +345,26 @@ def main() -> int:
     expected_server = {"command": "./scripts/cortex-launcher", "args": ["./scripts/cortex.py"], "cwd": "."}
     if mcp != {"mcpServers": {"cortex": expected_server}}:
         fail("MCP companion must expose only the cortex server")
+    expected_hook_events = {"SessionStart", "SubagentStart", "SubagentStop", "Stop", "PostToolUse"}
+    hook_registry = hooks.get("hooks", {})
+    if not isinstance(hook_registry, dict) or set(hook_registry) != expected_hook_events:
+        fail("hook registry must contain only the five v11 telemetry lifecycle events")
     hook_commands = [
         hook.get("command")
-        for registrations in hooks.get("hooks", {}).values()
+        for registrations in hook_registry.values()
         if isinstance(registrations, list)
         for registration in registrations
         if isinstance(registration, dict)
         for hook in registration.get("hooks", [])
         if isinstance(hook, dict)
     ]
-    if len(hook_commands) != 6 or any(
+    if len(hook_commands) != len(expected_hook_events) or any(
         not isinstance(command, str)
         or '"${PLUGIN_ROOT}/scripts/cortex-launcher"' not in command
         or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
         for command in hook_commands
     ):
-        fail("all six lifecycle hooks must invoke the bundled Cortex launcher")
+        fail("all five v11 telemetry hooks must invoke the bundled Cortex launcher")
     for skill_name in EXPECTED_SKILLS:
         skill = plugin / "skills" / skill_name / "SKILL.md"
         try:
@@ -380,7 +387,7 @@ def main() -> int:
         description_line = next(
             (line for line in frontmatter.splitlines() if line.startswith("description:")), ""
         )
-        if skill_name == "orchestrator" and "Explicit opt-in Cortex coordinator" not in description_line:
+        if skill_name == "orchestrator" and "Explicit opt-in Cortex v11 coordinator" not in description_line:
             fail("orchestrator frontmatter must make explicit opt-in authoritative")
         if skill_name in {
             "cortex-control", "adaptive-pipeline", "context-compaction", "documentation-sync",
@@ -391,24 +398,19 @@ def main() -> int:
             fail("find-skills must require explicit skill-discovery intent")
     cortex_skill = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
     harvest_skill = (plugin / "skills/knowledge-harvest/SKILL.md").read_text(encoding="utf-8")
-    if 'depends_on: ["scope"]' not in cortex_skill or 'depends_on: ["plan"]' in cortex_skill.split("## Harvest route contract", 1)[1].split("## Coordinator isolation invariant", 1)[0]:
+    if "../knowledge-harvest/SKILL.md" not in cortex_skill or 'depends_on: ["scope"]' not in harvest_skill:
         fail("harvest discovery must depend on scope in the orchestrator contract")
     if any(line.strip().startswith("<!--") for line in harvest_skill.splitlines()):
         fail("knowledge-harvest must not retain historical normative HTML comments")
     required_routes = ("| `empty` | `orchestrate` |", "| `help` | `help` |", "| `harvest` | `harvest` |", "| `harvest-refresh` | `harvest-refresh` |", "| `normal` | `normal` |")
     if not all(route in cortex_skill for route in required_routes):
         fail("Cortex skill must declare every supported route deterministically")
-    required_invocation_guidance = ("Skills picker", "`$cortex:orchestrator`", "`/skills`", "not registered native slash")
+    required_invocation_guidance = (
+        "Codex Desktop", "`$cortex:orchestrator`", "`/skills`",
+        "`/cortex` is not a native slash command",
+    )
     if not all(marker in cortex_skill for marker in required_invocation_guidance):
         fail("Cortex skill must document Desktop/CLI invocation and textual shorthand")
-    expected_catalog = render_profile_catalog(profile_contract["profiles"])
-    catalog_start = "<!-- BEGIN GENERATED PROFILE CATALOG -->"
-    catalog_end = "<!-- END GENERATED PROFILE CATALOG -->"
-    if cortex_skill.count(catalog_start) != 1 or cortex_skill.count(catalog_end) != 1:
-        fail("Cortex skill must contain exactly one generated profile catalog")
-    actual_catalog = cortex_skill.split(catalog_start, 1)[1].split(catalog_end, 1)[0].strip()
-    if actual_catalog != expected_catalog:
-        fail("Cortex skill profile catalog is stale relative to profiles.json")
     agent_files = sorted((plugin / "agents").glob("*.toml"))
     try:
         agent_names = {tomllib.loads(path.read_text(encoding="utf-8"))["name"] for path in agent_files}

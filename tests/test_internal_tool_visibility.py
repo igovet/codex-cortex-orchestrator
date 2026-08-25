@@ -23,7 +23,6 @@ class InternalToolVisibilityTests(unittest.TestCase):
         self.assertTrue(SERVER_ONLY_TOOL_NAMES.isdisjoint(public_names))
         self.assertNotIn("record_evidence", public_names)
         self.assertNotIn("execute_verification_command", public_names)
-        self.assertNotIn("record_gate_outcome", public_names)
         self.assertNotIn("commit_gate", public_names)
         self.assertNotIn("update_pipeline", public_names)
 

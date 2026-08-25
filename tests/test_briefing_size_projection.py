@@ -37,8 +37,9 @@ class BriefingSizeProjectionTests(unittest.TestCase):
         }
         prompt = control.host_spawn_prompt("backend_dev", package)
         self.assertGreater(len(prompt.encode("utf-8")), 14_500)
-        self.assertIn("artifact-contract", prompt)
-        self.assertIn("task-contract", prompt)
+        self.assertNotIn("artifact-contract", prompt)
+        self.assertNotIn("/tmp/task-contract", prompt)
+        self.assertNotIn("/tmp/intent", prompt)
         self.assertIn(huge, prompt)
 
     def test_oversized_successor_projection_retains_each_complete_item(self) -> None:
@@ -60,7 +61,7 @@ class BriefingSizeProjectionTests(unittest.TestCase):
         self.assertGreater(len(prompt.encode("utf-8")), 14_500)
         self.assertIn(fitting, prompt)
         self.assertIn(omitted, prompt)
-        self.assertIn("artifact-contract", prompt)
+        self.assertNotIn("artifact-contract", prompt)
 
 
 if __name__ == "__main__":

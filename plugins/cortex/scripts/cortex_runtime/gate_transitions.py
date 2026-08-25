@@ -599,7 +599,7 @@ def _persist_transition(
     if not completed:
         return
     task = load_task_definition(task_dir, state)
-    remove_active_mapping(root, state["task_id"], str(task.get("thread_id", "")))
+    remove_active_mapping(root, state["task_id"])
     cleanup = cleanup_completed_manifest_snapshots(task_dir, state)
     save_state(
         task_dir,

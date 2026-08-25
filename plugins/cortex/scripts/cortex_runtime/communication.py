@@ -6,10 +6,8 @@ as user prose.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
-from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -257,27 +255,12 @@ def public_risks(values: object, *, config: Mapping[str, Any] | None = None, lim
     return result[:limit] or ([fallback] if values else [])
 
 
-def _contract_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "profiles.json"
-
-
-def _configured_profiles() -> Mapping[str, Any]:
-    try:
-        data = json.loads(_contract_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    value = data.get("communication", {})
-    return value if isinstance(value, dict) else {}
-
-
 def select_profile(config: Mapping[str, Any] | None = None, *, env: Mapping[str, str] | None = None) -> str:
     """Resolve a communication profile, falling back to natural safely."""
     config = config or {}
     env = os.environ if env is None else env
-    value = config.get("communication_profile") or config.get("profile") or env.get(PROFILE_ENV)
+    value = config.get("communication_profile") or env.get(PROFILE_ENV)
     value = str(value or DEFAULT_PROFILE).strip().lower()
-    aliases = _configured_profiles().get("aliases", {})
-    value = str(aliases.get(value, value)) if isinstance(aliases, dict) else value
     return value if value in PROFILES else DEFAULT_PROFILE
 
 

@@ -20,7 +20,6 @@ class JsonRpcHarness:
         host_state_dir: Path,
         *,
         audience: str | None = None,
-        worker_binding: dict[str, Any] | None = None,
         elicitation_responder: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         environment = os.environ.copy()
@@ -30,8 +29,6 @@ class JsonRpcHarness:
         # The black-box server must use its host-private per-project mapping,
         # never a test/workspace-local ``.codex/cortex`` path.
         environment["CORTEX_HOST_STATE_DIR"] = str(host_state_dir)
-        if worker_binding is not None:
-            environment["CORTEX_WORKER_BINDING_JSON"] = json.dumps(worker_binding, sort_keys=True)
         command = [sys.executable, str(server)]
         if audience is not None:
             command.append(f"--mcp-audience={audience}")

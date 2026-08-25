@@ -19,7 +19,7 @@ from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex
-from cortex_runtime import ledger_db
+from cortex_runtime import ledger_db, v11_submission
 
 
 def _first_boot_in_process(root_text: str, ready: multiprocessing.Queue, start: multiprocessing.synchronize.Event, results: multiprocessing.Queue) -> None:
@@ -71,6 +71,79 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
         }
         ledger_db.create_task(root, definition, state, f"tasks/0001-{task_id}")
 
+    @staticmethod
+    def repair_escrow_fixture(root: Path, task_id: str = "repair-task", attempt_id: str = "repair-attempt") -> dict[str, object]:
+        ledger_db.create_task(
+            root,
+            {"schema": cortex.SCHEMA, "task_id": task_id, "created_at": "2026-01-01T00:00:00+00:00"},
+            {
+                "schema": cortex.SCHEMA, "task_id": task_id, "task_number": 1,
+                "status": "active", "revision": 1, "updated_at": "2026-01-01T00:00:00+00:00",
+                "attempts": [{"attempt_id": attempt_id, "status": "running"}],
+            },
+            f"tasks/0001-{task_id}",
+        )
+        payload = {"status": "completed", "summary": ""}
+        diagnostics = [{
+            "code": "validation_invalid", "json_pointer": "/outcome/summary",
+            "repair_pointer": "/summary", "message": "must not be empty",
+        }]
+        return {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "task_ref_digest": v11_submission.canonical_digest("task-000000000001"),
+            "assignment_ref_digest": v11_submission.canonical_digest("assignment-v1-" + "a" * 64),
+            "kind": "outcome",
+            "base_payload_digest": v11_submission.canonical_digest(payload),
+            "payload": payload,
+            "diagnostics": diagnostics,
+            "allowed_paths": ["/summary"],
+        }
+
+    def test_repair_escrow_is_immutable_and_cascades_only_with_owning_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            fixture = self.repair_escrow_fixture(root)
+            row = ledger_db.store_repair_escrow(root, **fixture)
+            with ledger_db.connection(root, write=True) as connection:
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "repair escrow rows are immutable"):
+                    connection.execute(
+                        "UPDATE repair_escrow SET allowed_paths_json='[]' WHERE handle_digest=?",
+                        (row["handle_digest"],),
+                    )
+            self.assertIsNotNone(ledger_db.get_repair_escrow(root, handle_digest=row["handle_digest"]))
+            self.assertEqual(ledger_db.delete_tasks(root, {str(fixture["task_id"])}), 1)
+            self.assertIsNone(ledger_db.get_repair_escrow(root, handle_digest=row["handle_digest"]))
+
+    def test_concurrent_identical_rejected_drafts_reuse_one_escrow_and_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            fixture = self.repair_escrow_fixture(root)
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                rows = list(executor.map(
+                    lambda _index: ledger_db.store_repair_escrow(root, **fixture),
+                    range(16),
+                ))
+            self.assertEqual({row["handle_id"] for row in rows}, {rows[0]["handle_id"]})
+            self.assertEqual({row["handle_digest"] for row in rows}, {rows[0]["handle_digest"]})
+            with ledger_db.connection(root) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM repair_escrow").fetchone()[0], 1)
+
+    @staticmethod
+    def mark_as_exact_prior_canonical_v16(root: Path) -> None:
+        """Rewrite only the canonical migration identity as the v16 release."""
+        prior = ledger_db._prior_canonical_migration(16)
+        with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+            connection.execute(
+                "UPDATE schema_migrations SET version=?, name=?, checksum=?",
+                (prior.version, prior.name, ledger_db._migration_checksum(prior)),
+            )
+            connection.execute("PRAGMA user_version = 16")
+            connection.commit()
+        ledger_db._forget_database_readiness(root)
+
     def test_fresh_ledger_records_only_current_canonical_schema_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
@@ -119,11 +192,12 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                     "INSERT INTO schema_migrations VALUES(?,?,?,?)",
                     [
                         (version, f"historical-v{version}", "2026-01-01", "historical")
-                        for version in range(1, ledger_db.DATABASE_SCHEMA_VERSION + 1)
+                        for version in sorted(ledger_db._PRECANONICAL_MIGRATION_NAMES)
                     ],
                 )
                 connection.execute("CREATE TABLE old_host_state(value TEXT NOT NULL)")
                 connection.execute("INSERT INTO old_host_state VALUES('preserve')")
+                connection.execute("PRAGMA user_version = 15")
                 connection.commit()
             database.chmod(0o600)
 
@@ -168,6 +242,147 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             )
             self.assertEqual((archives[0] / "governance-lifecycle.key").read_bytes(), b"o" * 32)
             self.assertNotEqual(old_key.read_bytes(), b"o" * 32)
+
+    def test_exact_v16_namespace_is_archived_once_before_fresh_v17_starts(self) -> None:
+        """The hard namespace cutover archives, never adopts, canonical v16."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            (project / "README.md").write_text("# fixture\n", encoding="utf-8")
+            root = cortex.ledger_root_path({"project_root": str(project)}, create=True)
+            ledger_db.ensure_database(root)
+
+            old_task_id = "legacy-v8-task"
+            old_task_ref = "task-" + "8" * 64
+            old_definition = {
+                "schema": "cortex/v8",
+                "task_id": old_task_id,
+                "user_request": "Legacy fixture",
+                "created_at": "2026-08-23T00:00:00+00:00",
+            }
+            old_state = {
+                "schema": "cortex/v8",
+                "task_id": old_task_id,
+                "task_number": 1,
+                "status": "active",
+                "revision": 1,
+                "updated_at": "2026-08-23T00:00:00+00:00",
+            }
+            old_artifact_dir = "tasks/0001-legacy-v8-task"
+            ledger_db.create_task(root, old_definition, old_state, old_artifact_dir)
+            artifact = root / old_artifact_dir / "legacy-marker.txt"
+            artifact.parent.mkdir(parents=True, mode=0o700)
+            artifact.write_text("preserved legacy namespace", encoding="utf-8")
+            ledger_db.put_global(root, "operation_registry", {
+                "schema": "cortex/orchestration/v5",
+                "starts": {"legacy-start": {"task_ref": old_task_ref}},
+                "tasks": {old_task_id: {"start": {"task_ref": old_task_ref}}},
+                "updated_at": "2026-08-23T00:00:00+00:00",
+            })
+            old_key = ledger_db._governance_lifecycle_hmac_key(root, create=True)
+            self.mark_as_exact_prior_canonical_v16(root)
+
+            def start_request(label: str) -> dict[str, object]:
+                return {
+                    "project_root": str(project),
+                    "task": {
+                        "user_request": f"Create the {label} governed fixture result.",
+                        "complexity": "C1",
+                        "acceptance_criteria": [f"The {label} fixture result is produced."],
+                        "verification": [f"Inspect the {label} fixture result."],
+                    },
+                    "waves": [{"workers": [{"phase": "discover"}]}],
+                }
+
+            started = cortex.start_orchestration(start_request("first"))
+
+            self.assertTrue(started["ok"], started)
+            self.assertEqual(started["outcome"], "ready_to_spawn")
+            self.assertEqual([item.get("call") for item in started["dispatches"]], ["spawn_agent"])
+            self.assertIsNone(ledger_db.load_task(root, old_task_id))
+            self.assertIsNone(cortex._bound_project_root_for_task_ref(old_task_ref))
+            active_registry = ledger_db.get_global(root, "operation_registry")
+            self.assertEqual(active_registry["schema"], cortex.PUBLIC_ORCHESTRATION_SCHEMA)
+
+            archives = list(root.glob("pre-canonical-ledger-*"))
+            self.assertEqual(len(archives), 1)
+            archive = archives[0]
+            self.assertRegex(archive.name, r"^pre-canonical-ledger-[A-Za-z0-9.]+-[0-9a-f]{16}$")
+            with sqlite3.connect(archive / ledger_db.DATABASE_NAME) as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 16)
+                archived_registry = json.loads(connection.execute(
+                    "SELECT payload_json FROM global_documents WHERE name='operation_registry'"
+                ).fetchone()[0])
+                archived_task = connection.execute(
+                    "SELECT definition_json,state_json FROM tasks WHERE task_id=?", (old_task_id,),
+                ).fetchone()
+            self.assertEqual(archived_registry["schema"], "cortex/orchestration/v5")
+            self.assertEqual(json.loads(archived_task[0])["schema"], "cortex/v8")
+            self.assertEqual(json.loads(archived_task[1])["schema"], "cortex/v8")
+            self.assertEqual(
+                (archive / old_artifact_dir / "legacy-marker.txt").read_text(encoding="utf-8"),
+                "preserved legacy namespace",
+            )
+            self.assertEqual((archive / "governance-lifecycle.key").read_bytes(), old_key)
+
+            second = cortex.start_orchestration(start_request("second"))
+            self.assertTrue(second["ok"], second)
+            self.assertEqual(second["outcome"], "ready_to_spawn")
+            self.assertEqual([item.get("call") for item in second["dispatches"]], ["spawn_agent"])
+            self.assertEqual(len(list(root.glob("pre-canonical-ledger-*"))), 1)
+
+            before_reopen = ledger_db.migration_history(root)
+            ledger_db.ensure_database(root)
+            self.assertEqual(ledger_db.migration_history(root), before_reopen)
+            self.assertEqual(before_reopen[0]["version"], 17)
+            self.assertEqual(len(list(root.glob("pre-canonical-ledger-*"))), 1)
+
+    def test_prior_canonical_v16_tampering_fails_closed_without_archive(self) -> None:
+        """Unknown prior identities and malformed sidecar keys are never replaced."""
+        cases = ("checksum", "name", "key")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / ".codex" / "cortex"
+                ledger_db.ensure_database(root)
+                ledger_db._governance_lifecycle_hmac_key(root, create=True)
+                self.mark_as_exact_prior_canonical_v16(root)
+                if case in {"checksum", "name"}:
+                    with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+                        if case == "checksum":
+                            connection.execute("UPDATE schema_migrations SET checksum='tampered'")
+                        else:
+                            connection.execute("UPDATE schema_migrations SET name='unknown-canonical-ledger'")
+                        connection.commit()
+                else:
+                    ledger_db._governance_lifecycle_key_path(root).write_bytes(b"invalid")
+                ledger_db._forget_database_readiness(root)
+                database_before = (root / ledger_db.DATABASE_NAME).read_bytes()
+
+                with self.assertRaisesRegex(ValueError, "unsupported pre-canonical ledger|host key is invalid"):
+                    ledger_db.ensure_database(root)
+
+                self.assertEqual((root / ledger_db.DATABASE_NAME).read_bytes(), database_before)
+                self.assertEqual(list(root.glob("pre-canonical-ledger-*")), [])
+
+    def test_single_canonical_v15_identity_is_unsupported_and_never_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            current = ledger_db._migration_plan()[0]
+            unsupported = ledger_db._Migration(15, current.name, current.statements)
+            with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+                connection.execute(
+                    "UPDATE schema_migrations SET version=?,name=?,checksum=?",
+                    (unsupported.version, unsupported.name, ledger_db._migration_checksum(unsupported)),
+                )
+                connection.execute("PRAGMA user_version=15")
+                connection.commit()
+            ledger_db._forget_database_readiness(root)
+            database_before = (root / ledger_db.DATABASE_NAME).read_bytes()
+            with self.assertRaisesRegex(ValueError, "unsupported pre-canonical ledger"):
+                ledger_db.ensure_database(root)
+            self.assertEqual((root / ledger_db.DATABASE_NAME).read_bytes(), database_before)
+            self.assertEqual(list(root.glob("pre-canonical-ledger-*")), [])
 
     def test_ready_ledger_uses_read_only_readiness_probe_without_migration_write_path(self) -> None:
         """A warm helper call must not serialize on bootstrap/migration work."""
@@ -558,38 +773,6 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertEqual(len(archives), 1)
             with sqlite3.connect(archives[0] / ledger_db.DATABASE_NAME) as connection:
                 self.assertEqual(connection.execute("SELECT task_id FROM historical_v8_marker").fetchone()[0], "active-v8-task")
-
-    def test_v14_to_v15_rebuild_preserves_attempt_events_and_is_idempotent(self) -> None:
-        """The v15 CHECK-constraint rebuild must retain every prior event row."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / ".codex" / "cortex"
-            migrations = ledger_db._migration_plan()
-            with mock.patch.object(ledger_db, "_migration_plan", return_value=migrations[:14]):
-                ledger_db.ensure_database(root)
-                self.create_task(root, "v14-attempt-task")
-                with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
-                    connection.execute(
-                        "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            "attempt-event-v14", "v14-attempt-task", "attempt-v14", "verification-v14", 1,
-                            "verification_observed", '{"exit_code":0}', "cortex",
-                            "2026-08-22T00:00:00+00:00", "2026-08-22T00:00:00+00:00",
-                        ),
-                    )
-                    connection.commit()
-
-            ledger_db.ensure_database(root)
-            with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 15)
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT event_type,payload_json,actor FROM attempt_events WHERE event_ref='attempt-event-v14'"
-                    ).fetchone(),
-                    ("verification_observed", '{"exit_code":0}', "cortex"),
-                )
-            first_history = ledger_db.migration_history(root)
-            ledger_db.ensure_database(root)
-            self.assertEqual(ledger_db.migration_history(root), first_history)
 
     def test_projection_ack_requires_the_current_nonexpired_lease_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

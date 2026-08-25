@@ -38,7 +38,12 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 15
+DATABASE_SCHEMA_VERSION = 17
+# v11 is a hard namespace cutover. The immediately preceding canonical
+# database is eligible for whole-ledger quarantine only when its exact
+# version/name/checksum identity matches the release that wrote it. Unknown or
+# tampered ledgers remain fail-closed and are never replaced.
+_PRIOR_CANONICAL_DATABASE_SCHEMA_VERSIONS = frozenset({16})
 # These are the migration identities emitted by the pre-canonical ledger
 # format.  They are retained only as recognition data: the current runtime
 # never replays or imports these migrations.  A database is eligible for
@@ -310,6 +315,16 @@ def _decode_json(text: str, label: str) -> dict[str, Any]:
     return value
 
 
+def _decode_json_list(text: str, label: str) -> list[Any]:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"SQLite {label} JSON is invalid") from exc
+    if not isinstance(value, list):
+        raise ValueError(f"SQLite {label} must be an array")
+    return value
+
+
 def database_path(root: Path) -> Path:
     return root / DATABASE_NAME
 
@@ -439,6 +454,8 @@ def _is_recognized_precanonical_history(
     if user_version != versions[-1] or versions != list(range(versions[0], versions[-1] + 1)):
         return False
     for version, name in zip(versions, names):
+        if version not in _PRECANONICAL_MIGRATION_NAMES:
+            return False
         expected = _PRECANONICAL_MIGRATION_NAMES.get(version)
         # The historical fixture format used by early host bootstrap tests
         # deliberately labels the same lineage as ``historical-vN``.
@@ -486,6 +503,40 @@ def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]
                         # failure from the caller.
                         raise
                     return False
+
+                # A breaking runtime release never imports or upgrades the
+                # prior canonical namespace. Recognize only its exact signed
+                # migration identity, then archive the entire ledger before a
+                # fresh database is created. This check deliberately binds the
+                # version, canonical name, ordered executable statements, and
+                # PRAGMA user_version; a changed checksum/name/version is not a
+                # prior release and must fail closed below.
+                recognized_prior_canonical = {
+                    (
+                        version,
+                        migration.name,
+                        _migration_checksum(_prior_canonical_migration(version)),
+                    )
+                    for version in _PRIOR_CANONICAL_DATABASE_SCHEMA_VERSIONS
+                }
+                if (
+                    len(history) == 1
+                    and history[0] in recognized_prior_canonical
+                    and user_version == int(history[0][0])
+                ):
+                    # The lifecycle key is optional until an authority-bearing
+                    # operation first creates it.  When it exists, however,
+                    # it is part of the prior namespace's integrity boundary:
+                    # an unsafe, replaced, or malformed sidecar must not be
+                    # swept into an archive under a trusted release label.
+                    prior_key = _governance_lifecycle_key_path(root)
+                    try:
+                        prior_key.lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        _governance_lifecycle_hmac_key(root, create=False)
+                    return True
 
                 # A single current-version row with the canonical migration
                 # name is the identity of this release's ledger.  If its
@@ -1327,6 +1378,47 @@ _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS = (
     "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
 )
 
+# Repair escrow is private transport state, not canonical attempt evidence.
+# A rejected draft may be retained here without contradicting a public
+# ``state_mutated=false`` response because no task revision, attempt, event,
+# result, or workspace row is changed.  Rows live exactly as long as their
+# owning task and are immutable after insertion; identical rejected drafts
+# reuse one row and therefore one signed public handle.
+_REPAIR_ESCROW_SCHEMA_STATEMENTS = (
+    "CREATE TABLE repair_escrow(handle_digest TEXT PRIMARY KEY, handle_id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, task_ref_digest TEXT NOT NULL, assignment_ref_digest TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('plan','outcome')), base_payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, allowed_paths_json TEXT NOT NULL, escrow_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, assignment_ref_digest, escrow_digest))",
+    "CREATE INDEX repair_escrow_task_attempt_idx ON repair_escrow(task_id, attempt_id, created_at)",
+    "CREATE TRIGGER repair_escrow_immutable_update BEFORE UPDATE ON repair_escrow FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'repair escrow rows are immutable'); END",
+)
+
+_PRIOR_CANONICAL_STATEMENTS_BY_VERSION: dict[int, tuple[str, ...]] = {
+    # Version 16 is the immediately preceding aggregate ledger.  Retain its
+    # exact checksummed statement set only so the hard cutover can quarantine
+    # it as a whole; no table or row is imported into v17.
+    16: (
+        _BASE_SCHEMA_STATEMENTS
+        + _ARTIFACT_SCHEMA_STATEMENTS
+        + _CLOSURE_SCHEMA_STATEMENTS
+        + _PROJECTION_SCHEMA_STATEMENTS
+        + _PRUNE_SCHEMA_STATEMENTS
+        + _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
+        + _GOVERNANCE_SCHEMA_STATEMENTS
+        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
+        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
+        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
+        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+    ),
+}
+
+
+def _prior_canonical_migration(version: int) -> _Migration:
+    try:
+        statements = _PRIOR_CANONICAL_STATEMENTS_BY_VERSION[version]
+    except KeyError as exc:
+        raise ValueError("unknown prior canonical ledger version") from exc
+    return _Migration(version, "canonical-current-ledger", statements)
+
 
 def insert_governance_lifecycle_auth(
     root: Path,
@@ -1384,7 +1476,8 @@ def _migration_plan() -> tuple[_Migration, ...]:
         + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
         + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
         + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
-        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS,
+        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+        + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
     ),)
 
 
@@ -1455,7 +1548,15 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
         15: {
             "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
         },
+        17: {
+            "repair_escrow", "repair_escrow_task_attempt_idx", "repair_escrow_immutable_update",
+        },
     }
+    # The canonical database is a fresh aggregate schema, not migration 16
+    # applied after migration 15. Validate the union of every required object
+    # from the aggregate plan so a dropped early table cannot hide behind the
+    # new namespace version.
+    required[DATABASE_SCHEMA_VERSION] = set().union(*required.values())
     present = {
         str(row[0])
         for row in connection.execute(
@@ -1546,7 +1647,19 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
                 "actor", "occurred_at", "created_at",
             },
         },
+        17: {
+            "repair_escrow": {
+                "handle_digest", "handle_id", "task_id", "attempt_id", "task_ref_digest",
+                "assignment_ref_digest", "kind", "base_payload_digest", "payload_json",
+                "diagnostics_json", "allowed_paths_json", "escrow_digest", "created_at",
+            },
+        },
     }
+    current_columns: dict[str, set[str]] = {}
+    for phase_requirements in column_requirements.values():
+        for table, expected_columns in phase_requirements.items():
+            current_columns.setdefault(table, set()).update(expected_columns)
+    column_requirements[DATABASE_SCHEMA_VERSION] = current_columns
     for table, expected_columns in column_requirements.get(version, {}).items():
         columns = {str(row[0]) for row in connection.execute("SELECT name FROM pragma_table_info(?)", (table,))}
         if not expected_columns.issubset(columns):
@@ -1751,6 +1864,213 @@ def migration_history(root: Path) -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute(
             "SELECT version, name, applied_at, checksum FROM schema_migrations ORDER BY version"
         )]
+
+
+def _repair_escrow_basis(
+    *,
+    task_id: str,
+    attempt_id: str,
+    task_ref_digest: str,
+    assignment_ref_digest: str,
+    kind: str,
+    base_payload_digest: str,
+    payload: Mapping[str, Any],
+    diagnostics: Sequence[Mapping[str, Any]],
+    allowed_paths: Sequence[str],
+) -> dict[str, Any]:
+    """Return the immutable content bound by one signed repair handle."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", task_id):
+        raise ValueError("repair escrow task identity is invalid")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", attempt_id):
+        raise ValueError("repair escrow attempt identity is invalid")
+    for label, value in (
+        ("task_ref_digest", task_ref_digest),
+        ("assignment_ref_digest", assignment_ref_digest),
+        ("base_payload_digest", base_payload_digest),
+    ):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", str(value or "")) is None:
+            raise ValueError(f"repair escrow {label} is invalid")
+    if kind not in {"plan", "outcome"}:
+        raise ValueError("repair escrow kind is invalid")
+    if not isinstance(payload, Mapping):
+        raise ValueError("repair escrow payload must be an object")
+    if not isinstance(diagnostics, Sequence) or isinstance(diagnostics, (str, bytes)) or not diagnostics:
+        raise ValueError("repair escrow diagnostics are invalid")
+    if not isinstance(allowed_paths, Sequence) or isinstance(allowed_paths, (str, bytes)) or not allowed_paths:
+        raise ValueError("repair escrow allowed paths are invalid")
+    normalized_diagnostics = [dict(item) for item in diagnostics if isinstance(item, Mapping)]
+    normalized_paths = [str(item) for item in allowed_paths if isinstance(item, str) and item.startswith("/")]
+    if len(normalized_diagnostics) != len(diagnostics) or len(normalized_paths) != len(allowed_paths):
+        raise ValueError("repair escrow diagnostics or allowed paths are invalid")
+    return {
+        "schema": "cortex/private-repair-escrow/v1",
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "task_ref_digest": task_ref_digest,
+        "assignment_ref_digest": assignment_ref_digest,
+        "kind": kind,
+        "base_payload_digest": base_payload_digest,
+        "payload": dict(payload),
+        "diagnostics": normalized_diagnostics,
+        "allowed_paths": normalized_paths,
+    }
+
+
+def store_repair_escrow(
+    root: Path,
+    *,
+    task_id: str,
+    attempt_id: str,
+    task_ref_digest: str,
+    assignment_ref_digest: str,
+    kind: str,
+    base_payload_digest: str,
+    payload: Mapping[str, Any],
+    diagnostics: Sequence[Mapping[str, Any]],
+    allowed_paths: Sequence[str],
+) -> dict[str, Any]:
+    """Create or reuse one task-lifetime private repair escrow row."""
+    basis = _repair_escrow_basis(
+        task_id=task_id,
+        attempt_id=attempt_id,
+        task_ref_digest=task_ref_digest,
+        assignment_ref_digest=assignment_ref_digest,
+        kind=kind,
+        base_payload_digest=base_payload_digest,
+        payload=payload,
+        diagnostics=diagnostics,
+        allowed_paths=allowed_paths,
+    )
+    payload_json = _canonical_json(basis["payload"])
+    diagnostics_json = _canonical_json(basis["diagnostics"])
+    allowed_paths_json = _canonical_json(basis["allowed_paths"])
+    escrow_digest = hashlib.sha256(_canonical_json(basis).encode("utf-8")).hexdigest()
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        task_row = connection.execute(
+            "SELECT state_json FROM tasks WHERE task_id=?", (task_id,),
+        ).fetchone()
+        if task_row is None:
+            raise ValueError("repair escrow task is unavailable")
+        state = _decode_json(str(task_row["state_json"]), "repair escrow task state")
+        if not any(
+            isinstance(item, Mapping) and str(item.get("attempt_id") or "") == attempt_id
+            for item in state.get("attempts", [])
+        ):
+            raise ValueError("repair escrow attempt is unavailable")
+        # One rejected draft becomes the immutable repair base for the whole
+        # active attempt.  A later full resubmission (or a concurrent second
+        # rejection) must not manufacture a new capsule and silently replace
+        # the diagnostic scope already returned to the worker.
+        existing = connection.execute(
+            "SELECT * FROM repair_escrow WHERE task_id=? AND attempt_id=? ORDER BY created_at, handle_digest LIMIT 1",
+            (task_id, attempt_id),
+        ).fetchone()
+        if existing is None:
+            handle_id = secrets.token_urlsafe(16)
+            if re.fullmatch(r"[A-Za-z0-9_-]{22}", handle_id) is None:
+                raise RuntimeError("repair handle generation failed")
+            handle_digest = hashlib.sha256(handle_id.encode("ascii")).hexdigest()
+            created_at = _now()
+            connection.execute(
+                "INSERT INTO repair_escrow(handle_digest,handle_id,task_id,attempt_id,task_ref_digest,assignment_ref_digest,kind,base_payload_digest,payload_json,diagnostics_json,allowed_paths_json,escrow_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    handle_digest, handle_id, task_id, attempt_id, task_ref_digest,
+                    assignment_ref_digest, kind, base_payload_digest, payload_json,
+                    diagnostics_json, allowed_paths_json, escrow_digest, created_at,
+                ),
+            )
+            existing = connection.execute(
+                "SELECT * FROM repair_escrow WHERE handle_digest=?", (handle_digest,),
+            ).fetchone()
+        if existing is None:
+            raise ValueError("repair escrow could not be read after persistence")
+        row = dict(existing)
+    # A pre-existing row with different semantic content is the exact pending
+    # repair, not a collision and not permission to replace the rejected base.
+    # Its authenticated contents are returned so the caller can reissue the
+    # same opaque contract.  Task/attempt ownership was checked above.
+    return _validated_repair_escrow_row(row)
+
+
+def _validated_repair_escrow_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Decode and authenticate every immutable escrow field before use."""
+    value = dict(row)
+    handle_id = str(value.get("handle_id") or "")
+    handle_digest = str(value.get("handle_digest") or "")
+    if not hmac.compare_digest(
+        hashlib.sha256(handle_id.encode("ascii", errors="strict")).hexdigest(),
+        handle_digest,
+    ):
+        raise ValueError("repair escrow integrity check failed")
+    payload = _decode_json(str(value.get("payload_json") or ""), "repair escrow payload")
+    diagnostics = _decode_json_list(str(value.get("diagnostics_json") or ""), "repair escrow diagnostics")
+    allowed_paths = _decode_json_list(str(value.get("allowed_paths_json") or ""), "repair escrow allowed paths")
+    basis = _repair_escrow_basis(
+        task_id=str(value.get("task_id") or ""),
+        attempt_id=str(value.get("attempt_id") or ""),
+        task_ref_digest=str(value.get("task_ref_digest") or ""),
+        assignment_ref_digest=str(value.get("assignment_ref_digest") or ""),
+        kind=str(value.get("kind") or ""),
+        base_payload_digest=str(value.get("base_payload_digest") or ""),
+        payload=payload,
+        diagnostics=diagnostics,
+        allowed_paths=allowed_paths,
+    )
+    observed = str(value.get("escrow_digest") or "")
+    expected = hashlib.sha256(_canonical_json(basis).encode("utf-8")).hexdigest()
+    if re.fullmatch(r"[0-9a-f]{64}", observed) is None or not hmac.compare_digest(expected, observed):
+        raise ValueError("repair escrow integrity check failed")
+    return {
+        **value,
+        "payload": payload,
+        "diagnostics": diagnostics,
+        "allowed_paths": allowed_paths,
+    }
+
+
+def get_repair_escrow(root: Path, *, handle_digest: str) -> dict[str, Any] | None:
+    """Read one private repair escrow row by the digest of its random id."""
+    if re.fullmatch(r"[0-9a-f]{64}", str(handle_digest or "")) is None:
+        raise ValueError("repair handle digest is invalid")
+    ensure_database(root)
+    with _connection(root) as connection:
+        row = connection.execute(
+            "SELECT * FROM repair_escrow WHERE handle_digest=?", (handle_digest,),
+        ).fetchone()
+    if row is None:
+        return None
+    return _validated_repair_escrow_row(dict(row))
+
+
+def get_pending_repair_escrow(
+    root: Path,
+    *,
+    task_id: str,
+    attempt_id: str,
+) -> dict[str, Any] | None:
+    """Read the one immutable repair contract bound to an active attempt.
+
+    More than one row indicates state produced outside the locked v11 state
+    machine and fails closed as an integrity error.  Successful completion is
+    tracked by the canonical AttemptResult, so no mutable "consumed" bit is
+    required on the forensic escrow row.
+    """
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", str(task_id or "")):
+        raise ValueError("repair escrow task identity is invalid")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", str(attempt_id or "")):
+        raise ValueError("repair escrow attempt identity is invalid")
+    ensure_database(root)
+    with _connection(root) as connection:
+        rows = connection.execute(
+            "SELECT * FROM repair_escrow WHERE task_id=? AND attempt_id=? ORDER BY created_at, handle_digest LIMIT 2",
+            (task_id, attempt_id),
+        ).fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("repair escrow integrity check failed: multiple pending contracts")
+    return _validated_repair_escrow_row(dict(rows[0]))
 
 
 def _upsert_task_finding_connection(
@@ -2176,11 +2496,11 @@ def reconcile_terminal_worker_session(
     that attempt may remain presented as awaiting, running, or resumable.
     This is intentionally a named runtime transition rather than a caller
     issuing an ad-hoc SQL repair: retries are idempotent, preserve the native
-    identity row, and make the terminal timestamp durable before a coordinator
+    assignment row, and make the terminal timestamp durable before a coordinator
     can consume the result.
 
     A missing session is an authority violation, not an invitation to invent a
-    worker identity.  The caller must fail closed and retry/recover through the
+    assignment authority.  The caller must fail closed and retry/recover through the
     normal dispatched attempt instead.
     """
     ensure_database(root)
@@ -2224,13 +2544,12 @@ def reconcile_terminal_worker_session(
 
 
 def list_worker_sessions(root: Path, task_id: str) -> list[dict[str, Any]]:
-    """Read server-owned native worker identities for one task.
+    """Read server-observed native worker lifecycle telemetry for one task.
 
-    Compaction recovery must be able to rehydrate a native child even when an
-    older task projection does not carry the nested ``host_spawn`` object.
-    ``worker_sessions`` is the canonical server-observed identity table, so
-    this read is deliberately scoped to one exact task and returns no other
-    host/session metadata.
+    This table records spawn/wait/stop observations for native children. It is
+    never an authorization source: worker authority is the explicit v11
+    task_ref + assignment_ref capability pair. The read is deliberately
+    scoped to one exact task and returns no unrelated transport telemetry.
     """
     ensure_database(root)
     with _connection(root) as connection:

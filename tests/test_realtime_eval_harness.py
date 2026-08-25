@@ -100,7 +100,7 @@ elif mode == "gates_recorded_failure":
             "type": "mcp_tool_call",
             "tool": "mcp__cortex__continue_orchestration",
             "status": "completed",
-            "arguments": {"step": 3, "future_waves": "SECRET_FUTURE_WAVES"},
+            "arguments": {"step": 3, "unsupported_field": "SECRET_UNSUPPORTED_FIELD"},
             "result": {"structuredContent": {
                 "ok": False,
                 "code": "orchestrate_validation_failed",
@@ -363,6 +363,37 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertNotIn("SECRET_ATTEMPT", rendered)
         self.assertNotIn("SECRET_ANSWER", rendered)
 
+    def test_worker_terminal_cleanup_telemetry_keeps_only_fixed_intent_and_outcome(self) -> None:
+        event = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {
+                "type": "mcp_tool_call",
+                "tool": "mcp__cortex__manage_orchestration",
+                "status": "completed",
+                "arguments": {
+                    "intent": "finalize_worker_failure",
+                    "task_ref": "SECRET_TASK",
+                    "coordinator_ref": "SECRET_COORDINATOR",
+                    "payload": {
+                        "dispatch_ref": "SECRET_DISPATCH",
+                        "reason_code": "worker_nonretryable_terminal",
+                    },
+                },
+                "result": {"structuredContent": {
+                    "ok": False,
+                    "failure": {"code": "worker_terminal_failure"},
+                }},
+            },
+        }))
+        self.assertEqual(event, {
+            "event": "cortex_mcp_call", "tool": "manage_orchestration",
+            "status": "completed", "ok": False,
+            "management_intent": "finalize_worker_failure", "terminal_cleanup": True,
+            "failure": {"error_code": "unknown", "reason": "unclassified"},
+        })
+        rendered = json.dumps(event, sort_keys=True)
+        for secret in ("SECRET_TASK", "SECRET_COORDINATOR", "SECRET_DISPATCH"):
+            self.assertNotIn(secret, rendered)
+
     def test_question_management_telemetry_accepts_batch_resume_contract_without_retaining_it(self) -> None:
         event = self.harness.sanitize_codex_stream_line(json.dumps({
             "item": {
@@ -462,7 +493,7 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
             },
             answer,
             {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_completed"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
             {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
@@ -524,7 +555,7 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertFalse(audit["all_question_attempts_resolved_before_result"])
         self.assertEqual(audit["resolved_before_result_count"], 0)
 
-    def test_stream_classifies_native_result_and_known_lifecycle_failure(self) -> None:
+    def test_stream_accepts_only_the_exact_native_completion_marker(self) -> None:
         native = self.harness.sanitize_codex_stream_line(json.dumps({
             "item": {
                 "type": "collab_tool_call",
@@ -533,56 +564,30 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
                 "agents_states": {
                     "child": {
                         "status": "completed",
-                        "message": "ATTEMPT_COMPLETED attempt_result_ref=SECRET_REF\nSECRET_SUMMARY",
+                        "message": "ATTEMPT_COMPLETED",
                     },
                 },
             },
         }))
-        self.assertEqual(native["outcome"], "attempt_result_recorded")
+        self.assertEqual(native["outcome"], "attempt_completed")
         self.assertEqual(native["agent_statuses"], {"completed": 1})
-        self.assertNotIn("SECRET_REF", json.dumps(native))
+        self.assertEqual(
+            self.harness.classified_native_outcome({
+                "child": {"message": "ATTEMPT_COMPLETED attempt_result_ref=SECRET_REF"},
+            }),
+            "other_terminal_message",
+        )
         validation = self.harness.classified_native_outcome({
                 "child": {"message": "complete_attempt returned attempt_result_invalid for SECRET_PATH"},
         })
         self.assertEqual(validation, "attempt_result_invalid")
-        lifecycle = self.harness.sanitize_codex_stream_line(json.dumps({
-            "item": {
-                "type": "mcp_tool_call",
-                "tool": "mcp__cortex__continue_orchestration",
-                "status": "completed",
-                "result": {
-                    "structuredContent": {
-                        "ok": False,
-                        "error": "passed completion requires attempt_result_ref from SECRET_RESULT",
-                    },
-                },
-            },
-        }))
-        self.assertEqual(lifecycle["failure_class"], "resultless_success")
-        self.assertNotIn("SECRET_RESULT", json.dumps(lifecycle))
-
-        copied_dispatch_ref = self.harness.sanitize_codex_stream_line(json.dumps({
-            "item": {
-                "type": "mcp_tool_call",
-                "tool": "mcp__cortex__continue_orchestration",
-                "status": "completed",
-                "result": {
-                    "structuredContent": {
-                        "ok": False,
-                        "error": "successful results use attempt_result_ref only; do not supply dispatch_ref SECRET_REF",
-                    },
-                },
-            },
-        }))
-        self.assertEqual(copied_dispatch_ref["failure_class"], "success_with_dispatch_ref")
-        self.assertNotIn("SECRET_REF", json.dumps(copied_dispatch_ref))
 
     def test_native_terminal_audit_requires_read_then_server_continuation_before_close(self) -> None:
         events = [
             {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
             {
                 "event": "native_tool_call", "tool": "wait", "status": "completed",
-                "outcome": "attempt_result_recorded",
+                "outcome": "attempt_completed",
             },
             {
                 "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
@@ -638,7 +643,7 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
             {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
             {
                 "event": "native_tool_call", "tool": "wait", "status": "completed",
-                "outcome": "attempt_result_recorded",
+                "outcome": "attempt_completed",
             },
             {
                 "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
@@ -766,7 +771,7 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
                 {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
                 {
                     "event": "native_tool_call", "tool": "wait", "status": "completed",
-                    "outcome": "attempt_result_recorded",
+                    "outcome": "attempt_completed",
                 },
                 {
                     "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
@@ -1276,7 +1281,7 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
             "canonical_ref_match": None,
         })
         serialized = json.dumps(events, sort_keys=True)
-        self.assertNotIn("SECRET_FUTURE_WAVES", serialized)
+        self.assertNotIn("SECRET_UNSUPPORTED_FIELD", serialized)
         self.assertNotIn("SECRET_DIAGNOSTIC", serialized)
 
     def test_exited_parent_descendant_is_terminated_and_reaped(self) -> None:

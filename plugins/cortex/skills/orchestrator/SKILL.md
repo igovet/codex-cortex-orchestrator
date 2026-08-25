@@ -1,388 +1,158 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex coordinator. Use only when the user directly selects or mentions cortex:orchestrator. Never activate from task complexity alone.
+description: Explicit opt-in Cortex v11 coordinator. Use only when the user directly selects or mentions cortex:orchestrator. Never activate from task complexity alone.
 ---
 
-# Cortex Orchestrator
+# Cortex Orchestrator v11
 
-## Invocation and routes
+## Invocation
 
-In Codex Desktop use the Skills picker to select `cortex:orchestrator` or
-mention `$cortex:orchestrator`. In CLI use `$cortex:orchestrator` or `/skills`.
-The textual shorthand is a skill invocation, not registered native slash
-command: `/cortex` is not a registered native slash route.
-
-When Desktop supplies the selected route as the canonical Markdown link
-`[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)`, the host carries that
-activation as trusted context for the first `start_orchestration` call. Do not
-copy an activation marker, skill path, or arbitrary link into task JSON. If the
-host reports `activation_required`, preserve the structured correction and
-re-enter through the Skills picker or `$cortex:orchestrator`; do not fabricate a
-marker in a worker payload.
-
-If activation is needed, use the Skills picker to select
-`cortex:orchestrator` or mention `$cortex:orchestrator`; to leave the route,
-use `$cortex:orchestrator normal`. A Cortex lifecycle response that says a
-task is complete is terminal: result the verified handoff and limitations
-without asking for another activation.
+In Codex Desktop, select `cortex:orchestrator` in Skills or mention
+`$cortex:orchestrator`. In CLI, use `$cortex:orchestrator` or `/skills`.
+`/cortex` is not a native slash command. The host, not task JSON, establishes
+the activation context for the first `start_orchestration` call.
 
 | Exact argument | Route | Effect |
 | --- | --- | --- |
-| `empty` | `orchestrate` | Start normal relative orchestration. |
-| `help` | `help` | Explain Cortex without writes. |
-| `harvest` | `harvest` | Incrementally synchronize knowledge docs. |
-| `harvest-refresh` | `harvest-refresh` | Fully re-audit knowledge docs. |
-| `prune` | `prune` | Remove only completed host-private Cortex task state stale for at least seven days. |
-| `normal` | `normal` | Exit the active Cortex session. |
+| `empty` | `orchestrate` | Start a new explicitly activated task. |
+| `help` | `help` | Explain Cortex without lifecycle writes. |
+| `harvest` | `harvest` | Start the explicit knowledge-harvest task. |
+| `harvest-refresh` | `harvest-refresh` | Start the explicit full knowledge audit. |
+| `normal` | `normal` | Leave the route without inferring a task. |
 
-Do not guess unknown arguments. Return a machine-readable route validation
-diagnostic with `path: "route"`, the received token, the expected enum
-`["empty", "help", "harvest", "harvest-refresh", "prune", "normal"]`, and
-one concrete correction. This is a route-input correction, not a task
-question; do not ask the user to make a Cortex recovery decision.
+For an unknown argument, return a machine-readable route validation diagnostic
+with `path: "route"`, the received token, the expected enum
+`["empty", "help", "harvest", "harvest-refresh", "normal"]`, and one concrete
+recovery response. This is route input recovery, not a task question. Do not ask the
+user to make an orchestration recovery decision.
 
-The help route explains invocation, opt-in behavior, the host-private Cortex
-ledger, and the nine-operation public registry. The registry contains the five
-coordinator operations and the five strict worker operations, with one shared
-operation between the role projections. A host may expose the strict
-five-operation `worker` or `coordinator` projection when it can establish
-role-specific capabilities; exposure does not change server-side scope checks.
-Help performs no activation, dispatch, or write. Source/tests outrank generated
-docs.
+For every activated orchestration route, read and follow
+`../cortex-control/SKILL.md` before the first lifecycle call. That bundled file
+is the authoritative public runtime contract. No project-local `AGENTS.md` is
+part of the installed Cortex contract.
 
-The empty, `harvest`, and `harvest-refresh` routes explicitly authorize durable
-orchestration; `prune` authorizes only the bounded maintenance call below.
-Ordinary work never activates Cortex. The normal route uses
-`manage_orchestration` with intent `deactivate` only when a Cortex task is
-active.
+## Coordinator boundary
 
-For every activated orchestration or harvest route, read and apply
-`../cortex-control/SKILL.md` before the first lifecycle call. That bundled
-skill is the authoritative runtime protocol for root isolation, dispatch,
-questions, evidence, recovery, ownership, verification, and private diagnostic
-handling. No project-local `AGENTS.md` is part of the installed contract.
+The root coordinator is never a project worker. It must not inspect, search,
+read, edit, patch, build, test, or run the target project, plugin cache, or
+private runtime state itself. It may clarify user intent, call public Cortex
+tools, invoke the exact returned V2 `spawn_agent` dispatches, wait, read
+canonical results, route durable user questions, and deliver a verified
+terminal outcome. Every project operation belongs to a worker.
 
-## Explicit task identity and new-task default
+The root does not create visible threads, run a non-native execution layer, use
+generic collaboration calls, or substitute a local implementation for a
+missing or failed worker. Native `spawn_agent`, exact `wait`/`wait_agent`, and
+same-child `followup_task` are the only worker lifecycle primitives.
 
-A request may continue, resume, inspect, steer, or follow up an existing task
-only when the user's current message explicitly contains that task's opaque
-`task_ref` or explicit task number. Preserve that exact identifier; never infer
-it from the same Codex thread, prior turns, an active ledger entry, a similar
-request, words such as “continue” or “resume”, a thread URL, or available
-workers.
+## Explicit capabilities
 
-If the current user message does not explicitly contain a `task_ref` or task
-number, the request is always a new task: call `start_orchestration` with a new
-task payload and do not call `continue_orchestration`, `manage_orchestration`,
-recovery/inspect, or select a prior task. “Continue the task” without an
-explicit `task_ref` or task number is a new-task request. A Codex thread ID is
-not a Cortex `task_ref` unless the user explicitly supplies it as the task
-identifier.
+Starting a task returns `task_ref` and `coordinator_ref`. Cortex owns and issues
+both opaque refs; the coordinator may only copy and serialize their exact bytes.
+Keep them together, private, and available only to the coordinator. Every later task-scoped
+coordinator call requires both. A user-supplied task reference, prior turn,
+thread ID, project path, active worker, hook event, environment value, ledger
+entry, or remembered task does not replace a missing coordinator capability.
 
-The server may replay a start only when it can prove that the call is a retry
-of the same private MCP transport request (for example, the host lost one
-response). This is not content-based deduplication: a new start call with the
-same wording, project, or task fields is still a new task. Never infer or
-manufacture the private request identity in coordinator arguments.
+Never expose `coordinator_ref` to a worker. A worker has only its returned
+`task_ref` and `assignment_ref`, which it byte-copies on every worker tool call;
+it never generates or infers either from a session or host state.
+When a worker reads a predecessor, it supplies the granted
+`attempt_result_ref` in addition to that worker pair. The coordinator result
+form carries only `task_ref + coordinator_ref + step`; the server derives the
+current wave and returns all canonical wave results plus the continuation.
 
-## Turn-local read discipline
+Before any Cortex tool or project read/write, each child verifies that its
+server-issued bootstrap contains both worker refs. A missing ref produces zero
+Cortex/project calls and only
+`CORTEX_WORKER_BOOTSTRAP_MISSING missing_fields=[...] retryable=true`, without
+capability values or ambient reconstruction. The bracket content is a non-empty
+ordered comma-separated subset of `task_ref,assignment_ref` (never `|`, an
+extra field, a duplicate, or a different order). Each returned dispatch also
+contains its server-built `bootstrap_repair_message`. Keep that message private.
+On the marker, call `followup_task` once on the same native child and byte-copy
+the exact `bootstrap_repair_message` unchanged as its message, then wait on
+that child again; never reconstruct a repair message or spawn a replacement.
+The repaired child must not stop at a gate-passed acknowledgement: with both
+refs valid it immediately reads the complete dispatch briefing and continues
+the original assignment through `complete_attempt` to exactly
+`ATTEMPT_COMPLETED`. Gate-passed prose before that briefing read is a
+nonterminal protocol failure, never completion evidence or permission to
+spawn a replacement. After that single repair, only the exact second missing
+marker, a durable `QUESTION_RECORDED` branch, or exact `ATTEMPT_COMPLETED`
+after canonical progress is a valid terminal child response. Bootstrap
+finalization is legal only for the exact second bootstrap-missing marker. A
+child that has already read its briefing has proved valid worker authorization:
+its later tool/schema/protocol failure is never bootstrap loss. Follow the
+returned structured recovery on that same child; do not relabel the failure as
+`finalize_bootstrap_failure`.
+If the repaired child still lacks a valid pair, or the coordinator lost the
+server-built message, fail closed terminally.
 
-Maintain a turn-local evidence index of every fully read skill, file, and
-bounded source range. Read each exact path only once per coordinator turn and
-reuse that evidence; never reload the Orchestrator skill, Cortex Control skill,
-or an unchanged project file just because a lifecycle response needs attention.
-Read again only after an explicit truncation/pagination, a post-read file edit,
-or when a distinct unread range is necessary. Search before opening a large
-file and read only the required range. This does not relax the root's ban on
-project, plugin, cache, or ledger inspection during active orchestration.
+A different exact terminal child marker,
+`CORTEX_ATTEMPT_FAILED retryable=false`, means the started worker cannot
+continue. Call `manage_orchestration(intent=finalize_worker_failure)` exactly
+once with the same coordinator pair and original dispatch's structured
+`payload={dispatch_ref, reason_code:"worker_nonretryable_terminal"}`. Do not
+read a worker result, continue, copy child prose into the reason, or spawn a
+replacement. The server closes that current assignment/session nonresumably,
+preserves briefing, event, and repair evidence, and creates no AttemptResult.
 
-The `prune` route is maintenance, not a coding pipeline. After explicit user
-selection, call `manage_orchestration` once with exact absolute `project_root`,
-intent `prune`, no `task_ref`, and
-`payload: {"confirmation":"PRUNE","older_than_days":7}`. It removes only
-completed task-scoped host-private Cortex state last updated at least seven
-days ago, and reconciles task indexes, public starts,
-activations, operation receipts, classification receipts, task resource
-claims, and lane bindings. It preserves every active or blocked task regardless
-of age and never removes a classification receipt referenced by a retained
-task. It also preserves recent completed tasks, lanes, source, documentation,
-and plugin files. Never reinterpret `prune` as clear-all. When no retention
-period is supplied, the route presents the stable choices `keep_1d`, `keep_7d`,
-`keep_30d`, and `full_reset`. The first three map to bounded retention
-windows. `full_reset` is separately destructive: it requires the exact second
-confirmation `RESET CORTEX`, refuses to run while any task is active, and
-removes only host-private Cortex state while preserving project source and docs.
+On compaction, keep the existing coordinator pair in the bounded private
+handoff described by Cortex Control. If either component is lost, fail closed:
+do not inspect, recover, infer a task, or request a replacement bearer. A
+fresh user-directed task starts through a fresh explicit activation.
 
-## Harvest route contract
+## Normal lifecycle
 
-For exact `harvest` or `harvest-refresh`, read
-`../knowledge-harvest/SKILL.md` and its linked
-`references/feature-census.md` completely before calling Cortex. Those files
-define the authoritative inventory, coverage matrix, feature-page depth, and
-completeness assessment. Do not substitute a generic documentation task.
+1. Before `start_orchestration`, preserve the user's exact task text in
+   `task.user_request`. For ordinary tasks, provide grounded non-empty
+   `task.acceptance_criteria` and `task.verification`; ask one task-relevant
+   question if material intent is missing. Use only fields advertised by the
+   current tool schema.
+2. Invoke every returned native `spawn_agent` dispatch exactly as returned. A
+   returned child ID is bound only by the runtime; never guess or transform it.
+   `action.kind=invoke_dispatches` is the `spawn_all_exact_before_wait`
+   contract: execute every exact returned native `spawn_agent` dispatch before
+   any wait. Execute every exact returned native spawn_agent dispatch before any wait.
+   It grants no wait permission and does not mean a worker exists.
+3. Wait only for the exact eligible live native child IDs. Generic wait
+   failures, timeouts, unknown IDs, partial responses, and another child's
+   terminal event do not retire a worker or authorize a replacement.
+   `action.kind=wait_for_bound_workers` is the
+   `wait_existing_returned_child_ids_only` contract: wait only on existing
+   child IDs returned by successful `spawn_agent` calls. Wait only on existing child IDs returned by successful spawn_agent calls.
+4. On a canonical worker completion, the worker final must be exactly
+   `ATTEMPT_COMPLETED`. Use `read_worker_result({task_ref, coordinator_ref,
+   step})`; the server derives the current wave, returns all canonical wave
+   results and continuation, and never requires a copied `attempt_result_ref`.
+   Follow only that returned continuation.
+5. A worker question pauses the same worker. Record the durable scalar answer
+   or stable-option selection and use `followup_task` only for that exact
+   paused child; its first worker call is the exact scalar `action:"poll"`
+   request with its original refs and `question_ref`. Never remove and recreate
+   a question to repair a ref mismatch. A task is final only when
+   the server returns a terminal outcome after canonical result processing.
 
-Both routes start with the canonical phases `scope`, `discover`, `architecture`,
-`plan`, `documentation`, `review`, and `close`. Planner Scope first publishes a
-discovery brief, relevant context, and all validated non-overlapping domains; the
-final Planner consumes all predecessor result projections after architecture.
-After reading the scope result, the
-coordinator must decide whether the repository is large enough to split the
-single discovery placeholder into 2–8 parallel `explorer` workers with
-non-overlapping domain ownership. A repository with several applications,
-services, packages, runtime processes, or integration families is large for
-this purpose. Each discovery worker declares `depends_on: ["scope"]`. After the
-domain census, the architecture worker receives `scope` and `discover`; each
-documentation worker receives the architecture synthesis plus any domain
-handoffs it needs. Use non-overlapping documentation paths when parallelizing
-writers and exactly one owner for `docs/features/index.md`.
+For a structured `ok=false` response, retry the same operation exactly once
+only when `recovery.kind=same_operation`, `retryable=true`,
+`state_mutated=false`, and non-empty `allowed_changes` define the correction.
+After that retry, follow its new response; do not loop or guess. A v11 worker
+repair is instead the one `repair_patch_only` branch: reuse only the returned
+opaque `repair_capsule`, base digest, and diagnostic-scoped allowed patches. A nonretryable or incomplete
+recovery stops task-scoped calls. An MCP `isError=true` response may still
+contain Cortex `ok=false` plus `error` and `recovery`; follow that structured
+recovery exactly. A raw JSON-RPC/protocol failure without that contract stops
+the operation; never inspect the plugin, source, logs, database, session, or
+environment to recover it. An opaque worker repair completes only with
+`ok=true terminal=true`; its `attempt_result_ref` remains server-side for the
+coordinator's canonical result read.
 
-`harvest` is incremental only after a source-backed coverage manifest proves a
-complete baseline. If the manifest is absent, shallow, stale, contradicted, or
-contains unexplained gaps, the coordinator must treat harvest as a full
-baseline census. Recent commits may prioritize discovery but may never define
-the entire scope of an incomplete baseline.
+## Harvest routes
 
-`harvest-refresh` always rebuilds the inventory independently of existing
-feature docs. Its review worker performs a second source-to-doc coverage pass;
-zero unexplained unmapped surfaces and a no-change second documentation plan
-are the recommended completion evidence. Any gap becomes a durable finding
-and a corrective writer/reviewer dispatch; the coordinator keeps the chosen
-pipeline moving until the evidence is resolved or the user must decide a task
-scope/acceptance issue.
-
-The coordinator must route semantic results that lack inventory counts,
-domain/source coverage, mapping/exclusion evidence, and concrete coverage
-gaps to a corrective owner; this is an evidence finding, not a Cortex stop. A
-handful of top-level service summaries is not complete documentation when
-those services own distinct workflows, commands, state machines, integrations,
-configuration, failure behavior, or operational contracts.
-
-Both harvest routes always use `task.plan_approval: auto`. Planning remains a
-worker phase with a durable planning artifact, but a command-style knowledge
-harvest never pauses for separate user approval of that plan.
-
-## Coordinator isolation invariant
-
-While Cortex orchestration is active, the main/root agent is a coordinator,
-not a project worker. It must not inspect, search, read, edit, patch, generate,
-format, build, test, or run project code itself. This prohibition includes
-repository shell commands and direct filesystem or patch tools, even when the
-next implementation step appears obvious from a worker result.
-
-The coordinator may only clarify the user's goal, call the public Cortex
-lifecycle and result-read tools, invoke the exact returned native dispatches,
-wait for workers, relay questions, evaluate results and gate evidence, adjust
-future waves through Cortex, and communicate the integrated result to the user. All project
-operations, including follow-up inspection and implementation after a planning
-result, belong to a dispatched worker. The coordinator must remain idle while
-a worker is active. Never work in parallel with an active
-worker or substitute coordinator work for a missing, slow, failed, or blocked
-worker. If dispatch is unavailable, keep the task resumable and route the
-condition through server-owned recovery or one concrete task question; never
-stop Cortex or fall back to direct project work.
-
-Technical lifecycle failures are never user-facing blockers. Invalidated
-attempts, validation errors, stale receipts, replay-registry drift, failed
-dispatches, and contradictory internal projections must be recorded as JSONC
-recovery evidence and repaired by Cortex through the same attempt or a
-server-owned corrective dispatch. The coordinator must not answer that Cortex
-is blocked and must not loop through `manage_orchestration` repeatedly. For a
-completed worker result, read it once, call `continue_orchestration` once with
-the exact server continuation, and follow the returned dispatch or wait. Only
-a durable worker question or explicit plan approval can stop the ordinary
-chat.
-
-### Question Firewall
-
-The ordinary-chat question surface is reserved for the user's task. A worker
-may pause the chat only for requirement, scope, acceptance, product, or
-explicit external/destructive authorization decisions. When a question's
-`context.decision_scope` is available, use one of those task scopes (for
-example `requirement`, `scope`, `acceptance`, or
-`external_authorization`). Never ask the user to decide a Cortex policy,
-governance gate, planner/reapproval choice, retry, worker/profile, dispatch,
-ledger, receipt, evidence, lifecycle, or recovery issue. Those conditions are
-internal orchestration evidence: return the server's `orchestrator_advice`,
-record it, and choose or delegate the corrective action. Do not persist an
-internal question and do not expose it as a user blocker.
-
-## Team intelligence and routing
-
-The main/root agent is the user-facing mission commander and integration
-authority. It owns goal clarification, routing, wave decisions, evidence
-gates, recovery, and the final answer. It is never a hidden implementer.
-Workers are internal specialists with bounded ownership; they result to the
-main coordinator and never become an alternate user-facing authority.
-
-Workers publish semantic AttemptResult facts and, when useful, incremental
-AttemptEvents. Cortex owns attempt identity, receipts, workspace observations,
-checks, timestamps, and evidence markers; it exposes result refs and scoped
-human/handoff projections consumed by the coordinator. A projection is a
-handoff view, not the worker's authoritative transport.
-
-`profiles.json` is the canonical team source. Use only the exact profile names
-below. `automatic` means the profile is the default owner of one or more
-pipeline gates. `manual` means Cortex selects it for the implementation gate
-only when task signals or worker evidence justify that specialist. Access is a
-hard capability boundary, not a suggestion.
-
-<!-- BEGIN GENERATED PROFILE CATALOG -->
-| Profile | Route | Access | Select when | Avoid when |
-| --- | --- | --- | --- | --- |
-| `accessibility_engineer` | automatic | read-only | Accessibility conformance or assistive-technology behavior needs independent analysis. | General visual design or production UI implementation is the primary task. |
-| `architect` | automatic | read-only | System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided. | The design is already settled and the remaining work is bounded implementation. |
-| `backend_dev` | manual | workspace-write | A bounded server, API, service, business-logic, or persistence change must be implemented. | The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery. |
-| `build_verification` | automatic | read-only | Independent non-mutating build, test, packaging, installation, or release-readiness proof is required. | A failing check must be diagnosed or repaired. |
-| `code_reviewer` | automatic | read-only | A completed or proposed change needs independent defect-focused review. | The primary need is implementation, planning, or broad repository discovery. |
-| `data_engineer` | manual | workspace-write | Data movement, transformation, backfill, migration execution, or integrity validation must be implemented. | Only database schema design is needed, with no data-operation implementation. |
-| `database_architect` | automatic | read-only | Schema, index, query-plan, migration, locking, or rollback design needs specialist review. | The approved design only needs migration or data-pipeline implementation. |
-| `debugger` | manual | workspace-write | A failure must be reproduced and its root cause proven before a focused repair. | The desired behavior and implementation path are already known. |
-| `devops_engineer` | manual | workspace-write | Infrastructure, delivery, deployment, runtime configuration, or operational automation must change. | The task is application implementation without delivery or runtime ownership. |
-| `explorer` | automatic | read-only | Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known. | The task requires design decisions or source changes. |
-| `frontend_dev` | manual | workspace-write | A browser UI, component, client state, styling, or frontend test change must be implemented. | The task spans material server ownership or is only interaction design. |
-| `fullstack_dev` | manual | workspace-write | One coherent change spans both browser-facing and server-facing contracts. | The work can be cleanly owned by one narrower frontend or backend specialist. |
-| `general` | automatic | workspace-write | The work is bounded but no specialist profile has a justified capability match. | A narrower supported specialist clearly owns the task. |
-| `mobile_dev` | manual | workspace-write | An iOS, Android, React Native, Flutter, or native mobile change must be implemented. | The task is browser web UI or a platform-neutral backend. |
-| `performance_engineer` | automatic | read-only | Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis. | The bottleneck is already proven and only an approved implementation remains. |
-| `planner` | automatic | read-only | Early discovery domains or a decision-complete final plan, dependency order, ownership map, or acceptance matrix is needed. | The task is a simple bounded execution step or requires editing project files. |
-| `qa_engineer` | automatic | workspace-write | Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created. | Only a non-mutating final command run or source-code review is needed. |
-| `refactorer` | manual | workspace-write | The explicit goal is behavior-preserving structural improvement with regression proof. | New behavior, unresolved defects, or architecture decisions dominate the task. |
-| `security_auditor` | automatic | read-only | Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review. | The task is to implement a known security fix rather than audit it. |
-| `technical_writer` | automatic | workspace-write | Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs. | Facts are unverified or production code changes are still required. |
-| `ux_designer` | automatic | read-only | User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed. | The design is settled and production frontend code must be written. |
-<!-- END GENERATED PROFILE CATALOG -->
-
-Routing is evidence-driven:
-
-1. Use the canonical gate owner for planning, discovery, architecture,
-   specialist audits, review, documentation, QA, and close.
-2. For implementation, prefer the narrowest justified writer:
-   `debugger` for reproduce-and-prove failures; `refactorer` for explicit
-   behavior-preserving structure work; `frontend_dev`, `backend_dev`,
-   `fullstack_dev`, or `mobile_dev` for their application surfaces;
-   `data_engineer` for data movement and migration execution; and
-   `devops_engineer` for infrastructure and delivery. Use `general` only when
-   no specialist match is supported.
-3. The coordinator owns the pipeline decision. Build or consciously accept the
-   initial canonical pipeline, then follow the exact `pipeline.waves` snapshot
-   returned by Cortex. Planner and explorer results are advisory evidence, not
-   commands to rebuild the pipeline. Change `future_waves` only when the
-   coordinator concludes that verified evidence materially changes ownership,
-   dependencies, risk gates, sequencing, or validation. Include a concise
-   reason. Never restate or relabel an unchanged pipeline merely because a
-   result completed. Context narrowing changes dependencies, not phase
-   membership: Cortex rejects removal of a pending implementation obligation
-   and automatically records rework when a replacement repeats a current or
-   completed phase. If an accepted implementation plan reaches documentation
-   or close without implementation and its required QA/audit/review evidence,
-   Cortex records the missing evidence and returns corrective owner options;
-   the coordinator may retain the current owner, add a specialist, or ask a
-   Planner to replan. Evidence-backed material replans have no task-lifetime
-   quota: `replan_count` is audit history and the prior `replan_limit` field
-   cannot terminate a progressing task. Cortex preflights the complete
-   replacement before mutating the current gate. If an older failed replan
-   left an active gate with no live or pending dispatch, repair it through the
-   chosen pipeline or a server-derived corrective dispatch; a Planner route is
-   advice, never a requirement.
-4. A profile may own only its declared automatic gate, or—when it is a manual
-   workspace writer—the implementation gate. Do not assign a writer to plan,
-   discovery, review, audit, or close work. Do not assign a read-only analyst
-   to implement a fix.
-5. Each returned dispatch explains `phase`, `profile`, `capability`, `sandbox`,
-   and `selection_reason`. Check that rationale against the latest evidence
-   before invoking the dispatch. Never invent a role name or silently replace
-   Cortex's native arguments. A `ready_to_spawn` response authorizes only its
-   returned `dispatch.call` with those exact `dispatch.arguments`: a generic
-   collaboration spawn, self-authored task name, or replacement child cannot
-   bind to or advance the issued Cortex attempt.
-   Do not treat a planned dispatch, commentary, or an empty wait as proof that
-   a worker exists. The native call must return a child id before saying it was
-   sent; retain those exact ids and wait only on them. A missing or failed
-   native dispatch is internal recovery evidence: let Cortex derive one
-   corrective dispatch and never expose it as a blocker or continue the wave
-   from an unbound child.
-
-Multiple workers with the same profile are separate bounded instances. Keep
-their ownership, paths, dependencies, result refs, and native task identities
-distinct. `profile` preserves the exact canonical role. `display_name` is the
-human-readable `Profile Module` label (for example, `Explorer Auth`), and
-`spawn_agent.task_name` is its host-safe task/attempt-unique key with an
-ordinal and a
-uniqueness digest. A new dispatch must use
-`spawn_agent`; `followup_task` is reserved for resuming that exact native
-worker after its durable question or other explicitly resumable pause. Cortex
-rejects reuse of a `host_agent_id` already bound to another attempt. Since
-dynamic host events result `agent_type=default`, lifecycle hooks use the
-exact returned dispatch identity to bind each opaque child ID back to its
-issued native task key and canonical profile before injecting worker context.
-The hidden `spawn_agent` host contract currently exposes only `task_name` to
-the native child list; it has no separate label field. Therefore the host may
-render the unique key (for example, `architect_repository_08_<digest>`) even
-though Cortex's `display_name` remains the human-readable `Architect
-Repository` metadata and is used by lifecycle context. Never remove the key's
-ordinal or digest to improve host rendering: that would reintroduce child
-identity collisions. Explicit `visible_thread` dispatches use their
-human-readable `display_name` as the native thread title.
-
-## Runtime protocol handoff
-
-### User communication
-
-User-visible updates use the communication contract in `profiles.json`. The
-default `natural` profile favors plain language; `compact` limits updates to
-the essential result and next step; `technical` retains useful implementation
-detail. Select with `communication_profile` or `CORTEX_COMMUNICATION_PROFILE`;
-unknown values fall back to `natural`. Human-readable message types are kept
-separate from internal transport metadata. Before publication, check plain
-language, absence of internal identifiers and tool names, non-repetition, an
-explicit next step, and the selected profile's length/detail expectations.
-
-Natural-facing output is a strict presentation boundary. In the default
-`natural` profile, every user-visible update contains only 3–5 short steps:
-what happened, why it matters, what happens next, and—when applicable—the one
-decision required from the user. Internal protocol names, lifecycle states,
-worker identities, dispatch references, cursors, result refs, model names,
-and validation implementation details stay internal. Ask at most one clear
-question in a user-facing message. If all material uncertainty is closed and
-the plan is executable, the coordinator must recommend **Approve** explicitly;
-it may recommend **Revise** only when a concrete unresolved risk, dependency,
-or verification gap remains. Waiting for workers produces no user-facing
-heartbeat or progress message.
-
-For an activated route, `../cortex-control/SKILL.md` is the single coordinator
-core and state-machine authority. Load it completely before the first lifecycle
-call and follow its exact tool sequence, silent-wait policy, question flow,
-result processing, unbounded rework escalation, steer/follow-up distinction, model routing,
-recovery, and completion contract. Do not restate or reinterpret that protocol
-here.
-
-Before every Cortex lifecycle or recovery tool call, use the exact nested JSON
-schema advertised for that tool by the active MCP `tools/list` surface. Never
-infer field names, enum values, or nested paths from prose, a prior error, or
-the transcript; apply all returned field diagnostics atomically to the same
-request and preserve fields that already passed validation.
-
-Before `start_orchestration`, ordinary tasks have non-empty
-`task.acceptance_criteria` and `task.verification` grounded in the exact user
-request or verified authority. Ask the user first when a material criterion
-cannot be derived without inventing intent. Planner work packages keep
-`profile` forbidden at package level; each microtask has non-empty
-`verification`, explicit `profile`, narrow non-broad `allowed_paths`, and
-non-empty acceptance criteria. Cortex compiles the approved dependency graph
-into an immutable executable plan unit instead of dispatching a generic
-implementation mission.
-
-After compaction or uncertain host state, use the Cortex Control recovery rule:
-inspect once, reconcile `pending_dispatches` and `active_workers`, and never
-reconstruct lifecycle state from chat. The coordinator must remain idle while a
-worker is active and may never use patch, shell, or project-inspection tools as
-   direct project operation.
-
-Native worker-slot cleanup, all wait behavior, result-link publication,
-`next_strategy` retry handling, and terminal completion are defined only in
-Cortex Control. A native spawn, wait, child message, or local child close is
-never completion evidence: read the exact canonical AttemptResult and wait for
-the server-derived `continue_orchestration` continuation/terminal audit before
-presenting any result. A completed lifecycle response is terminal: present the
-evidence-backed result and every unrun release gate without asking the user to
-activate Cortex again.
+For `harvest` or `harvest-refresh`, read
+`../knowledge-harvest/SKILL.md` and its linked `references/feature-census.md`
+before starting. Use their source-backed inventory contract, then follow the
+same v11 capability and V2 lifecycle rules above. Harvest evidence gaps are
+worker findings for a corrective owner, not a reason for host/session recovery
+or direct coordinator project work.

@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
 import cortex_hook
-from cortex_runtime import identity as worker_identity
+from cortex_runtime import identity as native_identity
 from cortex_runtime import mcp_api
 from cortex_runtime import prompt_compiler
 from cortex_runtime import briefings
@@ -71,16 +71,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def write_task_state(self, state: dict) -> None:
         control.db_update_task_state(self.ledger, state)
 
-    def delegate(self, state, task_id, gate, agent="general"):
-        observed = control.status({"task_id": task_id, "principal": "owner"})
-        delegated = control.record_delegation({"task_id": task_id, "principal": "owner", "expected_revision": state["revision"], "status_receipt": observed["status_receipt"], "gate": gate, "agent": agent, "task_kind": gate, "risk": "moderate", "requested_model": "gpt-5.6-terra", "requested_reasoning_effort": "medium", "objective": "bounded work", "ownership": f"Own {gate}", "allowed_paths": ["."], "acceptance_criteria": [f"Complete {gate}"], "verification": ["Record evidence"]})
-        confirmed = control.confirm_host_spawn({
-            "task_id": task_id, "principal": "owner", "expected_revision": delegated["state"]["revision"],
-            "attempt_id": delegated["attempt_id"], "host_agent_id": f"test-host-{delegated['attempt_id']}",
-            "host_task_name": delegated["spawn_request"]["task_name"],
-            "host_model": delegated["spawn_request"]["model"],
-        })
-        return {**delegated, "state": confirmed["state"], "host_spawn": confirmed["host_spawn"]}
 
 
     def test_runtime_dependency_slices_do_not_import_executable_facade(self):
@@ -158,44 +148,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "used": delegated["state"]["revision"],
         })
 
-    def test_active_activation_can_infer_omitted_identity_but_unbound_task_cannot(self):
-        self.init()
-        observed = control.status({"task_id": "task"})
-        self.assertTrue(observed["active"])
-        # A correctly bound thread is a safe identity recovery path. It must
-        # not be mistaken for the task owner/principal string.
-        by_thread = control.status({"task_id": "task", "thread_id": "owner"})
-        self.assertTrue(by_thread["active"])
-        with self.assertRaisesRegex(ValueError, "different thread"):
-            control.status({"task_id": "task", "thread_id": "other-thread"})
-        with self.assertRaisesRegex(ValueError, "different principal"):
-            control.status({"task_id": "task", "principal": "intruder"})
 
-    def test_confirm_host_spawn_recovers_stale_revision(self):
-        state = self.init()["state"]
-        observed = control.status({"task_id": "task", "principal": "owner"})
-        delegated = control.record_delegation({
-            "task_id": "task", "principal": "owner",
-            "expected_revision": state["revision"],
-            "status_receipt": observed["status_receipt"],
-            "gate": "plan", "agent": "planner", "task_kind": "planning", "risk": "low",
-            "objective": "bounded work", "ownership": "Own plan",
-            "allowed_paths": ["."], "acceptance_criteria": ["Complete plan"],
-            "verification": ["Record evidence"],
-        })
-        confirmed = control.confirm_host_spawn({
-            "task_id": "task",
-            "attempt_id": delegated["attempt_id"],
-            "expected_revision": state["revision"],
-            "host_agent_id": "test-host-stale-revision",
-            "host_task_name": delegated["spawn_request"]["task_name"],
-            "host_model": delegated["spawn_request"]["model"],
-        })
-        self.assertEqual(confirmed["revision_correction"], {
-            "requested": state["revision"],
-            "used": confirmed["state"]["revision"] - 1,
-        })
-        self.assertEqual(confirmed["state"]["attempts"][-1]["status"], "running")
 
     def test_manifest_reconciles_every_change_without_truncation(self):
         (self.project / "modified.txt").write_text("before\n", encoding="utf-8")
@@ -277,101 +230,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertFalse(blocked["recorded"])
         self.assertFalse(blocked["file_manifest_receipt"]["complete"])
 
-    def test_large_final_manifest_is_not_marked_partial_before_terminal_close(self):
-        created = self.init()
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        state = self.task_state(task_dir)
-        state.update({
-            "current_pipeline": ["close"],
-            "parallel_groups": [["close"]],
-            "current_gates": ["close"],
-            "require_delegation": False,
-            "require_handoff": False,
-        })
-        policy = dict(control.TRACKER_POLICY)
-        policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
-        complete_baseline = control.capture_project_manifest(self.project, policy=policy)
-        state["initial_manifest_ref"] = control.store_manifest_snapshot(task_dir, complete_baseline)
-        state["initial_manifest_digest"] = complete_baseline["digest"]
-        self.write_task_state(state)
-        (self.project / "close-a.txt").write_text("a\n", encoding="utf-8")
-        (self.project / "close-b.txt").write_text("b\n", encoding="utf-8")
-        final_manifest = control.capture_project_manifest(self.project, policy=policy)
-        self.assertFalse(final_manifest["partial_manifest"]["partial"])
-        self.assertIn("close-a.txt", final_manifest["entries"])
-        self.assertIn("close-b.txt", final_manifest["entries"])
-        evidence = control.record_evidence({
-            "task_id": "task", "principal": "owner", "expected_revision": state["revision"],
-            "gate": "close", "summary": "close evidence after complete manifest capture",
-        })
-        closed = control.record_gate({
-            "task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"],
-            "gate": "close", "outcome": "passed", "summary": "complete manifest permits close",
-        })
-        self.assertEqual(closed["state"]["status"], "completed")
-        self.assertEqual(self.task_state(task_dir)["status"], "completed")
 
-    def test_manifest_snapshots_are_deduplicated_for_unchanged_attempts(self):
-        state = self.init()["state"]
-        first = self.delegate(state, "task", "plan", agent="planner")
-        second = self.delegate(first["state"], "task", "plan", agent="planner")
-        attempts = second["state"]["attempts"]
-        task_dir = self.ledger / "tasks" / "0001-task"
-        snapshots = control.db_manifest_snapshot_refs(self.ledger)
 
-        self.assertEqual(len(snapshots), 1)
-        self.assertEqual(attempts[0]["result_baseline_ref"], attempts[1]["result_baseline_ref"])
-        self.assertEqual(attempts[0]["result_baseline_ref"], second["state"]["initial_manifest_ref"])
-        self.assertFalse((task_dir / "baseline-manifest.json").exists())
-        self.assertFalse(any((task_dir / "delegations").glob("*.baseline.json")))
-        self.assertEqual(snapshots[0], attempts[0]["result_baseline_ref"])
-
-    def test_completed_task_removes_manifest_snapshots_and_rework_recreates_one(self):
-        created = self.init()
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        state = self.task_state(task_dir)
-        state.update({
-            "current_pipeline": ["close"],
-            "parallel_groups": [["close"]],
-            "current_gates": ["close"],
-            "require_delegation": False,
-            "require_handoff": False,
-        })
-        self.write_task_state(state)
-
-        evidence = control.record_evidence({
-            "task_id": "task",
-            "principal": "owner",
-            "expected_revision": state["revision"],
-            "gate": "close",
-            "summary": "close manifest lifecycle evidence",
-        })
-
-        closed = control.record_gate({
-            "task_id": "task",
-            "principal": "owner",
-            "expected_revision": evidence["state"]["revision"],
-            "gate": "close",
-            "outcome": "passed",
-            "summary": "close manifest lifecycle",
-        })
-        closed_state = closed["state"]
-        self.assertEqual(closed_state["status"], "completed")
-        self.assertEqual(closed_state["manifest_snapshot_cleanup"]["status"], "completed")
-        self.assertEqual(control.db_manifest_snapshot_refs(self.ledger), [])
-
-        reworked = control.update_pipeline({
-            "task_id": "task",
-            "principal": "owner",
-            "expected_revision": closed_state["revision"],
-            "operations": [{"op": "rework", "gate": "close"}],
-            "allow_rework": True,
-            "reason": "verify manifest re-baselining",
-        })
-        self.assertEqual(reworked["state"]["status"], "active")
-        ref = reworked["state"]["initial_manifest_ref"]
-        self.assertIsNotNone(control.db_get_manifest_snapshot(self.ledger, ref))
-        self.assertEqual(reworked["state"]["manifest_snapshot_cleanup"]["status"], "active")
 
     def test_c2_pipeline_requires_documentation(self):
         created = self.init(complexity="C2")
@@ -523,58 +383,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertNotIn(resource, serialized)
         self.assertIn(control.lock_key(resource), claimed["state"]["locks"])
 
-    def test_tool_schemas_require_runtime_auth_and_fields(self):
-        for name in control.AUTHORIZED_TOOLS:
-            self.assertIn("principal", control.TOOLS[name][1]["required"], name)
-        required = {
-            "activate_orchestration": {"user_command", "thread_id", "principal"},
-            "deactivate_orchestration": {"user_command"},
-            "record_delegation": set(),
-            "confirm_host_spawn": {"attempt_id", "host_agent_id", "host_task_name"},
-            "finalize_attempt": {"attempt_id", "status"},
-            "cortex.question": {"task_id"},
-            "publish_worker_question": {"attempt_id", "submission_id", "question"},
-            "answer_worker_question": {"question_id", "submission_id", "answer", "resume_context"},
-            "get_worker_question_updates": {"attempt_id"},
-            "execute_verification_command": {"verification_id"},
-            "create_handoff": {"completed", "next_action"},
-            "claim_resource": {"expires_at"},
-            "claim_lane": {"expires_at"},
-            "claim_lane_resource": {"expires_at"},
-            "retire_lane": {"confirm"},
-        }
-        for name, fields in required.items():
-            self.assertTrue(fields.issubset(control.TOOLS[name][1]["required"]), name)
-        verification_properties = control.TOOLS["execute_verification_command"][1]["properties"]
-        self.assertFalse({"argv", "cwd", "env", "shell", "executable"} & set(verification_properties))
 
 
-    def test_planner_briefing_requires_nested_planning_sibling(self):
-        package = {
-            "task_id": "task", "gate": "plan", "attempt_id": "plan-01", "dispatch_ref": "dispatch-plan-000000000000",
-            "project_root": "/workspace/project", "facade_managed": True, "user_owned_thread": False,
-            "user_request": "Plan the fixture.", "task_user_request": "Plan the fixture.", "objective": "Plan.",
-            "ownership": "Own planning", "allowed_paths": ["."], "acceptance_criteria": ["Plan complete"],
-            "verification": ["Verify plan"], "task_acceptance_criteria": [], "task_verification": [],
-            "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
-            "result_baseline_ref": "manifest-" + "a" * 64, "task_requirements": [], "task_scope": [],
-            "pause_conditions": [], "budget": "none", "plan_feedback": None,
-            "intent_clarification_required": False, "intent_clarification_reason": None,
-        }
-        prompt = control.host_spawn_prompt("planner", package)
-        self.assertIn("PLANNER COMPLETION SHAPE", prompt)
-        self.assertIn("`planning` object", prompt)
-        self.assertIn("Valid: `{planning:{overview:...,work_packages:[...]}}`", prompt)
-        self.assertIn("Invalid: `{overview:...,work_packages:[...]}`", prompt)
-        self.assertNotIn("REQUIRED top-level planning siblings", prompt)
 
-    def test_installable_orchestrator_releases_completed_native_agent_slots(self):
-        skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("Before every new native", skill)
-        self.assertIn("use `list_agents` defensively", skill)
-        self.assertIn("exact failed result Cortex already accepted", skill)
-        self.assertIn("close\n   that exact completed native child", skill)
-        self.assertIn("Never close a running child", skill)
 
     def test_sync_detects_and_repairs_same_version_plugin_content_drift(self):
         if not shutil.which("codex"):
@@ -611,7 +422,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
             key: value for key, value in hook_state.items()
             if key.startswith("cortex@cortex:hooks/hooks.json:")
         }
-        self.assertEqual(len(cortex_hook_state), 6)
+        hook_manifest = json.loads(
+            (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(cortex_hook_state), len(hook_manifest["hooks"]))
         for value in cortex_hook_state.values():
             self.assertRegex(value["trusted_hash"], r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(unrelated_state.read_text(encoding="utf-8"), '{"preserve": true}\n')
@@ -939,360 +753,22 @@ class OrchestrationInvariantTests(unittest.TestCase):
         accepted = subprocess.run([sys.executable, str(release), "--root", str(checkout), "--require-tracked"], text=True, capture_output=True, check=False)
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
-    def test_numbered_task_hook_resolution(self):
-        created = self.init(task_id="hooked")
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        self.assertFalse(task_dir.exists(), "task initialization must not eagerly materialize telemetry")
-        event = {"hook_event_name": "PostToolUse", "session_id": "owner", "tool_name": "Agent"}
-        completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
-        self.assertEqual(completed.stdout.strip(), "{}")
-        lifecycle = task_dir / "lifecycle-events.jsonl"
-        self.assertTrue(lifecycle.exists())
-        self.assertEqual(lifecycle.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(task_dir.stat().st_mode & 0o777, 0o700)
-        for name in ("lifecycle-events-meta.json", ".lifecycle-events.lock"):
-            artifact = task_dir / name
-            self.assertTrue(artifact.is_file())
-            self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
-        self.assertFalse((task_dir / "state.sqlite").exists())
-        self.assertFalse((task_dir / "artifacts").exists())
-        self.assertFalse((task_dir / "delegations").exists())
 
-    def test_agent_hook_rejects_empty_wait_as_unspawned_dispatch(self):
-        self.init(task_id="empty-wait")
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        for tool_name in ("Agent", "wait", "wait_agent"):
-            with self.subTest(tool_name=tool_name):
-                event = {
-                    "hook_event_name": "PreToolUse",
-                    "session_id": "owner",
-                    "tool_name": tool_name,
-                    "tool_input": {"action": "wait", "receiver_thread_ids": []},
-                }
-                completed = subprocess.run(
-                    [sys.executable, str(hook)], input=json.dumps(event), text=True,
-                    capture_output=True, env=os.environ.copy(), check=True,
-                )
-                output = json.loads(completed.stdout)["hookSpecificOutput"]
-                self.assertEqual(output["hookEventName"], "PreToolUse")
-                self.assertNotIn("permissionDecision", output)
-                self.assertIn("CORTEX COORDINATOR WAIT ADVISORY", output["additionalContext"])
 
-        worker_event = {
-            "hook_event_name": "PreToolUse",
-            "session_id": "owner",
-            "agent_type": "general",
-            "tool_name": "wait",
-            "tool_input": {"action": "wait", "receiver_thread_ids": []},
-        }
-        completed = subprocess.run(
-            [sys.executable, str(hook)], input=json.dumps(worker_event), text=True,
-            capture_output=True, env=os.environ.copy(), check=True,
-        )
-        output = json.loads(completed.stdout)["hookSpecificOutput"]
-        self.assertEqual(output["hookEventName"], "PreToolUse")
-        self.assertNotIn("permissionDecision", output)
-        reason = output["additionalContext"]
-        self.assertIn("CORTEX DISPATCH ADVISORY", reason)
-        self.assertIn("no worker was spawned", reason)
-        self.assertIn("retry the lifecycle step", reason)
 
-        bare_wait = {
-            "hook_event_name": "PreToolUse",
-            "session_id": "owner",
-            "tool_name": "wait",
-            "tool_input": {},
-        }
-        completed = subprocess.run(
-            [sys.executable, str(hook)], input=json.dumps(bare_wait), text=True,
-            capture_output=True, env=os.environ.copy(), check=True,
-        )
-        output = json.loads(completed.stdout)["hookSpecificOutput"]
-        self.assertEqual(output["hookEventName"], "PreToolUse")
-        self.assertNotIn("permissionDecision", output)
-        self.assertIn("CORTEX COORDINATOR WAIT ADVISORY", output["additionalContext"])
 
-        event["tool_input"]["receiver_thread_ids"] = ["child-01"]
-        targeted = subprocess.run(
-            [sys.executable, str(hook)], input=json.dumps(event), text=True,
-            capture_output=True, env=os.environ.copy(), check=True,
-        )
-        self.assertEqual(targeted.stdout.strip(), "{}")
 
-    def test_session_hook_reasserts_root_coordinator_lock(self):
-        self.init(task_id="coordinator-lock")
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "SessionStart", "session_id": "owner"}
-        completed = subprocess.run(
-            [sys.executable, str(hook)],
-            input=json.dumps(event),
-            text=True,
-            capture_output=True,
-            env=os.environ.copy(),
-            check=True,
-        )
-        payload = json.loads(completed.stdout)
-        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("COORDINATOR ROUTE", context)
-        self.assertNotIn("COORDINATOR LOCK", context)
-        self.assertIn("must not inspect", context)
-        self.assertIn("Remain idle while workers run", context)
 
-    def test_session_hook_accepts_thread_id_alias(self):
-        self.init(task_id="prior-session-hook")
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        completed = subprocess.run(
-            [sys.executable, str(hook)],
-            input=json.dumps({"hook_event_name": "SessionStart", "thread_id": "owner"}),
-            text=True,
-            capture_output=True,
-            env=os.environ.copy(),
-            check=True,
-        )
-        payload = json.loads(completed.stdout)
-        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        self.assertIn("COORDINATOR ROUTE", payload["hookSpecificOutput"]["additionalContext"])
-        self.assertNotIn("COORDINATOR LOCK", payload["hookSpecificOutput"]["additionalContext"])
 
-    def test_compact_session_hook_reasserts_durable_recovery(self):
-        self.init(task_id="compact-recovery")
-        public_ref = control._v3_task_ref("compact-recovery")
-        control.db_put_global(self.ledger, "operation_registry", {
-            "schema": "cortex/orchestration/v5",
-            "starts": {},
-            "tasks": {"compact-recovery": {"start": {"task_ref": public_ref}}},
-        })
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "SessionStart", "session_id": "owner", "source": "compact"}
-        completed = subprocess.run(
-            [sys.executable, str(hook)],
-            input=json.dumps(event),
-            text=True,
-            capture_output=True,
-            env=os.environ.copy(),
-            check=True,
-        )
-        payload = json.loads(completed.stdout)
-        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("CONTEXT RECOVERY", context)
-        self.assertIn("manage_orchestration(intent='inspect'", context)
-        self.assertIn(f"task_ref={public_ref!r}", context)
-        self.assertIn("exactly once", context)
-        self.assertIn("Do not call start_orchestration again", context)
 
-    def test_start_hook_places_native_spawn_imperative_after_mcp_result(self):
-        context = cortex_hook.dispatch_required_context({
-            "hook_event_name": "PostToolUse",
-            "tool_name": "mcp__cortex__start_orchestration",
-            "tool_response": {"structuredContent": {
-                "schema": "cortex/orchestration/v5",
-                "ok": True,
-                "task_ref": "task-live",
-                "dispatches": [{
-                    "call": "spawn_agent",
-                    "arguments": {"task_name": "explorer_auth_01_deadbeef"},
-                }],
-            }},
-        })
-        self.assertIn("CORTEX DISPATCH REQUIRED NOW", context)
-        self.assertIn("next tool call must invoke dispatches[0].call", context)
-        self.assertIn("Do not call wait", context)
-        self.assertIn("explorer_auth_01_deadbeef", context)
 
-    def test_continue_hook_requires_the_returned_dispatch_not_a_generic_spawn(self):
-        context = cortex_hook.dispatch_required_context({
-            "hook_event_name": "PostToolUse",
-            "tool_name": "mcp__cortex__continue_orchestration",
-            "tool_response": {"structuredContent": {
-                "schema": "cortex/orchestration/v5",
-                "ok": True,
-                "outcome": "ready_to_spawn",
-                "task_ref": "task-live",
-                "dispatches": [{
-                    "call": "spawn_agent",
-                    "arguments": {"task_name": "security_auditor_repository_02_deadbeef"},
-                }],
-            }},
-        })
-        self.assertIsNotNone(context)
-        assert context is not None
-        self.assertIn("next tool call must invoke dispatches[0].call", context)
-        self.assertIn("generic collaboration spawn", context)
-        self.assertIn("cannot bind to or advance this Cortex attempt", context)
-        self.assertIn("security_auditor_repository_02_deadbeef", context)
 
-    def test_hook_manifest_covers_clear_and_agent_tool_contracts(self):
-        manifest = json.loads(
-            (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")
-        )
-        self.assertIn("clear", manifest["hooks"]["SessionStart"][0]["matcher"])
-        matcher = manifest["hooks"]["PostToolUse"][0]["matcher"]
-        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__start_orchestration"))
-        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__continue_orchestration"))
-        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__manage_orchestration"))
-        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__read_worker_result"))
-        self.assertTrue(re.fullmatch(matcher, "spawn_agent"))
-        self.assertTrue(re.fullmatch(matcher, "wait_agent"))
-        pre_matcher = manifest["hooks"]["PreToolUse"][0]["matcher"]
-        self.assertTrue(re.fullmatch(pre_matcher, "Agent"))
-        self.assertTrue(re.fullmatch(pre_matcher, "wait"))
-        self.assertTrue(re.fullmatch(pre_matcher, "spawn_agent"))
-        self.assertTrue(re.fullmatch(pre_matcher, "wait_agent"))
 
-    def test_lifecycle_hook_commands_fail_open_when_a_retired_cache_path_disappears(self):
-        manifest = json.loads(
-            (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")
-        )
-        commands = [
-            hook["command"]
-            for registrations in manifest["hooks"].values()
-            for registration in registrations
-            for hook in registration["hooks"]
-        ]
-        self.assertEqual(len(commands), 6)
-        for command in commands:
-            self.assertIn("if test -f", command)
-            self.assertIn("else printf '{}\\n'", command)
-            environment = {**os.environ, "PLUGIN_ROOT": str(self.base / "retired-plugin-cache")}
-            completed = subprocess.run(
-                command,
-                shell=True,
-                text=True,
-                input="{}\n",
-                capture_output=True,
-                env=environment,
-                check=True,
-            )
-            self.assertEqual(completed.stdout, "{}\n")
-            self.assertEqual(completed.stderr, "")
 
-    def test_hook_refuses_symlinked_lifecycle_event_file(self):
-        created = self.init(task_id="hook-symlink")
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        task_dir.mkdir(mode=0o700)
-        victim = self.base / "victim.txt"
-        victim.write_text("unchanged\n", encoding="utf-8")
-        (task_dir / "lifecycle-events.jsonl").symlink_to(victim)
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "PostToolUse", "session_id": "owner", "tool_name": "Agent"}
-        completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
-        self.assertEqual(completed.stdout.strip(), "{}")
-        self.assertIn("warning: ValueError", completed.stderr)
-        self.assertEqual(victim.read_text(encoding="utf-8"), "unchanged\n")
 
-    def test_worker_hook_forces_main_chat_return_route(self):
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        inactive_event = {"hook_event_name": "SubagentStart", "session_id": "worker", "agent_type": "explorer"}
-        inactive = subprocess.run([sys.executable, str(hook)], input=json.dumps(inactive_event), text=True, capture_output=True, env=os.environ.copy(), check=True)
-        self.assertEqual(inactive.stdout.strip(), "{}")
-        self.init(task_id="worker-context")
-        active_event = {"hook_event_name": "SubagentStart", "session_id": "owner", "agent_type": "explorer"}
-        completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(active_event), text=True, capture_output=True, env=os.environ.copy(), check=True)
-        payload = json.loads(completed.stdout)
-        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SubagentStart")
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("internal worker, never user-facing", context)
-        self.assertIn("native parent channel", context)
-        self.assertIn("public worker_question when needed", context)
-        self.assertIn("public record_attempt_event for bounded semantic checkpoints", context)
-        self.assertIn("public complete_attempt for the final semantic result", context)
-        self.assertIn("consume no worker attempt", context)
-        self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", context)
-        self.assertIn("followup_task resumes this exact child", context)
-        self.assertIn("worker_question(action=poll)", context)
-        self.assertIn("record the decision/consequence with record_attempt_event", context)
-        self.assertIn("pending poll returns QUESTION_RECORDED", context)
-        self.assertIn("never emit OTHER_TERMINAL", context)
-        self.assertIn("never paste a generated result view", context)
-        self.assertIn("Never call Cortex lifecycle", context)
-        self.assertNotIn("mcp__codebase_memory__", context)
 
-    def test_worker_hook_maps_unique_native_task_key_back_to_canonical_profile(self):
-        created = self.init(task_id="unique-worker-hook")
-        delegation = self.delegate(created["state"], "unique-worker-hook", "discover", "general")
-        native_task_name = delegation["spawn_request"]["task_name"]
-        self.assertNotEqual(native_task_name, "general")
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "SubagentStart", "session_id": "owner", "agent_type": native_task_name}
-        completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
-        payload = json.loads(completed.stdout)
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Canonical profile: general", context)
-        self.assertIn("Worker display name: General Invariant", context)
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        lifecycle = json.loads((task_dir / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-        self.assertEqual(lifecycle["agent_type"], "general")
-        self.assertEqual(lifecycle["display_name"], "General Invariant")
 
-    def test_post_spawn_result_extracts_exact_child_identity_without_model_bearer(self):
-        task_name = "general_bounded_work_01_ab12cd34"
-        event = {
-            "hook_event_name": "PostToolUse",
-            "tool_name": "spawn_agent",
-            "tool_input": {"task_name": task_name},
-            "tool_response": {"result": {"agent_id": "native-child-42"}},
-        }
-        self.assertEqual(
-            cortex_hook._native_spawn_identity(event),
-            (task_name, "native-child-42", None),
-        )
 
-    def test_post_spawn_result_rejects_unscoped_or_malformed_identity(self):
-        self.assertIsNone(cortex_hook._native_spawn_identity({
-            "hook_event_name": "PostToolUse",
-            "tool_name": "spawn_agent",
-            "tool_input": {"task_name": "not a server task"},
-            "tool_response": {"agent_id": "native-child-42"},
-        }))
-        self.assertIsNone(cortex_hook._native_spawn_identity({
-            "hook_event_name": "PostToolUse",
-            "tool_name": "spawn_agent",
-            "tool_input": {"task_name": "general_bounded_work_01_ab12cd34"},
-            "tool_response": {"agent_id": "not valid/identity"},
-        }))
-
-    def test_hook_hashes_thread_and_allowlists_telemetry_fields(self):
-        created = self.init(task_id="hook-privacy")
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "PostToolUse", "session_id": "owner", "agent_type": "secret-agent", "tool_name": "bad tool\nsecret"}
-        subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        payload = json.loads((task_dir / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-        self.assertNotIn("thread_id", payload)
-        self.assertEqual(len(payload["thread_id_digest"]), 64)
-        self.assertIsNone(payload["agent_type"])
-        self.assertIsNone(payload["tool_name"])
-
-    def test_lifecycle_telemetry_retains_bounded_tail_and_dropped_count(self):
-        created = self.init(task_id="hook-retention")
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        original_events, original_bytes = cortex_hook.MAX_LIFECYCLE_EVENTS, cortex_hook.MAX_LIFECYCLE_BYTES
-        try:
-            cortex_hook.MAX_LIFECYCLE_EVENTS, cortex_hook.MAX_LIFECYCLE_BYTES = 3, 100000
-            for index in range(6):
-                cortex_hook.append_lifecycle_event(task_dir, {"index": index})
-        finally:
-            cortex_hook.MAX_LIFECYCLE_EVENTS, cortex_hook.MAX_LIFECYCLE_BYTES = original_events, original_bytes
-        events = [json.loads(line) for line in (task_dir / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()]
-        metadata = json.loads((task_dir / "lifecycle-events-meta.json").read_text(encoding="utf-8"))
-        self.assertEqual([item["index"] for item in events], [3, 4, 5])
-        self.assertEqual(metadata["dropped"], 3)
-
-    def test_v8_rejects_older_task_schema(self):
-        created = self.init(task_id="schema-check")
-        task_dir = self.ledger / "tasks" / created["task_directory"]
-        unsupported = "cortex/" + "v" + str(5)
-        task = self.task_definition(task_dir)
-        state = self.task_state(task_dir)
-        task["schema"] = unsupported
-        state["schema"] = unsupported
-        control.db_update_task_definition(self.ledger, task)
-        self.write_task_state(state)
-        with self.assertRaisesRegex(ValueError, "create a new task"):
-            control.status({"task_id": "schema-check", "principal": "owner"})
 
     def test_shipped_policy_and_plugin_have_no_retired_profile_contract(self):
         repository = Path(__file__).parents[1]
@@ -1312,73 +788,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         matches = [path for path in repository.rglob("SKILL.md") if path.parent.name == "orchestrator"]
         self.assertEqual(matches, [authoritative])
 
-    def test_control_skill_requires_unified_host_dispatch_contract(self):
-        skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("The public registry exposes nine MCP operations", skill)
-        self.assertIn("ordinary Desktop launch", skill)
-        self.assertIn("The strict worker projection is `worker_question`", skill)
-        self.assertIn("The explicit coordinator projection is", skill)
-        self.assertIn("The stdio MCP process has one immutable launch-time audience", skill)
-        self.assertIn("strict five-tool projections", skill)
-        self.assertIn("Coordinators use\n`start_orchestration`", skill)
-        self.assertIn("`start_orchestration` and `continue_orchestration` for normal work", skill)
-        self.assertIn("Invoke every returned dispatch", skill)
-        self.assertIn("Expected routes are metadata, not\nproof", skill)
-        self.assertIn("Workers must not call coordinator lifecycle operations", skill)
-        self.assertIn("`record_attempt_event`", skill)
-        self.assertIn("`complete_attempt`", skill)
-        self.assertIn("`read_worker_result`", skill)
-        self.assertIn("question intent", skill)
-        self.assertIn("depends_on", skill)
-        self.assertIn("server-owned briefing receipt", skill)
-        self.assertIn("task_ref", skill)
-        self.assertIn("docs/features/index.md", skill)
-        self.assertIn("Knowledge reviewed:", skill)
-        self.assertIn("context_files", skill)
-        self.assertIn("dispatch_ref", skill)
-        self.assertIn("briefing_digest", skill)
-        self.assertIn("direct-read exceptions below the host-private Cortex", skill)
-        self.assertIn("optional\n   compiled-plan paths with their exact SHA-256", skill)
-        self.assertIn("do not send a corrective follow-up", skill)
-        self.assertIn("Only a newly returned top-level dispatch authorizes rework", skill)
-        self.assertIn("unbounded while acceptance criteria", skill)
-        self.assertIn("raises reasoning effort", skill)
-        self.assertIn("ordinary tasks have non-empty `task.acceptance_criteria`", skill)
-        self.assertIn("ask the user before calling Cortex", skill)
-        self.assertIn("complete decision handoff", skill)
-        self.assertIn("final ordinary\n   assistant message", skill)
-        self.assertIn("End the turn without calling any UI/input/approval/elicitation", skill)
-        self.assertIn("generic numbered or recommended/alternative placeholders", skill)
-        self.assertIn("`profile` is forbidden at package level", skill)
-        self.assertIn("non-empty `task.acceptance_criteria`", skill)
-        self.assertIn("an explicit `profile`, narrow non-broad", skill)
-        self.assertIn("it does not author a digest or evidence marker", skill)
 
-    def test_orchestrator_skill_requires_schema_first_lifecycle_calls(self):
-        skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("Before every Cortex lifecycle or recovery tool call", skill)
-        self.assertIn("exact nested JSON", skill)
-        self.assertIn("active MCP `tools/list` surface", skill)
-        self.assertIn("preserve fields that already passed validation", skill)
 
-    def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
-        skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        markers = [
-            "## Normal flow",
-            "Then call `start_orchestration` once",
-            "Invoke every returned dispatch",
-            "Workers do not call lifecycle operations",
-            "After all workers finish",
-            "then call `continue_orchestration` exactly\n   once with",
-            "Repeat one continue per completed wave",
-        ]
-        positions = []
-        cursor = 0
-        for marker in markers:
-            position = skill.find(marker, cursor)
-            self.assertGreaterEqual(position, cursor, marker)
-            positions.append(position)
-            cursor = position + len(marker)
 
     def test_all_installable_sources_are_plugin_bundled(self):
         repository = Path(__file__).parents[1]
@@ -1387,68 +798,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(len(list((repository / "plugins/cortex/agents").glob("*.toml"))), 21)
         self.assertEqual(len(list((repository / "plugins/cortex/skills").glob("*/SKILL.md"))), 10)
 
-    def test_runtime_contract_is_plugin_bundled_and_does_not_depend_on_root_agents(self):
-        repository = Path(__file__).parents[1]
-        plugin = repository / "plugins/cortex"
-        root_policy = (repository / "AGENTS.md").read_text(encoding="utf-8")
-        control_skill = (plugin / "skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        orchestrator_skill = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("This file governs work in this source checkout only", root_policy)
-        self.assertIn("No project-local `AGENTS.md` is part of the installed contract", orchestrator_skill)
-        self.assertIn("`../cortex-control/SKILL.md`", orchestrator_skill)
-        for runtime_only in (
-            "Every native dispatch carries only a compact bootstrap",
-            "Call `start_orchestration` once per task contract",
-            "The explicit `prune` route calls",
-            "## Cortex MCP tool-error log",
-        ):
-            self.assertNotIn(runtime_only, root_policy)
-        for bundled_contract in (
-            "Assign exactly one writer to an overlapping code or documentation area",
-            "State every unrun required check, environmental limitation",
-            "## Private tool-error diagnostics",
-            "at or below 10 MiB",
-            "Expected public validation and recovery responses with `ok: false`",
-            "never put secrets in tool inputs",
-        ):
-            self.assertIn(bundled_contract, control_skill)
-        manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["skills"], "./skills/")
-        self.assertTrue((plugin / "hooks/hooks.json").is_file())
-        self.assertTrue((plugin / ".mcp.json").is_file())
-        self.assertIn(
-            '"dispatch_transport": "compact_native_bootstrap_to_one_scoped_immutable_briefing"',
-            (plugin / "profiles.json").read_text(encoding="utf-8"),
-        )
-        # The executable facade is deliberately free to move implementation
-        # into cortex_runtime.  Hooks rely on this stable import/export
-        # contract, not on a particular function definition remaining in the
-        # monolithic entrypoint source file.
-        self.assertTrue(callable(control.bind_host_worker_from_hook))
-        self.assertIs(cortex_hook.bind_host_worker_from_hook, control.bind_host_worker_from_hook)
-        self.assertIs(control.worker_module_label, worker_identity.worker_module_label)
-        self.assertIs(control.PUBLIC_TOOL_DESCRIPTIONS, mcp_api.PUBLIC_TOOL_DESCRIPTIONS)
-        hook = (plugin / "scripts/cortex_hook.py").read_text(encoding="utf-8")
-        self.assertIn("bind_host_worker_from_hook", hook)
-        self.assertIn("do not author digest", hook)
-        self.assertIn("def stopped_worker_after_wait_context(", hook)
-        self.assertIn("Do not submit a synthetic result", hook)
-        self.assertIn("recover_inspect", hook)
-        for relative in (
-            "skills/cortex-control/SKILL.md",
-            "skills/orchestrator/SKILL.md",
-            "skills/context-compaction/SKILL.md",
-        ):
-            skill = (plugin / relative).read_text(encoding="utf-8")
-            self.assertIn("pending_dispatches", skill, relative)
-            self.assertIn("active_workers", skill, relative)
-        installer = (repository / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
-        self.assertIn('plugin_source="${project_dir}/plugins/${plugin_name}"', installer)
-        self.assertNotIn('plugin_source="${project_dir}"', installer)
-        self.assertIn("sync-cortex-hook-trust.py", installer)
-        hook_sync = (repository / "scripts/sync-cortex-hook-trust.py").read_text(encoding="utf-8")
-        self.assertIn("EXPECTED_KEYS", hook_sync)
-        self.assertIn("source does not match the installed cache", hook_sync)
 
     def test_all_profiles_ship_complete_professional_playbooks(self):
         import tomllib
@@ -1503,7 +852,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual([line for line in prompt.splitlines() if line.startswith("## ")], expected_sections)
         fence = next(line[:-4] for line in prompt.splitlines() if line.startswith("```") and line.endswith("json"))
         assignment = json.loads(prompt.split(fence + "json\n", 1)[1].split("\n" + fence, 1)[0])
-        self.assertEqual(assignment["user_intent"]["projection"], hostile)
+        self.assertNotIn("user_intent", assignment)
+        self.assertNotIn("user_request", assignment)
         self.assertEqual(assignment["mission"], hostile)
         self.assertEqual(assignment["requirements"], [hostile])
         self.assertEqual(assignment["plan_feedback"], hostile)
@@ -1681,116 +1031,31 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 "governance_context": {"effective_mode": "full"},
             },
         )
-        self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", briefing)
+        self.assertIn("complete_attempt ok=true terminal=true", briefing)
+        self.assertIn("Return exactly ATTEMPT_COMPLETED", briefing)
+        self.assertIn("no attempt_result_ref handoff", briefing)
         self.assertNotIn("ATTEMPT_COMPLETED result_ref=", briefing)
 
-    def test_worst_case_briefing_preserves_fresh_contract_without_size_rejection(self):
-        """Large fresh-v3 planner and close inputs remain lossless and usable."""
-
-        unit = "Юникод🚀漢字—" * 500
-        predecessor_refs = [f"result-{index:02d}-" + "r" * 50 for index in range(8)]
-        predecessor_results = [
-            {
-                "result_ref": result_ref,
-                "attempt_id": f"implementation-{index:02d}",
-                "gate": "implementation", "profile": "backend_dev",
-                "summary": unit[:900],
-                "changed_files": [f"path/{item}/файл-{index}.py" for item in range(24)],
-                "checks": [unit[:700] for _ in range(8)],
-                "findings": [{"summary": unit[:500]} for _ in range(8)],
-                "semantic_events": [{
-                    "actor": "cortex", "event_type": "question_answered",
-                    "payload": {"question_ref": f"question-{index}", "question": unit[:500], "answer": unit[:800]},
-                }],
-            }
-            for index, result_ref in enumerate(predecessor_refs)
-        ]
-        decisions = [{"question_en": unit[:500], "answer_en": unit[:800]} for _ in range(8)]
-
-        def package(gate: str) -> dict:
-            return {
-                "task_id": "task-worst-case", "task_ref": "task-ref-worst-case",
-                "gate": gate, "attempt_id": f"{gate}-06", "dispatch_ref": "dispatch-" + "a" * 24,
-                "project_root": "/workspace/worst-case", "facade_managed": True, "user_owned_thread": False,
-                "user_request": unit[:1600], "task_user_request": unit[:1600], "objective": unit[:2400],
-                "selection_reason": unit[:1000], "strategy": unit[:500],
-                "task_requirements": [unit[:600] for _ in range(8)], "task_constraints": [unit[:700] for _ in range(8)],
-                "task_scope": [unit[:500] for _ in range(8)],
-                "allowed_paths": [f"plugins/cortex/{index}/файл" for index in range(50)],
-                "context_files": [unit[:500] for _ in range(16)], "knowledge_index_files": [unit[:500] for _ in range(8)],
-                "context_result_refs": predecessor_refs, "predecessor_results": predecessor_results,
-                "predecessor_selection": {"available": 8, "limit": 8},
-                "read_receipts": {"briefing": {"receipt": "briefing-receipt"}, "predecessors": predecessor_refs},
-                "resolved_user_decisions": decisions,
-                "task_acceptance_criteria": [unit[:700] for _ in range(8)], "acceptance_criteria": [unit[:700] for _ in range(8)],
-                "task_verification": [unit[:700] for _ in range(8)], "verification": [unit[:700] for _ in range(8)],
-                "pause_conditions": [unit[:1000] for _ in range(8)], "plan_feedback": unit * 5, "budget": unit[:500],
-                "intent_clarification_required": False, "intent_clarification_reason": unit[:500],
-                "governance_context": {
-                    "schema": "cortex/governance/v1", "effective_mode": "full",
-                    "close_obligations": [unit[:500] for _ in range(8)],
-                    "policy_snapshot": {"schema": "cortex/governance-policy/v1", "required_floor": "full"},
-                },
-                "user_intent": {
-                    "projection": unit[:1600], "artifact_ref": "artifact-intent", "artifact_path": "/workspace/intent.txt",
-                    "digest_sha256": "a" * 64, "byte_size": 999,
-                },
-                "mode": "ordinary",
-                "plan_unit": {
-                    "plan_revision": "plan-06", "source_result_ref": "result-plan", "artifact_ref": "artifact-plan",
-                    "artifact_path": "/workspace/plan.json", "digest_sha256": "b" * 64, "byte_size": 1234,
-                    "microtask_count": 8, "package_count": 2, "package_ids_digest": "c" * 64, "read_required": True,
-                },
-            }
-
-        for gate, profile in (("plan", "planner"), ("governance_close", "code_reviewer")):
-            with self.subTest(gate=gate):
-                prompt = control.host_spawn_prompt(profile, package(gate))
-                self.assertGreater(len(prompt.encode("utf-8")), 14_500)
-                self.assertEqual(prompt.encode("utf-8").decode("utf-8"), prompt)
-                self.assertNotIn("\ufffd", prompt)
-                self.assertTrue(prompt.startswith("# Cortex Worker Briefing v3"))
-                self.assertIn("## Tool protocol", prompt)
-                self.assertIn("read_dispatch_briefing", prompt)
-                self.assertIn("complete_attempt", prompt)
-                self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", prompt)
-                self.assertNotIn("ATTEMPT_COMPLETED result_ref=", prompt)
-                route = [
-                    "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>",
-                    "Answer=>followup_task same child",
-                    "poll same ref/attempt first",
-                    "Answered=>record_attempt_event",
-                    "rerun, complete_attempt",
-                    "ATTEMPT_COMPLETED attempt_result_ref=<generated id>",
-                ]
-                positions = [prompt.index(marker) for marker in route]
-                self.assertEqual(positions, sorted(positions))
-                self.assertIn("## Output contract", prompt)
-                assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-                self.assertEqual(assignment["worker_identity"]["attempt_id"], f"{gate}-06")
-                self.assertEqual(assignment["user_intent"]["digest_sha256"], "a" * 64)
-                self.assertEqual(assignment["handoff"]["schema"], "cortex/handoff-projection/v1")
-                self.assertEqual(assignment["handoff"]["target"]["gate"], gate)
-                self.assertEqual(assignment["handoff"]["target"]["profile"], profile)
-                self.assertTrue(assignment["compiled_context"]["server_receipts"]["briefing_read"])
 
     def test_installable_orchestration_contract_forbids_root_project_work(self):
         repository = Path(__file__).parents[1]
-        for relative in (
-            "plugins/cortex/skills/orchestrator/SKILL.md",
-            "plugins/cortex/skills/cortex-control/SKILL.md",
-        ):
-            contract = (repository / relative).read_text(encoding="utf-8").lower()
-            self.assertIn("coordinator", contract, relative)
-            self.assertIn("must not", contract, relative)
-            self.assertIn("patch", contract, relative)
-            self.assertIn("remain idle", contract, relative)
-            self.assertIn("worker", contract, relative)
+        orchestrator = " ".join(
+            (repository / "plugins/cortex/skills/orchestrator/SKILL.md")
+            .read_text(encoding="utf-8").lower().split()
+        )
+        control_skill = " ".join(
+            (repository / "plugins/cortex/skills/cortex-control/SKILL.md")
+            .read_text(encoding="utf-8").lower().split()
+        )
+        self.assertIn("the root coordinator is never a project worker", orchestrator)
+        self.assertIn("must not inspect, search, read, edit, patch, build, test, or run the target project", orchestrator)
+        self.assertIn("all repository investigation, editing, testing, and review belong to a worker", control_skill)
+        self.assertIn("the coordinator does not perform project work", control_skill)
 
         hook = (repository / "plugins/cortex/scripts/cortex_hook.py").read_text(encoding="utf-8")
-        self.assertIn("COORDINATOR ROUTE", hook)
-        self.assertNotIn("COORDINATOR LOCK", hook)
-        self.assertIn("never permission for direct coordinator work", hook)
+        self.assertIn('HOOK_SCHEMA = "cortex/hook-telemetry/v11"', hook)
+        self.assertIn('NATIVE_TOOLS = frozenset({"spawn_agent", "wait", "wait_agent"})', hook)
+        self.assertNotIn("bind_host_worker", hook)
 
     def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):
         contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
@@ -1830,7 +1095,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         self.assertEqual(
             shared["dispatch_briefing_fallback"],
-            "scoped_paged_read_dispatch_briefing_with_server_owned_worker_binding_and_returned_cursor_only_when_host_file_read_is_unavailable",
+            "only an actual host-file-unavailable read failure returns one exact host path with max_reads=1",
         )
         self.assertEqual(
             shared["repository_intelligence"],
@@ -1880,13 +1145,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         self.assertIn("long_context", model_routing["terra_task_kinds"])
         self.assertIn("integration_conflict", model_routing["terra_task_kinds"])
-
-        skill = (repository / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-        generated = control.render_profile_catalog(markdown=True)
-        catalog = skill.split("<!-- BEGIN GENERATED PROFILE CATALOG -->", 1)[1].split(
-            "<!-- END GENERATED PROFILE CATALOG -->", 1
-        )[0].strip()
-        self.assertEqual(catalog, generated)
 
     def test_default_cortex_ledger_is_excluded_from_manifest(self):
         ledger = control.ledger_root({"project_root": str(self.project)})
@@ -1963,7 +1221,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "10.0.7")
+        self.assertEqual(base_version, "11.0.1")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",
@@ -2051,44 +1309,23 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_cortex_help_route_is_deterministic_and_read_only(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("ordinary tasks have", skill)
-        self.assertIn("`task.acceptance_criteria` and `task.verification` grounded", skill)
-        self.assertIn("Ask the user first", skill)
-        self.assertIn("`profile` forbidden at package level", skill)
-        self.assertIn("non-empty acceptance criteria", skill)
-        self.assertIn("explicit `profile`, narrow non-broad `allowed_paths`", skill)
         self.assertEqual(self.cortex_routes(skill), {
             "empty": "orchestrate",
             "help": "help",
             "harvest": "harvest",
             "harvest-refresh": "harvest-refresh",
-            "prune": "prune",
             "normal": "normal",
         })
-        help_section = skill.split("## Invocation and routes", 1)[1].split("## Turn-local read discipline", 1)[0]
+        help_section = skill.split("## Invocation", 1)[1].split("## Coordinator boundary", 1)[0]
         self.assertIn("`cortex:orchestrator`", help_section)
         self.assertIn("`$cortex:orchestrator`", help_section)
-        self.assertIn("not registered native slash", help_section)
-        self.assertIn("Help performs no activation", help_section)
+        self.assertIn("`/cortex` is not a native slash command", help_section)
+        self.assertIn("`help` | `help` | Explain Cortex without lifecycle writes", help_section)
+        self.assertIn("machine-readable route validation diagnostic", help_section)
         before = control.capture_project_manifest(self.project)
         after = control.capture_project_manifest(self.project)
         self.assertEqual(before["digest"], after["digest"])
 
-    def test_bundled_skills_require_explicit_task_identity_for_continuation(self):
-        root = Path(__file__).parents[1] / "plugins/cortex/skills"
-        expected = (
-            "## Explicit task identity and new-task default",
-            "only when the user's current message explicitly contains",
-            "the request is always a new task",
-            "do not call `continue_orchestration`, `manage_orchestration`,",
-            "A Codex thread ID is",
-            "not a Cortex `task_ref`",
-        )
-        for relative in ("orchestrator/SKILL.md", "cortex-control/SKILL.md"):
-            with self.subTest(relative=relative):
-                text = (root / relative).read_text(encoding="utf-8")
-                for marker in expected:
-                    self.assertIn(marker, text)
 
     def test_harvest_skills_require_exhaustive_feature_coverage(self):
         repository = Path(__file__).parents[1]
@@ -2096,10 +1333,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         harvest = (repository / "plugins/cortex/skills/knowledge-harvest/SKILL.md").read_text(encoding="utf-8")
         census = (repository / "plugins/cortex/skills/knowledge-harvest/references/feature-census.md").read_text(encoding="utf-8")
         for marker in (
-            "## Harvest route contract",
-            "2–8 parallel `explorer` workers",
-            "zero unexplained unmapped surfaces",
-            "Recent commits may prioritize discovery but may never define",
+            "## Harvest routes",
+            "../knowledge-harvest/SKILL.md",
+            "source-backed inventory contract",
+            "same v11 capability and V2 lifecycle rules",
         ):
             self.assertIn(marker, orchestrator)
         for marker in (

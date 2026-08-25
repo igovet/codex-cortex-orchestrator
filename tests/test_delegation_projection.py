@@ -101,6 +101,7 @@ class RequiredBriefingProjectionTests(HostPrivateControlStoreTestMixin, unittest
         self.assertNotIn("briefing_path", durable)
         self.assertNotIn("message", durable)
         self.assertNotIn("prompt", durable)
+        self.assertNotIn("bootstrap_repair_message", durable)
         self.assertNotIn(str(task_dir), str(durable))
 
         package = control._delegation_package(task_dir, state["task_id"], attempt["attempt_id"])
@@ -109,8 +110,18 @@ class RequiredBriefingProjectionTests(HostPrivateControlStoreTestMixin, unittest
         restored = delegation_service.rehydrate_dispatch_spawn_request(
             task_dir, control.load_task_definition(task_dir, state), attempt,
         )
-        self.assertEqual(restored["briefing_path"], delegated["spawn_request"]["briefing_path"])
-        self.assertEqual(restored["message"], delegated["spawn_request"]["message"])
+        self.assertEqual(
+            Path(restored["briefing_path"]).resolve(),
+            (task_dir / str(durable["briefing_file"])).resolve(),
+        )
+        self.assertTrue(str(restored["message"]).strip())
+        self.assertTrue(str(restored["bootstrap_repair_message"]).strip())
+        self.assertEqual(
+            restored,
+            delegation_service.rehydrate_dispatch_spawn_request(
+                task_dir, control.load_task_definition(task_dir, state), attempt,
+            ),
+        )
 
     def test_required_materialization_failure_is_recoverable_without_dispatch(self) -> None:
         with mock.patch.object(delegation_service, "materialize_job", side_effect=OSError("disk unavailable")):

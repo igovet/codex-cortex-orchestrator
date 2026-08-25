@@ -13,13 +13,12 @@ def counts(workers: int, waves: int) -> tuple[int, int]:
     # status, delegation, confirmation, result, finalization, evidence, gate,
     # reconciliation, handoff, close, and final status round-trips.
     baseline = 4 + workers * 4 + waves * 2 + 4
-    # Public Cortex needs one start, one continue per wave, and per worker one
-    # template read, one successful draft validation, one short draft-ref
-    # promotion, and one coordinator result read. Corrective draft validation
-    # calls are measured separately because they are data-dependent; invalid
-    # drafts do not persist, while the successful draft is staged in SQLite.
+    # Public Cortex v11 needs one start, one continue per wave, and per worker
+    # one briefing read, one compact completion, and one coordinator result
+    # read. Digest-bound correction calls are data-dependent and measured
+    # separately; rejected drafts do not mutate the task ledger.
     # Native spawn_agent calls are deliberately outside this MCP-call budget.
-    facade = 1 + waves + workers * 4
+    facade = 1 + waves + workers * 3
     return baseline, facade
 
 
@@ -34,12 +33,12 @@ def main() -> int:
         "workers": args.workers,
         "waves": args.waves,
         "baseline_mcp_calls": baseline,
-        "relative_v3_mcp_calls": facade,
+        "current_v11_mcp_calls": facade,
         "reduction": round(reduction, 4),
-        "target_met": facade == 1 + args.waves + args.workers * 4 and facade < baseline,
+        "target_met": facade == 1 + args.waves + args.workers * 3 and facade < baseline,
         "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "worker_question", "record_attempt_event", "complete_attempt", "read_dispatch_briefing", "read_worker_result"],
         "normal_operations": ["start_orchestration", "record_attempt_event", "complete_attempt", "read_worker_result", "continue_orchestration"],
-        "complete_attempt_payload": ["project_root", "task_id", "attempt_id", "status", "summary", "findings"],
+        "complete_attempt_payload": ["task_ref", "assignment_ref", "plan_or_outcome"],
         "note": "Call-count contract benchmark; workers emit semantic attempt events and a compact completion result, while Cortex owns attempt persistence, server-observed metadata, result projections, and coordinator reads. Native host spawn calls are excluded.",
     }
     print(json.dumps(result, sort_keys=True))

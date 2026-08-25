@@ -1,16 +1,53 @@
 # Release readiness
 
-Status: source-mode release contract for Cortex 10.0.7.
+Status: source-mode release contract for Cortex 11.0.1.
 
 ## Current release identity
 
-- plugin version: 10.0.7
-- task contract: cortex/v10
-- orchestration lifecycle: cortex/orchestration/v6
-- SQLite schema: v15
+- release label: 11.0.1
+- task and capability contract: v11
+- SQLite schema: v17
 - public operations: 9
 - prompt contract: v3, sole stable renderer
-- lifecycle hooks: 6
+- lifecycle hooks: 5
+
+The v11 gate requires `start_orchestration` to be the sole task creator and
+initial coordinator capability issuer. Coordinator calls must carry
+`task_ref`/`coordinator_ref`; worker calls must carry
+`task_ref`/`assignment_ref`. Native execution must prove the exact
+`spawn_agent` → `wait` → `read_worker_result` → server-derived continuation
+sequence. Session/environment authorization, `create_thread`, server-owned
+CLI/executor launches, `repair_planning`, and manually authored
+`advance`/`completions` are forbidden. Plan and outcome repair must use only a
+digest- and capsule-bound patch through `complete_attempt`. Legacy rows and
+lost capabilities fail closed; incompatible old namespaces are quarantined.
+
+The public response boundary is closed at v11. Lifecycle and governance
+responses use typed action, receipt, inspection, and top-level error/recovery unions;
+worker briefing, question, event, completion, and result responses carry only
+their minimal canonical fields. Generic `user_message`, `user_view`,
+`internal`, full pipeline/governance state, and prose `next_action` fields are
+not public outputs. Patch-critical diagnostics, original JSON Pointer paths,
+exact semantic repair pointers, bounded nested field schemas,
+`error={code,category,message,diagnostics}`, and explicit
+`recovery={kind,operation,retryable,state_mutated}`. Repair recovery retains
+opaque handles, base payload digests, and allowed
+patch operations/paths are retained. A
+malformed handle copy reissues the same repair; a correctly shaped handle that
+fails integrity is terminal.
+Heavy state is available only through explicit inspect. The exact canonical
+v16 predecessor is quarantined as a complete unit with no state adoption into
+v17; v15 and older or unknown namespaces fail closed without archival.
+
+Worker bootstrap validates its required briefing and capability references before
+any project or tool operation. A missing pair permits at most one same-child
+repair follow-up using the exact server-retained references; no replacement
+child or ambient inference is allowed. A successful `complete_attempt` returns
+`terminal: true` with no result-reference handoff, after which the
+worker makes no further task-scoped calls. Invalid repair remains fail-closed.
+Exact `CORTEX_ATTEMPT_FAILED retryable=false` requires the fixed
+dispatch-scoped `finalize_worker_failure` transition; result read,
+continuation, and replacement are forbidden.
 
 The source tree is ready for a release decision only after the checks below
 are run against the exact working tree. This page does not claim an installed
@@ -32,8 +69,8 @@ plugin, trusted hooks, or live-model access.
 
 ## Runtime acceptance
 
-A worker must be able to checkpoint complete AttemptEvent rows of any content volume and close one
-AttemptResult. The server must derive identity, timestamps, changed files,
+A worker must be able to checkpoint complete AttemptEvent rows of any content
+volume and close one AttemptResult. The server must derive identity, timestamps, changed files,
 checks, workspace observations, and verification metadata. The lifecycle must
 distinguish WORK_COMPLETED, FINALIZING, COMPLETED, BLOCKED, and FAILED.
 

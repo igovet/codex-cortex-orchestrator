@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from cortex_runtime import attempt_protocol, canonical_json, communication
 from cortex_runtime.validation import ValidationFailure, collect_validations
-from cortex_runtime.worker_identity import WorkerBindingError, bind_semantic_params, current_binding
 
 from cortex_runtime.core.runtime_bindings import bind_symbols
 
@@ -23,6 +22,7 @@ bind_symbols(
         "PUBLIC_ORCHESTRATION_SCHEMA",
         "QUESTION_SCHEMA",
         "_attempt",
+        "authorize_worker_assignment",
         "_question_config",
         "_question_options",
         "_question_payload",
@@ -43,6 +43,7 @@ bind_symbols(
         "now",
         "question_bus_paths",
         "redact",
+        "WorkerAssignmentError",
         "require_internal_english",
         "safe_id",
         "sanitize_structured",
@@ -79,8 +80,9 @@ _GENERIC_NUMBERED_QUESTION = re.compile(
 # A worker question is a user-facing pause only when the worker needs an
 # actual task decision.  Cortex's own mechanics are coordinator concerns and
 # must be returned as internal advice, never persisted as a question.  The
-# explicit ``context.decision_scope`` marker is the only classifier. Missing
-# markers are rejected rather than inferred from worker-authored prose.
+# explicit public ``decision_scope`` marker is the only classifier.  The
+# facade converts it to the internal durable context only after strict public
+# validation. Missing markers are rejected rather than inferred from prose.
 _QUESTION_TASK_SCOPES = {
     "task", "task_decision", "requirement", "requirements", "scope", "product",
     "acceptance", "acceptance_criteria", "external_authorization",
@@ -95,6 +97,8 @@ _QUESTION_INTERNAL_SCOPES = {
 # intentionally small field schemas: the response contains only the fields
 # that failed, while the tool declaration remains the complete form.
 _QUESTION_FIELD_SCHEMAS: dict[str, dict[str, Any]] = {
+    "task_ref": {"type": "string", "pattern": "^task-[0-9a-f]{12}$"},
+    "assignment_ref": {"type": "string", "pattern": "^assignment-v1-[0-9a-f]{64}$"},
     "project_root": {"type": "string", "minLength": 1},
     "task_id": {"type": "string", "minLength": 1},
     "attempt_id": {"type": "string", "minLength": 1},
@@ -103,36 +107,91 @@ _QUESTION_FIELD_SCHEMAS: dict[str, dict[str, Any]] = {
     "question_ref": {"type": "string", "minLength": 1},
     "batch_ref": {"type": "string", "minLength": 1},
     "question": {"type": "string", "minLength": 1},
+    "question_type": {"type": "string", "enum": ["single_select", "multi_select", "text"]},
+    "decision_scope": {"type": "string", "enum": sorted(_QUESTION_TASK_SCOPES)},
     "batch": {"type": "object"},
     "header": {"type": "string"},
     "options": {"type": "array"},
     "recommendation": {"type": "string", "minLength": 1},
     "recommended_option_ids": {"type": "array", "minItems": 1, "uniqueItems": True},
     "recommended_answer": {"type": "string", "minLength": 1},
+    "option_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,159}$"},
+    "question_key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,159}$"},
+    "label": {"type": "string", "minLength": 1},
+    "label_en": {"type": "string", "minLength": 1},
+    "multiple": {"type": "boolean"},
+    "custom_label": {"type": "string"},
+    "context": {"type": "object"},
 }
-_QUESTION_ALLOWED_FIELDS = set(_QUESTION_FIELD_SCHEMAS) | {
+_QUESTION_ALLOWED_FIELDS = {
+    "project_root", "task_id", "attempt_id", "profile", "action",
+    "question_ref", "batch_ref", "question", "batch", "header", "options",
+    "recommendation", "recommended_option_ids", "recommended_answer",
     "multiple", "custom_label", "context",
 }
+_QUESTION_CORTEX_ISSUED_FIELDS = {
+    "task_ref", "assignment_ref", "question_ref", "batch_ref",
+}
+_PUBLIC_QUESTION_COMMON_FIELDS = {"task_ref", "assignment_ref", "action"}
+_PUBLIC_QUESTION_BRANCH_FIELDS = {
+    "ask": _PUBLIC_QUESTION_COMMON_FIELDS | {
+        "question", "question_type", "decision_scope", "header", "options", "custom_label",
+        "recommendation", "recommended_option_ids", "recommended_answer",
+    },
+    "poll": _PUBLIC_QUESTION_COMMON_FIELDS | {"question_ref"},
+    "ask_batch": _PUBLIC_QUESTION_COMMON_FIELDS | {"batch"},
+    "poll_batch": _PUBLIC_QUESTION_COMMON_FIELDS | {"batch_ref"},
+}
+_PUBLIC_QUESTION_FIELDS = set().union(*_PUBLIC_QUESTION_BRANCH_FIELDS.values())
 
 
-def _question_diagnostic(path: str, message: str, *, received: Any = _MISSING, expected: Any = None) -> dict[str, Any]:
+def _question_json_pointer(path: str) -> str:
+    """Translate one internal dotted path into an RFC 6901 JSON Pointer."""
+    source = str(path or "").strip()
+    if source == "$":
+        return ""
+    if source.startswith("$."):
+        source = source[2:]
+    elif source.startswith("$"):
+        source = source[1:].lstrip(".")
+    # Internal paths use ``questions[0]`` for list entries.  A JSON Pointer
+    # requires a distinct numeric segment instead of retaining brackets.
+    source = re.sub(r"\[([0-9]+)\]", r".\1", source)
+    parts = [part for part in source.split(".") if part]
+    if not parts:
+        return ""
+    return "/" + "/".join(
+        part.replace("~", "~0").replace("/", "~1") for part in parts
+    )
+
+
+def _question_diagnostic(
+    path: str,
+    message: str,
+    *,
+    received: Any = _MISSING,
+    expected: Any = None,
+    json_pointer: str | None = None,
+) -> dict[str, Any]:
+    """Return one small, path-addressable correction without input echoing."""
+    del received, expected
     field = path.rsplit(".", 1)[-1]
     schema = dict(_QUESTION_FIELD_SCHEMAS.get(field, {"type": "object"}))
+    if message == "unsupported worker_question field":
+        schema = {"type": "object", "additionalProperties": False}
     if field == "profile":
         schema["enum"] = sorted(AGENTS)
-    item: dict[str, Any] = {
+    elif field == "decision_scope":
+        schema = {"type": "string", "enum": sorted(_QUESTION_TASK_SCOPES)}
+    diagnostic = {
         "code": "worker_question_request_invalid",
-        "path": path,
-        "json_pointer": path,
-        "message": message,
+        "json_pointer": json_pointer if json_pointer is not None else _question_json_pointer(path),
+        "message": redact(message, 300),
         "field_schema": schema,
-        "fix": f"Correct only {path} according to field_schema, then retry worker_question on this same attempt.",
     }
-    if received is not _MISSING:
-        item["received"] = received
-    if expected is not None:
-        item["expected"] = expected
-    return item
+    if field in _QUESTION_CORTEX_ISSUED_FIELDS:
+        diagnostic["value_source"] = "cortex"
+    return diagnostic
 
 
 def _question_firewall_scope(params: dict[str, Any]) -> dict[str, Any]:
@@ -169,6 +228,11 @@ def _question_firewall_scope(params: dict[str, Any]) -> dict[str, Any]:
         if declared in _QUESTION_INTERNAL_SCOPES:
             internal.append({"path": path, "scope": declared or "internal"})
             continue
+        # An unknown marker cannot safely be interpreted as a material user
+        # decision.  Returning it as a precise validation correction gives the
+        # worker the advertised enum, rather than inviting source inspection
+        # or accidentally persisting an internal Cortex question.
+        internal.append({"path": path, "scope": "unknown_decision_scope"})
     return {
         "allowed": not internal,
         "category": "task_decision" if not internal else "internal_cortex",
@@ -186,20 +250,7 @@ def _question_firewall_advice(params: dict[str, Any]) -> dict[str, Any] | None:
         "ok": True,
         "outcome": "orchestrator_advice",
         "requires_user_decision": False,
-        "question_firewall": {
-            "decision": "route_to_orchestrator",
-            "category": decision["category"],
-            "internal_questions": decision["internal"],
-        },
-        "advice": (
-            "This is an internal Cortex condition, not a user task decision. "
-            "Record it as orchestration evidence and choose or delegate the corrective action."
-        ),
-        "next_action": (
-            "Return this internal condition to the coordinator as advice; do not ask the user, "
-            "do not persist a worker question, and continue through the coordinator's corrective dispatch."
-        ),
-        "recoverable": True,
+        "reason_category": decision["category"],
     }
 
 def _canonical_json_bytes(value: object, *, label: str, maximum: int) -> int:
@@ -749,11 +800,18 @@ def _batch_payload(params: dict[str, Any]) -> tuple[dict[str, Any], str]:
             {"code": "worker_question_request_invalid", "path": f"batch.{field}", "message": "unsupported batch field"}
             for field in unknown
         ])
-    batch_key = safe_id(str(raw_batch.get("batch_key") or ""))
+    raw_batch_key = raw_batch.get("batch_key")
+    batch_key = safe_id(str(raw_batch_key or ""))
     raw_questions = raw_batch.get("questions")
     collect_validations(
         (
-            ("batch.batch_key", lambda: None if batch_key else "batch requires batch_key"),
+            (
+                "batch.batch_key",
+                lambda: None
+                if isinstance(raw_batch_key, str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", raw_batch_key)
+                else "batch requires a stable lowercase batch_key",
+            ),
             ("batch.questions", lambda: None if isinstance(raw_questions, list) and bool(raw_questions) else "batch requires 1..32 questions"),
         ),
         code="worker_question_request_invalid",
@@ -763,18 +821,91 @@ def _batch_payload(params: dict[str, Any]) -> tuple[dict[str, Any], str]:
     questions: list[dict[str, Any]] = []
     item_diagnostics: list[dict[str, Any]] = []
     for ordinal, item in enumerate(raw_questions, 1):
+        item_path = f"$.batch.questions[{ordinal - 1}]"
+        if isinstance(item, dict):
+            question_type = item.get("type")
+            allowed = {
+                "question_key", "question", "type", "header", "custom_label",
+                "context", "recommendation",
+            }
+            if question_type in {"single_select", "multi_select"}:
+                allowed |= {"options", "recommended_option_ids"}
+            elif question_type == "text":
+                allowed.add("recommended_answer")
+            for field in sorted(set(item) - allowed):
+                item_diagnostics.append(_question_diagnostic(
+                    f"{item_path}.{field}",
+                    f"this cross-branch field is forbidden for {question_type or 'batch question'}",
+                ))
+            raw_question_key = item.get("question_key")
+            if not isinstance(raw_question_key, str) or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", raw_question_key) is None:
+                item_diagnostics.append(_question_diagnostic(
+                    f"{item_path}.question_key", "batch question requires a stable lowercase question_key",
+                ))
+            for field, expected_type in {
+                "question": str,
+                "type": str,
+                "header": str,
+                "custom_label": str,
+                "context": dict,
+                "recommendation": str,
+                "options": list,
+                "recommended_option_ids": list,
+                "recommended_answer": str,
+            }.items():
+                if field in item and not isinstance(item[field], expected_type):
+                    item_diagnostics.append(_question_diagnostic(
+                        f"{item_path}.{field}", f"{field} must be a {expected_type.__name__}",
+                    ))
+            raw_options = item.get("options")
+            if isinstance(raw_options, list):
+                if not raw_options:
+                    item_diagnostics.append(_question_diagnostic(f"{item_path}.options", "selection batch question options must not be empty"))
+                for option_index, option in enumerate(raw_options):
+                    option_path = f"{item_path}.options[{option_index}]"
+                    if not isinstance(option, dict):
+                        item_diagnostics.append(_question_diagnostic(option_path, "batch choice option must be an object with stable option_id"))
+                        continue
+                    for field in sorted(set(option) - {"option_id", "label", "label_en", "description"}):
+                        item_diagnostics.append(_question_diagnostic(f"{option_path}.{field}", "unsupported batch choice option field"))
+                    option_id = option.get("option_id")
+                    if not isinstance(option_id, str) or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", option_id) is None:
+                        item_diagnostics.append(_question_diagnostic(f"{option_path}.option_id", "batch choice option requires a stable lowercase option_id"))
+                    if not any(isinstance(option.get(label), str) and option[label].strip() for label in ("label", "label_en")):
+                        item_diagnostics.append(_question_diagnostic(f"{option_path}.label_en", "batch choice option requires label or label_en"))
+            raw_ids = item.get("recommended_option_ids")
+            if isinstance(raw_ids, list):
+                if not raw_ids:
+                    item_diagnostics.append(_question_diagnostic(f"{item_path}.recommended_option_ids", "recommended_option_ids must not be empty"))
+                elif any(not isinstance(value, str) or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", value) is None for value in raw_ids):
+                    item_diagnostics.append(_question_diagnostic(f"{item_path}.recommended_option_ids", "recommended_option_ids must contain stable lowercase option IDs"))
+                elif len(raw_ids) != len(set(raw_ids)):
+                    item_diagnostics.append(_question_diagnostic(f"{item_path}.recommended_option_ids", "recommended_option_ids must be unique"))
+        before = len(item_diagnostics)
         try:
             questions.append(_batch_question_config(item))
         except (ValueError, TypeError) as exc:
             collected = getattr(exc, "diagnostics", None)
             if isinstance(collected, list) and collected:
-                item_diagnostics.extend({**diagnostic, "path": f"batch.questions[{ordinal - 1}].{diagnostic.get('path', '$')}"} for diagnostic in collected)
+                for diagnostic in collected:
+                    item_path = str(diagnostic.get("path") or "").removeprefix("$.").strip(".")
+                    path = item_path
+                    if item_path:
+                        path = f"{path}.{item_path}"
+                    item_diagnostics.append(_question_diagnostic(
+                        path,
+                        str(diagnostic.get("message") or "invalid batch question"),
+                    ))
             else:
-                item_diagnostics.append({
-                    "code": "worker_question_request_invalid",
-                    "path": f"batch.questions[{ordinal - 1}]",
-                    "message": redact(str(exc), 1000),
-                })
+                field = _worker_question_error_path(str(exc))
+                path = item_path
+                if field != "$":
+                    path = f"{path}.{field}"
+                item_diagnostics.append(_question_diagnostic(path, redact(str(exc), 1000)))
+        if len(item_diagnostics) > before:
+            # The schema-shaped diagnostics above are returned together; the
+            # parsed record is never committed when any item is invalid.
+            continue
     if item_diagnostics:
         raise ValidationFailure(item_diagnostics)
     keys = [item["question_key"] for item in questions]
@@ -825,7 +956,6 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             authorize(state, {
                 "project_root": params.get("project_root"),
                 "principal": state.get("principal"),
-                "thread_id": state.get("thread_id"),
             })
         else:
             authorize(state, params)
@@ -898,6 +1028,7 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "question": question,
             "context": context,
             "blocking": blocking,
+            "question_type": config["question_type"],
             "header": config["header"],
             "options": config["options"],
             "multiple": config["multiple"],
@@ -1017,9 +1148,6 @@ def _poll_worker_question_batch(
             "ok": True,
             "outcome": "batch_superseded",
             "batch_ref": batch_ref,
-            "status": "superseded",
-            "resume": False,
-            "next_action": "Do not resume this worker from the superseded batch; wait for a replacement dispatch or current revision guidance.",
         }
     if record.get("status") != "answered":
         return {
@@ -1027,17 +1155,15 @@ def _poll_worker_question_batch(
             "ok": True,
             "outcome": "awaiting_user",
             "batch_ref": batch_ref,
-            "status": record.get("status"),
-            "next_action": "Remain available; the parent coordinator must complete this same durable batch.",
+            "progress": _batch_progress(record),
         }
     return {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": True,
         "outcome": "batch_answered",
         "batch_ref": batch_ref,
-        "status": "answered",
+        "progress": _batch_progress(record),
         "answers": _batch_answer_view(record),
-        "next_action": "Resume this same worker attempt with the canonical English batch answers; complete the AttemptResult only after the mission is complete.",
     }
 
 
@@ -1074,9 +1200,35 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
     if preflight:
         raise ValidationFailure(preflight)
     if action in {"ask", "ask_batch"}:
-        firewall_advice = _question_firewall_advice(params)
-        if firewall_advice is not None:
-            return firewall_advice
+        # ``orchestrator_advice`` is an internal engine state, not a public
+        # worker-question outcome.  Returning it through this facade used to
+        # miss every closed v11 response variant and surface as a raw MCP
+        # -32602 error.  Keep the firewall decision in the worker boundary as
+        # a normal, non-mutating correction instead: a missing declaration is
+        # caller-correctable, while an explicitly internal scope is a clear
+        # instruction not to turn Cortex mechanics into a user question.
+        firewall = _question_firewall_scope(params)
+        if not firewall["allowed"]:
+            diagnostics: list[dict[str, Any]] = []
+            for item in firewall["internal"]:
+                source_path = str(item.get("path") or "question")
+                scope = str(item.get("scope") or "")
+                context_path = (
+                    "$.context.decision_scope"
+                    if source_path == "question"
+                    else f"$.{source_path}.context.decision_scope"
+                )
+                if scope == "missing_decision_scope":
+                    diagnostics.append(_question_diagnostic(
+                        context_path,
+                        "ask requires context.decision_scope to name the material user-decision boundary",
+                    ))
+                else:
+                    diagnostics.append(_question_diagnostic(
+                        context_path,
+                        "worker questions may cover only task requirements, scope, acceptance, or explicit external/destructive authorization; do not submit Cortex-internal conditions as user questions",
+                    ))
+            raise ValidationFailure(diagnostics)
     profile = canonical_profile(params.get("profile") or "")
     if profile not in AGENTS:
         raise ValueError("profile must be an exact Cortex worker profile")
@@ -1087,17 +1239,12 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
         attempt = _attempt(state, attempt_id)
         if not attempt.get("facade_managed") or attempt.get("profile") != profile:
             raise ValueError("worker question identity does not match an active facade-managed attempt")
-        binding = current_binding() or {}
-        if binding.get("dispatch_ref") and str(attempt.get("dispatch_ref") or "") != binding["dispatch_ref"]:
-            raise ValueError("worker binding dispatch_ref does not match the exact dispatched worker")
-        if binding.get("briefing_digest") and str(attempt.get("briefing_digest") or "").lower() != binding["briefing_digest"].lower():
-            raise ValueError("worker binding briefing_digest does not match the exact dispatched worker")
         if action == "poll_batch":
             if any(params.get(field) not in (None, "", [], {}) for field in (
                 "question_ref", "question", "header", "options", "multiple", "custom_label", "context", "batch",
                 "recommendation", "recommended_option_ids", "recommended_answer"
             )):
-                raise ValueError("poll_batch accepts only batch_ref and worker identity fields")
+                raise ValueError("poll_batch accepts only batch_ref and assignment authority fields")
             batch_ref = safe_id(str(params.get("batch_ref") or ""))
             if not batch_ref:
                 raise ValueError("poll_batch requires batch_ref")
@@ -1114,7 +1261,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "question", "header", "options", "multiple", "custom_label", "context",
                 "recommendation", "recommended_option_ids", "recommended_answer"
             )):
-                raise ValueError("ask_batch accepts only batch and worker identity fields")
+                raise ValueError("ask_batch accepts only batch and assignment authority fields")
             result = _publish_worker_question_batch(params, task_dir, state, attempt)
             record = result["batch"]
             _record_batch_question_events(root, state, record, answered=False)
@@ -1123,17 +1270,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "ok": True,
                 "outcome": "batch_recorded",
                 "batch_ref": record["batch_id"],
-                # Keep the established coordinator transport compact: batch
-                # refs travel through the existing question_ref envelope.
-                "question_ref": record["batch_id"],
-                "status": record["status"],
                 "idempotent": bool(result.get("idempotent")),
-                "next_action": (
-                    "Return QUESTION_RECORDED question_ref=<value>, then a complete decision handoff to the parent: "
-                    "why input is needed, every full question, every concrete option label and description, material "
-                    "trade-offs, and your recommendation. Do not use placeholders such as Option 1 or Recommended "
-                    "option. Remain available and do not complete the AttemptResult until this batch is answered."
-                ),
             }
         if action == "ask":
             if str(params.get("question_ref") or "").strip():
@@ -1173,25 +1310,18 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "ok": True,
                 "outcome": "question_recorded",
                 "question_ref": record["question_id"],
-                "status": record["status"],
                 "idempotent": bool(result.get("idempotent")),
-                "next_action": (
-                    "Return QUESTION_RECORDED question_ref=<value>, then a complete decision handoff to the parent: "
-                    "why input is needed, the full question, every concrete option label and description, material "
-                    "trade-offs, and your recommendation. Do not use placeholders such as Option 1 or Recommended "
-                    "option. Remain available and do not complete the AttemptResult until this question is answered."
-                ),
             }
         question_ref = safe_id(str(params.get("question_ref") or ""))
         if any(params.get(field) not in (None, "", [], {}) for field in (
             "question", "header", "options", "multiple", "custom_label", "context",
             "recommendation", "recommended_option_ids", "recommended_answer"
         )):
-            raise ValueError("poll accepts only the question_ref and worker identity fields")
+            raise ValueError("poll accepts only the question_ref and assignment authority fields")
         records = _question_records(question_bus_paths(task_dir), state)
         record = next((item for item in records if item.get("question_id") == question_ref), None)
         if record is None or record.get("attempt_id") != attempt_id or record.get("profile") != profile:
-            raise ValueError("question_ref does not belong to this worker attempt")
+            raise ValueError("question_ref is not bound to this authorized worker attempt")
         if _question_is_stale(record, state, attempt):
             _supersede_question(task_dir, state, record, attempt)
         if record.get("status") == "superseded":
@@ -1200,9 +1330,6 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "ok": True,
                 "outcome": "question_superseded",
                 "question_ref": question_ref,
-                "status": "superseded",
-                "resume": False,
-                "next_action": "Do not resume this worker from the superseded question; wait for current revision guidance or a replacement dispatch.",
             }
         if record.get("status") != "answered":
             return {
@@ -1210,64 +1337,348 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "ok": True,
                 "outcome": "awaiting_user",
                 "question_ref": question_ref,
-                "status": record.get("status"),
-                "next_action": "Remain available; the parent coordinator must surface and answer this question.",
             }
+        # Older records created before v11 canonical scalar-answer persistence
+        # could contain an empty answer_en object even though answer_text was
+        # present.  Prefer that durable scalar rather than projecting an empty
+        # answer through the public schema; newly written records are guarded
+        # by answer_worker_question before they become answered.
+        answer = record.get("answer_en")
+        if isinstance(answer, Mapping):
+            has_canonical_text = bool(str(
+                answer.get("text") or answer.get("answer_en") or answer.get("answer_en_text")
+                or answer.get("custom_response") or ""
+            ).strip())
+            selections = answer.get("selections")
+            if not has_canonical_text and isinstance(selections, list):
+                has_canonical_text = any(str(item).strip() for item in selections)
+            if not has_canonical_text:
+                answer = record.get("answer_en_text") or record.get("answer_text") or record.get("answer")
+        elif not str(answer or "").strip():
+            answer = record.get("answer_en_text") or record.get("answer_text") or record.get("answer")
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
             "outcome": "question_answered",
             "question_ref": question_ref,
-            "status": "answered",
-            "answer": record.get("answer_en") or record.get("answer"),
-            "answer_text": record.get("answer_en_text") or record.get("answer_text"),
-            "answer_option_ids": record.get("answer_option_ids") or [],
-            "resume_context": record.get("resume_context"),
-            "next_action": "Resume this same worker attempt with the user's answer; complete the AttemptResult only after the mission is complete.",
+            "answer": answer,
         }
 
 
 def _worker_question_error_path(message: str) -> str:
     lowered = message.lower()
     for marker, path in (
+        # Prefer every exact field marker over the generic word ``question``.
+        # This mapper is a compatibility fallback for ValueErrors that predate
+        # typed diagnostics; its output must still identify one legal retry
+        # field without allowing action/profile/etc. to be shadowed.
+        ("assignment_ref", "assignment_ref"), ("task_ref", "task_ref"),
         ("question_ref", "question_ref"), ("batch_ref", "batch_ref"),
-        ("question_key", "batch.questions"), ("batch", "batch"),
-        ("question", "question"), ("action", "action"),
-        ("profile", "profile"), ("attempt", "attempt_id"),
-        ("task", "task_id"), ("project_root", "project_root"),
+        ("project_root", "project_root"), ("attempt_id", "attempt_id"),
+        ("task_id", "task_id"), ("action", "action"), ("profile", "profile"),
+        # Keep recommendation fields ahead of the generic ``question``
+        # marker.  Their validation messages intentionally say "worker
+        # question ..."; matching the generic noun first rewrites an
+        # actionable recommendation correction as /question.
+        ("recommended_option_ids", "recommended_option_ids"),
+        ("recommended_answer", "recommended_answer"),
+        ("recommendation", "recommendation"),
+        ("question_key", "batch.questions"), ("custom_label", "custom_label"),
+        ("header", "header"), ("context", "context"), ("options", "options"),
+        ("batch", "batch"), ("question", "question"),
+        ("attempt", "attempt_id"), ("task", "task_id"),
     ):
         if marker in lowered:
             return path
     return "$"
 
 
-def worker_question(params: dict[str, Any]) -> dict[str, Any]:
+def _dedupe_question_diagnostics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one deterministic correction per exact pointer/message pair."""
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = str(item.get("json_pointer") or item.get("path") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _validate_public_question_options(
+    value: object,
+    path: str,
+    diagnostics: list[dict[str, Any]],
+) -> list[str]:
+    """Validate public stable choice options and return their exact IDs."""
+    if not isinstance(value, list):
+        diagnostics.append(_question_diagnostic(path, "options are required and must be an array"))
+        return []
+    if not value:
+        diagnostics.append(_question_diagnostic(path, "options are required and must not be empty"))
+        return []
+    option_ids: list[str] = []
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            diagnostics.append(_question_diagnostic(item_path, "choice option must be an object with stable option_id"))
+            continue
+        for field in sorted(set(item) - {"option_id", "label", "label_en", "description"}):
+            diagnostics.append(_question_diagnostic(f"{item_path}.{field}", "unsupported choice option field"))
+        option_id = item.get("option_id")
+        if not isinstance(option_id, str) or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", option_id) is None:
+            diagnostics.append(_question_diagnostic(f"{item_path}.option_id", "choice option requires a stable lowercase option_id"))
+        else:
+            option_ids.append(option_id)
+        if not any(isinstance(item.get(label), str) and item[label].strip() for label in ("label", "label_en")):
+            diagnostics.append(_question_diagnostic(f"{item_path}.label_en", "choice option requires label or label_en"))
+    if len(option_ids) != len(set(option_ids)):
+        diagnostics.append(_question_diagnostic(path, "choice option_id values must be unique"))
+    return option_ids
+
+
+def _validate_public_recommended_ids(
+    value: object,
+    path: str,
+    diagnostics: list[dict[str, Any]],
+    *,
+    option_ids: list[str],
+    single: bool,
+) -> None:
+    if not isinstance(value, list):
+        diagnostics.append(_question_diagnostic(path, "recommended_option_ids are required and must be an array"))
+        return
+    if not value:
+        diagnostics.append(_question_diagnostic(path, "recommended_option_ids are required and must not be empty"))
+        return
+    if any(not isinstance(item, str) or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", item) is None for item in value):
+        diagnostics.append(_question_diagnostic(path, "recommended_option_ids must contain stable lowercase option IDs"))
+        return
+    if len(value) != len(set(value)):
+        diagnostics.append(_question_diagnostic(path, "recommended_option_ids must be unique"))
+    if single and len(value) != 1:
+        diagnostics.append(_question_diagnostic(path, "single_select requires exactly one recommended option ID"))
+    if option_ids and any(item not in set(option_ids) for item in value):
+        diagnostics.append(_question_diagnostic(path, "recommended_option_ids must reference defined options"))
+
+
+def _validate_public_question_item(
+    value: object,
+    path: str,
+    diagnostics: list[dict[str, Any]],
+    *,
+    batch_item: bool,
+) -> None:
+    """Validate one explicit question_type branch without presence inference."""
+    if not isinstance(value, dict):
+        diagnostics.append(_question_diagnostic(path, "question item must be an object"))
+        return
+    base_fields = {
+        "question", "question_type", "decision_scope", "header", "custom_label",
+        "recommendation", "options", "recommended_option_ids", "recommended_answer",
+    }
+    if batch_item:
+        base_fields.add("question_key")
+    else:
+        base_fields.update(_PUBLIC_QUESTION_COMMON_FIELDS)
+    for field in sorted(set(value) - base_fields):
+        diagnostics.append(_question_diagnostic(f"{path}.{field}", "unsupported worker_question field"))
+
+    required_text = ["question", "recommendation"]
+    if batch_item:
+        question_key = value.get("question_key")
+        if not isinstance(question_key, str) or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", question_key) is None:
+            diagnostics.append(_question_diagnostic(f"{path}.question_key", "question_key is required and must be a stable lowercase identifier"))
+    for field in required_text:
+        if not isinstance(value.get(field), str) or not value[field].strip():
+            diagnostics.append(_question_diagnostic(f"{path}.{field}", f"{field} is required and must be a non-empty string"))
+    for field in ("header", "custom_label"):
+        if field in value and not isinstance(value[field], str):
+            diagnostics.append(_question_diagnostic(f"{path}.{field}", f"{field} must be a string"))
+
+    question_type = value.get("question_type")
+    if not isinstance(question_type, str) or not question_type.strip():
+        diagnostics.append(_question_diagnostic(f"{path}.question_type", "question_type is required"))
+        question_type = ""
+    elif question_type not in _BATCH_QUESTION_TYPES:
+        diagnostics.append(_question_diagnostic(f"{path}.question_type", "question_type must be single_select, multi_select, or text"))
+        question_type = ""
+    decision_scope = value.get("decision_scope")
+    if not isinstance(decision_scope, str) or not decision_scope.strip():
+        diagnostics.append(_question_diagnostic(f"{path}.decision_scope", "decision_scope is required"))
+    elif decision_scope not in _QUESTION_TASK_SCOPES:
+        diagnostics.append(_question_diagnostic(
+            f"{path}.decision_scope",
+            "decision_scope must be one exact advertised material user-decision scope",
+        ))
+
+    if question_type in {"single_select", "multi_select"}:
+        if "recommended_answer" in value:
+            diagnostics.append(_question_diagnostic(
+                f"{path}.recommended_answer",
+                f"recommended_answer is forbidden for {question_type}",
+            ))
+        option_ids = _validate_public_question_options(value.get("options"), f"{path}.options", diagnostics)
+        _validate_public_recommended_ids(
+            value.get("recommended_option_ids"),
+            f"{path}.recommended_option_ids",
+            diagnostics,
+            option_ids=option_ids,
+            single=question_type == "single_select",
+        )
+    elif question_type == "text":
+        for field in ("options", "recommended_option_ids"):
+            if field in value:
+                diagnostics.append(_question_diagnostic(f"{path}.{field}", f"{field} is forbidden for text"))
+        if not isinstance(value.get("recommended_answer"), str) or not value["recommended_answer"].strip():
+            diagnostics.append(_question_diagnostic(f"{path}.recommended_answer", "recommended_answer is required for text"))
+
+
+def _adapt_public_question_item(value: dict[str, Any], *, batch_item: bool) -> dict[str, Any]:
+    """Map the strict public discriminator to the existing durable format."""
+    adapted = {
+        key: item for key, item in value.items()
+        if key not in {"question_type", "decision_scope"}
+    }
+    adapted["context"] = {"decision_scope": value["decision_scope"]}
+    question_type = str(value["question_type"])
+    if batch_item:
+        adapted["type"] = question_type
+    else:
+        adapted["multiple"] = question_type == "multi_select"
+    return adapted
+
+
+def _worker_question_facade(params: dict[str, Any]) -> dict[str, Any]:
     """Run durable ask/poll while keeping caller mistakes on the same attempt."""
     try:
-        return _worker_question_impl(bind_semantic_params(params))
-    except (ValueError, OSError) as exc:
+        original = dict(params)
+        public_fields = _PUBLIC_QUESTION_FIELDS
+        # Collect independent public-form errors before authority lookup.  A
+        # missing capability must not hide an unrelated malformed action and
+        # force the model through one-validator-symptom-per-retry cascades.
+        preflight: list[dict[str, Any]] = [
+            _question_diagnostic(
+                f"$.{field}",
+                "unsupported worker_question field",
+                received=original.get(field),
+                json_pointer="/" + field.replace("~", "~0").replace("/", "~1"),
+            )
+            for field in sorted(set(original) - public_fields)
+        ]
+        for field in ("task_ref", "assignment_ref"):
+            if not isinstance(original.get(field), str) or not original[field].strip():
+                preflight.append(_question_diagnostic(f"$.{field}", f"{field} is required", received=None))
+        raw_action = original.get("action")
+        action = raw_action.strip() if isinstance(raw_action, str) else ""
+        if not action:
+            preflight.append(_question_diagnostic("$.action", "action is required", received=raw_action))
+        elif action not in {"ask", "poll", "ask_batch", "poll_batch"}:
+            preflight.append(_question_diagnostic("$.action", "worker question action is unsupported", received=raw_action))
+        if action == "poll" and (not isinstance(original.get("question_ref"), str) or not original["question_ref"].strip()):
+            preflight.append(_question_diagnostic("$.question_ref", "poll requires the exact Cortex-issued question_ref", received=original.get("question_ref")))
+        elif action == "ask_batch" and not isinstance(original.get("batch"), dict):
+            preflight.append(_question_diagnostic("$.batch", "ask_batch requires batch", received=original.get("batch")))
+        elif action == "poll_batch" and (not isinstance(original.get("batch_ref"), str) or not original["batch_ref"].strip()):
+            preflight.append(_question_diagnostic("$.batch_ref", "poll_batch requires the exact Cortex-issued batch_ref", received=original.get("batch_ref")))
+        legal_fields = _PUBLIC_QUESTION_BRANCH_FIELDS.get(action)
+        if legal_fields is not None:
+            # Unknown fields were already diagnosed above.  Only fields that
+            # belong to another published action branch are cross-branch
+            # errors; this prevents duplicate /answer_mode diagnostics.
+            for field in sorted((set(original) & public_fields) - legal_fields):
+                preflight.append(_question_diagnostic(
+                    f"$.{field}",
+                    f"this cross-branch field is forbidden for {action}",
+                    received=original.get(field),
+                ))
+        expected_types = {
+            "task_ref": str,
+            "assignment_ref": str,
+            "action": str,
+            "question_ref": str,
+            "batch_ref": str,
+            "question": str,
+            "question_type": str,
+            "decision_scope": str,
+            "header": str,
+            "options": list,
+            "custom_label": str,
+            "recommendation": str,
+            "recommended_option_ids": list,
+            "recommended_answer": str,
+            "batch": dict,
+        }
+        for field in sorted(set(original) & set(expected_types)):
+            expected_type = expected_types[field]
+            if not isinstance(original[field], expected_type):
+                preflight.append(_question_diagnostic(
+                    f"$.{field}",
+                    f"{field} must be a {expected_type.__name__}",
+                    received=original.get(field),
+                ))
+        if action == "ask":
+            _validate_public_question_item(original, "$", preflight, batch_item=False)
+        elif action == "ask_batch" and isinstance(original.get("batch"), dict):
+            batch = original["batch"]
+            for field in sorted(set(batch) - {"batch_key", "questions"}):
+                preflight.append(_question_diagnostic(f"$.batch.{field}", "unsupported worker_question field"))
+            batch_key = batch.get("batch_key")
+            if not isinstance(batch_key, str) or re.fullmatch(r"[a-z0-9][a-z0-9._:-]{0,159}", batch_key) is None:
+                preflight.append(_question_diagnostic("$.batch.batch_key", "batch_key is required and must be a stable lowercase identifier"))
+            batch_questions = batch.get("questions")
+            if not isinstance(batch_questions, list) or not batch_questions:
+                preflight.append(_question_diagnostic("$.batch.questions", "questions are required and must be a non-empty array"))
+            else:
+                if len(batch_questions) > 32:
+                    preflight.append(_question_diagnostic("$.batch.questions", "questions must contain no more than 32 items"))
+                for index, item in enumerate(batch_questions):
+                    _validate_public_question_item(item, f"$.batch.questions[{index}]", preflight, batch_item=True)
+        if preflight:
+            raise ValidationFailure(_dedupe_question_diagnostics(preflight))
+        project, _task_dir, state, attempt, profile = authorize_worker_assignment(original, "worker_question")
+        semantic = {key: value for key, value in original.items() if key not in {"task_ref", "assignment_ref"}}
+        if action == "ask":
+            semantic = _adapt_public_question_item(semantic, batch_item=False)
+        elif action == "ask_batch":
+            semantic["batch"] = {
+                **semantic["batch"],
+                "questions": [
+                    _adapt_public_question_item(item, batch_item=True)
+                    for item in semantic["batch"]["questions"]
+                ],
+            }
+        return _worker_question_impl({
+            **semantic,
+            "project_root": str(project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": profile,
+        })
+    # Public MCP input is model-authored.  A type mismatch must remain an
+    # ordinary v11 validation response, never escape as a JSON-RPC -32602
+    # transport error.  In particular, a resumed worker can accidentally
+    # pass the coordinator's ``resume`` object as ``action``; that is a
+    # caller-correctable form error on this same attempt, not a bootstrap or
+    # runtime failure.
+    except (ValueError, TypeError, OSError, RuntimeError) as exc:
         message = redact(str(exc), 1000)
         lowered = message.lower()
-        if isinstance(exc, WorkerBindingError):
+        if isinstance(exc, WorkerAssignmentError):
             return {
                 "schema": PUBLIC_ORCHESTRATION_SCHEMA,
                 "ok": False,
-                "outcome": "needs_input",
-                "code": "worker_question_unavailable",
-                "diagnostics": [{
-                    "code": "worker_question_unavailable",
-                    "path": "$",
-                    "message": message,
-                    "fix": "Preserve this server-owned worker-session diagnostic; it cannot be repaired by changing tool arguments.",
-                    "json_pointer": "",
-                    "field_schema": {"type": "object"},
-                }],
+                "outcome": "assignment_unavailable",
+                "code": "worker_assignment_unavailable",
                 "retryable": False,
-                "attempt_budget_consumed": False,
-                "worker_replacement_authorized": False,
-                "next_action": "Keep the same task resumable and use the server-owned worker-session recovery action; do not create a replacement worker.",
             }
-        terminal = isinstance(exc, OSError) or any(fragment in lowered for fragment in (
+        reference_mismatch = any(fragment in lowered for fragment in (
+            "question_ref does not belong to this worker attempt",
+            "question_ref is not bound to this authorized worker attempt",
+            "batch_ref does not belong to this worker attempt",
+        ))
+        terminal = isinstance(exc, OSError) or reference_mismatch or any(fragment in lowered for fragment in (
             "attempt is no longer active",
             "invalidated or terminal attempt",
             "question batch record failed validation",
@@ -1275,13 +1686,15 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "answered batch has no canonical answer",
             "question count quota exhausted",
         ))
-        code = "worker_question_unavailable" if terminal else "worker_question_request_invalid"
+        code = "worker_question_reference_mismatch" if reference_mismatch else (
+            "worker_question_unavailable" if terminal else "worker_question_request_invalid"
+        )
         path = _worker_question_error_path(message)
         diagnostics = getattr(exc, "diagnostics", None)
         if not isinstance(diagnostics, list) or not diagnostics:
             diagnostics = [{
                 "code": code,
-                "path": path,
+                "path": f"$.{path}" if path != "$" else "$",
                 "message": message,
                 "fix": (
                     "The worker attempt is no longer active; do not create a replacement or guess another identity."
@@ -1292,56 +1705,53 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
         normalized: list[dict[str, Any]] = []
         for raw in diagnostics:
             item = dict(raw) if isinstance(raw, dict) else {"message": str(raw)}
+            raw_pointer = str(item.get("json_pointer") or "")
             path = str(item.get("path") or "$")
             field = path.rsplit(".", 1)[-1]
-            item.setdefault("code", code)
-            item.setdefault("json_pointer", path)
+            if raw_pointer:
+                field = raw_pointer.rsplit("/", 1)[-1] or field
             schema = dict(_QUESTION_FIELD_SCHEMAS.get(field, {"type": "object"}))
             if field == "profile":
                 schema["enum"] = sorted(AGENTS)
-            item.setdefault("field_schema", schema)
-            if "received" not in item and path.startswith("$."):
-                item["received"] = params.get(path[2:], None)
-            item.setdefault("expected", item.get("field_schema"))
-            item.setdefault("fix", f"Correct only {path} according to field_schema, then retry worker_question on this same attempt; no write or replacement worker was created.")
-            normalized.append(item)
-        diagnostics = normalized
+            elif field == "decision_scope":
+                schema = {"type": "string", "enum": sorted(_QUESTION_TASK_SCOPES)}
+            normalized_item = {
+                "code": str(item.get("code") or code),
+                "json_pointer": raw_pointer if raw_pointer.startswith("/") else (
+                    "/" + path[2:].replace(".", "/") if path.startswith("$.") else ""
+                ),
+                "message": redact(str(item.get("message") or "invalid value"), 300),
+                "field_schema": dict(item.get("field_schema") or schema),
+            }
+            if str(item.get("value_source") or "") == "cortex" or field in _QUESTION_CORTEX_ISSUED_FIELDS:
+                normalized_item["value_source"] = "cortex"
+            normalized.append(normalized_item)
+        diagnostics = _dedupe_question_diagnostics(normalized)
+        if terminal:
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": False,
+                "outcome": "needs_correction",
+                "code": code,
+                "diagnostics": diagnostics,
+                "retryable": False,
+            }
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": True if terminal else False,
-            "outcome": "orchestrator_advice" if terminal else "needs_correction",
+            "ok": False,
+            "outcome": "needs_correction",
             "code": code,
             "diagnostics": diagnostics,
-            # A lost/expired worker question is an internal routing fact, not
-            # a Cortex stop. The coordinator must derive a corrective owner;
-            # caller-correctable schema errors remain same-attempt retries.
             "retryable": True,
-            "attempt_budget_consumed": False,
-            "next_action": (
-                "Record this worker-question lifecycle condition as orchestrator advice, then route the same task to a corrective owner; do not ask the user, stop Cortex, or create a duplicate worker."
-                if terminal else
-                "Correct every listed path in the worker_question request according to its field_schema, preserve all other fields, and call worker_question again with the same project_root, task_id, attempt_id, and profile."
-            ),
-            "validation": {
-                "schema": "cortex/validation-error/v1",
-                "diagnostics_are_complete": True,
-                "invalid_paths": [item.get("path") for item in diagnostics if item.get("path")],
-                "retry": {
-                    "same_attempt": not terminal,
-                    "same_task_corrective_dispatch": terminal,
-                    "attempt_budget_consumed": False,
-                    "replacement_worker_authorized": False,
-                },
-                "apply_all_diagnostics_atomically": True,
-            },
-            "repair": {
-                "tool": "worker_question",
-                "same_attempt": True,
-                "patch_only": True,
-                "paths": [item.get("json_pointer") for item in diagnostics if item.get("json_pointer")],
-                "preserve_paths_not_listed": True,
-            },
         }
+
+
+def worker_question(params: dict[str, Any]) -> dict[str, Any]:
+    """Return only the closed public worker-question state."""
+    from cortex_runtime.mcp_api import project_public_response
+    return project_public_response(
+        "worker_question", _worker_question_facade(params), arguments=params,
+    )
 
 
 def _question_record_view(record: dict[str, Any]) -> dict[str, Any]:
@@ -1443,8 +1853,19 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             if not user_language.lower().startswith("en"):
                 raise ValueError("localized free-text answer requires answer_en translation")
             canonical_parts.append(custom_text)
+        # A plain user reply has no option ids or custom_response wrapper.
+        # It is still the canonical decision and must not be persisted as an
+        # answered record whose later worker poll projects to an empty answer.
+        # Keep the supplied scalar text as the durable fallback; it is better
+        # to preserve the user's actual answer than to manufacture a blank
+        # English-only projection.
+        elif answer_text:
+            canonical_parts.append(answer_text)
         answer_en_text = "\n".join(part for part in canonical_parts if part).strip()
+        if not answer_en_text:
+            raise ValueError("worker question answer has no canonical text")
         answer_en = supplied_answer_en if supplied_answer_en_text else {
+            "text": answer_en_text,
             "option_ids": option_ids,
             "selections": [option_map[item] for item in option_ids],
             "custom_response": custom_text,
@@ -2334,7 +2755,7 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
 
 
 def _question_record_for_main(params: dict[str, Any], question_id: str) -> dict[str, Any]:
-    listed = list_worker_questions({"task_id": params["task_id"], "principal": params["principal"], "thread_id": params.get("thread_id"), "project_root": params.get("project_root")})
+    listed = list_worker_questions({"task_id": params["task_id"], "principal": params["principal"], "project_root": params.get("project_root")})
     record = next((item for item in listed["questions"] if item.get("question_id") == question_id), None)
     if record is None:
         raise ValueError("question_id does not belong to this task")
@@ -2344,26 +2765,92 @@ def _question_record_for_main(params: dict[str, Any], question_id: str) -> dict[
 def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Allow the coordinator to localize only the user-facing projection."""
     requires_localization = not str(params.get("user_language") or "en").lower().startswith("en")
-    if requires_localization and not str(params.get("localized_question") or "").strip():
-        raise ValueError(
-            "non-English user questions require localized_question in the task's user_language"
-        )
+    # The exact question_ref is sufficient: canonical prompt/options are
+    # durable server data and must never be reconstructed by the coordinator.
+    # Localization is an optional display projection only.
     question = redact(params.get("localized_question") or record["question"], 4000)
     config = _question_config(record)
+    canonical_options = list(config.get("options") or [])
+    diagnostics: list[dict[str, Any]] = []
+    localized_fields = {
+        "localized_question": {"type": "string", "minLength": 1},
+        "localized_header": {"type": "string", "minLength": 1},
+        "localized_options": {
+            "type": "array",
+            "minItems": len(canonical_options),
+            "maxItems": len(canonical_options),
+        },
+        "localized_custom_label": {"type": "string", "minLength": 1},
+    }
+    for field in ("localized_question", "localized_header", "localized_custom_label"):
+        if field in params and (not isinstance(params[field], str) or not params[field].strip()):
+            diagnostics.append({
+                "code": "question_management_validation_failed",
+                "json_pointer": f"/payload/{field}",
+                "message": f"{field} must be a non-empty string when supplied",
+                "field_schema": localized_fields[field],
+            })
+    raw_localized_options = params.get("localized_options")
+    if "localized_options" in params:
+        if not canonical_options:
+            diagnostics.append({
+                "code": "question_management_validation_failed",
+                "json_pointer": "/payload/localized_options",
+                "message": "localized_options is forbidden for a text question",
+                "field_schema": {"type": "array", "maxItems": 0},
+            })
+        elif not isinstance(raw_localized_options, list):
+            diagnostics.append({
+                "code": "question_management_validation_failed",
+                "json_pointer": "/payload/localized_options",
+                "message": "localized_options must be an array when supplied",
+                "field_schema": localized_fields["localized_options"],
+            })
+        elif len(raw_localized_options) != len(canonical_options):
+            diagnostics.append({
+                "code": "question_management_validation_failed",
+                "json_pointer": "/payload/localized_options",
+                "message": "localized_options count must match the stored canonical option count",
+                "field_schema": localized_fields["localized_options"],
+            })
+        else:
+            for index, (canonical, raw_display) in enumerate(zip(canonical_options, raw_localized_options)):
+                if not isinstance(raw_display, (str, dict)):
+                    diagnostics.append({
+                        "code": "question_management_validation_failed",
+                        "json_pointer": f"/payload/localized_options/{index}",
+                        "message": "localized option must be a string or option display object",
+                        "field_schema": {"type": "object"},
+                    })
+                    continue
+                if isinstance(raw_display, dict):
+                    supplied_id = raw_display.get("option_id")
+                    if supplied_id is not None and supplied_id != canonical["option_id"]:
+                        diagnostics.append({
+                            "code": "question_management_validation_failed",
+                            "json_pointer": f"/payload/localized_options/{index}/option_id",
+                            "message": "localized option_id must match the stored canonical option_id",
+                            "field_schema": {"type": "string", "const": canonical["option_id"]},
+                        })
+                    label = raw_display.get("label_localized", raw_display.get("label", raw_display.get("label_en")))
+                else:
+                    label = raw_display
+                if not isinstance(label, str) or not label.strip():
+                    diagnostics.append({
+                        "code": "question_management_validation_failed",
+                        "json_pointer": f"/payload/localized_options/{index}",
+                        "message": "localized option requires a non-empty display label",
+                        "field_schema": {"type": "string", "minLength": 1},
+                    })
+    if diagnostics:
+        raise ValidationFailure(_dedupe_question_diagnostics(diagnostics))
     localized_header = params.get("localized_header")
-    if requires_localization and not str(localized_header or "").strip():
-        localized_header = question
     if localized_header:
         config["header"] = redact(localized_header, 200)
     _require_self_contained_question(question, "localized question")
     _require_meaningful_decision_label(config["header"], "localized question header")
-    if requires_localization and config.get("options") and not isinstance(params.get("localized_options"), list):
-        raise ValueError("non-English choice questions require localized_options")
     if isinstance(params.get("localized_options"), list):
         localized = _question_options(params["localized_options"])
-        canonical_options = list(config.get("options") or [])
-        if len(localized) != len(canonical_options):
-            raise ValueError("localized_options must match the canonical option count")
         merged = []
         for index, (canonical, display) in enumerate(zip(canonical_options, localized)):
             raw_display = params["localized_options"][index]
@@ -2385,8 +2872,6 @@ def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> 
             })
         config["options"] = merged
     localized_custom_label = params.get("localized_custom_label")
-    if requires_localization and not str(localized_custom_label or "").strip():
-        localized_custom_label = question
     if localized_custom_label:
         config["custom_label"] = redact(localized_custom_label, 200)
     config["localized_for_user"] = requires_localization

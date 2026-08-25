@@ -1,10 +1,10 @@
 {
   "schema": "cortex/profile-contract/v1",
+  "orchestration_protocol": "cortex/orchestration/v11",
   "communication": {
     "default": "natural",
     "profiles": ["natural", "compact", "technical"],
     "selection": "config.communication_profile or CORTEX_COMMUNICATION_PROFILE; invalid values use natural",
-    "aliases": {"default": "natural", "normal": "natural", "neutral": "natural", "detailed": "technical"},
     "quality_checks": ["plain_language", "no_internal_metadata", "no_repetition", "next_step", "profile_match", "quality_gate"],
     "internal_metadata": "Never include transport identity, digests, ledger references, or tool names in user prose.",
     "user_view": "The only user-facing projection is user_view; internal is the bounded machine receipt projection and must never be rendered as user prose.",
@@ -39,7 +39,7 @@
     "attempt_result_ref_schema": "cortex/attempt-result-ref/v1",
     "question_schema": "cortex/question/v3",
     "question_route": "worker_publish_main_chat_ui_worker_poll",
-    "question_resume_contract": "accepted worker_question(action=ask) returns only QUESTION_RECORDED with the exact ref and pauses the same attempt; coordinator records the answer then followup_task resumes the same child; first resumed call uses worker_question(action=poll) with the same ref, answered decisions are recorded with record_attempt_event, affected checks rerun, and complete_attempt is mandatory; pending poll returns QUESTION_RECORDED; no OTHER_TERMINAL, freeform terminal, or replacement worker",
+    "question_resume_contract": "accepted worker_question(action=ask) returns only QUESTION_RECORDED with the exact ref and pauses the same attempt; coordinator records the durable scalar answer or stable-option selection then followup_task resumes the same child; first resumed call is exactly worker_question({action:'poll',task_ref:<unchanged string>,assignment_ref:<unchanged string>,question_ref:<same exact string>}); coordinator resume.kind is copied into scalar action and is never passed as an object; never remove/recreate a question to repair question_ref; answered decisions are recorded with record_attempt_event, affected checks rerun, and complete_attempt is mandatory; pending poll returns QUESTION_RECORDED; no OTHER_TERMINAL, freeform terminal, or replacement worker",
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
     "internal_language": "en",
     "user_facing_language": "main_coordinator_only_task_language",
@@ -48,52 +48,107 @@
     "worker_operations": ["worker_question", "record_attempt_event", "complete_attempt", "read_dispatch_briefing", "read_worker_result"],
     "normal_flow": ["start_orchestration", "worker_question", "read_dispatch_briefing", "record_attempt_event", "complete_attempt", "read_worker_result", "continue_orchestration"],
     "recovery_operations": ["manage_orchestration"],
-    "dispatch_transport": "compact_native_bootstrap_to_one_scoped_immutable_briefing",
-    "dispatch_briefing_scope": "read_only_the_exact_briefing_path_and_never_list_or_read_other_cortex_ledger_paths",
-    "dispatch_briefing_fallback": "scoped_paged_read_dispatch_briefing_with_server_owned_worker_binding_and_returned_cursor_only_when_host_file_read_is_unavailable",
-    "dispatch_briefing_integrity": "server_receipt_and_complete_read_are_authoritative; no_shell_reread_or_local_hash_after_success; exact_host_read_only_on_server_reported_file_unavailable",
+    "coordinator_action_semantics": {
+      "invoke_dispatches": {
+        "marker": "spawn_all_exact_before_wait",
+        "instruction": "Execute every exact returned native spawn_agent dispatch before any wait.",
+        "wait_permission": false
+      },
+      "wait_for_bound_workers": {
+        "marker": "wait_existing_returned_child_ids_only",
+        "instruction": "Wait only on existing child IDs returned by successful spawn_agent calls.",
+        "requires_child_ids": true
+      }
+    },
+    "capability_handoff": "Cortex owns and issues refs; models only copy and serialize the exact opaque bytes. A coordinator preserves its exact task_ref and coordinator_ref only in a bounded private compaction handoff. If either value is lost, every task-scoped coordinator operation fails closed; never infer a task, session, project, ledger row, dispatch, or replacement capability.",
+    "worker_bootstrap_recovery": {
+      "required_fields": ["task_ref", "assignment_ref"],
+      "missing_final": "CORTEX_WORKER_BOOTSTRAP_MISSING missing_fields=[task_ref,assignment_ref] retryable=true",
+      "calls_before_complete_pair": 0,
+      "repair_primitive": "followup_task",
+      "repair_target": "same_native_child",
+      "repair_payload": "byte_exact_server_bootstrap_repair_message_only",
+      "repair_positive_branch": "read_briefing_then_continue_original_assignment_no_gate_acknowledgement",
+      "post_repair_terminal_allowlist": ["bootstrap_missing_marker", "question_recorded", "attempt_completed"],
+      "invalid_post_repair_action": "finalize_bootstrap_failure_only_for_exact_second_bootstrap_missing_marker; post_briefing failures follow_returned_structured_recovery",
+      "max_repairs": 1,
+      "replacement_spawn": false,
+      "ambient_reconstruction": false,
+      "terminal_management": "manage_orchestration(intent=finalize_bootstrap_failure, payload={dispatch_ref,reason_code:bootstrap_missing_identity})"
+    },
+    "worker_nonretryable_terminal": {
+      "child_final": "CORTEX_ATTEMPT_FAILED retryable=false",
+      "management": "manage_orchestration(intent=finalize_worker_failure,payload={dispatch_ref,reason_code:worker_nonretryable_terminal})",
+      "scope": "exact_current_bound_nonterminal_assignment",
+      "preserve": ["briefing_receipt", "attempt_events", "repair_escrow"],
+      "create": [],
+      "task_state": "blocked",
+      "session": "terminal_nonresumable",
+      "exact_replay": "idempotent",
+      "forbidden": ["read_worker_result", "continue_orchestration", "replacement_spawn"]
+    },
+    "dispatch_transport": "minimal_native_capability_bootstrap_plus_structured_dispatch_ref_to_one_scoped_immutable_briefing",
+    "dispatch_briefing_scope": "assignment_scoped_api_read_only; never list or read other Cortex ledger paths",
+    "dispatch_briefing_fallback": "only an actual host-file-unavailable read failure returns one exact host path with max_reads=1",
+    "dispatch_briefing_integrity": "server receipt and complete read are authoritative; no shell reread or local hash after success",
     "dispatch_briefing_evidence": "a_successful_full_read_dispatch_briefing_call creates a server-owned AttemptEvent receipt",
     "predecessor_read_evidence": "a_successful_scoped_read_worker_result_call creates a server-owned AttemptEvent receipt",
-    "worker_final_response": "compact_generated_attempt_result_ref_and_at_most_two_sentence_summary_or_exact_error",
+    "worker_final_response": "complete_attempt_ok_true_terminal_true_requires_worker_final_exactly_ATTEMPT_COMPLETED_with_no_attempt_result_ref_handoff; retryable_false_stops_task_scoped_calls_and_returns_exactly_CORTEX_ATTEMPT_FAILED_retryable_false_for_fixed_coordinator_cleanup",
     "attempt_result_lifecycle": "read_dispatch_briefing_receipt_then_record_attempt_event_checkpoints_then_complete_attempt_closes_one_attempt; missing briefing receipt is retryable and cannot mutate the attempt; finalization_or_projection_failures_retry_server_side_without_respawning_the_worker",
     "result_lifecycle": "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker",
     "result_projection": "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord",
     "worker_result_authority": "workers_publish_semantic_facts_only; Cortex owns identity, task_revision, dispatch, profile, phase, predecessors, receipts, changed_files, timestamps, workspace_observations, verification_metadata, and evidence_markers",
     "worker_result_fields": ["status", "summary", "findings", "decisions_needed", "unresolved"],
+    "worker_submission_fields": ["task_ref", "assignment_ref", "plan_or_outcome_or_digest_bound_repair"],
     "worker_result_unresolved_semantics": "ordinary status=completed may use unresolved only for concrete material open items required by a successor handoff; closure verifier gates review, governance_activation, governance_close, and close that pass require unresolved=[]; non-success results may use unresolved only for concrete material findings or unanswered required decisions; internal governance/evidence findings are routed through findings and corrective dispatch, never a user question or lifecycle pause; residual risk, omitted or environment checks, retrospective notes, uncertainty, and placeholder none belong in summary, claims, or AttemptEvents",
     "worker_result_optional_data": "typed_gate_payloads_are_allowed_when_applicable_but_do_not_make_server_observed_facts_worker_authoritative",
-    "server_bound_fields": ["project_root", "task_id", "task_ref", "attempt_id", "profile", "phase", "dispatch_ref", "briefing_digest", "timestamps", "receipts", "changed_files", "verification_metadata"],
-    "semantic_only_rule": "Workers author semantic facts only. The active worker session already binds task and attempt identity; omit server_bound_fields from every worker operation and never copy them from the briefing.",
+    "server_bound_fields": ["project_root", "task_id", "attempt_id", "profile", "phase", "dispatch_ref", "briefing_digest", "timestamps", "receipts", "changed_files", "verification_metadata"],
+    "semantic_only_rule": "Workers preserve the exact task_ref and assignment_ref from the native bootstrap on every worker operation. All other identity and evidence fields are backend-derived; sessions, hooks, environment, and process identity are telemetry only.",
+    "worker_response_contract": "Worker success responses carry only a closed outcome plus immediate action data. MCP isError=true is the tool-execution-error channel and may carry Cortex ok=false plus error/recovery; process that structured contract normally. Every expected domain failure is ok=false with top-level error={code,category,message,diagnostics} and recovery={kind,operation,retryable,state_mutated}. same_operation is legal only when retryable=true, state_mutated=false, and nonempty allowed_changes define one deterministic retry; each change supplies an exact json_pointer and nonempty allowed_ops. Apply those exact changes once, then follow the new response. repair_patch_only uses only the returned opaque capsule, digest, and allowed patches. terminal_stop ends task-scoped calls. A raw JSON-RPC/protocol failure without the Cortex structured contract fails closed with CORTEX_PROTOCOL_FAILURE retryable=false. Never inspect Cortex source, installed cache, database, session, environment, hidden path, or process state. No output echoes a capability, submitted value, receipt, identity, telemetry, or prose instruction.",
     "operation_cards": {
+      "start_orchestration": {
+        "input": "{project_root, task, waves?}",
+        "purpose": "Start one explicitly activated task and retain the returned private {task_ref, coordinator_ref} pair for every later coordinator operation.",
+        "action_semantics": ["invoke_dispatches", "wait_for_bound_workers"]
+      },
       "read_dispatch_briefing": {
-        "input": "{} or the returned cursor only",
-        "purpose": "Read the one server-bound immutable briefing before project work; continue until complete=true."
+        "input": "{task_ref, assignment_ref, cursor?}",
+        "purpose": "Read the one assignment-scoped immutable briefing before project work. The first bounded page may be incomplete; continue with its opaque next_cursor until complete=true."
       },
       "read_worker_result": {
-        "input": "worker: {attempt_result_ref} plus returned cursor only; coordinator: {task_ref, attempt_result_ref} plus returned cursor",
-        "purpose": "Read only a predecessor ref explicitly supplied by the dispatch; worker identity and project scope are server-bound, and workers must never send task_ref."
+        "input": "worker: {task_ref, assignment_ref, attempt_result_ref}; coordinator: {task_ref, coordinator_ref, step}",
+        "purpose": "Workers read only a predecessor ref explicitly granted by the verified worker assignment. Coordinators provide task_ref, coordinator_ref, and server-derived step; the server derives the current wave and returns all canonical wave results plus continuation. A worker never reads its own terminal result."
       },
       "record_attempt_event": {
-        "input": "{event_type, payload, event_key?}",
-        "purpose": "Checkpoint semantic evidence; the server supplies actor, attempt, timestamps, and receipts."
+        "input": "{task_ref, assignment_ref, event_type, payload, event_key?}",
+        "purpose": "Checkpoint pre-completion semantic evidence; the server supplies actor, attempt, timestamps, and receipts. Never call after complete_attempt succeeds."
       },
       "complete_attempt": {
-        "input": "{status, summary, findings, decisions_needed, unresolved, claims?, planning?}",
-        "purpose": "Close one attempt with semantic facts. Planner plans use one nested planning object; never put overview or work_packages at the root."
-      },
-      "repair_planning": {
-        "input": "{base_payload_digest, patches}",
-        "purpose": "Repair only returned diagnostic paths on the same rejected planner attempt; never resend the full planning object."
+        "input": "{task_ref, assignment_ref, plan} or {task_ref, assignment_ref, outcome} or {task_ref, assignment_ref, repair_capsule, base_payload_digest, patches}",
+        "purpose": "Close one attempt with a compact plan/outcome: planner plan-gate assignments require plan; all non-planner assignments require outcome. After validation issues repair, recovery.kind=repair_patch_only locks the attempt to the exact capsule, base digest, and diagnostic paths until success. Each repair diagnostic supplies its exact repair_pointer, allowed_ops, and valid field_schema; choose only an advertised patch operation. Never inspect Cortex source, installed cache, schema, log, ledger, session, environment, or hidden path to construct a retry. Full draft replay and invalid/empty/out-of-scope patches or a malformed capsule copy reissue that same retryable repair. retryable=false is reserved for a structurally valid handle that fails integrity, authority/identity/base integrity, or already-terminal failure. ok=true terminal=true ends worker calls and requires exact final ATTEMPT_COMPLETED; terminal failure requires CORTEX_ATTEMPT_FAILED retryable=false for fixed coordinator cleanup."
       },
       "worker_question": {
-        "input": "{action, question fields when asking, ref when polling}",
-        "purpose": "Pause only for a material task decision; server binds the question to this attempt."
+        "input": "closed union: ask single_select={task_ref,assignment_ref,action:'ask',question_type:'single_select',decision_scope,question,recommendation,options,recommended_option_ids:[one]}; ask multi_select={task_ref,assignment_ref,action:'ask',question_type:'multi_select',decision_scope,question,recommendation,options,recommended_option_ids:[one_or_more]}; ask text={task_ref,assignment_ref,action:'ask',question_type:'text',decision_scope,question,recommendation,recommended_answer}; poll={task_ref,assignment_ref,action:'poll',question_ref}; ask_batch={task_ref,assignment_ref,action:'ask_batch',batch:{batch_key,questions:[same question_type/decision_scope item union]}}; poll_batch={task_ref,assignment_ref,action:'poll_batch',batch_ref}",
+        "purpose": "Pause only for a material task decision under the exact verified worker assignment. question_type, decision_scope, and recommendation are mandatory for every asked question. Never send answer_mode, context, type, or multiple, and never infer the question type from answer-field presence. single_select/multi_select/text fields never mix, and poll/batch fields never mix with ask fields. A durable scalar answer or stable-option selection resumes the same child; its first worker call is exactly action:'poll' with the original refs and exact scalar question_ref."
+      },
+      "continue_orchestration": {
+        "input": "{task_ref, coordinator_ref, step, results}",
+        "purpose": "Continue only the exact coordinator task and server-derived result references.",
+        "action_semantics": ["invoke_dispatches", "wait_for_bound_workers"]
+      },
+      "manage_orchestration": {
+        "input": "{task_ref, coordinator_ref, intent, payload?}",
+        "purpose": "Manage only the exact coordinator task; it never accepts a session, project root, ledger path, task guess, or recovered capability."
+      },
+      "manage_governance": {
+        "input": "{task_ref, coordinator_ref, action, payload?}",
+        "purpose": "Perform only the exact task-scoped governance action under the coordinator capability."
       }
     },
-    "planner_completion_shape": "The complete_attempt root remains the semantic AttemptResult. planning is the only structured planner sibling and requires overview plus work_packages; optional planning siblings are requirement_coverage, recommendation, recommendation_rationale, recommendation_actions, resolved_questions, and risks.",
+    "complete_attempt_v11": "Every worker call carries task_ref and assignment_ref. Planner plan-gate assignments require plan and all non-planner assignments require outcome. complete_attempt accepts that compact full branch or the same-attempt repair form {repair_capsule, base_payload_digest, patches}. Copy the opaque capsule directly. Every expected failure has top-level error={code,category,message,diagnostics}; repair uses recovery.kind=repair_patch_only with recovery.repair={repair_capsule,base_payload_digest,patch_paths,diagnostics}. Each self-contained diagnostic supplies repair_pointer, allowed_ops, and code/message/field_schema; choose only an advertised operation, and never inspect Cortex source, installed cache, schema, log, ledger, session, environment, or hidden path after a recovery response. Once issued, the exact repair base and diagnostic path set remain locked: full draft replay, malformed capsule copies, and invalid, empty, or out-of-scope patches return the same retryable recovery without state mutation. A structurally valid capsule that fails integrity, other authority/identity/base integrity, or an already-terminal attempt is nonretryable. ok=true terminal=true ends worker calls; the worker final is exactly ATTEMPT_COMPLETED with no attempt_result_ref handoff. The coordinator obtains all current-wave canonical results and continuation through read_worker_result({task_ref, coordinator_ref, step}).",
     "attachment_preflight": "Before start_orchestration, materialize any referenced attachment or pasted text through the host attachment surface and place its exact content in task.user_request; never send an attachment path as a placeholder, duplicate a path, or paraphrase material task text.",
-    "activation_context": "Activation is host-owned context. The model selects the Cortex route, but does not copy activation markers or skill links into worker payloads; start_orchestration receives activation context from the host and rejects inactive launches with a structured correction.",
-    "caller_correctable_tool_errors": "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable",
+    "activation_context": "Activation is host-owned context. The model selects the Cortex route, but does not copy activation markers or skill links into worker payloads; start_orchestration receives activation context from the host and rejects inactive launches with structured error and recovery cards.",
+    "caller_correctable_tool_errors": "retry_same_operation_only_when_retryable_state_unmutated_and_allowed_changes_nonempty_otherwise_stop",
     "read_only_workspace_delta": "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified",
     "repository_intelligence": "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
     "codebase_memory_project_resolution": "derive_canonical_path_key_then_single_exact_root_list_fallback",
@@ -106,8 +161,8 @@
       "effort_by_prior_failures": {"1":"high","2":"xhigh","3+":"max"}
     },
     "prompt_compaction_guidance": {
-      "bootstrap_target_bytes": 1500,
-      "ordinary_briefing_target_bytes": 16384,
+      "bootstrap_target_bytes": 1024,
+      "ordinary_briefing_target_bytes": 12288,
       "harvest_briefing_target_bytes": 18432,
       "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule"
     },

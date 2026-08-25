@@ -72,10 +72,10 @@ def dispatch_context(
     complexity: str,
     resolve_dispatch_route: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> tuple[str, str, dict[str, Any], str | None]:
-    """Resolve hidden/visible transport without allowing a visible fallback."""
+    """Resolve the native V2 hidden-subagent transport."""
     dispatch_mode = str(params.get("dispatch_mode", "hidden_subagent")).strip() or "hidden_subagent"
-    if dispatch_mode not in {"hidden_subagent", "visible_thread"}:
-        raise ValueError("dispatch_mode must be hidden_subagent or visible_thread")
+    if dispatch_mode != "hidden_subagent":
+        raise ValueError("native spawn_agent dispatch is the only supported worker transport")
     luna_fallback = str(params.get("luna_fallback", "terra")).strip() or "terra"
     if luna_fallback != "terra":
         raise ValueError("luna_fallback must be terra")
@@ -87,24 +87,11 @@ def dispatch_context(
         "complexity": complexity,
         "_security_gate": gate == "security",
     }
-    if dispatch_mode == "visible_thread":
-        route_params["available_models"] = params.get("available_thread_models")
     route = resolve_dispatch_route(route_params)
     raw_thread_environment = str(params.get("thread_environment") or "").strip().lower()
-    if dispatch_mode == "visible_thread":
-        if route["selected_model"] != "gpt-5.6-luna":
-            raise ValueError("visible_thread is reserved for a Luna policy route")
-        if route.get("host_available_models") is None:
-            raise ValueError("visible_thread requires exact available_thread_models from native create_thread")
-        route["model_resolution"] = "visible_thread"
-        thread_environment = raw_thread_environment or "local"
-        if thread_environment not in {"local", "worktree"}:
-            raise ValueError("thread_environment must be local or worktree")
-    else:
-        if raw_thread_environment:
-            raise ValueError("thread_environment applies only to visible_thread")
-        thread_environment = None
-    return dispatch_mode, luna_fallback, route, thread_environment
+    if raw_thread_environment not in {"", "local"}:
+        raise ValueError("native hidden subagents use the current workspace")
+    return dispatch_mode, luna_fallback, route, "local"
 
 
 def delegation_lists(
@@ -152,10 +139,11 @@ def spawn_request(
     route: Mapping[str, Any],
     thread_environment: str | None,
 ) -> dict[str, Any]:
-    """Build the native host request while keeping policy expectation distinct from override."""
-    host_tool = "create_thread" if dispatch_mode == "visible_thread" else "spawn_agent"
+    """Build the sole native V2 spawn_agent host request."""
+    if dispatch_mode != "hidden_subagent":
+        raise ValueError("native spawn_agent dispatch is the only supported worker transport")
     result: dict[str, Any] = {
-        "host_tool": host_tool,
+        "host_tool": "spawn_agent",
         "phase": gate,
         "profile": agent,
         "display_name": display_name,
@@ -167,11 +155,9 @@ def spawn_request(
         "expected_model": route.get("expected_model") or route["selected_model"],
         "model_resolution": route.get("model_resolution", "policy"),
         "reasoning_effort": route["selected_reasoning_effort"],
+        "fork_turns": "none",
     }
-    if host_tool == "spawn_agent":
-        result["fork_turns"] = "none"
     if route.get("model_resolution") != "configured_default":
         result["model"] = route["selected_model"]
-    if host_tool == "create_thread":
-        result["thread_environment"] = thread_environment
+    del thread_environment
     return result

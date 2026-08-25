@@ -1078,7 +1078,7 @@ def _validate_independent_review_attestation(
     metadata: dict[str, Any],
     payload: dict[str, Any],
 ) -> None:
-    """Bind close review evidence to the canonical reviewer attempt/session."""
+    """Bind close review evidence to one independent semantic assignment."""
     task_id = str(metadata.get("task_id") or payload.get("task_id") or "").strip()
     attempt_id = str(payload.get("attempt_id") or "").strip()
     result_ref = str(payload.get("attempt_result_ref") or "").strip()
@@ -1114,7 +1114,7 @@ def _validate_independent_review_attestation(
     ):
         raise GovernanceError("independent review is not backed by a passed governance_close reviewer attempt", code="review_attestation_invalid")
     canonical_result = connection.execute(
-        "SELECT result_ref,result_status,lifecycle_status,workspace_observation_json,changed_files_status "
+        "SELECT result_ref,result_status,lifecycle_status,workspace_observation_json,changed_files_status,metadata_json "
         "FROM attempt_results WHERE result_ref=? AND task_id=? AND attempt_id=?",
         (result_ref, task_id, attempt_id),
     ).fetchone()
@@ -1140,17 +1140,51 @@ def _validate_independent_review_attestation(
     ).fetchone()
     if observed_verification is None:
         raise GovernanceError("independent review requires a server verification observation", code="review_attestation_invalid")
-    session = connection.execute(
-        "SELECT host_agent_id, host_task_name, status FROM worker_sessions "
-        "WHERE task_id=? AND attempt_id=? AND status='completed' ORDER BY generation DESC LIMIT 1",
-        (task_id, attempt_id),
-    ).fetchone()
-    reviewer = str(session["host_agent_id"] or "").strip() if session is not None else ""
-    declared_reviewer = str(
-        payload.get("reviewer_identity") or payload.get("reviewer_id") or payload.get("reviewer") or ""
-    ).strip()
-    if not reviewer or reviewer == owner or (declared_reviewer and declared_reviewer != reviewer):
-        raise GovernanceError("independent review is not bound to an independent completed worker session", code="review_attestation_invalid")
+    result_metadata = _strict_json_loads(
+        str(canonical_result["metadata_json"]), "attempt result metadata",
+    )
+    result_identity = result_metadata.get("identity") if isinstance(result_metadata, dict) else None
+    reviewer_dispatch_ref = str(attempt.get("dispatch_ref") or "").strip()
+    reviewer_profile = str(attempt.get("profile") or attempt.get("agent") or "").strip()
+    reviewer_agent = str(attempt.get("agent") or attempt.get("profile") or "").strip()
+    if not isinstance(result_identity, dict) or not (
+        str(result_metadata.get("phase") or "") == "governance_close"
+        and str(result_identity.get("attempt_id") or "") == attempt_id
+        and str(result_identity.get("dispatch_ref") or "") == reviewer_dispatch_ref
+        and str(result_identity.get("profile") or "") == reviewer_profile == "code_reviewer"
+        and str(result_identity.get("agent") or "") == reviewer_agent == "code_reviewer"
+        and reviewer_dispatch_ref
+    ):
+        raise GovernanceError(
+            "independent review is not bound to the canonical governance_close assignment",
+            code="review_attestation_invalid",
+        )
+    # Dispatch and attempt identities are server-issued assignment facts. They
+    # are the separation boundary for approval; native child/session telemetry
+    # is deliberately irrelevant and may be missing. Caller-authored reviewer
+    # labels never grant or strengthen this authority.
+    semantic_reviewer_identities = {
+        attempt_id,
+        reviewer_dispatch_ref,
+        reviewer_profile,
+        reviewer_agent,
+    }
+    if str(owner or "").strip() in semantic_reviewer_identities:
+        raise GovernanceError(
+            "independent review assignment cannot approve its own initiative ownership",
+            code="review_attestation_invalid",
+        )
+    for other in state.get("attempts", []):
+        if not isinstance(other, dict) or other is attempt:
+            continue
+        if (
+            str(other.get("attempt_id") or "") == attempt_id
+            or str(other.get("dispatch_ref") or "") == reviewer_dispatch_ref
+        ):
+            raise GovernanceError(
+                "independent review assignment is reused by another task attempt",
+                code="review_attestation_invalid",
+            )
     try:
         reviewed_initiative_revision = int(payload.get("reviewed_initiative_revision"))
     except (TypeError, ValueError) as exc:
@@ -2259,27 +2293,27 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
     role = str(actor_role or "").strip().lower()
     if role not in ACTOR_ROLES:
         raise GovernanceError("actor_role must be coordinator, worker, or reviewer", code="invalid_actor_role")
-    action = str(payload.get("action") or payload.get("intent") or "").strip().lower().replace("-", "_")
+    action = str(payload.get("action") or "").strip()
     if not action:
         raise GovernanceError("governance action is required", code="action_required")
-    if action in {"create", "create_initiative"} and payload.get("entity", "initiative") in {"initiative", "initiatives"}:
+    if action == "create_initiative":
         return {"initiative": create_initiative(root, title=payload.get("title", ""), goal=payload.get("goal", ""), owner=payload.get("owner", actor_role), risk=payload.get("risk", "moderate"), initiative_ref=payload.get("initiative_ref"), parent_ref=payload.get("parent_ref"), acceptance_oracle_artifact_ref=payload.get("acceptance_oracle_artifact_ref"))}
-    if action in {"inspect", "inspect_initiative"}:
+    if action == "inspect_initiative":
         return {"initiative": inspect_initiative(root, _safe_ref(payload.get("initiative_ref"), "initiative_ref", prefix="initiative-"))}
-    if action in {"link_record", "record_link"} or (action == "link" and payload.get("entity") in {"record", "governance_record"}):
+    if action == "link_record":
         return {"link": link_record(root, record_ref=payload.get("record_ref", ""), relationship=payload.get("relationship", "evidence"), initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), lane_id=payload.get("lane_id"), finding_fingerprint=payload.get("finding_fingerprint"), evidence_ref=payload.get("evidence_ref"), link_ref=payload.get("link_ref"))}
-    if action in {"link_task", "link"}:
+    if action == "link_task":
         return {"link": link_task(root, initiative_ref=payload.get("initiative_ref", ""), task_id=payload.get("task_id", ""), relationship=payload.get("relationship", "deliverable"), milestone=payload.get("milestone"), deliverable=payload.get("deliverable"), corrective=bool(payload.get("corrective")), expected_revision=payload.get("expected_revision"))}
-    if action in {"add_dependency", "dependency"}:
+    if action == "add_dependency":
         return {"dependency": add_dependency(root, source_type=payload.get("source_type", "initiative"), source_ref=payload.get("source_ref", ""), target_type=payload.get("target_type", "initiative"), target_ref=payload.get("target_ref", ""), dependency_type=payload.get("dependency_type", "blocks"), dependency_ref=payload.get("dependency_ref"))}
-    if action in {"transition", "transition_initiative"}:
+    if action == "transition_initiative":
         return {"initiative": transition_initiative(root, initiative_ref=payload.get("initiative_ref", ""), status=payload.get("status", ""), expected_revision=payload.get("expected_revision"), evidence=payload.get("evidence"))}
-    if action in {"create_record", "record_create"} or (action == "create" and payload.get("entity") in {"record", "governance_record"}):
+    if action == "create_record":
         return {"record": create_record(root, record_type=payload.get("record_type", ""), content=payload.get("content"), initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), created_by=payload.get("created_by", actor_role), status=payload.get("status"), supersedes=payload.get("supersedes"), expires_at=payload.get("expires_at"), approval_basis=payload.get("approval_basis"), content_artifact_ref=payload.get("content_artifact_ref"), record_ref=payload.get("record_ref"), actor_role=role, submission_id=payload.get("submission_id"))}
-    if action in {"revise_record", "record_revise", "revise"}:
+    if action == "revise_record":
         return {"record": revise_record(root, record_ref=payload.get("record_ref", ""), content=payload.get("content"), created_by=payload.get("created_by", role), status=payload.get("status"), approval_basis=payload.get("approval_basis"), actor_role=role, submission_id=payload.get("submission_id"))}
-    if action in {"inspect_record", "record_inspect", "history", "list_records", "snapshot", "snapshot_inspect"}:
-        if action in {"snapshot", "snapshot_inspect"}:
+    if action in {"inspect_record", "list_records", "snapshot"}:
+        if action == "snapshot":
             return {
                 "snapshot": active_snapshot(
                     root,
@@ -2289,7 +2323,7 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
                     offset=payload.get("offset", 0),
                 )
             }
-        if action in {"history", "list_records"}:
+        if action == "list_records":
             return {
                 "records": list_records(
                     root,
@@ -2302,18 +2336,18 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
                 )
             }
         return {"record": inspect_record(root, payload.get("record_ref"))}
-    if action in {"request_exception", "exception_request"}:
+    if action == "request_exception":
         return {"exception": request_exception(root, trigger=payload.get("trigger", ""), reason=payload.get("reason", ""), actor_role=actor_role, initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), created_by=payload.get("created_by", actor_role))}
-    if action in {"evaluate_promotion", "promotion_evaluate", "promotion_inspect"}:
+    if action in {"evaluate_promotion", "promotion_inspect"}:
         if action == "promotion_inspect":
             records = list_records(root, record_type="promotion", initiative_ref=payload.get("initiative_ref"), active_only=False)
             if payload.get("record_ref"):
                 records = [item for item in records if item.get("record_ref") == payload.get("record_ref")]
             return {"proposals": records}
         return evaluate_promotion(root, fingerprint=payload.get("fingerprint", ""), threshold=int(payload.get("threshold", 3)), window_days=int(payload.get("window_days", 90)), created_by=payload.get("created_by", actor_role), initiative_ref=payload.get("initiative_ref"))
-    if action in {"approve_promotion", "promotion_approve", "approve"}:
+    if action == "approve_promotion":
         return approve_promotion(root, proposal_ref=payload.get("proposal_ref") or payload.get("record_ref", ""), actor_role=role, approval_basis=payload.get("approval_basis"), created_by=payload.get("created_by", role))
-    if action in {"reject_promotion", "promotion_reject", "reject"}:
+    if action == "reject_promotion":
         proposal_ref = _safe_ref(payload.get("proposal_ref") or payload.get("record_ref"), "proposal_ref", prefix="record-")
         with _connection(root, write=True) as connection:
             proposal = connection.execute("SELECT * FROM governance_records WHERE record_ref=? AND record_type='promotion'", (proposal_ref,)).fetchone()
