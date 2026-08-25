@@ -176,7 +176,7 @@ def main() -> int:
                 "user_request": "reject an installed task without an observable result contract",
                 "complexity": "C1", "requirements": [],
             },
-            "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],
+            "waves": [{"phase": "discover", "workers": [{"profile": "explorer"}]}],
         })
         if rejected.get("ok") is not False or rejected.get("outcome") != "needs_input":
             raise SystemExit("fresh plugin probe: installed MCP accepted a task without acceptance and verification")
@@ -187,7 +187,7 @@ def main() -> int:
                 "acceptance_criteria": ["The installed MCP creates one canonical host-private task ledger bound to the workspace."],
                 "verification": ["Inspect the generated task and orchestration schemas and dispatch identity."],
             },
-            "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],
+            "waves": [{"phase": "discover", "workers": [{"profile": "explorer"}]}],
         })
         ledger = cortex.ledger_root_path({"project_root": str(workspace)}, create=False)
         task_dirs = list((ledger / "tasks").iterdir())

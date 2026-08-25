@@ -56,7 +56,7 @@ class BatchQuestionTests(unittest.TestCase):
                 "acceptance_criteria": ["The user's selected strategy is recorded."],
                 "verification": ["Poll the same durable question reference."],
             },
-            "waves": [{"workers": [{"phase": "plan"}]}],
+            "waves": [{"phase": "plan", "workers": [{}]}],
         })
         self.assertTrue(started["ok"], started)
         task_dir = next((self.ledger / "tasks").iterdir())

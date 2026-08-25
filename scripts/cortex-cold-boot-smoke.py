@@ -27,7 +27,7 @@ _BOOTSTRAP_IDENTITY = re.compile(
 
 def waves() -> list[dict[str, object]]:
     """Return the one bounded canonical wave exercised by the smoke."""
-    return [{"workers": [{"phase": "discover"}]}]
+    return [{"phase": "discover", "workers": [{}]}]
 
 
 @contextlib.contextmanager

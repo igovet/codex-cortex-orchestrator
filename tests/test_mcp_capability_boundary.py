@@ -42,11 +42,12 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "verification": ["Inspect exact correction pointers."],
             },
             "waves": [{
+                "phase": "implementation",
                 "unexpected_wave_field": True,
                 "workers": [
-                    {"phase": "discover", "allowed_paths": "src", "strategy": "model-authored"},
-                    {"phase": "qa", "allowed_paths": []},
-                    {"phase": "review", "allowed_paths": ["/absolute", "../traversal", "safe/path", 7]},
+                    {"allowed_paths": "src", "strategy": "model-authored"},
+                    {"allowed_paths": []},
+                    {"allowed_paths": ["/absolute", "../traversal", "safe/path", 7]},
                 ],
             }],
         })
@@ -220,7 +221,7 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                             "acceptance_criteria": ["The boundary remains scoped."],
                             "verification": ["Run the capability boundary regression test."],
                         },
-                        "waves": [{"workers": [{"phase": "discover"}]}],
+                        "waves": [{"phase": "discover", "workers": [{}]}],
                     },
                 },
             },

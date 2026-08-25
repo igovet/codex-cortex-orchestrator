@@ -7966,9 +7966,9 @@ def _v11_schema_value_diagnostics(
         if isinstance(variants, list) and variants:
             # JSON Schema applies sibling constraints together with ``oneOf``.
             # Validate the common closed object first, then select exactly one
-            # conditional branch.  The start worker schema uses this to keep
-            # phase/profile ownership model-visible without duplicating its
-            # complete worker form in every phase branch.
+            # conditional branch.  The start wave schema uses this to keep its
+            # inherited phase/profile ownership model-visible without
+            # duplicating the complete worker form in every phase branch.
             common = {key: item for key, item in node.items() if key != "oneOf"}
             if common:
                 common_diagnostics: list[dict[str, Any]] = []
@@ -9674,11 +9674,13 @@ def _v11_start_wave_preflight(raw_waves: object) -> list[dict[str, Any]]:
             add(wave_pointer, "must be an object", _v11_schema_object_card(wave_schema), {"type": type(wave).__name__})
             continue
         for key in sorted(set(wave) - set(wave_properties)):
-            add(
-                f"{wave_pointer}/{key}",
-                "unsupported wave field",
-                _v11_schema_object_card(wave_schema),
-            )
+            field_pointer = f"{wave_pointer}/{key}"
+            if not any(item.get("json_pointer") == field_pointer for item in diagnostics):
+                add(
+                    field_pointer,
+                    "unsupported wave field",
+                    _v11_schema_object_card(wave_schema),
+                )
         workers = wave.get("workers")
         workers_pointer = f"{wave_pointer}/workers"
         if not isinstance(workers, list):
@@ -9693,11 +9695,13 @@ def _v11_start_wave_preflight(raw_waves: object) -> list[dict[str, Any]]:
                 add(worker_pointer, "must be an object", _v11_schema_object_card(worker_schema), {"type": type(worker).__name__})
                 continue
             for key in sorted(set(worker) - set(worker_properties)):
-                add(
-                f"{worker_pointer}/{key}",
-                "unsupported worker field",
-                _v11_schema_object_card(worker_schema),
-                )
+                field_pointer = f"{worker_pointer}/{key}"
+                if not any(item.get("json_pointer") == field_pointer for item in diagnostics):
+                    add(
+                        field_pointer,
+                        "unsupported worker field",
+                        _v11_schema_object_card(worker_schema),
+                    )
             if "allowed_paths" not in worker:
                 continue
             allowed_paths = worker.get("allowed_paths")
@@ -9732,6 +9736,9 @@ def _v11_compact_waves(
     # prevents the caller from discovering one bad phase/profile/dependency per
     # retry.  All diagnostics are independent and no ledger state is touched.
     wave_diagnostics: list[dict[str, Any]] = []
+    _start_schema, _task_schema, _waves_schema, wave_schema, worker_schema = _v11_start_public_schema_forms()
+    wave_public_fields = set(wave_schema.get("properties") or {})
+    worker_public_fields = set(worker_schema.get("properties") or {})
 
     def wave_diag(
         path: str,
@@ -9766,44 +9773,57 @@ def _v11_compact_waves(
     available_context_gates = set(completed_gates or set())
     for wave_index, raw_wave in enumerate(raw_waves, 1):
         wave_path = f"waves[{wave_index - 1}]"
-        if not isinstance(raw_wave, dict) or set(raw_wave) != {"workers"}:
-            wave_diag(wave_path, "wave must contain only workers", "{workers: [...]}")
+        if not isinstance(raw_wave, dict):
+            wave_diag(wave_path, "wave must be an object", "{phase: ..., workers: [...]}")
             continue
+        for key in sorted(set(raw_wave) - wave_public_fields):
+            wave_diag(
+                f"{wave_path}.{key}", "unsupported wave field",
+                "a wave containing only phase and workers", received=raw_wave.get(key),
+            )
+        raw_phase = str(raw_wave.get("phase") or "").strip()
+        if not raw_phase:
+            wave_diag(
+                f"{wave_path}.phase", "phase is required on the wave",
+                f"one of: {', '.join(sorted(AVAILABLE_GATES))}",
+                field_schema={"type": "string", "enum": sorted(AVAILABLE_GATES)},
+            )
+            continue
+        if raw_phase not in AVAILABLE_GATES:
+            wave_diag(
+                f"{wave_path}.phase", f"unknown wave phase {raw_phase!r}",
+                f"one canonical phase: {', '.join(sorted(AVAILABLE_GATES))}",
+                received=raw_phase,
+                field_schema={"type": "string", "enum": sorted(AVAILABLE_GATES)},
+            )
+            continue
+        gate = canonical_pipeline_gate(raw_phase)
+        previous = seen_phases.get(gate)
+        if previous is not None and previous[0] != wave_index:
+            wave_diag(
+                f"{wave_path}.phase",
+                f"waves repeat phase {gate!r}: {previous[1]!r} and {raw_phase!r}",
+                "put multiple owners of one phase in the same wave",
+                received=raw_phase,
+                field_schema={"type": "string", "enum": sorted(AVAILABLE_GATES)},
+            )
+        seen_phases.setdefault(gate, (wave_index, raw_phase))
         workers = raw_wave.get("workers")
         if not isinstance(workers, list) or not workers or len(workers) > 32:
             wave_diag(f"{wave_path}.workers", "workers must contain 1..32 worker objects", "an array of 1..32 worker objects")
             continue
-        wave_gates: set[str] = set()
         for worker_index, worker in enumerate(workers, 1):
             worker_path = f"{wave_path}.workers[{worker_index - 1}]"
             if not isinstance(worker, dict):
-                wave_diag(worker_path, "worker must be an object", "{phase, profile, ...}")
+                wave_diag(worker_path, "worker must be an object", "{profile, objective, ...}")
                 continue
-            raw_phase = str(worker.get("phase") or "").strip()
-            if not raw_phase:
-                wave_diag(f"{worker_path}.phase", "phase is required", f"one of: {', '.join(sorted(AVAILABLE_GATES))}")
-                continue
-            if raw_phase not in AVAILABLE_GATES:
+            unsupported_worker_fields = sorted(set(worker) - worker_public_fields)
+            for key in unsupported_worker_fields:
                 wave_diag(
-                    f"{worker_path}.phase",
-                    f"unknown worker phase {raw_phase!r}",
-                    f"one canonical phase: {', '.join(sorted(AVAILABLE_GATES))}",
-                    received=raw_phase,
-                    field_schema={"type": "string", "enum": sorted(AVAILABLE_GATES)},
+                    f"{worker_path}.{key}", "unsupported worker field",
+                    "use only fields published for a worker; phase belongs on the containing wave",
+                    received=worker.get(key),
                 )
-                continue
-            gate = canonical_pipeline_gate(raw_phase)
-            previous = seen_phases.get(gate)
-            if previous is not None and previous[0] != wave_index:
-                wave_diag(
-                    f"{worker_path}.phase",
-                    f"waves repeat phase {gate!r}: {previous[1]!r} and {raw_phase!r}",
-                    "put multiple owners of one phase in the same wave",
-                    received=raw_phase,
-                    field_schema={"type": "string", "enum": sorted(AVAILABLE_GATES), "rule": "one canonical phase per wave; parallel owners share a wave"},
-                )
-            seen_phases.setdefault(gate, (wave_index, raw_phase))
-            wave_gates.add(gate)
             raw_profile = str(worker.get("profile") or "").strip()
             if raw_profile:
                 profile = raw_profile
@@ -9877,7 +9897,7 @@ def _v11_compact_waves(
                             received=raw_dependencies,
                             field_schema={"type": "array", "items": {"type": "string", "enum": sorted(AVAILABLE_GATES)}, "rule": "completed or earlier-wave phases only"},
                         )
-        available_context_gates.update(wave_gates)
+        available_context_gates.add(gate)
     if wave_diagnostics:
         raise ValidationFailure(wave_diagnostics)
 
@@ -9885,35 +9905,36 @@ def _v11_compact_waves(
     phase_waves: dict[str, tuple[int, str]] = {}
     available_context_gates = set(completed_gates or set())
     for wave_index, raw_wave in enumerate(raw_waves, 1):
-        if not isinstance(raw_wave, dict) or set(raw_wave) != {"workers"}:
-            raise ValueError(f"waves[{wave_index - 1}] must contain only workers")
+        if not isinstance(raw_wave, dict) or set(raw_wave) != {"phase", "workers"}:
+            raise ValueError(f"waves[{wave_index - 1}] must contain exactly phase and workers")
+        raw_phase = str(raw_wave.get("phase") or "").strip()
+        if not raw_phase:
+            raise ValueError(f"waves[{wave_index - 1}].phase is required")
+        gate = canonical_pipeline_gate(raw_phase)
+        if gate not in AVAILABLE_GATES:
+            suggestions = difflib.get_close_matches(gate, sorted(AVAILABLE_GATES), n=3)
+            suffix = f"; try {', '.join(suggestions)}" if suggestions else ""
+            raise ValueError(f"unknown wave phase {raw_phase!r}" + suffix)
+        prior_phase = phase_waves.get(gate)
+        if prior_phase is not None and prior_phase[0] != wave_index:
+            raise ValueError(
+                f"waves repeat canonical phase {gate!r}: {prior_phase[1]!r} and {raw_phase!r}; "
+                "put multiple owners of one phase in the same wave"
+            )
+        phase_waves.setdefault(gate, (wave_index, raw_phase))
         workers = raw_wave.get("workers")
         if not isinstance(workers, list) or not workers or len(workers) > 32:
             raise ValueError(f"waves[{wave_index - 1}].workers must contain 1..32 workers")
         delegations: list[dict[str, Any]] = []
-        wave_gates: set[str] = set()
         for worker_index, worker in enumerate(workers, 1):
             if not isinstance(worker, dict):
                 raise ValueError(f"waves[{wave_index - 1}].workers[{worker_index - 1}] must be an object")
-            raw_phase = str(worker.get("phase") or "").strip()
-            if not raw_phase:
-                raise ValueError(f"waves[{wave_index - 1}].workers[{worker_index - 1}].phase is required")
-            gate = canonical_pipeline_gate(raw_phase)
-            if gate not in AVAILABLE_GATES:
-                suggestions = difflib.get_close_matches(gate, sorted(AVAILABLE_GATES), n=3)
-                suffix = f"; try {', '.join(suggestions)}" if suggestions else ""
-                raise ValueError(f"unknown worker phase {raw_phase!r}" + suffix)
-            prior_phase = phase_waves.get(gate)
-            if prior_phase is not None and prior_phase[0] != wave_index:
-                guidance = (
-                    " Use phase 'close' with profile 'build_verification' for final build verification."
-                    if gate == "qa" else " Put multiple owners of one phase in the same wave."
-                )
+            unsupported = sorted(set(worker) - worker_public_fields)
+            if unsupported:
                 raise ValueError(
-                    f"waves repeat canonical phase {gate!r}: {prior_phase[1]!r} and {raw_phase!r} "
-                    f"normalize to the same phase.{guidance}"
+                    f"waves[{wave_index - 1}].workers[{worker_index - 1}] contains unsupported field(s): "
+                    + ", ".join(unsupported)
                 )
-            phase_waves.setdefault(gate, (wave_index, raw_phase))
             raw_profile = str(worker.get("profile") or "").strip()
             profile = canonical_profile(raw_profile) if raw_profile else _default_profile_for_gate(gate)
             if profile not in AGENTS:
@@ -9996,9 +10017,8 @@ def _v11_compact_waves(
             if str(worker.get("effort") or "").strip():
                 spec["requested_reasoning_effort"] = str(worker["effort"]).strip().lower()
             delegations.append(spec)
-            wave_gates.add(gate)
         result.append({"wave_id": f"wave-{wave_index:02d}", "delegations": delegations})
-        available_context_gates.update(wave_gates)
+        available_context_gates.add(gate)
     return result
 
 
@@ -10033,10 +10053,14 @@ def _v11_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
         }
 
     knowledge_harvest = _is_knowledge_harvest_task(task)
-    groups = (
+    classified_groups = (
         [["scope"], ["discover"], ["architecture"], ["plan"], ["documentation"], ["review"], ["close"]]
         if knowledge_harvest else classified["parallel_groups"]
     )
+    # A wave owns exactly one phase. Independent phases remain distinct waves;
+    # parallelism within a wave is reserved for multiple workers sharing that
+    # phase and therefore one inherited profile-ownership contract.
+    groups = [[gate] for group in classified_groups for gate in group]
     waves = [
         {
             "wave_id": f"wave-{index:02d}",

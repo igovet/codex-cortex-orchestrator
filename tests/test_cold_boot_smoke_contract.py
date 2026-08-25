@@ -14,11 +14,9 @@ SPEC.loader.exec_module(SMOKE)
 
 
 def test_cold_boot_fixture_uses_only_canonical_phases() -> None:
-    phases = [
-        str(worker["phase"])
-        for wave in SMOKE.waves()
-        for worker in wave["workers"]
-    ]
+    waves = SMOKE.waves()
+    phases = [str(wave["phase"]) for wave in waves]
 
     assert phases == ["discover"]
+    assert all("phase" not in worker for wave in waves for worker in wave["workers"])
     assert SMOKE.cortex.DATABASE_SCHEMA_VERSION == 17

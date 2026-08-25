@@ -837,6 +837,12 @@ server-derived continuation for that task. Cortex owns and issues these opaque
 refs; a model only copies and serializes their exact bytes, never generates or
 infers them from a session, host, thread, project, or worker identity.
 
+The start pipeline has one semantic phase source: every wave requires
+`phase`, and every worker in `waves[].workers` inherits it. A worker-level
+`phase` is unsupported rather than treated as an alias. Multiple workers may
+share one wave phase; workers for another phase use a separate wave. Optional
+worker profile overrides are validated against the containing wave phase.
+
 The only valid native lifecycle is the exact server-issued
 `spawn_agent` → exact `wait` → `read_worker_result` → server-derived
 `continue_orchestration` route. `create_thread`, session/environment

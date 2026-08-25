@@ -35,8 +35,8 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                         "acceptance_criteria": ["The exact worker is terminal and no result exists."],
                         "verification": ["Inspect durable task, session, event, and repair rows."],
                     },
-                    "waves": [{"workers": [{
-                        "phase": "implementation", "profile": "general",
+                    "waves": [{"phase": "implementation", "workers": [{
+                        "profile": "general",
                         "objective": "Record evidence before the terminal failure.",
                         "allowed_paths": ["result.txt"],
                     }]}],
@@ -140,13 +140,15 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                         "acceptance_criteria": ["Only genuine server evidence can block the task."],
                         "verification": ["Inspect evidence binding and one-time consumption."],
                     },
-                    "waves": [{"workers": [{
-                        "phase": "implementation", "profile": "general",
+                    "waves": [{"phase": "implementation", "workers": [{
+                        "profile": "general",
                         "objective": "Exercise terminal evidence.",
                         "allowed_paths": ["result.txt"],
                     }]}],
                 })
                 self.assertTrue(started["ok"], started)
+                self.assertEqual(started["outcome"], "ready_to_spawn")
+                self.assertEqual(len(started["dispatches"]), 1)
                 dispatch = started["dispatches"][0]
                 match = re.search(
                     r"read_dispatch_briefing\((\{[^\n]+?\})\)",
@@ -325,8 +327,7 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                         "acceptance_criteria": ["The file exists."],
                         "verification": ["Read the exact file."],
                     },
-                    "waves": [{"workers": [{
-                        "phase": "implementation",
+                    "waves": [{"phase": "implementation", "workers": [{
                         "profile": "general",
                         "objective": "Create result.txt.",
                         "allowed_paths": ["result.txt"],
@@ -392,7 +393,7 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                         "acceptance_criteria": ["The plan is scoped."],
                         "verification": ["Inspect the plan."],
                     },
-                    "waves": [{"workers": [{"phase": "plan"}]}],
+                    "waves": [{"phase": "plan", "workers": [{}]}],
                 })
                 self.assertTrue(started["ok"], started)
                 bootstrap = str(started["dispatches"][0]["arguments"]["message"])
@@ -539,7 +540,7 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                         "acceptance_criteria": ["The plan is scoped."],
                         "verification": ["Inspect the plan."],
                     },
-                    "waves": [{"workers": [{"phase": "plan"}]}],
+                    "waves": [{"phase": "plan", "workers": [{}]}],
                 })
                 self.assertTrue(started["ok"], started)
                 bootstrap = str(started["dispatches"][0]["arguments"]["message"])
@@ -583,7 +584,7 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                         "acceptance_criteria": ["The plan is scoped."],
                         "verification": ["Inspect the plan."],
                     },
-                    "waves": [{"workers": [{"phase": "plan"}]}],
+                    "waves": [{"phase": "plan", "workers": [{}]}],
                 })
                 self.assertTrue(started["ok"], started)
                 bootstrap = str(started["dispatches"][0]["arguments"]["message"])

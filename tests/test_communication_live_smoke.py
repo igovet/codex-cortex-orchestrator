@@ -58,7 +58,7 @@ class CommunicationLiveSmokeTests(unittest.TestCase):
                 "communication_profile": "natural",
                 "plan_approval": "auto",
             },
-            "waves": [{"workers": [{"phase": "discover"}]}],
+            "waves": [{"phase": "discover", "workers": [{}]}],
         })
         self.assertTrue(started.get("ok"), started)
         dispatch = started["dispatches"][0]

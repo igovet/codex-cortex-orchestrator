@@ -48,7 +48,7 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
                 "acceptance_criteria": ["The runtime binding behavior is preserved."],
                 "verification": ["Run the focused runtime binding regression tests."],
             },
-            "waves": [{"workers": [{"phase": "plan"}]}],
+            "waves": [{"phase": "plan", "workers": [{}]}],
         })
         self.assertTrue(started["ok"], started)
         match = _BOOTSTRAP_AUTHORITY.search(str(started["dispatches"][0]["arguments"]["message"]))

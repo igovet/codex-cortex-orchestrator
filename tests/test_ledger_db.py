@@ -209,7 +209,7 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                     "acceptance_criteria": ["The fixture result is produced."],
                     "verification": ["Inspect the fixture result."],
                 },
-                "waves": [{"workers": [{"phase": "discover"}]}],
+                "waves": [{"phase": "discover", "workers": [{}]}],
             })
 
             self.assertTrue(started["ok"], started)
@@ -291,7 +291,7 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                         "acceptance_criteria": [f"The {label} fixture result is produced."],
                         "verification": [f"Inspect the {label} fixture result."],
                     },
-                    "waves": [{"workers": [{"phase": "discover"}]}],
+                    "waves": [{"phase": "discover", "workers": [{}]}],
                 }
 
             started = cortex.start_orchestration(start_request("first"))

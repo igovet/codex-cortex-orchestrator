@@ -30,6 +30,7 @@
 - The process audience is fixed at launch. The public union contains exactly nine operations.
 - No worker operation accepts caller-authored identity, timestamps, changed paths, predecessor receipts, or evidence markers.
 - Every coordinator call requires the exact `task_ref` and `coordinator_ref`; every worker call requires the exact `task_ref` and `assignment_ref`. Cortex issues refs and callers only byte-copy them. Never infer authorization from a project scan, session/environment variable, or guessed child identity.
+- A start wave declares `phase` exactly once at `waves[].phase`; all workers in that wave inherit it. `waves[].workers[].phase` is unsupported. Multiple same-phase workers share a wave, while different phases use separate waves; profile overrides are constrained by the containing wave phase.
 - The only native lifecycle is the exact server-issued `spawn_agent` → `wait` → `read_worker_result` → server-derived continuation route. `create_thread`, `repair_planning`, and manually authored `advance`/`completions` are legacy and fail closed.
 - A worker question is durable and attempt/revision-bound. A scalar answer or stable-option selection resumes the same child; its first worker call is exactly scalar `action:"poll"` with the original refs and `question_ref`. Never remove and recreate a question to fix a ref mismatch.
 - A lost native server receipt is recovered by inspecting canonical state before any new dispatch.

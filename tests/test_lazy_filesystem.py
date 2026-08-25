@@ -43,7 +43,7 @@ class LazyFilesystemTests(unittest.TestCase):
                 "acceptance_criteria": ["Persist the result canonically."],
                 "verification": ["Run the focused regression."],
             },
-            "waves": [{"workers": [{"phase": "discover"}]}],
+            "waves": [{"phase": "discover", "workers": [{}]}],
         })
 
     def test_initialization_and_path_helpers_do_not_materialize_task_artifacts(self) -> None:

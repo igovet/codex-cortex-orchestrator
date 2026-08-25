@@ -109,7 +109,7 @@
     "operation_cards": {
       "start_orchestration": {
         "input": "{project_root, task, waves?}",
-        "purpose": "Start one explicitly activated task and retain the returned private {task_ref, coordinator_ref} pair for every later coordinator operation. Omit waves.worker.profile for the server-owned phase owner; an expert override must use the selected phase branch's exact closed profile enum.",
+        "purpose": "Start one explicitly activated task and retain the returned private {task_ref, coordinator_ref} pair for every later coordinator operation. Each wave has exactly {phase,workers}; workers inherit the wave phase and must not carry phase. Put multiple same-phase workers in one wave and different phases in separate waves. Omit worker.profile for the server-owned phase owner; an expert override must use the containing wave phase's exact closed profile enum.",
         "action_semantics": ["invoke_dispatches", "wait_for_bound_workers"]
       },
       "read_dispatch_briefing": {

@@ -274,7 +274,7 @@ _WAIT_FOR_BOUND_WORKERS_INSTRUCTION = COORDINATOR_ACTION_SEMANTICS["wait_for_bou
 
 
 PUBLIC_TOOL_DESCRIPTIONS = {
-    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Host activation context must already be established by the host before this call. Omit waves.worker.profile for the canonical server-owned phase owner; when an expert override is necessary, use only a phase/profile pair admitted by that phase's closed conditional enum. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale. action.kind=invoke_dispatches means: " + _INVOKE_DISPATCHES_INSTRUCTION + " It grants no wait permission. action.kind=wait_for_bound_workers means: " + _WAIT_FOR_BOUND_WORKERS_INSTRUCTION,
+    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Host activation context must already be established by the host before this call. Each wave declares exactly one phase at waves[].phase; every worker in that wave inherits it and workers[].phase is unsupported. Put multiple workers for the same phase in one wave and use separate waves for different phases. Omit worker.profile for the canonical server-owned phase owner; an expert override must use the containing wave phase's closed conditional enum. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale. action.kind=invoke_dispatches means: " + _INVOKE_DISPATCHES_INSTRUCTION + " It grants no wait permission. action.kind=wait_for_bound_workers means: " + _WAIT_FOR_BOUND_WORKERS_INSTRUCTION,
     "continue_orchestration": "Coordinator-only lifecycle operation. Preserve and submit the exact task_ref plus coordinator_ref returned by start_orchestration, together with the server-derived continuation step and result refs. Never infer authority from a host session, omit coordinator_ref, submit inline result bodies or replacement pipelines, or repeat a consumed dispatch. action.kind=invoke_dispatches means: " + _INVOKE_DISPATCHES_INSTRUCTION + " It grants no wait permission. action.kind=wait_for_bound_workers means: " + _WAIT_FOR_BOUND_WORKERS_INSTRUCTION,
     "manage_orchestration": "Coordinator-only bounded task management. Every call requires the exact task_ref plus coordinator_ref returned by start_orchestration; Cortex derives project scope from task_ref and rejects project_root. For a durable worker question, call intent=question with exactly payload={question_ref}; Cortex renders the stored canonical prompt and all stored canonical options, so the coordinator never invents option IDs or counts. Optional localization is display-only and may omit localized_options; when localized_options is supplied it must contain one ordered display label for every stored canonical option. Never put localization at the top level and never invent plan-approval field names. On awaiting_user, render question and end the turn. On the next user message, submit the answer with the same payload.question_ref; on question_answered, forward the returned resume object unchanged to exactly the paused child with followup_task. The resume object's kind is not a worker_question action object: the child maps resume.kind to the action string and preserves its own task_ref and assignment_ref. Bootstrap finalization is legal only after the exact bootstrap-missing sequence and is never a fallback for a child tool/protocol error. A child's bare terminal marker is status text, never failure authority: call finalize_worker_failure only for the original dispatch and let Cortex verify and consume its current server-bound terminal evidence. Missing, stale, wrong-dispatch, or replayed evidence must leave the task unchanged. No ambient-authority recovery or project-wide prune/maintenance authority is model-facing. If coordinator_ref is lost, fail closed with coordinator_capability_lost and start a fresh user-authorized task; never reconstruct or mint authority from runtime state.",
     "worker_question": "Worker-only closed action union. Preserve the exact task_ref and assignment_ref from the native dispatch on every call and use one tools/list branch without cross-branch fields. action=ask requires top-level question_type and decision_scope plus question and recommendation. question_type=single_select requires options with stable option_id values and exactly one recommended_option_ids item; multi_select requires options and one or more recommended_option_ids; text requires recommended_answer. Never send answer_mode, context, type, multiple, or infer a question type from field presence. ask_batch applies the same question_type/decision_scope contract to every batch.questions item. ask_batch requires only batch beyond authorization/action; poll_batch requires only the exact scalar batch_ref. For action=poll, make exactly {action:\"poll\",task_ref:<same string>,assignment_ref:<same string>,question_ref:<exact returned scalar string>}. The coordinator resume value {kind:\"poll\",question_ref:...} is an instruction for followup_task, not a value for action: copy its kind into the action string and its question_ref string unchanged. Do not omit worker authorization, turn action into an object, mix ask/poll/batch fields, rename a ref, or replace its value. Questions may cover only task requirements, scope, acceptance, or explicit external/destructive authorization; they may never ask the user to repair Cortex validation, lifecycle, routing, ledger, or worker conditions. A retryable non-mutating recovery names every independent JSON pointer to fix on this same worker attempt exactly once.",
@@ -574,22 +574,11 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "phase": {
-                "type": "string",
-                "minLength": 1,
-                "enum": sorted(canonical_gates),
-                "description": (
-                    "Canonical phase: scope, plan, discover, architecture, database_architecture, implementation, qa, "
-                    "security, performance, accessibility, ux, review, documentation, governance_activation, "
-                    "governance_close, or close. A canonical phase may "
-                    "appear in only one wave, though one wave may contain multiple workers for that phase."
-                ),
-            },
             "profile": {
                 "type": "string",
                 "description": (
                     "Optional expert override. Omit it to use the canonical server-owned phase owner; "
-                    "when supplied, the selected phase branch below is the complete allowed enum."
+                    "when supplied, the containing wave phase branch is the complete allowed enum."
                 ),
             },
             "objective": {"type": "string"},
@@ -647,28 +636,44 @@ def build_public_schemas(
             },
             "effort": {"type": "string", "description": "Optional expert reasoning-effort override."},
         },
-        "required": ["phase"],
+    }
+    V3_WAVE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "phase": {
+                "type": "string", "minLength": 1, "enum": public_phase_values,
+                "description": (
+                    "The single canonical phase inherited by every worker in this wave. Multiple workers may share "
+                    "this phase; workers for another phase belong in a separate wave."
+                ),
+            },
+            "workers": {"type": "array", "minItems": 1, "maxItems": 32, "items": V3_WORKER_SCHEMA},
+        },
+        "required": ["phase", "workers"],
         "oneOf": [
             {
                 "properties": {
                     "phase": {"const": gate},
-                    "profile": {
-                        "type": "string",
-                        "enum": phase_profile_values[gate],
-                        "description": (
-                            f"Optional expert override for phase {gate}; omit it to use the canonical server owner."
-                        ),
+                    "workers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "profile": {
+                                    "type": "string",
+                                    "enum": phase_profile_values[gate],
+                                    "description": (
+                                        f"Optional expert override for wave phase {gate}; omit it to use the canonical server owner."
+                                    ),
+                                },
+                            },
+                        },
                     },
                 },
             }
             for gate in public_phase_values
         ],
-    }
-    V3_WAVE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {"workers": {"type": "array", "minItems": 1, "maxItems": 32, "items": V3_WORKER_SCHEMA}},
-        "required": ["workers"],
     }
     START_ORCHESTRATION_SCHEMA = {
         "type": "object",

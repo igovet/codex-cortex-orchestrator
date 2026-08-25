@@ -505,10 +505,10 @@ def _orchestrate_pipeline_snapshot(state: dict[str, Any], plan: dict[str, Any]) 
             status_value = "pending"
         waves.append({
             "wave": index,
+            "phase": gates[0] if len(gates) == 1 else None,
             "status": status_value,
             "workers": [
                 {
-                    "phase": item.get("gate"),
                     "profile": item.get("agent"),
                 }
                 for item in wave.get("delegations", [])
@@ -663,6 +663,10 @@ def _normalize_orchestrate_waves(
                 proposed_pipeline.append(gate)
             by_gate.setdefault(gate, []).append(dict(raw_spec))
             wave_specs.append(dict(raw_spec))
+        if len(group) != 1:
+            raise ValueError(
+                "each orchestration wave must own exactly one phase; put different phases in separate waves"
+            )
         original_ids[tuple(group)] = wave_id
         proposed_groups.append(group)
         # ``classification`` is advisory. Preserve the exact wave/group
@@ -733,7 +737,13 @@ def _normalize_orchestrate_waves(
                     "project_root": project_root_value,
                 })
                 delegations.append(spec)
-        normalized.append({"wave_id": wave_id, "gates": list(group), "delegations": delegations, "status": "pending"})
+        normalized.append({
+            "wave_id": wave_id,
+            "phase": group[0],
+            "gates": list(group),
+            "delegations": delegations,
+            "status": "pending",
+        })
     classification = {
         **classification,
         "recommended_pipeline": list(classification.get("pipeline") or []),
@@ -831,6 +841,7 @@ def _orchestrate_wave_contract(waves: object) -> list[dict[str, Any]]:
     return [
         {
             "wave_id": wave.get("wave_id"),
+            "phase": wave.get("phase"),
             "gates": wave.get("gates"),
             "delegations": wave.get("delegations"),
         }
@@ -1905,7 +1916,6 @@ def _semantic_future_pipeline(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 if "context_gates" in spec else "all_verified_predecessors"
             )
             workers.append({
-                "phase": spec.get("gate"),
                 "profile": spec.get("agent"),
                 "objective": str(spec.get("objective") or ""),
                 "strategy": str(spec.get("strategy") or "default"),
@@ -1916,7 +1926,14 @@ def _semantic_future_pipeline(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 "verification": list(spec.get("verification") or []),
             })
         if workers:
-            semantic.append({"workers": workers})
+            phases = {
+                str(spec.get("gate") or "")
+                for spec in wave.get("delegations", [])
+                if isinstance(spec, dict)
+            }
+            if len(phases) != 1:
+                raise ValueError("canonical wave persistence requires exactly one inherited phase")
+            semantic.append({"phase": next(iter(phases)), "workers": workers})
     return semantic
 
 
@@ -2026,14 +2043,67 @@ def _historical_recovery_specs(plan: dict[str, Any], gate: str) -> list[dict[str
         if isinstance(entry, dict)
     ]
     semantic_versions.append(_semantic_future_pipeline(plan))
+    allowed_worker_fields = {
+        "profile", "objective", "strategy", "paths", "dependencies",
+        "context_files", "acceptance_criteria", "verification",
+    }
+    validated_versions: list[list[dict[str, Any]]] = []
     for semantic in semantic_versions:
-        workers = [
-            worker
-            for wave in semantic
-            for worker in (wave.get("workers") or [])
-            if isinstance(worker, dict) and worker.get("phase") == gate
-        ]
-        if workers:
+        if not isinstance(semantic, list):
+            raise ValueError("historical semantic pipeline must be an array of phase waves")
+        if any(not isinstance(wave, dict) for wave in semantic):
+            raise ValueError("historical semantic pipeline waves must be objects")
+        seen_phases: set[str] = set()
+        for wave in semantic:
+            if set(wave) != {"phase", "workers"}:
+                raise ValueError("historical semantic waves require exactly phase and workers")
+            phase = wave.get("phase")
+            if not isinstance(phase, str) or phase not in AVAILABLE_GATES:
+                raise ValueError("historical semantic wave phase must be canonical")
+            if phase in seen_phases:
+                raise ValueError("historical semantic pipeline repeats one phase across waves")
+            seen_phases.add(phase)
+            workers = wave.get("workers")
+            if not isinstance(workers, list) or not workers or any(not isinstance(worker, dict) for worker in workers):
+                raise ValueError("historical semantic phase wave requires non-empty worker objects")
+            for worker in workers:
+                if "phase" in worker:
+                    raise ValueError("historical semantic workers must inherit phase from their wave")
+                unsupported = sorted(set(worker) - allowed_worker_fields)
+                if unsupported:
+                    raise ValueError(
+                        "historical semantic worker contains unsupported fields: " + ", ".join(unsupported)
+                    )
+                missing = sorted(allowed_worker_fields - set(worker))
+                if missing:
+                    raise ValueError(
+                        "historical semantic worker is missing canonical fields: " + ", ".join(missing)
+                    )
+                for field in ("profile", "objective", "strategy"):
+                    if not isinstance(worker.get(field), str):
+                        raise ValueError(f"historical semantic worker {field} must be a string")
+                for field in ("paths", "context_files", "acceptance_criteria", "verification"):
+                    value = worker.get(field)
+                    if (
+                        not isinstance(value, list)
+                        or any(not isinstance(item, str) for item in value)
+                    ):
+                        raise ValueError(f"historical semantic worker {field} must be a string array")
+                dependencies = worker.get("dependencies")
+                if not (
+                    dependencies == "all_verified_predecessors"
+                    or isinstance(dependencies, list)
+                    and all(isinstance(item, str) and item in AVAILABLE_GATES for item in dependencies)
+                ):
+                    raise ValueError(
+                        "historical semantic worker dependencies must be canonical phase strings or the default predecessor policy"
+                    )
+        validated_versions.append(semantic)
+
+    for semantic in validated_versions:
+        matching_waves = [wave for wave in semantic if wave["phase"] == gate]
+        if matching_waves:
+            workers = matching_waves[0]["workers"]
             return [
                 {
                     "gate": gate,

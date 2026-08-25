@@ -206,9 +206,9 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 "plan_approval": "auto",
             },
             "waves": [
-                {"workers": [{"phase": "implementation"}]},
-                {"workers": [{"phase": "documentation"}]},
-                {"workers": [{"phase": "close"}]},
+                {"phase": "implementation", "workers": [{}]},
+                {"phase": "documentation", "workers": [{}]},
+                {"phase": "close", "workers": [{}]},
             ],
         })
         self.assertTrue(started["ok"], started)
@@ -309,9 +309,9 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                     "plan_approval": "auto",
                 },
                 "waves": [
-                    {"workers": [{"phase": "implementation"}]},
-                    {"workers": [{"phase": "documentation"}]},
-                    {"workers": [{"phase": "close"}]},
+                    {"phase": "implementation", "workers": [{}]},
+                    {"phase": "documentation", "workers": [{}]},
+                    {"phase": "close", "workers": [{}]},
                 ],
             }
         )

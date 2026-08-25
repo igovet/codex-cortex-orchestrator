@@ -33,6 +33,116 @@ class FreshPipelineContractTests(unittest.TestCase):
         self.assertNotIn("replacement_waves", source)
         self.assertNotIn("planner_recovery_pending", source)
 
+    def test_corrupt_plan_recovery_restores_only_matching_wave_workers(self) -> None:
+        def semantic_worker(
+            profile: str,
+            objective: str,
+            paths: list[str],
+            *,
+            dependencies: list[str] | str = "all_verified_predecessors",
+        ) -> dict[str, object]:
+            return {
+                "profile": profile,
+                "objective": objective,
+                "strategy": "bounded",
+                "paths": paths,
+                "dependencies": dependencies,
+                "context_files": [],
+                "acceptance_criteria": [],
+                "verification": [],
+            }
+
+        semantic = [
+            {
+                "phase": "implementation",
+                "workers": [
+                    {
+                        **semantic_worker(
+                            "backend_dev", "Restore the backend implementation.",
+                            ["src/backend.py"], dependencies=["plan"],
+                        ),
+                        "context_files": ["docs/project/index.md"],
+                        "acceptance_criteria": ["Backend behavior is restored."],
+                        "verification": ["Run the backend checks."],
+                    },
+                    semantic_worker(
+                        "frontend_dev", "Restore the frontend implementation.",
+                        ["src/frontend.ts"],
+                    ),
+                ],
+            },
+            {
+                "phase": "qa",
+                "workers": [semantic_worker(
+                    "qa_engineer", "Verify the recovered implementation.", ["tests"],
+                )],
+            },
+        ]
+        corrupted_plan = {
+            "waves": [],
+            "history": [{"semantic_future_pipeline": semantic}],
+        }
+        state = {
+            "chosen_pipeline": ["implementation", "qa"],
+            "completed_gates": [],
+            "skipped_gates": [],
+            "attempts": [],
+        }
+
+        recovered = orchestration_engine._delivery_recovery_waves(
+            Path("."), state, corrupted_plan,
+        )
+
+        self.assertEqual([wave["wave_id"] for wave in recovered], ["retry-implementation", "retry-qa"])
+        implementation = recovered[0]["delegations"]
+        qa = recovered[1]["delegations"]
+        self.assertEqual(len(implementation), 2)
+        self.assertEqual(
+            [(item["agent"], item["objective"], item["allowed_paths"]) for item in implementation],
+            [
+                ("backend_dev", "Restore the backend implementation.", ["src/backend.py"]),
+                ("frontend_dev", "Restore the frontend implementation.", ["src/frontend.ts"]),
+            ],
+        )
+        self.assertEqual(implementation[0]["context_gates"], ["plan"])
+        self.assertEqual(len(qa), 1)
+        self.assertEqual(qa[0]["agent"], "qa_engineer")
+        self.assertEqual(qa[0]["allowed_paths"], ["tests"])
+        self.assertTrue(all(item["gate"] == "implementation" for item in implementation))
+        self.assertTrue(all(item["gate"] == "qa" for item in qa))
+
+        with self.assertRaisesRegex(ValueError, "inherit phase from their wave"):
+            orchestration_engine._historical_recovery_specs({
+                "waves": [],
+                "history": [{"semantic_future_pipeline": [{
+                    "phase": "implementation",
+                    "workers": [{"phase": "implementation", "profile": "general"}],
+                }]}],
+            }, "implementation")
+
+        with self.assertRaisesRegex(ValueError, "exactly phase and workers"):
+            orchestration_engine._historical_recovery_specs({
+                "waves": [],
+                "history": [{"semantic_future_pipeline": [{
+                    "workers": [{"phase": "implementation", "profile": "backend_dev"}],
+                }]}],
+            }, "implementation")
+
+        malformed_qa = semantic_worker(
+            "qa_engineer", "Malformed unrelated QA.", ["tests"],
+        )
+        malformed_qa["unexpected"] = True
+        with self.assertRaisesRegex(ValueError, "unsupported fields: unexpected"):
+            orchestration_engine._historical_recovery_specs({
+                "waves": [],
+                "history": [{"semantic_future_pipeline": [
+                    {"phase": "implementation", "workers": [semantic_worker(
+                        "backend_dev", "Valid target worker.", ["src/backend.py"],
+                    )]},
+                    {"phase": "qa", "workers": [malformed_qa]},
+                ]}],
+            }, "implementation")
+
 
 if __name__ == "__main__":
     unittest.main()

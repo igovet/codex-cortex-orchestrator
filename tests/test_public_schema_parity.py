@@ -150,7 +150,7 @@ class PublicSchemaParityTests(unittest.TestCase):
 
         allowed_schema = worker["properties"]["allowed_paths"]
         item_schema = allowed_schema["items"]
-        diagnostics = cortex._v11_start_wave_preflight([{"workers": [{
+        diagnostics = cortex._v11_start_wave_preflight([{"phase": "implementation", "workers": [{
             "allowed_paths": [],
             "obsolete_worker_field": True,
         }, {
@@ -238,6 +238,7 @@ class PublicSchemaParityTests(unittest.TestCase):
             self.assertIn(f"/task/{sentinel_task}", minimum_pointers)
 
             wave_diagnostics = cortex._v11_start_wave_preflight([{
+                "phase": "implementation",
                 sentinel_wave: "accepted",
                 "workers": [{sentinel_worker: True, "allowed_paths": []}],
             }])
@@ -268,39 +269,52 @@ class PublicSchemaParityTests(unittest.TestCase):
 
     def test_runtime_accepts_only_canonical_profile_and_phase_forms(self) -> None:
         result = cortex._v11_compact_waves(
-            [{"workers": [{"phase": "qa", "profile": "qa_engineer"}]}],
+            [{"phase": "qa", "workers": [{"profile": "qa_engineer"}]}],
             {"user_request": "canonical parity", "complexity": "C1"},
         )
         self.assertEqual(result[0]["delegations"][0]["agent"], "qa_engineer")
         for phase, profile in (("verification", "qa_engineer"), ("discover", "discovery"), ("plan", "planner_agent")):
             with self.subTest(phase=phase, profile=profile), self.assertRaises(ValueError):
                 cortex._v11_compact_waves(
-                    [{"workers": [{"phase": phase, "profile": profile}]}],
+                    [{"phase": phase, "workers": [{"profile": profile}]}],
                     {"user_request": "canonical parity", "complexity": "C1"},
                 )
 
-    def test_start_worker_schema_exposes_closed_phase_profile_pairs(self) -> None:
-        worker = (
-            cortex.PUBLIC_SCHEMA_REGISTRY["start_orchestration"]["properties"]["waves"]
-            ["items"]["properties"]["workers"]["items"]
-        )
+    def test_start_wave_schema_exposes_one_phase_and_closed_worker_profile_pairs(self) -> None:
+        wave = cortex.PUBLIC_SCHEMA_REGISTRY["start_orchestration"]["properties"]["waves"]["items"]
+        worker = wave["properties"]["workers"]["items"]
+        self.assertEqual(wave["required"], ["phase", "workers"])
+        self.assertNotIn("phase", worker["properties"])
         self.assertNotIn("enum", worker["properties"]["profile"])
         branches = {
             branch["properties"]["phase"]["const"]: branch
-            for branch in worker["oneOf"]
+            for branch in wave["oneOf"]
         }
-        self.assertIn("general", branches["implementation"]["properties"]["profile"]["enum"])
-        self.assertIn("qa_engineer", branches["qa"]["properties"]["profile"]["enum"])
-        self.assertNotIn("general", branches["qa"]["properties"]["profile"]["enum"])
+        def profiles(phase: str) -> list[str]:
+            return branches[phase]["properties"]["workers"]["items"]["properties"]["profile"]["enum"]
+        self.assertIn("general", profiles("implementation"))
+        self.assertIn("qa_engineer", profiles("qa"))
+        self.assertNotIn("general", profiles("qa"))
         self.assertEqual(
             cortex._v11_start_wave_preflight([
-                {"workers": [{"phase": "implementation", "profile": "general"}]},
+                {"phase": "implementation", "workers": [{"profile": "general"}]},
             ]),
             [],
         )
+        inherited = cortex._v11_compact_waves([
+            {"phase": "implementation", "workers": [
+                {"profile": "general", "objective": "First owner."},
+                {"profile": "general", "objective": "Second owner."},
+            ]},
+            {"phase": "qa", "workers": [{"profile": "qa_engineer"}]},
+        ], {"user_request": "wave inheritance", "complexity": "C1"})
+        self.assertEqual(
+            [item["gate"] for wave_item in inherited for item in wave_item["delegations"]],
+            ["implementation", "implementation", "qa"],
+        )
 
         diagnostics = cortex._v11_start_wave_preflight([
-            {"workers": [{"phase": "qa", "profile": "general"}]},
+            {"phase": "qa", "workers": [{"profile": "general"}]},
         ])
         self.assertEqual(len(diagnostics), 1)
         self.assertEqual(diagnostics[0]["json_pointer"], "/waves/0/workers/0/profile")
@@ -308,6 +322,13 @@ class PublicSchemaParityTests(unittest.TestCase):
             diagnostics[0]["field_schema"],
             {"type": "string", "enum": ["build_verification", "qa_engineer"]},
         )
+
+        legacy = cortex._v11_start_wave_preflight([
+            {"phase": "implementation", "workers": [{"phase": "implementation", "profile": "general"}]},
+        ])
+        self.assertEqual(len(legacy), 1)
+        self.assertEqual(legacy[0]["json_pointer"], "/waves/0/workers/0/phase")
+        self.assertFalse(legacy[0].get("state_mutated", False))
 
     def test_management_validation_receipt_uses_the_complete_public_schema(self) -> None:
         receipt = cortex._validation_contract("manage_orchestration", [{

@@ -561,7 +561,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     tool_protocol = (
         "Use each active MCP tool's advertised schema. The bootstrap task_ref and assignment_ref are the sole worker authorization: "
         "preserve both unchanged on every worker call and never infer them from ambient state. Backend identity, dispatch, paths, receipts, "
-        "timestamps, and changed_files are never worker input. read_dispatch_briefing must complete before project work; follow only its opaque "
+        "timestamps, and changed_files are never worker input. Your phase is inherited from the containing start wave and server-bound with the selected profile; never rewrite or infer it. read_dispatch_briefing must complete before project work; follow only its opaque "
         "next_cursor and never shell-read the briefing after success. A worker read_worker_result additionally uses one granted predecessor ref; "
         "workers never use coordinator_ref. On a same-child durable-question resume, invoke worker_question with the literal scalar action='poll', your unchanged task_ref and assignment_ref, and the exact scalar question_ref; the coordinator resume object is not the action value. Record material evidence before completion. Submit one compact v11 plan or outcome. An ok=false response uses only top-level error/recovery and its public diagnostics; never inspect Cortex source, cache, logs, ledger, session, environment, or hidden paths. A validation retry "
         "must copy the exact opaque repair_capsule, base_payload_digest, and diagnostic-scoped allowed_ops patches into the same complete_attempt; do not decode, "

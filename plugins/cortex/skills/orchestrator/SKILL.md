@@ -114,9 +114,12 @@ fresh user-directed task starts through a fresh explicit activation.
    `task.user_request`. For ordinary tasks, provide grounded non-empty
    `task.acceptance_criteria` and `task.verification`; ask one task-relevant
    question if material intent is missing. Use only fields advertised by the
-   current tool schema. Omit `waves.workers[].profile` for the server-owned
-   phase owner; when expert routing is required, use only the selected phase
-   branch's exact profile enum.
+   current tool schema. Each wave declares exactly one `waves[].phase`; every
+   worker in that wave inherits it, and `waves[].workers[].phase` is
+   unsupported. Put multiple workers for one phase in the same wave and use
+   separate waves for different phases. Omit `workers[].profile` for the
+   server-owned phase owner; when expert routing is required, use only the
+   containing wave phase branch's exact profile enum.
 2. Invoke every returned native `spawn_agent` dispatch exactly as returned. A
    returned child ID is bound only by the runtime; never guess or transform it.
    `action.kind=invoke_dispatches` is the `spawn_all_exact_before_wait`

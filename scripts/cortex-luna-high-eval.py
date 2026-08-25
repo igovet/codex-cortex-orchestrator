@@ -2436,9 +2436,9 @@ def _fixture_eval(base: Path) -> list[dict[str, object]]:
     current = cortex.start_orchestration({
         "project_root": str(parallel),
         "task": {**task("parallel Luna fixture", "C1"), "plan_approval": "auto"},
-        "waves": [{"workers": [
-            {"phase": "discover", "profile": "explorer"},
-            {"phase": "architecture", "profile": "architect"},
+        "waves": [{"phase": "discover", "workers": [
+            {"profile": "explorer"},
+            {"profile": "explorer"},
         ]}],
     })
     if len(current.get("dispatches") or []) != 2:
@@ -2510,7 +2510,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "{\"user_request\":\"Produce a planner work breakdown for the fixture.\",\"complexity\":\"C1\","
             "\"acceptance_criteria\":[\"The planner attempt is completed on the same worker after validation repair.\"],"
             "\"verification\":[\"Verify the canonical planner result and retained rejected draft.\"],\"plan_approval\":\"auto\"}. "
-            "Call start_orchestration with exactly this initial waves array: [{\"workers\":[{\"phase\":\"plan\",\"profile\":\"planner\",\"objective\":\"Submit the malformed planner fixture immediately.\"}]}]. "
+            "Call start_orchestration with exactly this initial waves array: [{\"phase\":\"plan\",\"workers\":[{\"profile\":\"planner\",\"objective\":\"Submit the malformed planner fixture immediately.\"}]}]. "
             "Use the returned dispatch and native wait. On that worker's first turn, call complete_attempt immediately: "
             "do not inspect the project, run commands, ask questions, or spend time making the report correct. "
             "The first completion must contain exactly this malformed planning object, while retaining the required "
@@ -2536,7 +2536,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "sanitized CORTEX_WORKER_BOOTSTRAP_MISSING final, one same-child followup, and no replacement spawn or ambient "
             "reconstruction.\",\"Read result.md and verify its exact one-line content only after recovery.\"],"
             "\"plan_approval\":\"auto\"}</cortex_task_contract> "
-            "<cortex_initial_waves>[{\"workers\":[{\"phase\":\"implementation\",\"profile\":\"general\","
+            "<cortex_initial_waves>[{\"phase\":\"implementation\",\"workers\":[{\"profile\":\"general\","
             "\"objective\":\"Apply the bootstrap gate before any Cortex or project call. After the exact capability pair is present, "
             "read the briefing, create result.md containing only Bootstrap pair recovered., verify it, and complete the attempt.\","
             "\"allowed_paths\":[\"result.md\"]}]}]</cortex_initial_waves>. "
@@ -2621,8 +2621,8 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "</cortex_task_contract> "
             "Do not pass governance_mode, governance_triggers, risk_triggers, or initiative_ref: the server default "
             "auto mode must resolve solely from C3 complexity. Call start_orchestration exactly once with that exact "
-            "task and these exact caller waves: [{\"workers\":[{\"phase\":\"implementation\"}]},"
-            "{\"workers\":[{\"phase\":\"documentation\"}]},{\"workers\":[{\"phase\":\"close\"}]}]. "
+            "task and these exact caller waves: [{\"phase\":\"implementation\",\"workers\":[{}]},"
+            "{\"phase\":\"documentation\",\"workers\":[{}]},{\"phase\":\"close\",\"workers\":[{}]}]. "
             "Before spawning, confirm requested_mode=auto, effective_mode=full, governance_activation is first, and "
             "governance_close is immediately before close. Execute every returned wave in order. Do not call "
             "manage_governance to force or simulate activation. Do not call manage_orchestration to force governance or "
@@ -2704,10 +2704,10 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "\"plan_approval\":\"auto\"}"
             "</cortex_task_contract> "
             "Call start_orchestration exactly once with that exact task and these exact waves: "
-            "[{\"workers\":[{\"phase\":\"discover\",\"profile\":\"explorer\",\"objective\":\"Confirm the README heading and relevant context.\"},"
-            "{\"phase\":\"discover\",\"profile\":\"explorer\",\"objective\":\"Independently verify the required result.md content and constraints.\"}]},"
-            "{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"review\"}]},"
-            "{\"workers\":[{\"phase\":\"documentation\"}]},{\"workers\":[{\"phase\":\"close\"}]}]."
+            "[{\"phase\":\"discover\",\"workers\":[{\"profile\":\"explorer\",\"objective\":\"Confirm the README heading and relevant context.\"},"
+            "{\"profile\":\"explorer\",\"objective\":\"Independently verify the required result.md content and constraints.\"}]},"
+            "{\"phase\":\"implementation\",\"workers\":[{}]},{\"phase\":\"review\",\"workers\":[{}]},"
+            "{\"phase\":\"documentation\",\"workers\":[{}]},{\"phase\":\"close\",\"workers\":[{}]}]."
         )
     if scenario == "planner_work_breakdown":
         return common + (
@@ -2720,10 +2720,10 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "\"plan_approval\":\"required\"}"
             "</cortex_task_contract> "
             "Call start_orchestration exactly once with that exact task and waves exactly "
-            "[{\"workers\":[{\"phase\":\"discover\"}]},{\"workers\":[{\"phase\":\"plan\"}]},"
-            "{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"qa\"}]},"
-            "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
-            "{\"workers\":[{\"phase\":\"close\"}]}]. Complete discovery before the singleton final Planner. "
+            "[{\"phase\":\"discover\",\"workers\":[{}]},{\"phase\":\"plan\",\"workers\":[{}]},"
+            "{\"phase\":\"implementation\",\"workers\":[{}]},{\"phase\":\"qa\",\"workers\":[{}]},"
+            "{\"phase\":\"review\",\"workers\":[{}]},{\"phase\":\"documentation\",\"workers\":[{}]},"
+            "{\"phase\":\"close\",\"workers\":[{}]}]. Complete discovery before the singleton final Planner. "
             "The Planner must read its supplied discovery result and publish the strict result plus this exact planning sibling: "
             "{\"overview\":\"Inspect the source before producing and verifying the requested result.\","
             "\"work_packages\":[{\"id\":\"inspect_source\",\"title\":\"Inspect source\","

@@ -43,7 +43,7 @@ class JsonRpcHarnessLifecycleTests(unittest.TestCase):
                         "verification": ["Poll the durable question with the original scalar references."],
                         "complexity": "C1",
                     },
-                    "waves": [{"workers": [{"phase": "implementation", "profile": "general", "allowed_paths": ["result.txt"]}]}],
+                    "waves": [{"phase": "implementation", "workers": [{"profile": "general", "allowed_paths": ["result.txt"]}]}],
                 })
                 self.assertTrue(started["ok"], started)
                 # Public JSON projection preserves the native message bytes;
@@ -144,7 +144,7 @@ class JsonRpcHarnessLifecycleTests(unittest.TestCase):
                         "verification": ["Run this focused integration test."],
                         "complexity": "C1",
                     },
-                    "waves": [{"workers": [{"phase": "discover"}]}],
+                    "waves": [{"phase": "discover", "workers": [{}]}],
                 })
                 self.assertTrue(started["ok"], started)
                 ledger = cortex.ledger_root_path({"project_root": str(project)})
