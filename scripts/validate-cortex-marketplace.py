@@ -264,59 +264,6 @@ def main() -> int:
         or not all(isinstance(value, str) and value.strip() for value in mode_overlays["harvest"].values())
     ):
         fail("harvest guidance must live in one conditional mode overlay")
-    required_attempt_fields = ["status", "summary", "findings", "decisions_needed", "unresolved"]
-    if (
-        shared.get("attempt_result_schema") != "cortex/attempt-result/v1"
-        or shared.get("attempt_result_ref_schema") != "cortex/attempt-result-ref/v1"
-        or shared.get("required_attempt_result_fields") != required_attempt_fields
-    ):
-        fail("shared worker contract must define the complete AttemptResult payload")
-    expected_public_operations = {
-        "start_orchestration", "continue_orchestration", "manage_orchestration",
-        "manage_governance",
-        "worker_question", "record_attempt_event", "complete_attempt",
-        "read_dispatch_briefing", "read_worker_result",
-    }
-    if set(shared.get("public_operations", [])) != expected_public_operations:
-        fail("shared worker contract must declare the nine public Cortex operations")
-    if shared.get("worker_operations") != [
-        "worker_question", "record_attempt_event", "complete_attempt",
-        "read_dispatch_briefing", "read_worker_result",
-    ]:
-        fail("workers must receive scoped reads, question, attempt event, and completion operations")
-    question_resume_contract = str(shared.get("question_resume_contract") or "")
-    for marker in (
-        "QUESTION_RECORDED", "followup_task", "worker_question({action:'poll'",
-        "record_attempt_event", "complete_attempt", "OTHER_TERMINAL",
-    ):
-        if marker not in question_resume_contract:
-            fail("shared worker contract must define the complete question resume route")
-    if (
-        shared.get("dispatch_briefing_fallback")
-        != "only an actual host-file-unavailable read failure returns one exact host path with max_reads=1"
-    ):
-        fail("worker briefing fallback must be failure-only, exact-path, and one-read bounded")
-    if set(shared.get("coordinator_operations", [])) != {
-        "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance",
-        "read_worker_result",
-    }:
-        fail("coordinator operations must own lifecycle and result reading")
-    if (
-        shared.get("worker_final_response")
-        != "complete_attempt_ok_true_terminal_true_requires_worker_final_exactly_ATTEMPT_COMPLETED_with_no_attempt_result_ref_handoff; retryable_false_stops_task_scoped_calls; only_recovery_terminal_failure_evidence_server_bound_requests_exact_CORTEX_ATTEMPT_FAILED_retryable_false_status_for_server_verified_cleanup"
-    ):
-        fail("worker final response must keep terminal markers subordinate to server-bound evidence")
-    if (
-        shared.get("result_lifecycle")
-        != "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker"
-        or shared.get("result_projection")
-        != "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord"
-        or shared.get("caller_correctable_tool_errors")
-        != "retry_same_operation_only_when_retryable_state_unmutated_and_allowed_changes_nonempty_otherwise_stop"
-        or shared.get("read_only_workspace_delta")
-        != "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified"
-    ):
-        fail("shared worker contract must define semantic result finalization and read-only concurrency semantics")
     if (
         shared.get("repository_intelligence")
         != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
@@ -345,6 +292,165 @@ def main() -> int:
     expected_server = {"command": "./scripts/cortex-launcher", "args": ["./scripts/cortex.py"], "cwd": "."}
     if mcp != {"mcpServers": {"cortex": expected_server}}:
         fail("MCP companion must expose only the cortex server")
+    try:
+        import cortex as cortex_server
+        from cortex_runtime.mcp_api import public_tools_for_audience
+        from render_cortex_tool_catalog import expected_skill_text
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        fail(f"public MCP registry could not be loaded: {exc}")
+    contracts = getattr(cortex_server, "PUBLIC_CONTRACTS", None)
+    schemas = getattr(cortex_server, "PUBLIC_SCHEMA_REGISTRY", None)
+    tools = getattr(cortex_server, "PUBLIC_TOOLS", None)
+    if not isinstance(contracts, dict) or not contracts:
+        fail("the canonical action-specific public contract registry is missing")
+    if not isinstance(schemas, dict) or not isinstance(tools, dict):
+        fail("the runtime public schema/tool registries are missing")
+    start_contract = contracts.get("start_orchestration")
+    start_schema = start_contract.get("inputSchema") if isinstance(start_contract, dict) else None
+    start_properties = start_schema.get("properties") if isinstance(start_schema, dict) else None
+    project_root_schema = start_properties.get("project_root") if isinstance(start_properties, dict) else None
+    waves_schema = start_properties.get("waves") if isinstance(start_properties, dict) else None
+    wave_schema = waves_schema.get("items") if isinstance(waves_schema, dict) else None
+    wave_properties = wave_schema.get("properties") if isinstance(wave_schema, dict) else None
+    workers_schema = wave_properties.get("workers") if isinstance(wave_properties, dict) else None
+    worker_schema = workers_schema.get("items") if isinstance(workers_schema, dict) else None
+    worker_properties = worker_schema.get("properties") if isinstance(worker_schema, dict) else None
+    allowed_paths_schema = worker_properties.get("allowed_paths") if isinstance(worker_properties, dict) else None
+    allowed_path_item = allowed_paths_schema.get("items") if isinstance(allowed_paths_schema, dict) else None
+    if (
+        not isinstance(project_root_schema, dict)
+        or project_root_schema.get("description") != "An absolute path to the project root."
+        or not isinstance(allowed_paths_schema, dict)
+        or allowed_paths_schema.get("description")
+        != "Every entry is strictly project-relative to project_root, never absolute."
+        or not isinstance(allowed_path_item, dict)
+        or allowed_path_item.get("description")
+        != "A project-relative path such as desktop-v11-smoke.txt; never an absolute path."
+    ):
+        fail("start_orchestration path guidance must be owned by its canonical inputSchema")
+    path_guidance_markers = (
+        "an absolute path to the project root",
+        "strictly project-relative to project_root",
+        "desktop-v11-smoke.txt",
+    )
+    if any(
+        marker in str(start_contract.get("description") or "").lower()
+        for marker in path_guidance_markers
+    ):
+        fail("start_orchestration path guidance must not be duplicated in its tool description")
+    model_facing_sources = (
+        *sorted((plugin / "skills").rglob("SKILL.md")),
+        *sorted((plugin / "agents").glob("*.toml")),
+        plugin / "profiles.json",
+        plugin / "scripts/cortex_runtime/briefings.py",
+        plugin / "scripts/cortex_runtime/prompt_compiler.py",
+    )
+    for source in model_facing_sources:
+        source_text = source.read_text(encoding="utf-8").lower()
+        if any(marker in source_text for marker in path_guidance_markers):
+            fail(f"canonical inputSchema path guidance is duplicated in model-facing source: {source.name}")
+    canonical_schemas: dict[str, object] = {}
+    split_base_operations: set[str] = set()
+    for name, contract in contracts.items():
+        if not isinstance(name, str) or not name or not isinstance(contract, dict):
+            fail("every public contract must have a non-empty name and object definition")
+        if set(contract) != {
+            "description", "inputSchema", "base_operation", "injected_arguments",
+            "audience", "execution",
+        }:
+            fail(f"public contract has a non-canonical shape: {name}")
+        description = contract.get("description")
+        schema = contract.get("inputSchema")
+        base_operation = contract.get("base_operation")
+        injected = contract.get("injected_arguments")
+        audience = contract.get("audience")
+        execution = contract.get("execution")
+        if (
+            not isinstance(description, str)
+            or not description.strip()
+            or not isinstance(schema, dict)
+            or not isinstance(base_operation, str)
+            or not base_operation
+            or not isinstance(injected, dict)
+            or audience not in {"coordinator", "worker"}
+            or not isinstance(execution, dict)
+            or set(execution) != {"prerequisite", "terminal"}
+            or not isinstance(execution.get("prerequisite"), str)
+            or not isinstance(execution.get("terminal"), bool)
+        ):
+            fail(f"public contract metadata is incomplete: {name}")
+        properties = schema.get("properties")
+        required = schema.get("required")
+        if (
+            schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+            or not isinstance(properties, dict)
+            or not isinstance(required, list)
+            or set(injected) & set(properties)
+        ):
+            fail(f"public contract does not keep injected routing outside its closed input schema: {name}")
+        if audience == "worker":
+            dispatch_schema = properties.get("dispatch_ref")
+            if (
+                "dispatch_ref" not in required
+                or not isinstance(dispatch_schema, dict)
+                or dispatch_schema.get("type") != "string"
+                or dispatch_schema.get("format") != "cortex-dispatch-ref"
+                or "dispatch_ref" in description
+            ):
+                fail(f"worker dispatch authority must live only in the required inputSchema: {name}")
+        stack: list[object] = [schema]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if any(key in item for key in ("oneOf", "anyOf", "allOf", "not")):
+                    fail(f"public contract contains a schema combinator: {name}")
+                if item.get("type") == "object" and item.get("additionalProperties") is not False:
+                    fail(f"public contract contains an open object schema: {name}")
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+        canonical_schemas[name] = schema
+        if injected:
+            split_base_operations.add(base_operation)
+    if schemas != canonical_schemas:
+        fail("runtime public schema registry diverges from canonical public contracts")
+    if set(tools) != set(contracts):
+        fail("runtime public tool registry diverges from canonical public contracts")
+    for name, registration in tools.items():
+        if (
+            not isinstance(registration, dict)
+            or set(registration) != set(contracts[name]) | {"handler"}
+            or not callable(registration.get("handler"))
+            or {key: value for key, value in registration.items() if key != "handler"} != contracts[name]
+            or registration.get("inputSchema") is not contracts[name].get("inputSchema")
+        ):
+            fail(f"runtime public tool registration diverges from its canonical contract: {name}")
+    if split_base_operations & set(tools):
+        fail("retired multiplexed public aliases remain registered")
+    coordinator_tools = public_tools_for_audience(tools, "coordinator")
+    worker_tools = public_tools_for_audience(tools, "worker")
+    default_tools = public_tools_for_audience(tools, "default")
+    expected_coordinator = {name for name, contract in contracts.items() if contract.get("audience") == "coordinator"}
+    expected_worker = {name for name, contract in contracts.items() if contract.get("audience") == "worker"}
+    if (
+        not coordinator_tools
+        or not worker_tools
+        or set(coordinator_tools) & set(worker_tools)
+        or set(coordinator_tools) != expected_coordinator
+        or set(worker_tools) != expected_worker
+        or set(default_tools) != set(coordinator_tools) | set(worker_tools)
+        or set(default_tools) != set(contracts)
+    ):
+        fail("public tool audience ownership is not a disjoint complete projection")
+    control_skill_path = plugin / "skills/cortex-control/SKILL.md"
+    control_skill_text = control_skill_path.read_text(encoding="utf-8")
+    try:
+        expected_control_skill = expected_skill_text(control_skill_text, contracts)
+    except ValueError as exc:
+        fail(f"Cortex control tool catalog is invalid: {exc}")
+    if control_skill_text != expected_control_skill:
+        fail("Cortex control tool catalog differs from the canonical public registry")
     expected_hook_events = {"SessionStart", "SubagentStart", "SubagentStop", "Stop", "PostToolUse"}
     hook_registry = hooks.get("hooks", {})
     if not isinstance(hook_registry, dict) or set(hook_registry) != expected_hook_events:
@@ -379,6 +485,8 @@ def main() -> int:
             and line.strip() not in {
                 "<!-- BEGIN GENERATED PROFILE CATALOG -->",
                 "<!-- END GENERATED PROFILE CATALOG -->",
+                "<!-- BEGIN GENERATED CORTEX TOOL CATALOG -->",
+                "<!-- END GENERATED CORTEX TOOL CATALOG -->",
             }
         ]
         if forbidden_comments:
@@ -398,11 +506,15 @@ def main() -> int:
             fail("find-skills must require explicit skill-discovery intent")
     cortex_skill = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
     harvest_skill = (plugin / "skills/knowledge-harvest/SKILL.md").read_text(encoding="utf-8")
-    if "../knowledge-harvest/SKILL.md" not in cortex_skill or 'depends_on: ["scope"]' not in harvest_skill:
-        fail("harvest discovery must depend on scope in the orchestrator contract")
+    if not all(marker in cortex_skill for marker in ("`harvest`", "`harvest-refresh`")):
+        fail("orchestrator contract must expose both knowledge-harvest routes")
     if any(line.strip().startswith("<!--") for line in harvest_skill.splitlines()):
         fail("knowledge-harvest must not retain historical normative HTML comments")
-    required_routes = ("| `empty` | `orchestrate` |", "| `help` | `help` |", "| `harvest` | `harvest` |", "| `harvest-refresh` | `harvest-refresh` |", "| `normal` | `normal` |")
+    required_routes = (
+        "Select `empty` to start an explicitly activated task",
+        "guidance, `harvest` or `harvest-refresh`",
+        "or `normal` to leave the route",
+    )
     if not all(route in cortex_skill for route in required_routes):
         fail("Cortex skill must declare every supported route deterministically")
     required_invocation_guidance = (
@@ -427,8 +539,8 @@ def main() -> int:
         prompt_lower = prompt.lower()
         if "select this profile" in prompt_lower or "do not select" in prompt_lower:
             fail(f"selected worker prompt must not contain coordinator routing guidance: {path.name}")
-        if not all(marker in prompt_lower for marker in ("attemptresult", "escalate")):
-            fail(f"profile prompt lacks evidence or escalation guidance: {path.name}")
+        if "escalate" not in prompt_lower:
+            fail(f"profile prompt lacks escalation guidance: {path.name}")
         if not all(marker in prompt_lower for marker in ("role and mission:", "operating workflow:", "quality bar:")):
             fail(f"profile prompt lacks the professional playbook structure: {path.name}")
         if "gpt-" in prompt or "model_reasoning_effort" in prompt:

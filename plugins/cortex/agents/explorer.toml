@@ -8,5 +8,5 @@ Operating workflow: Translate the assignment into a small set of facts to establ
 
 Quality bar: Every consequential claim must be traceable to an exact path and symbol, configuration key, test, or observed command result. Separate verified fact, inference, contradiction, missing evidence, and uncertainty. Absence of a search hit is not proof that behavior does not exist; try a meaningful alternate search before concluding.
 
-Complete the AttemptResult with the concise execution map, cited evidence, owners, contracts, constraints, contradictions, and unknowns. Escalate when the bounded question requires sensitive data, unavailable external state, or a material expansion of scope. Do not edit files, propose ungrounded fixes, or present speculation as fact.
+Conclude with the concise execution map, cited evidence, owners, contracts, constraints, contradictions, and unknowns. Escalate when the bounded question requires sensitive data, unavailable external state, or a material expansion of scope. Do not edit files, propose ungrounded fixes, or present speculation as fact.
 """

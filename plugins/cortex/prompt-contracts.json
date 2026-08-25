@@ -38,8 +38,8 @@
     "mode": {"source": "profiles.json.mode_overlays", "task_data": false, "conditional": true},
     "gate": {"source": "profiles.json.gate_briefings + compiler.gate_contracts", "task_data": false, "conditional": true},
     "context": {"source": "compiler.context_contracts", "task_data": false, "conditional": true},
-    "tool_protocol": {"source": "profiles.json.shared_worker_contract.operation_cards + runtime MCP schema", "task_data": false},
-    "output_contract": {"source": "profiles.json.shared_worker_contract + AttemptResult/Event schemas + result and human projections", "task_data": false},
+    "tool_protocol": {"source": "profiles.json.shared_worker_contract.operation_guidance + active public MCP schema registry", "task_data": false},
+    "output_contract": {"source": "profiles.json.shared_worker_contract + active completion schema + result and human projections", "task_data": false},
     "stopping": {"source": "compiler.stopping_contract", "task_data": false}
   },
   "sources": {
@@ -49,35 +49,31 @@
     "mode_delta": "profiles.json.mode_overlays",
     "task_data": "generated assignment JSON",
     "tool_schema": "runtime MCP schema",
-    "operation_cards": "profiles.json.shared_worker_contract.operation_cards"
+    "tool_schema_registry": "active public MCP schema registry"
   },
   "v3": {
-    "title": "Cortex Worker Briefing v3 (artifact-backed, attempt-result protocol)",
+    "title": "Cortex Worker Briefing v3 (artifact-backed semantic lifecycle)",
     "required_sections": ["authority", "hard_constraints", "assignment", "role", "tool_protocol", "output_contract", "stopping"],
     "conditional_sections": ["mode", "gate", "context"],
-    "artifact_contract": "immutable_briefing_digest_bootstrap_remains_authoritative; AttemptResult/Event are the worker semantic transport; attempt_result_ref and any server-built human projection are derived outputs",
-    "failure_response_contract": "An expected MCP validation or domain failure is a tools/call result with isError=true and concise content, plus ok=false top-level error and recovery in structuredContent when the transport preserves it; it is not a raw JSON-RPC error. Use only public diagnostics, field schemas, allowed_ops, and opaque handles/digests; never inspect Cortex source, cache, logs, ledger, session, environment, or hidden paths. same_operation is legal only when retryable=true, state_mutated=false, and nonempty allowed_changes make one exact retry deterministic; otherwise stop. Incomplete recovery returns CORTEX_PROTOCOL_FAILURE retryable=false.",
+    "artifact_contract": "The immutable briefing and native dispatch are authoritative. Workers publish semantic evidence and one conclusion through the action-specific tools; canonical results and human projections are server-derived outputs.",
+    "failure_response_contract": "Expected MCP validation or domain failure remains a tools/call result with isError=true and a flat Cortex response. Use only public flat diagnostics, allowed_changes, and opaque repair values; never inspect Cortex source, cache, logs, ledger, session, environment, or hidden paths. Retry once only when retryable=true, state_mutated=false, and complete allowed_changes make that retry deterministic; otherwise stop. Incomplete public failure data fails closed with CORTEX_PROTOCOL_FAILURE retryable=false.",
     "prompt_volume_guidance": "Prompt volume targets are advisory worker guidance only. Prefer concise, complete evidence where practical, but never truncate, summarize away, reject, or omit material task, plan, result, event, question, answer, or artifact data to satisfy a byte, character, or file-size target. A complete payload may exceed any target and must be submitted intact; backend persistence stores the complete submitted content."
   },
-  "attempt_result_contract": {
-    "schema": "cortex/attempt-result/v1",
-    "required_fields": ["status", "summary", "findings", "decisions_needed", "unresolved"],
-    "optional_payload": "typed gate payloads when a gate requires them",
-    "worker_authority": "semantic facts only; the worker result is never authoritative for identity, task revision, dispatch, profile, phase, predecessors, changed_files, timestamps, verification metadata, receipts, or evidence markers",
-    "server_receipts": ["briefing_read", "predecessor_read"],
-    "projection": "attempt_result_ref and any human projection generated from the canonical AttemptRecord; coordinators obtain refs server-side through read_worker_result and never receive them from worker final text",
-    "coordinator_completion": "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned spawn_agent call with unmodified arguments; a self-authored task name or replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the worker final must be exactly ATTEMPT_COMPLETED. The coordinator calls read_worker_result with task_ref plus coordinator_ref plus the exact server-derived step; the server returns all canonical results for the current wave and the continuation. The coordinator then follows only that server-returned continuation and closes the completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed. A successful continuation is one-shot: follow only its returned native dispatch, wait, or terminal outcome; never call continue again with copied refs, request artifacts, a replacement pipeline, or a replacement worker. A task-identity or step-mismatch diagnostic is recoverable only with the same explicit coordinator capability: inspect the same task and follow server-owned recovery or a concrete user question; never infer authority from a host session."
+  "worker_completion_contract": {
+    "worker_authority": "Workers publish semantic conclusions only. Cortex derives lifecycle identity, provenance, workspace observations, and durable evidence.",
+    "worker_question_pause": "After durably publishing a required question, the worker ends its current native turn with a durable-question marker. It does not begin project work, poll, or submit before same-child follow-up after the real user answer.",
+    "coordinator_waiting": "Request one explicit 300-second native wait on the exact child and never use the native default wait duration. If no marker returns, request another explicit 300-second native wait on that exact child. A timeout or no child message leaves the child live. Only a durable-question marker authorizes the user-answer pause, and only a terminal-completion marker authorizes a canonical wave or result read.",
+    "coordinator_completion": "Native child output is not completion evidence. Read the current worker wave, follow the returned lifecycle direction, and deliver only after durable close evidence exists."
   },
   "role_delta_required_markers": [
     "Role and mission:",
     "Operating workflow:",
     "Quality bar:",
-    "AttemptResult",
     "Escalate"
   ],
   "skill_section_requirements": {
     "orchestrator": ["## Invocation", "## Normal lifecycle"],
-    "cortex-control": ["## MCP Cortex response handling", "## Exact authority pairs", "## Native V2 lifecycle"],
+    "cortex-control": ["## Schema authority and response handling", "## Authority boundaries", "## Lifecycle"],
     "context-compaction": ["## Cortex v11 compaction rule"],
     "knowledge-harvest": ["## Modes", "## Required pipeline", "## Worker result shape"],
     "output-validation": []
@@ -102,24 +98,16 @@
       "gpt-5.6-terra",
       "gpt-5.6-sol"
     ],
-    "forbidden_prompt_protocol_duplicates": [
-      "start_orchestration",
-      "continue_orchestration",
-      "record_attempt_event",
-      "complete_attempt",
-      "worker_question",
-      "read_worker_result"
-    ],
     "forbidden_role_protocol_phrases": [
       "Question resume:",
-      "Completion: End only with complete_attempt",
-      "worker_question(action=",
+      "Completion: End only with",
+      "embedded invocation examples",
       "record_attempt_event"
     ],
     "source_ownership": {
-      "worker_operation_cards": "profiles.json.shared_worker_contract.operation_cards",
-      "worker_assignment_authorization": "explicit task_ref plus assignment_ref capability",
-      "planner_shape": "profiles.json.shared_worker_contract.planner_completion_shape",
+      "worker_tool_schema": "active public MCP schema registry",
+      "worker_assignment_authorization": "one exact opaque authority carried by the native dispatch",
+      "planner_shape": "semantic work breakdown published through the current worker completion tool",
       "attachment_preflight": "profiles.json.shared_worker_contract.attachment_preflight",
       "activation_context": "profiles.json.shared_worker_contract.activation_context"
     }
@@ -135,19 +123,6 @@
     "max_public_calls": 20,
     "max_native_calls": 20,
     "max_stream_events": 512,
-    "live_runner": {
-      "scope": "development_source_prompt_eval_only",
-      "command": "codex exec",
-      "sandbox": "read-only",
-      "timeout_seconds": 90,
-      "max_stream_bytes": 262144,
-      "max_output_bytes": 16384,
-      "max_output_tokens": 4096,
-      "response_schema": "cortex/prompt-live-eval-response/v1",
-      "required_route": "worker",
-      "required_completion": "attempt_completed",
-      "forbidden_models": ["gpt-5.6-terra", "gpt-5.6-sol"],
-      "live_default": false
-    }
+    "live_verification": "development-only manual evidence in an ordinary interactive Codex CLI or tmux session; it is not a release gate or worker-lifecycle assertion"
   }
 }

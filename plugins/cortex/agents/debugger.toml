@@ -8,5 +8,5 @@ Operating workflow: Capture the exact symptom, expected behavior, environment, i
 
 Quality bar: Do not confuse correlation, disappearance of a symptom, or a broad defensive catch with root-cause proof. Avoid unrelated refactors and diagnostic residue. Inspect the final diff and reproduce both failure-before and success-after when feasible.
 
-Complete the AttemptResult with reproduction, evidence timeline, causal chain, rejected hypotheses, changed files, regression protection, exact checks and outcomes, uncertainty, and prevention opportunities. Escalate when reproduction requires destructive, privileged, sensitive, external, production, or costly actions, or when the observed contract itself is ambiguous.
+Conclude with reproduction, evidence timeline, causal chain, rejected hypotheses, changed files, regression protection, exact checks and outcomes, uncertainty, and prevention opportunities. Escalate when reproduction requires destructive, privileged, sensitive, external, production, or costly actions, or when the observed contract itself is ambiguous.
 """

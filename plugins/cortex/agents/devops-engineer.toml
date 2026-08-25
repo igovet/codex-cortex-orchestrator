@@ -8,5 +8,5 @@ Operating workflow: Inspect the current desired state, modules and pipelines, en
 
 Quality bar: A successful template render is not deployment proof. Separate validated configuration, planned external changes, and unverified environment behavior. Avoid manual drift, broad permissions, unbounded cost, and irreversible rollout steps.
 
-Complete the AttemptResult with changed infrastructure files, sanitized plan or lint evidence, affected environments, permissions and secrets impact, blast radius, rollout and rollback, exact commands, and remaining environment risk. Escalate network, credential, billing, production, destructive, privileged, or externally visible actions and never apply them without explicit authorization and approval.
+Conclude with changed infrastructure files, sanitized plan or lint evidence, affected environments, permissions and secrets impact, blast radius, rollout and rollback, exact commands, and remaining environment risk. Escalate network, credential, billing, production, destructive, privileged, or externally visible actions and never apply them without explicit authorization and approval.
 """

@@ -20,11 +20,16 @@ describe the same v11 task and capability contract.
 
 ## Current contract
 
-The package exposes exactly nine operations. Coordinator tasks expose
-`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
-`manage_governance`, and `read_worker_result`. Worker tasks expose
-`worker_question`, `record_attempt_event`, `complete_attempt`,
-`read_dispatch_briefing`, and `read_worker_result`.
+The package exposes one MCP tool for each semantic action. Lifecycle,
+inspection, recovery, interaction, approval, artifacts, lane/resource control,
+governance, attempt submission/repair, and scoped reads are separate tools,
+with no multiplexed selector or aliases. `tools/list` is the authoritative
+operation inventory.
+
+`public_contracts.py` supplies every tool's complete closed one-level
+`inputSchema`; the runtime validator consumes that same schema. Descriptions
+remain short and semantic. Skills and prompts contain no copied argument names,
+field constraints, or schema templates.
 
 Workers send complete semantic events and one `AttemptResult`. The server owns
 identity, timestamps, dispatch/profile/phase, task revision, changed files,
@@ -32,7 +37,7 @@ checks, verification observations, and result links. `ContextCompiler` and
 `HandoffCompiler` expose complete, target-specific context. Result views
 are rebuildable and cannot authorize lifecycle transitions.
 
-The validator checks the v11 registry, schema v17, strict coordinator and
+The validator checks the v11 action-specific catalog, schema v18, strict coordinator and
 worker projections, profile TOML parity, Prompt Contract v3, the five hooks,
 launcher paths, and the knowledge-route inventory. The prompt contract has one
 stable v3 renderer and no alternate prompt format or comparison runner.
@@ -45,8 +50,9 @@ The v11 release label is 11.0.1. The package must not expose `create_thread`,
 session/environment authorization, server-owned CLI or executor launches,
 `repair_planning`, or manually authored `advance`/`completions`. The only
 worker lifecycle is the exact server-issued `spawn_agent` target, exact `wait`,
-`read_worker_result`, and server-derived continuation. Legacy rows are
-quarantined and fail closed. The SQLite schema history and independent Prompt
+an action-specific canonical wave read, and server-derived continuation. Only
+the exact signed V11 v1--v8 lineage upgrades atomically to schema v18; unknown
+histories fail closed. The SQLite schema history and independent Prompt
 Contract/question schema histories remain storage/documentation history, not
 alternate public task protocols.
 

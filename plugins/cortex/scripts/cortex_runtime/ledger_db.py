@@ -38,12 +38,32 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 17
+DATABASE_SCHEMA_VERSION = 18
+_PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION = 17
+# One released aggregate-v17 build wrote this exact signed history before the
+# report-only repair and plain-text question hard cuts.  It is a migration
+# input only: both the exact row below and the legacy v17 schema shape must
+# match before any DDL runs.
+_EXACT_LEGACY_PRE_REPORT_V17_HISTORY: tuple[tuple[int, str, str], ...] = (
+    (17, "canonical-current-ledger", "fe628a4a38ba4462ba0a53f3602bc4d0809e8073e5dfb62bc0e50bd0cd2a4dbb"),
+)
 # v11 is a hard namespace cutover. The immediately preceding canonical
 # database is eligible for whole-ledger quarantine only when its exact
 # version/name/checksum identity matches the release that wrote it. Unknown or
 # tampered ledgers remain fail-closed and are never replaced.
 _PRIOR_CANONICAL_DATABASE_SCHEMA_VERSIONS = frozenset({16})
+# Exact source identity of the one aggregate-v17 namespace that preceded the
+# current governance-v17 layout.  It is eligible only for whole-namespace
+# quarantine; no row or authority is imported.  Matching both the signed
+# migration row and the complete sqlite_master fingerprint prevents an
+# arbitrary checksum rewrite from turning current authority into a fresh
+# bootstrap.
+_SUPPORTED_PRIOR_AGGREGATE_V17_IDENTITIES = frozenset({
+    (
+        (17, "canonical-current-ledger", "549cac1cbdfb1c019ee9de2c1f0fe7c151d5c3bb2faeeb34e539ae3d6e0f6973"),
+        "c4680ffa5c652d5a190a5a180d86acc7aad081381aede19e1fb38cde1001de31",
+    ),
+})
 # These are the migration identities emitted by the pre-canonical ledger
 # format.  They are retained only as recognition data: the current runtime
 # never replays or imports these migrations.  A database is eligible for
@@ -66,12 +86,30 @@ _PRECANONICAL_MIGRATION_NAMES = {
     14: "attempt-verification-authority",
     15: "attempt-question-decision-events",
 }
+# The immediately previous V11 build recorded the incremental v1..v8 ledger
+# history below.  It is a supported storage predecessor, not a public
+# protocol: opening it upgrades the private database in place while the
+# current public operation registry is reissued empty.  The checksums are the
+# executable migration identities emitted by that build, not names supplied by
+# a caller or inferred from a project directory.
+_SUPPORTED_PREVIOUS_V11_V8_HISTORY: tuple[tuple[int, str, str], ...] = (
+    (1, "sqlite-ledger-base", "22987cef753fa59594fcb25794b0c29d63f9d9660879c15ae994cb13af354cbe"),
+    (2, "immutable-artifact-catalog-and-chunks", "e9bb55107d182a08baa01826e8ff6e242956e5e7d32a730f097dcb49b07659ef"),
+    (3, "canonical-task-findings", "0ee95845cf6d5f9aac5bc7aabd9f3774ca03f08e53168b3efba34b6562635295"),
+    (4, "finding-waiver-and-resolution-metadata", "1e5886140fc287e3dcf12666398ddbbed3655298594350c9dec0b0988c961e6d"),
+    (5, "projection-jobs", "fa1c55dd14ea965b59b069ed24bfe80d9b71c68792be5c9010eb0a6242dab853"),
+    (6, "crash-safe-prune-tombstones", "a466fdfc92d3ada9e3956b06502cd8d771b1147732e7d0305857a589e660cabc"),
+    (7, "canonical-content-blobs-and-logical-artifacts", "1cf51c69cab95e7a1d678522d562ca19347d8494e3e145f1e5c46f48ecf6219b"),
+    (8, "revision-aware-orchestration", "081812ef70c27cbe647a7c6988ffa61c4a29a25859272e0169a87be48e7ff6f8"),
+)
+_PRIVATE_LEGACY_OPERATION_REGISTRY_NAME = "private_legacy_operation_registry_v11"
+_PRIVATE_LEGACY_TASK_IDS_NAME = "private_legacy_task_ids_v11"
+_CURRENT_OPERATION_REGISTRY_SCHEMA = "cortex/orchestration/v11"
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 # Paging is optional caller framing, not a server-side content quota.  A
 # UTF-8-safe page may exceed an extremely small caller request by one scalar.
 ARTIFACT_TRANSPORT_MIN_BYTES = 1
 ARTIFACT_TRANSPORT_MAX_BYTES = None
-ARTIFACT_CURSOR_MAX_CHARS = 4096
 # Mutable documents are coordination metadata, never an artifact transport.
 # Strict JSON and atomic writes preserve integrity without a size quota.
 MAX_DURABLE_DOCUMENT_KEY_BYTES = 160
@@ -464,6 +502,44 @@ def _is_recognized_precanonical_history(
     return True
 
 
+def _history_matches(
+    history: Sequence[tuple[object, ...]],
+    expected: Sequence[tuple[int, str, str]],
+    user_version: int,
+) -> bool:
+    """Return whether one stored history is the exact expected lineage."""
+    try:
+        normalized = tuple((int(row[0]), str(row[1]), str(row[2])) for row in history)
+    except (IndexError, TypeError, ValueError):
+        return False
+    expected_rows = tuple(expected)
+    return bool(expected_rows) and normalized == expected_rows and user_version == expected_rows[-1][0]
+
+
+def _is_supported_previous_v11_v8_history(
+    history: Sequence[tuple[object, ...]],
+    user_version: int,
+) -> bool:
+    """Recognize only the signed previous V11 v1..v8 storage lineage."""
+    try:
+        normalized = tuple((int(row[0]), str(row[1]), str(row[2])) for row in history)
+    except (IndexError, TypeError, ValueError):
+        return False
+    return normalized == _SUPPORTED_PREVIOUS_V11_V8_HISTORY and user_version == 8
+
+
+def _schema_identity_fingerprint(connection: sqlite3.Connection) -> str:
+    """Hash the complete normalized non-internal SQLite schema identity."""
+    rows = [
+        tuple(" ".join(str(value or "").split()) for value in row)
+        for row in connection.execute(
+            "SELECT type,name,COALESCE(sql,'') FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        )
+    ]
+    return hashlib.sha256(_canonical_json(rows).encode("utf-8")).hexdigest()
+
+
 def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]) -> bool:
     """Return whether the private ledger is not the exact current one.
 
@@ -492,9 +568,9 @@ def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]
                 history = [tuple(row) for row in connection.execute(
                     "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
                 )]
-                if history == [expected] and user_version == migration.version:
+                if _is_current_migration_history(history, user_version, migrations):
                     try:
-                        _assert_migration_schema(connection, migration.version)
+                        _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
                     except (KeyError, TypeError, ValueError, sqlite3.Error):
                         # A database that advertises the current canonical
                         # migration but has lost or altered schema objects is
@@ -504,13 +580,23 @@ def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]
                         raise
                     return False
 
-                # A breaking runtime release never imports or upgrades the
-                # prior canonical namespace. Recognize only its exact signed
-                # migration identity, then archive the entire ledger before a
-                # fresh database is created. This check deliberately binds the
-                # version, canonical name, ordered executable statements, and
-                # PRAGMA user_version; a changed checksum/name/version is not a
-                # prior release and must fail closed below.
+                if _is_pre_question_batch_current_migration_history(history, user_version):
+                    _assert_migration_schema(
+                        connection,
+                        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
+                        pre_report_repair=_is_pre_report_current_migration_history(
+                            history, user_version,
+                        ),
+                    )
+                    return False
+
+                if _is_supported_previous_v11_v8_history(history, user_version):
+                    _assert_migration_schema(connection, 8)
+                    return False
+
+                # The prior aggregate v16 namespace remains a separately
+                # recognized hard cutover.  Only the installed incremental
+                # v1..v8 V11 lineage below is a supported in-place upgrade.
                 recognized_prior_canonical = {
                     (
                         version,
@@ -524,11 +610,6 @@ def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]
                     and history[0] in recognized_prior_canonical
                     and user_version == int(history[0][0])
                 ):
-                    # The lifecycle key is optional until an authority-bearing
-                    # operation first creates it.  When it exists, however,
-                    # it is part of the prior namespace's integrity boundary:
-                    # an unsafe, replaced, or malformed sidecar must not be
-                    # swept into an archive under a trusted release label.
                     prior_key = _governance_lifecycle_key_path(root)
                     try:
                         prior_key.lstat()
@@ -538,19 +619,22 @@ def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]
                         _governance_lifecycle_hmac_key(root, create=False)
                     return True
 
-                # A single current-version row with the canonical migration
-                # name is the identity of this release's ledger.  If its
-                # checksum or PRAGMA user_version differs, the source plan or
-                # the ledger authority was modified after creation.  Replaying
-                # the changed plan into a fresh file could create a subtly
-                # incompatible schema, so fail closed before quarantine.
-                canonical_identity = (
-                    len(history) == 1
-                    and int(history[0][0]) == migration.version
-                    and str(history[0][1]) == migration.name
+                # The one prior aggregate-v17 layout is a hard-cutover input
+                # only when both its exact migration row and complete schema
+                # fingerprint match the release that wrote it.  A same-name
+                # row with any other checksum/schema is untrusted and falls
+                # through to the fail-closed path below.
+                prior_aggregate_identity = (
+                    tuple((int(row[0]), str(row[1]), str(row[2])) for row in history),
+                    _schema_identity_fingerprint(connection),
                 )
-                if canonical_identity:
-                    raise ValueError("Cortex database is an unsupported pre-canonical ledger")
+                if (
+                    user_version == DATABASE_SCHEMA_VERSION
+                    and len(prior_aggregate_identity[0]) == 1
+                    and (prior_aggregate_identity[0][0], prior_aggregate_identity[1])
+                    in _SUPPORTED_PRIOR_AGGREGATE_V17_IDENTITIES
+                ):
+                    return True
 
                 if _is_recognized_precanonical_history(history, user_version):
                     # A known historical namespace is safe to isolate as a
@@ -1156,7 +1240,6 @@ _ARTIFACT_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS logical_artifacts_task_created_idx ON logical_artifacts(task_id, created_at DESC, artifact_id)",
     "CREATE INDEX IF NOT EXISTS logical_artifacts_blob_idx ON logical_artifacts(blob_id)",
     "CREATE INDEX IF NOT EXISTS artifact_exports_task_path_idx ON artifact_exports(task_id, export_path)",
-    "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('artifact_cursor_hmac_key', '<runtime-token>')",
 )
 _CLOSURE_SCHEMA_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS task_findings(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, fingerprint TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL, blocking INTEGER NOT NULL CHECK(blocking IN (0, 1)), summary TEXT NOT NULL, details TEXT, next_action_json TEXT, source_evidence_json TEXT NOT NULL, first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL, waiver_reason TEXT, waived_by TEXT, waived_at TEXT, resolved_at TEXT, PRIMARY KEY(task_id, fingerprint))",
@@ -1184,22 +1267,47 @@ _PRUNE_SCHEMA_STATEMENTS = (
 _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS: tuple[str, ...] = ()
 
 _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
-    "CREATE TABLE IF NOT EXISTS task_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), base_revision INTEGER, source TEXT NOT NULL CHECK(source IN ('initial','user_steer','recovery','system')), message_original TEXT NOT NULL, message_language TEXT NOT NULL, message_en TEXT, translation_status TEXT NOT NULL DEFAULT 'not_required' CHECK(translation_status IN ('not_required','pending','translated')), created_at TEXT NOT NULL, PRIMARY KEY(task_id, task_revision))",
+    "CREATE TABLE IF NOT EXISTS task_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), base_revision INTEGER, source TEXT NOT NULL CHECK(source IN ('initial','user_steer','recovery','system')), message_original TEXT NOT NULL, message_language TEXT NOT NULL, message_en TEXT, translation_status TEXT NOT NULL DEFAULT 'not_required' CHECK(translation_status = 'not_required'), created_at TEXT NOT NULL, PRIMARY KEY(task_id, task_revision))",
     "CREATE TABLE IF NOT EXISTS plan_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, plan_revision INTEGER NOT NULL CHECK(plan_revision >= 1), base_plan_revision INTEGER, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), impact_json TEXT NOT NULL, plan_json TEXT, status TEXT NOT NULL CHECK(status IN ('active','superseded','approved','pending')), created_at TEXT NOT NULL, PRIMARY KEY(task_id, plan_revision))",
     "CREATE TABLE IF NOT EXISTS worker_sessions(session_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, host_agent_id TEXT, host_task_name TEXT NOT NULL, host_tool TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 1), status TEXT NOT NULL CHECK(status IN ('awaiting_spawn','running','idle_resumable','stopped_recoverable','terminated_unavailable','completed')), resumable INTEGER NOT NULL DEFAULT 1 CHECK(resumable IN (0,1)), started_at TEXT, last_seen_at TEXT NOT NULL, terminated_at TEXT, UNIQUE(task_id, attempt_id, generation), UNIQUE(task_id, host_agent_id))",
     "CREATE TABLE IF NOT EXISTS attempt_messages(message_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('user','coordinator','system')), kind TEXT NOT NULL CHECK(kind IN ('question_answer','steer','correction','recovery')), original_text TEXT NOT NULL, original_language TEXT NOT NULL, canonical_en TEXT NOT NULL, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), created_at TEXT NOT NULL, delivered_at TEXT, acknowledged_at TEXT)",
-    "CREATE TABLE IF NOT EXISTS question_batches(batch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, batch_key TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','answered','superseded')), language TEXT NOT NULL, created_at TEXT NOT NULL, answered_at TEXT, UNIQUE(task_id, attempt_id, batch_key))",
-    "CREATE TABLE IF NOT EXISTS question_items(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, question_type TEXT NOT NULL CHECK(question_type IN ('single_select','multi_select','text')), canonical_question TEXT NOT NULL, localized_question TEXT NOT NULL, options_json TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 1), PRIMARY KEY(batch_id, question_key), UNIQUE(batch_id, ordinal))",
-    "CREATE TABLE IF NOT EXISTS question_answers(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, answer_original TEXT NOT NULL, answer_original_language TEXT NOT NULL, answer_option_ids_json TEXT NOT NULL, answer_en TEXT, translation_status TEXT NOT NULL CHECK(translation_status IN ('not_required','awaiting_translation','translated')), translated_by TEXT, translated_at TEXT, PRIMARY KEY(batch_id, question_key), FOREIGN KEY(batch_id, question_key) REFERENCES question_items(batch_id, question_key) ON DELETE CASCADE)",
     "CREATE TABLE IF NOT EXISTS orchestration_trace(trace_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT, event TEXT NOT NULL, occurred_at TEXT NOT NULL, metadata_json TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS tool_observations(observation_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, context_epoch INTEGER NOT NULL CHECK(context_epoch >= 0), fingerprint TEXT NOT NULL, tool_name TEXT NOT NULL, normalized_arguments TEXT NOT NULL, workspace_generation TEXT NOT NULL, result_digest TEXT, coverage TEXT, status TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, repeat_count INTEGER NOT NULL DEFAULT 0 CHECK(repeat_count >= 0), UNIQUE(task_id, attempt_id, context_epoch, fingerprint))",
     "CREATE INDEX IF NOT EXISTS task_revisions_created_idx ON task_revisions(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS plan_revisions_created_idx ON plan_revisions(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS worker_sessions_status_idx ON worker_sessions(task_id, status, last_seen_at)",
     "CREATE INDEX IF NOT EXISTS attempt_messages_delivery_idx ON attempt_messages(task_id, attempt_id, delivered_at, created_at)",
-    "CREATE INDEX IF NOT EXISTS question_batches_status_idx ON question_batches(task_id, status, created_at)",
     "CREATE INDEX IF NOT EXISTS orchestration_trace_task_idx ON orchestration_trace(task_id, occurred_at)",
     "CREATE INDEX IF NOT EXISTS tool_observations_attempt_idx ON tool_observations(task_id, attempt_id, context_epoch, last_seen_at)",
+)
+
+# This is recognition-only source for the exact v17 predecessor.  It is never
+# replayed for a new database: the v17 -> v18 migration drops these retired
+# storage objects after validating the predecessor's signed history and full
+# schema identity.
+_PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
+    *_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS[:4],
+    "CREATE TABLE IF NOT EXISTS question_batches(batch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, batch_key TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','answered','superseded')), language TEXT NOT NULL, created_at TEXT NOT NULL, answered_at TEXT, UNIQUE(task_id, attempt_id, batch_key))",
+    "CREATE TABLE IF NOT EXISTS question_items(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, question_type TEXT NOT NULL CHECK(question_type IN ('single_select','multi_select','text')), canonical_question TEXT NOT NULL, localized_question TEXT NOT NULL, options_json TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 1), PRIMARY KEY(batch_id, question_key), UNIQUE(batch_id, ordinal))",
+    "CREATE TABLE IF NOT EXISTS question_answers(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, answer_original TEXT NOT NULL, answer_original_language TEXT NOT NULL, answer_option_ids_json TEXT NOT NULL, answer_en TEXT, translation_status TEXT NOT NULL DEFAULT 'not_required' CHECK(translation_status = 'not_required'), translated_by TEXT, translated_at TEXT, PRIMARY KEY(batch_id, question_key), FOREIGN KEY(batch_id, question_key) REFERENCES question_items(batch_id, question_key))",
+    *_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS[4:10],
+    "CREATE INDEX IF NOT EXISTS question_batches_status_idx ON question_batches(task_id, status, created_at)",
+    *_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS[10:],
+)
+
+_QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS = (
+    "DROP INDEX question_batches_status_idx",
+    "DROP TABLE question_answers",
+    "DROP TABLE question_items",
+    "DROP TABLE question_batches",
+)
+
+# One durable record holds the human-visible question text and its optional
+# answer.  Structured batch/options/localization state is intentionally not
+# retained in the current ledger.
+_DURABLE_QUESTION_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS durable_questions(question_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, dispatch_ref TEXT NOT NULL, profile TEXT NOT NULL, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), attempt_generation INTEGER NOT NULL CHECK(attempt_generation >= 1), submission_id TEXT NOT NULL, question_text TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','answered','superseded')), content_digest TEXT NOT NULL, published_sequence INTEGER NOT NULL CHECK(published_sequence >= 1), answer_text TEXT, answer_submission_id TEXT, answer_digest TEXT, answered_sequence INTEGER CHECK(answered_sequence >= 1), created_at TEXT NOT NULL, answered_at TEXT, superseded_at TEXT, UNIQUE(task_id,attempt_id,submission_id), UNIQUE(task_id,published_sequence))",
+    "CREATE INDEX IF NOT EXISTS durable_questions_task_status_published_idx ON durable_questions(task_id,status,published_sequence)",
 )
 
 # Governance is part of the one current canonical ledger schema. Bodies are
@@ -1384,10 +1492,28 @@ _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS = (
 # result, or workspace row is changed.  Rows live exactly as long as their
 # owning task and are immutable after insertion; identical rejected drafts
 # reuse one row and therefore one signed public handle.
-_REPAIR_ESCROW_SCHEMA_STATEMENTS = (
+_PRE_REPORT_REPAIR_ESCROW_SCHEMA_STATEMENTS = (
     "CREATE TABLE repair_escrow(handle_digest TEXT PRIMARY KEY, handle_id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, task_ref_digest TEXT NOT NULL, assignment_ref_digest TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('plan','outcome')), base_payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, allowed_paths_json TEXT NOT NULL, escrow_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, assignment_ref_digest, escrow_digest))",
     "CREATE INDEX repair_escrow_task_attempt_idx ON repair_escrow(task_id, attempt_id, created_at)",
     "CREATE TRIGGER repair_escrow_immutable_update BEFORE UPDATE ON repair_escrow FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'repair escrow rows are immutable'); END",
+)
+
+_REPAIR_ESCROW_SCHEMA_STATEMENTS = (
+    "CREATE TABLE repair_escrow(handle_digest TEXT PRIMARY KEY, handle_id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, dispatch_ref_digest TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind = 'report'), base_payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, allowed_paths_json TEXT NOT NULL, escrow_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, dispatch_ref_digest, escrow_digest))",
+    "CREATE INDEX repair_escrow_task_attempt_idx ON repair_escrow(task_id, attempt_id, created_at)",
+    "CREATE TRIGGER repair_escrow_immutable_update BEFORE UPDATE ON repair_escrow FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'repair escrow rows are immutable'); END",
+)
+
+# Exact pre-hard-cut v17 ledgers are authenticated by migration checksum
+# before this rebuild runs.  Their plan/outcome escrows are retired bearer
+# authorities and therefore are deliberately not copied into the current
+# report-only table.
+_REPORT_REPAIR_ESCROW_REBUILD_STATEMENTS = (
+    "DROP TRIGGER repair_escrow_immutable_update",
+    "DROP INDEX repair_escrow_task_attempt_idx",
+    "ALTER TABLE repair_escrow RENAME TO repair_escrow_pre_report_v17",
+    *_REPAIR_ESCROW_SCHEMA_STATEMENTS,
+    "DROP TABLE repair_escrow_pre_report_v17",
 )
 
 _PRIOR_CANONICAL_STATEMENTS_BY_VERSION: dict[int, tuple[str, ...]] = {
@@ -1400,7 +1526,7 @@ _PRIOR_CANONICAL_STATEMENTS_BY_VERSION: dict[int, tuple[str, ...]] = {
         + _CLOSURE_SCHEMA_STATEMENTS
         + _PROJECTION_SCHEMA_STATEMENTS
         + _PRUNE_SCHEMA_STATEMENTS
-        + _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
+        + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
         + _GOVERNANCE_SCHEMA_STATEMENTS
         + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
         + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
@@ -1418,6 +1544,341 @@ def _prior_canonical_migration(version: int) -> _Migration:
     except KeyError as exc:
         raise ValueError("unknown prior canonical ledger version") from exc
     return _Migration(version, "canonical-current-ledger", statements)
+
+
+def _v11_forward_upgrade_from_v8_migration_v17() -> _Migration:
+    """Return the exact post-report v17 upgrade written by the prior build."""
+    return _Migration(
+        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
+        "v11-forward-upgrade-from-v8",
+        _GOVERNANCE_SCHEMA_STATEMENTS
+        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
+        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
+        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
+        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+        + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
+    )
+
+
+def _v11_forward_upgrade_from_v8_migration() -> _Migration:
+    """Upgrade the signed v1..v8 lineage while removing retired batch tables."""
+    prior = _v11_forward_upgrade_from_v8_migration_v17()
+    return _Migration(
+        DATABASE_SCHEMA_VERSION,
+        prior.name,
+        prior.statements
+        + _DURABLE_QUESTION_SCHEMA_STATEMENTS
+        + _QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS,
+    )
+
+
+def _pre_question_batch_current_migration_histories() -> tuple[tuple[tuple[int, str, str], ...], ...]:
+    """Return exact v17 histories accepted for the atomic batch-storage cut."""
+    fresh = _Migration(
+        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
+        "canonical-current-ledger",
+        _BASE_SCHEMA_STATEMENTS
+        + _ARTIFACT_SCHEMA_STATEMENTS
+        + _CLOSURE_SCHEMA_STATEMENTS
+        + _PROJECTION_SCHEMA_STATEMENTS
+        + _PRUNE_SCHEMA_STATEMENTS
+        + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
+        + _GOVERNANCE_SCHEMA_STATEMENTS
+        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
+        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
+        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
+        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+        + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
+    )
+    v8_upgrade = _v11_forward_upgrade_from_v8_migration_v17()
+    return (
+        ((fresh.version, fresh.name, _migration_checksum(fresh)),),
+        _SUPPORTED_PREVIOUS_V11_V8_HISTORY + (
+            (v8_upgrade.version, v8_upgrade.name, _migration_checksum(v8_upgrade)),
+        ),
+    )
+
+
+def _is_pre_question_batch_current_migration_history(
+    history: Sequence[tuple[object, ...]],
+    user_version: int,
+) -> bool:
+    return any(
+        _history_matches(history, expected, user_version)
+        for expected in _pre_question_batch_current_migration_histories()
+    ) or _is_pre_report_current_migration_history(history, user_version)
+
+
+def _question_batch_hard_cut_migration() -> _Migration:
+    return _Migration(
+        DATABASE_SCHEMA_VERSION,
+        "remove-retired-question-batches",
+        _DURABLE_QUESTION_SCHEMA_STATEMENTS
+        + _QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS,
+    )
+
+
+def _copy_retired_question_batch_text(connection: sqlite3.Connection) -> None:
+    """Copy every v17 question/answer text pair before retiring batch storage.
+
+    The old batch is no longer a public or runtime concept.  Each old item is
+    nevertheless preserved as one durable text-pair record, in its original
+    task/batch/ordinal order.  The migration deliberately never attempts to
+    reinterpret localized/options/selection data.
+    """
+    rows = connection.execute(
+        """SELECT b.batch_id, b.task_id, b.attempt_id, b.status, b.created_at,
+                  b.answered_at, i.question_key, i.canonical_question, i.ordinal,
+                  a.answer_original
+           FROM question_batches AS b
+           JOIN question_items AS i ON i.batch_id = b.batch_id
+           LEFT JOIN question_answers AS a
+             ON a.batch_id = i.batch_id AND a.question_key = i.question_key
+           ORDER BY b.task_id, b.created_at, b.batch_id, i.ordinal, i.question_key"""
+    )
+    sequence_by_task: dict[str, int] = {}
+    task_revision: dict[str, int] = {}
+    for row in rows:
+        task_id = str(row["task_id"])
+        sequence = sequence_by_task.get(task_id, 0) + 1
+        sequence_by_task[task_id] = sequence
+        revision = task_revision.get(task_id)
+        if revision is None:
+            revision_row = connection.execute(
+                "SELECT MAX(task_revision) FROM task_revisions WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            revision = max(1, int(revision_row[0] or 1))
+            task_revision[task_id] = revision
+        batch_id = str(row["batch_id"])
+        question_key = str(row["question_key"])
+        question_text = str(row["canonical_question"])
+        answer_text = None if row["answer_original"] is None else str(row["answer_original"])
+        status = str(row["status"])
+        if answer_text is not None and status == "open":
+            status = "answered"
+        legacy_suffix = hashlib.sha256(
+            f"{batch_id}\0{question_key}".encode("utf-8")
+        ).hexdigest()[:24]
+        legacy_ref = f"question-legacy-v17-{legacy_suffix}"
+        answer_ref = f"answer-legacy-v17-{legacy_suffix}" if answer_text is not None else None
+        connection.execute(
+            """INSERT INTO durable_questions(
+                   question_ref,task_id,attempt_id,dispatch_ref,profile,task_revision,
+                   attempt_generation,submission_id,question_text,status,content_digest,
+                   published_sequence,answer_text,answer_submission_id,answer_digest,
+                   answered_sequence,created_at,answered_at,superseded_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                legacy_ref, task_id, str(row["attempt_id"]), f"legacy-v17:{batch_id}",
+                "legacy-v17", revision, 1, legacy_ref, question_text, status,
+                "sha256:" + hashlib.sha256(question_text.encode("utf-8")).hexdigest(), sequence,
+                answer_text, answer_ref,
+                None if answer_text is None else "sha256:" + hashlib.sha256(answer_text.encode("utf-8")).hexdigest(),
+                sequence if answer_text is not None else None, str(row["created_at"]),
+                row["answered_at"] if answer_text is not None else None,
+                row["answered_at"] if status == "superseded" else None,
+            ),
+        )
+
+
+def _upgrade_retired_question_batch_storage(
+    connection: sqlite3.Connection,
+    migration: _Migration,
+    *,
+    preparation: tuple[str, ...] = (),
+) -> None:
+    """Atomically retain v17 text pairs, then remove batch-only objects."""
+    _execute_migration_statements(connection, preparation)
+    _execute_migration_statements(connection, _DURABLE_QUESTION_SCHEMA_STATEMENTS)
+    _copy_retired_question_batch_text(connection)
+    _execute_migration_statements(connection, _QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS)
+    _record_migration(connection, migration)
+    connection.execute(f"PRAGMA user_version = {migration.version}")
+    _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
+
+
+def _current_migration_histories(
+    migrations: tuple[_Migration, ...],
+) -> tuple[tuple[tuple[int, str, str], ...], ...]:
+    """Return every exact private history that is valid for this runtime."""
+    fresh = tuple(
+        (migration.version, migration.name, _migration_checksum(migration))
+        for migration in migrations
+    )
+    v8_upgrade = _v11_forward_upgrade_from_v8_migration()
+    hard_cut = _question_batch_hard_cut_migration()
+    migrated_v17 = tuple(
+        history + ((hard_cut.version, hard_cut.name, _migration_checksum(hard_cut)),)
+        for history in _pre_question_batch_current_migration_histories()
+    )
+    return (
+        fresh,
+        _SUPPORTED_PREVIOUS_V11_V8_HISTORY + (
+            (v8_upgrade.version, v8_upgrade.name, _migration_checksum(v8_upgrade)),
+        ),
+        *migrated_v17,
+    )
+
+
+def _pre_report_current_migration_histories() -> tuple[tuple[tuple[int, str, str], ...], ...]:
+    """Return exact v17 histories emitted before report-only repair escrow."""
+    fresh = _Migration(
+        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
+        "canonical-current-ledger",
+        _BASE_SCHEMA_STATEMENTS
+        + _ARTIFACT_SCHEMA_STATEMENTS
+        + _CLOSURE_SCHEMA_STATEMENTS
+        + _PROJECTION_SCHEMA_STATEMENTS
+        + _PRUNE_SCHEMA_STATEMENTS
+        + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
+        + _GOVERNANCE_SCHEMA_STATEMENTS
+        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
+        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
+        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
+        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+        + _PRE_REPORT_REPAIR_ESCROW_SCHEMA_STATEMENTS,
+    )
+    v8_upgrade = _Migration(
+        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
+        "v11-forward-upgrade-from-v8",
+        _GOVERNANCE_SCHEMA_STATEMENTS
+        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
+        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
+        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
+        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
+        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+        + _PRE_REPORT_REPAIR_ESCROW_SCHEMA_STATEMENTS,
+    )
+    return (
+        ((fresh.version, fresh.name, _migration_checksum(fresh)),),
+        _SUPPORTED_PREVIOUS_V11_V8_HISTORY + (
+            (v8_upgrade.version, v8_upgrade.name, _migration_checksum(v8_upgrade)),
+        ),
+        _EXACT_LEGACY_PRE_REPORT_V17_HISTORY,
+    )
+
+
+def _is_pre_report_current_migration_history(
+    history: Sequence[tuple[object, ...]],
+    user_version: int,
+) -> bool:
+    return any(
+        _history_matches(history, expected, user_version)
+        for expected in _pre_report_current_migration_histories()
+    )
+
+
+def _upgrade_pre_report_repair_escrow(
+    connection: sqlite3.Connection,
+    history: Sequence[tuple[object, ...]],
+) -> None:
+    """Revoke old repair handles and reseal the exact v17 migration row."""
+    _execute_migration_statements(connection, _REPORT_REPAIR_ESCROW_REBUILD_STATEMENTS)
+    migration_name = str(history[-1][1])
+    target = (
+        _Migration(
+            _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
+            "canonical-current-ledger",
+            _BASE_SCHEMA_STATEMENTS
+            + _ARTIFACT_SCHEMA_STATEMENTS
+            + _CLOSURE_SCHEMA_STATEMENTS
+            + _PROJECTION_SCHEMA_STATEMENTS
+            + _PRUNE_SCHEMA_STATEMENTS
+            + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
+            + _GOVERNANCE_SCHEMA_STATEMENTS
+            + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
+            + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
+            + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
+            + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
+            + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
+            + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+            + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
+        )
+        if migration_name == "canonical-current-ledger"
+        else _v11_forward_upgrade_from_v8_migration_v17()
+    )
+    if target.name != migration_name:
+        raise ValueError("Cortex pre-report repair migration identity is invalid")
+    updated = connection.execute(
+        "UPDATE schema_migrations SET checksum=?, applied_at=? WHERE version=? AND name=?",
+        (_migration_checksum(target), _now(), target.version, target.name),
+    )
+    if updated.rowcount != 1:
+        raise ValueError("Cortex pre-report repair migration row is unavailable")
+
+
+def _is_current_migration_history(
+    history: Sequence[tuple[object, ...]],
+    user_version: int,
+    migrations: tuple[_Migration, ...],
+) -> bool:
+    return any(
+        _history_matches(history, expected, user_version)
+        for expected in _current_migration_histories(migrations)
+    )
+
+
+def _seal_legacy_v11_operation_registry(connection: sqlite3.Connection) -> None:
+    """Preserve prior registry bytes privately and issue no legacy authority.
+
+    A predecessor's registry can carry task and capability records for a
+    retired public contract.  Keep its exact JSON in an unadvertised durable
+    document for recovery/audit, then replace the live registry with an empty
+    current-v11 document.  No old capability is copied into a current public
+    route.
+    """
+    legacy_task_ids = [
+        str(row[0])
+        for row in connection.execute("SELECT task_id FROM tasks ORDER BY task_id")
+    ]
+    task_marker = _canonical_json({"task_ids": legacy_task_ids})
+    existing_task_marker = connection.execute(
+        "SELECT payload_json FROM global_documents WHERE name = ?",
+        (_PRIVATE_LEGACY_TASK_IDS_NAME,),
+    ).fetchone()
+    if existing_task_marker is None:
+        connection.execute(
+            "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
+            (_PRIVATE_LEGACY_TASK_IDS_NAME, task_marker, _now()),
+        )
+    elif str(existing_task_marker[0]) != task_marker:
+        raise ValueError("Cortex legacy task archive is inconsistent")
+
+    legacy = connection.execute(
+        "SELECT payload_json FROM global_documents WHERE name = 'operation_registry'"
+    ).fetchone()
+    if legacy is None:
+        return
+    payload_json = str(legacy[0])
+    archived = connection.execute(
+        "SELECT payload_json FROM global_documents WHERE name = ?",
+        (_PRIVATE_LEGACY_OPERATION_REGISTRY_NAME,),
+    ).fetchone()
+    if archived is None:
+        connection.execute(
+            "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
+            (_PRIVATE_LEGACY_OPERATION_REGISTRY_NAME, payload_json, _now()),
+        )
+    elif str(archived[0]) != payload_json:
+        raise ValueError("Cortex legacy operation registry archive is inconsistent")
+    current = _canonical_json({
+        "schema": _CURRENT_OPERATION_REGISTRY_SCHEMA,
+        "starts": {},
+        "tasks": {},
+        "updated_at": _now(),
+    })
+    connection.execute(
+        "UPDATE global_documents SET payload_json = ?, updated_at = ? WHERE name = 'operation_registry'",
+        (current, _now()),
+    )
 
 
 def insert_governance_lifecycle_auth(
@@ -1458,9 +1919,9 @@ def insert_governance_lifecycle_auth(
 
 
 def _migration_plan() -> tuple[_Migration, ...]:
-    # Fresh installations have one current schema.  There is deliberately no
-    # upgrade path from an earlier ledger: an existing database is accepted
-    # only when it already carries this exact canonical record.
+    # Fresh installations have one compact current schema.  The only
+    # additional accepted storage history is the exact signed v1..v8 V11
+    # lineage, which receives its separate forward-upgrade record.
     return (_Migration(
         DATABASE_SCHEMA_VERSION,
         "canonical-current-ledger",
@@ -1477,11 +1938,21 @@ def _migration_plan() -> tuple[_Migration, ...]:
         + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
         + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
         + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
+        + _DURABLE_QUESTION_SCHEMA_STATEMENTS
         + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
     ),)
 
 
-def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> None:
+def _assert_migration_schema(
+    connection: sqlite3.Connection,
+    version: int,
+    *,
+    pre_report_repair: bool = False,
+) -> None:
+    retired_question_batch_objects = {
+        "question_batches", "question_items", "question_answers",
+        "question_batches_status_idx",
+    }
     required = {
         1: {
             "schema_migrations", "ledger_meta", "tasks", "lanes", "classifications",
@@ -1551,12 +2022,28 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
         17: {
             "repair_escrow", "repair_escrow_task_attempt_idx", "repair_escrow_immutable_update",
         },
+        18: {
+            "durable_questions", "durable_questions_task_status_published_idx",
+        },
     }
-    # The canonical database is a fresh aggregate schema, not migration 16
-    # applied after migration 15. Validate the union of every required object
-    # from the aggregate plan so a dropped early table cannot hide behind the
-    # new namespace version.
-    required[DATABASE_SCHEMA_VERSION] = set().union(*required.values())
+    # Validate each supported predecessor as a complete aggregate schema.
+    # Version 8 is the exact prior incremental V11 store; it retained the
+    # former artifact tables in addition to the normalized catalog created at
+    # v7.  Version 16 is the immediate pre-repair aggregate ledger.  Version
+    # 17 adds repair escrow and retains the retired batch tables; v18 removes
+    # only those batch objects from the otherwise unchanged live ledger.
+    repair_escrow_required = set(required[17])
+    pre_repair_required = set().union(
+        *(objects for version, objects in required.items() if version not in {17, DATABASE_SCHEMA_VERSION})
+    )
+    required[8] = set().union(*(required[version] for version in range(1, 9))) | {
+        "artifacts", "artifact_chunks",
+    }
+    required[16] = pre_repair_required
+    required[_PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION] = pre_repair_required | repair_escrow_required
+    required[DATABASE_SCHEMA_VERSION] = (
+        pre_repair_required - retired_question_batch_objects
+    ) | repair_escrow_required | required[DATABASE_SCHEMA_VERSION]
     present = {
         str(row[0])
         for row in connection.execute(
@@ -1565,6 +2052,8 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
     }
     if not required.get(version, set()).issubset(present):
         raise ValueError("Cortex database schema is inconsistent with migration history")
+    if version == DATABASE_SCHEMA_VERSION and present & retired_question_batch_objects:
+        raise ValueError("Cortex database retains retired question batch storage")
     column_requirements: dict[int, dict[str, set[str]]] = {
         1: {
             "schema_migrations": {"version", "name", "applied_at", "checksum"},
@@ -1649,16 +2138,62 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
         },
         17: {
             "repair_escrow": {
-                "handle_digest", "handle_id", "task_id", "attempt_id", "task_ref_digest",
-                "assignment_ref_digest", "kind", "base_payload_digest", "payload_json",
+                "handle_digest", "handle_id", "task_id", "attempt_id", "dispatch_ref_digest",
+                "kind", "base_payload_digest", "payload_json",
                 "diagnostics_json", "allowed_paths_json", "escrow_digest", "created_at",
             },
         },
+        18: {
+            "durable_questions": {
+                "question_ref", "task_id", "attempt_id", "dispatch_ref", "profile",
+                "task_revision", "attempt_generation", "submission_id", "question_text",
+                "status", "content_digest", "published_sequence", "answer_text",
+                "answer_submission_id", "answer_digest", "answered_sequence", "created_at",
+                "answered_at", "superseded_at",
+            },
+        },
     }
-    current_columns: dict[str, set[str]] = {}
-    for phase_requirements in column_requirements.values():
+    if pre_report_repair:
+        if version != _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION:
+            raise ValueError("legacy repair schema is valid only for the exact v17 predecessor")
+        column_requirements[17]["repair_escrow"] = {
+            "handle_digest", "handle_id", "task_id", "attempt_id",
+            "task_ref_digest", "assignment_ref_digest", "kind",
+            "base_payload_digest", "payload_json", "diagnostics_json",
+            "allowed_paths_json", "escrow_digest", "created_at",
+        }
+    pre_repair_columns: dict[str, set[str]] = {}
+    for phase_version, phase_requirements in column_requirements.items():
+        if phase_version in {17, DATABASE_SCHEMA_VERSION}:
+            continue
         for table, expected_columns in phase_requirements.items():
-            current_columns.setdefault(table, set()).update(expected_columns)
+            pre_repair_columns.setdefault(table, set()).update(expected_columns)
+    legacy_v8_columns: dict[str, set[str]] = {}
+    for legacy_version in range(1, 9):
+        for table, expected_columns in column_requirements[legacy_version].items():
+            legacy_v8_columns.setdefault(table, set()).update(expected_columns)
+    legacy_v8_columns.update({
+        "artifacts": {
+            "artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256",
+            "byte_size", "chunk_count", "immutable", "export_path", "created_at",
+        },
+        "artifact_chunks": {
+            "artifact_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256",
+        },
+    })
+    column_requirements[8] = legacy_v8_columns
+    column_requirements[16] = {table: set(columns) for table, columns in pre_repair_columns.items()}
+    pre_question_batch_columns = {table: set(columns) for table, columns in pre_repair_columns.items()}
+    for table, expected_columns in column_requirements[17].items():
+        pre_question_batch_columns.setdefault(table, set()).update(expected_columns)
+    column_requirements[_PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION] = pre_question_batch_columns
+    current_columns = {table: set(columns) for table, columns in pre_repair_columns.items()}
+    for table, expected_columns in column_requirements[17].items():
+        current_columns.setdefault(table, set()).update(expected_columns)
+    for table, expected_columns in column_requirements[DATABASE_SCHEMA_VERSION].items():
+        current_columns.setdefault(table, set()).update(expected_columns)
+    for table in ("question_batches", "question_items", "question_answers"):
+        current_columns.pop(table, None)
     column_requirements[DATABASE_SCHEMA_VERSION] = current_columns
     for table, expected_columns in column_requirements.get(version, {}).items():
         columns = {str(row[0]) for row in connection.execute("SELECT name FROM pragma_table_info(?)", (table,))}
@@ -1683,14 +2218,16 @@ def _assert_current_migration_history(connection: sqlite3.Connection) -> None:
     a composite operation is using a savepoint.
     """
     try:
-        applied = _applied_migrations(connection)
+        history = [tuple(row) for row in connection.execute(
+            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+        )]
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     except sqlite3.OperationalError as exc:
         raise ValueError("Cortex database schema is unavailable inside an active transaction") from exc
-    for migration in _migration_plan():
-        known = applied.get(migration.version)
-        checksum = _migration_checksum(migration)
-        if known != (migration.name, checksum):
-            raise ValueError("Cortex database requires migration before this nested operation")
+    migrations = _migration_plan()
+    if not _is_current_migration_history(history, user_version, migrations):
+        raise ValueError("Cortex database requires migration before this nested operation")
+    _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
 
 
 def _migration_plan_fingerprint(migrations: tuple[_Migration, ...]) -> str:
@@ -1778,13 +2315,13 @@ def _cache_database_readiness(root: Path, migrations: tuple[_Migration, ...]) ->
     if readiness is None:
         _forget_database_readiness(root)
         return
-    expected_history = hashlib.sha256(_canonical_json([
-        (migration.version, migration.name, _migration_checksum(migration))
-        for migration in migrations
-    ]).encode("utf-8")).hexdigest()
+    expected_histories = {
+        hashlib.sha256(_canonical_json(history).encode("utf-8")).hexdigest()
+        for history in _current_migration_histories(migrations)
+    }
     if (
-        readiness.history_fingerprint != expected_history
-        or readiness.user_version != (migrations[-1].version if migrations else 0)
+        readiness.history_fingerprint not in expected_histories
+        or readiness.user_version != DATABASE_SCHEMA_VERSION
     ):
         _forget_database_readiness(root)
         return
@@ -1816,12 +2353,13 @@ def _database_readiness_is_current(root: Path, migrations: tuple[_Migration, ...
 
 
 def ensure_database(root: Path) -> None:
-    """Open a fresh canonical ledger without importing older database state.
+    """Open a current ledger or upgrade one exact prior V11 ledger in place.
 
-    A non-canonical or untrusted ledger is preserved under a private archive
-    name and replaced with a fresh current ledger. Unsafe filesystem
-    boundaries (symlinks, non-regular files, and unsafe permissions) still
-    fail closed before any quarantine is attempted.
+    Only the signed v1..v8 V11 storage lineage is forward-migrated.
+    Their rows remain in the database, while obsolete public registry entries
+    are retained privately and cannot authorize the current API.  Other
+    recognized historical namespaces are quarantined; unknown or tampered
+    identities remain fail-closed.
     """
     if _root_key(root) in _active_connections():
         _assert_current_migration_history(_active_connections()[_root_key(root)])
@@ -1839,19 +2377,54 @@ def ensure_database(root: Path) -> None:
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
             ).fetchone() is not None
             applied = _applied_migrations(connection) if has_history else {}
+            history = [tuple(row) for row in connection.execute(
+                "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+            )] if has_history else []
             user_objects = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type IN ('table','index','trigger','view') "
                 "AND name NOT LIKE 'sqlite_%' LIMIT 1"
             ).fetchone() is not None
             if user_objects and not has_history:
                 raise ValueError("Cortex database is an unsupported pre-canonical ledger")
-            migration = migrations[0]
-            expected = (migration.name, _migration_checksum(migration))
             if applied:
-                if applied != {migration.version: expected} or user_version != migration.version:
+                if _is_pre_question_batch_current_migration_history(history, user_version):
+                    pre_report_repair = _is_pre_report_current_migration_history(
+                        history, user_version,
+                    )
+                    _assert_migration_schema(
+                        connection,
+                        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
+                        pre_report_repair=pre_report_repair,
+                    )
+                    if pre_report_repair:
+                        _upgrade_pre_report_repair_escrow(connection, history)
+                    _upgrade_retired_question_batch_storage(
+                        connection,
+                        _question_batch_hard_cut_migration(),
+                    )
+                    upgrade = None
+                elif _is_supported_previous_v11_v8_history(history, user_version):
+                    _assert_migration_schema(connection, 8)
+                    _upgrade_retired_question_batch_storage(
+                        connection,
+                        _v11_forward_upgrade_from_v8_migration(),
+                        preparation=_v11_forward_upgrade_from_v8_migration_v17().statements,
+                    )
+                    _seal_legacy_v11_operation_registry(connection)
+                    upgrade = None
+                elif _is_current_migration_history(history, user_version, migrations):
+                    _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
+                    upgrade = None
+                else:
                     raise ValueError("Cortex database is an unsupported pre-canonical ledger")
-                _assert_migration_schema(connection, migration.version)
+                if upgrade is not None:
+                    _execute_migration_statements(connection, upgrade.statements)
+                    _seal_legacy_v11_operation_registry(connection)
+                    _record_migration(connection, upgrade)
+                    connection.execute(f"PRAGMA user_version = {upgrade.version}")
+                    _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
             else:
+                migration = migrations[0]
                 _execute_migration_statements(connection, migration.statements)
                 _record_migration(connection, migration)
                 connection.execute(f"PRAGMA user_version = {migration.version}")
@@ -1870,8 +2443,7 @@ def _repair_escrow_basis(
     *,
     task_id: str,
     attempt_id: str,
-    task_ref_digest: str,
-    assignment_ref_digest: str,
+    dispatch_ref_digest: str,
     kind: str,
     base_payload_digest: str,
     payload: Mapping[str, Any],
@@ -1884,13 +2456,15 @@ def _repair_escrow_basis(
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", attempt_id):
         raise ValueError("repair escrow attempt identity is invalid")
     for label, value in (
-        ("task_ref_digest", task_ref_digest),
-        ("assignment_ref_digest", assignment_ref_digest),
+        ("dispatch_ref_digest", dispatch_ref_digest),
         ("base_payload_digest", base_payload_digest),
     ):
         if re.fullmatch(r"sha256:[0-9a-f]{64}", str(value or "")) is None:
             raise ValueError(f"repair escrow {label} is invalid")
-    if kind not in {"plan", "outcome"}:
+    # The public v11 hard cut has one semantic completion payload.  Persisting
+    # a retired plan/outcome kind would make a legacy draft selectable through
+    # a newly issued repair handle, so accept only the current report target.
+    if kind != "report":
         raise ValueError("repair escrow kind is invalid")
     if not isinstance(payload, Mapping):
         raise ValueError("repair escrow payload must be an object")
@@ -1906,8 +2480,7 @@ def _repair_escrow_basis(
         "schema": "cortex/private-repair-escrow/v1",
         "task_id": task_id,
         "attempt_id": attempt_id,
-        "task_ref_digest": task_ref_digest,
-        "assignment_ref_digest": assignment_ref_digest,
+        "dispatch_ref_digest": dispatch_ref_digest,
         "kind": kind,
         "base_payload_digest": base_payload_digest,
         "payload": dict(payload),
@@ -1921,8 +2494,7 @@ def store_repair_escrow(
     *,
     task_id: str,
     attempt_id: str,
-    task_ref_digest: str,
-    assignment_ref_digest: str,
+    dispatch_ref_digest: str,
     kind: str,
     base_payload_digest: str,
     payload: Mapping[str, Any],
@@ -1933,8 +2505,7 @@ def store_repair_escrow(
     basis = _repair_escrow_basis(
         task_id=task_id,
         attempt_id=attempt_id,
-        task_ref_digest=task_ref_digest,
-        assignment_ref_digest=assignment_ref_digest,
+        dispatch_ref_digest=dispatch_ref_digest,
         kind=kind,
         base_payload_digest=base_payload_digest,
         payload=payload,
@@ -1973,10 +2544,10 @@ def store_repair_escrow(
             handle_digest = hashlib.sha256(handle_id.encode("ascii")).hexdigest()
             created_at = _now()
             connection.execute(
-                "INSERT INTO repair_escrow(handle_digest,handle_id,task_id,attempt_id,task_ref_digest,assignment_ref_digest,kind,base_payload_digest,payload_json,diagnostics_json,allowed_paths_json,escrow_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO repair_escrow(handle_digest,handle_id,task_id,attempt_id,dispatch_ref_digest,kind,base_payload_digest,payload_json,diagnostics_json,allowed_paths_json,escrow_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    handle_digest, handle_id, task_id, attempt_id, task_ref_digest,
-                    assignment_ref_digest, kind, base_payload_digest, payload_json,
+                    handle_digest, handle_id, task_id, attempt_id, dispatch_ref_digest,
+                    kind, base_payload_digest, payload_json,
                     diagnostics_json, allowed_paths_json, escrow_digest, created_at,
                 ),
             )
@@ -2009,8 +2580,7 @@ def _validated_repair_escrow_row(row: Mapping[str, Any]) -> dict[str, Any]:
     basis = _repair_escrow_basis(
         task_id=str(value.get("task_id") or ""),
         attempt_id=str(value.get("attempt_id") or ""),
-        task_ref_digest=str(value.get("task_ref_digest") or ""),
-        assignment_ref_digest=str(value.get("assignment_ref_digest") or ""),
+        dispatch_ref_digest=str(value.get("dispatch_ref_digest") or ""),
         kind=str(value.get("kind") or ""),
         base_payload_digest=str(value.get("base_payload_digest") or ""),
         payload=payload,
@@ -2310,8 +2880,8 @@ def create_task(root: Path, definition: dict[str, Any], state: dict[str, Any], a
                     task_id,
                     original,
                     language,
-                    original if language.lower().startswith("en") else None,
-                    "not_required" if language.lower().startswith("en") else "pending",
+                    original,
+                    "not_required",
                     str(definition.get("created_at") or _now()),
                 ),
             )
@@ -2403,8 +2973,8 @@ def append_task_revision(
                    VALUES (?, 1, NULL, 'initial', ?, ?, ?, ?, ?)""",
                 (
                     task_id, initial, initial_language,
-                    initial if initial_language.startswith("en") else None,
-                    "not_required" if initial_language.startswith("en") else "pending",
+                    initial,
+                    "not_required",
                     str(task["created_at"]),
                 ),
             )
@@ -2414,8 +2984,8 @@ def append_task_revision(
             """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                task_id, next_revision, next_revision - 1, source, original, language, canonical,
-                "translated" if canonical and not language.startswith("en") else "not_required" if language.startswith("en") else "pending",
+                task_id, next_revision, next_revision - 1, source, original, language, canonical or original,
+                "not_required",
                 created_at,
             ),
         )
@@ -2547,9 +3117,9 @@ def list_worker_sessions(root: Path, task_id: str) -> list[dict[str, Any]]:
     """Read server-observed native worker lifecycle telemetry for one task.
 
     This table records spawn/wait/stop observations for native children. It is
-    never an authorization source: worker authority is the explicit v11
-    task_ref + assignment_ref capability pair. The read is deliberately
-    scoped to one exact task and returns no unrelated transport telemetry.
+    never an authorization source: worker authority is the exact native
+    dispatch_ref carried by its dispatch. The read is deliberately scoped to
+    one exact task and returns no unrelated transport telemetry.
     """
     ensure_database(root)
     with _connection(root) as connection:
@@ -2676,6 +3246,100 @@ def list_task_documents(root: Path, task_id: str, prefix: str = "") -> list[tupl
         (str(row["document_key"]), _decode_json(str(row["payload_json"]), f"task document {row['document_key']}"))
         for row in rows
     ]
+
+
+_DURABLE_QUESTION_COLUMNS = (
+    "question_ref", "task_id", "attempt_id", "dispatch_ref", "profile", "task_revision",
+    "attempt_generation", "submission_id", "question_text", "status", "content_digest",
+    "published_sequence", "answer_text", "answer_submission_id", "answer_digest",
+    "answered_sequence", "created_at", "answered_at", "superseded_at",
+)
+_DURABLE_QUESTION_IMMUTABLE_COLUMNS = (
+    "question_ref", "task_id", "attempt_id", "dispatch_ref", "profile", "task_revision",
+    "attempt_generation", "submission_id", "question_text", "content_digest",
+    "published_sequence", "created_at",
+)
+_DURABLE_QUESTION_MUTABLE_COLUMNS = (
+    "status", "answer_text", "answer_submission_id", "answer_digest", "answered_sequence",
+    "answered_at", "superseded_at",
+)
+
+
+def _durable_question_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(record, Mapping):
+        raise ValueError("durable question must be an object")
+    missing = [column for column in _DURABLE_QUESTION_COLUMNS if column not in record]
+    if missing:
+        raise ValueError("durable question fields are incomplete")
+    value = {column: record[column] for column in _DURABLE_QUESTION_COLUMNS}
+    for column in (
+        "question_ref", "task_id", "attempt_id", "dispatch_ref", "profile", "submission_id",
+        "status", "content_digest", "created_at",
+    ):
+        if not isinstance(value[column], str) or not value[column] or "\x00" in value[column]:
+            raise ValueError("durable question text or identity is invalid")
+    # Question and answer bodies are semantic Unicode text blobs, not
+    # identifiers or transport delimiters.  Preserve every scalar exactly,
+    # including U+0000, rather than treating their contents as safe-text
+    # tokens or normalizing them on the way into SQLite.
+    if not isinstance(value["question_text"], str):
+        raise ValueError("durable question text is invalid")
+    if value["status"] not in {"open", "answered", "superseded"}:
+        raise ValueError("durable question status is invalid")
+    for column in ("task_revision", "attempt_generation", "published_sequence"):
+        if not isinstance(value[column], int) or isinstance(value[column], bool) or value[column] < 1:
+            raise ValueError("durable question sequence is invalid")
+    if value["answer_text"] is not None and not isinstance(value["answer_text"], str):
+        raise ValueError("durable question answer text is invalid")
+    for column in ("answer_submission_id", "answer_digest", "answered_at", "superseded_at"):
+        if value[column] is not None and (not isinstance(value[column], str) or "\x00" in value[column]):
+            raise ValueError("durable question answer field is invalid")
+    if value["answered_sequence"] is not None and (
+        not isinstance(value["answered_sequence"], int)
+        or isinstance(value["answered_sequence"], bool)
+        or value["answered_sequence"] < 1
+    ):
+        raise ValueError("durable question answer sequence is invalid")
+    return value
+
+
+def list_durable_questions(root: Path, task_id: str) -> list[dict[str, Any]]:
+    """Return durable question text pairs for one task in publication order."""
+    ensure_database(root)
+    with _connection(root) as connection:
+        rows = connection.execute(
+            "SELECT " + ",".join(_DURABLE_QUESTION_COLUMNS)
+            + " FROM durable_questions WHERE task_id = ? ORDER BY published_sequence",
+            (task_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def put_durable_question(root: Path, record: Mapping[str, Any]) -> None:
+    """Create a text pair or update only its mutable answer/lifecycle fields."""
+    value = _durable_question_record(record)
+    ensure_database(root)
+    placeholders = ",".join("?" for _ in _DURABLE_QUESTION_COLUMNS)
+    with _connection(root, write=True) as connection:
+        existing = connection.execute(
+            "SELECT " + ",".join(_DURABLE_QUESTION_COLUMNS)
+            + " FROM durable_questions WHERE question_ref = ?",
+            (value["question_ref"],),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                "INSERT INTO durable_questions(" + ",".join(_DURABLE_QUESTION_COLUMNS) + ") VALUES(" + placeholders + ")",
+                tuple(value[column] for column in _DURABLE_QUESTION_COLUMNS),
+            )
+            return
+        if any(existing[column] != value[column] for column in _DURABLE_QUESTION_IMMUTABLE_COLUMNS):
+            raise ValueError("durable question immutable fields conflict")
+        connection.execute(
+            "UPDATE durable_questions SET "
+            + ",".join(column + " = ?" for column in _DURABLE_QUESTION_MUTABLE_COLUMNS)
+            + " WHERE question_ref = ?",
+            tuple(value[column] for column in _DURABLE_QUESTION_MUTABLE_COLUMNS) + (value["question_ref"],),
+        )
 
 
 def put_artifact(
@@ -3031,63 +3695,6 @@ def read_artifact_content(root: Path, task_id: str, artifact_ref: str) -> str | 
     if len(raw) != metadata["byte_size"] or hashlib.sha256(raw).hexdigest() != metadata["digest_sha256"]:
         raise ValueError("SQLite artifact digest is invalid")
     return raw.decode("utf-8") if text else raw
-
-
-def _artifact_cursor_secret(connection: sqlite3.Connection) -> bytes:
-    row = connection.execute("SELECT value FROM ledger_meta WHERE key = ?", ("artifact_cursor_hmac_key",)).fetchone()
-    if row is None:
-        raise ValueError("SQLite artifact cursor key is unavailable")
-    value = str(row["value"])
-    if not re.fullmatch(r"[0-9a-f]{64}", value):
-        raise ValueError("SQLite artifact cursor key is invalid")
-    return bytes.fromhex(value)
-
-
-def encode_artifact_cursor(root: Path, payload: dict[str, Any]) -> str:
-    """Sign an opaque cursor bound to task, artifact/version and reader scope."""
-    if not isinstance(payload, dict):
-        raise ValueError("artifact cursor payload must be an object")
-    encoded = _canonical_json(payload).encode("utf-8")
-    encoded_token = base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
-    # SHA-256 signatures have a fixed unpadded URL-safe width of 43 chars.
-    # Reject an unusable oversized cursor before opening/bootstrapping SQLite.
-    if len(encoded_token) + 1 + 43 > ARTIFACT_CURSOR_MAX_CHARS:
-        raise ValueError("artifact cursor exceeds its safe transport length")
-    ensure_database(root)
-    with _connection(root) as connection:
-        signature = hmac.new(_artifact_cursor_secret(connection), encoded, hashlib.sha256).digest()
-    cursor = encoded_token + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
-    if len(cursor) > ARTIFACT_CURSOR_MAX_CHARS:
-        raise ValueError("artifact cursor exceeds its safe transport length")
-    return cursor
-
-
-def decode_artifact_cursor(root: Path, cursor: str) -> dict[str, Any]:
-    if (
-        not isinstance(cursor, str)
-        or cursor.count(".") != 1
-        or len(cursor) > ARTIFACT_CURSOR_MAX_CHARS
-    ):
-        raise ValueError("artifact cursor is invalid")
-    raw, signature = cursor.split(".", 1)
-    if not raw or not signature or not re.fullmatch(r"[A-Za-z0-9_-]+", raw) or not re.fullmatch(r"[A-Za-z0-9_-]+", signature):
-        raise ValueError("artifact cursor is invalid")
-    try:
-        encoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
-        supplied = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
-    except (TypeError, UnicodeError, ValueError) as exc:
-        raise ValueError("artifact cursor is invalid") from exc
-    if len(supplied) != hashlib.sha256().digest_size:
-        raise ValueError("artifact cursor is invalid")
-    # A malformed or stale cursor must not bootstrap a new durable ledger.
-    # Normal callers already resolved an existing task before cursor decode.
-    if not database_path(root).is_file():
-        raise ValueError("artifact cursor is unavailable")
-    with _connection(root) as connection:
-        expected = hmac.new(_artifact_cursor_secret(connection), encoded, hashlib.sha256).digest()
-    if not hmac.compare_digest(supplied, expected):
-        raise ValueError("artifact cursor signature is invalid")
-    return _decode_json(encoded.decode("utf-8"), "artifact cursor")
 
 
 def get_classification(root: Path, classification_id: str) -> dict[str, Any] | None:

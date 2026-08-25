@@ -1,8 +1,8 @@
-"""Closed, side-effect-free v11 public response contracts.
+"""Closed, side-effect-free v11 response contracts.
 
 This module is deliberately independent from the lifecycle engine and MCP
-transport.  It defines the model-facing response shapes and validates a value
-against one selected response family before a transport serializes it.
+transport. The public registry contains only the flat model-facing family;
+active nested engine receipts live in a separate explicitly private registry.
 """
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import copy
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from cortex_runtime.v11_submission import MAX_DIAGNOSTICS
 
 
 TASK_REF_PATTERN = r"^task-[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
@@ -20,6 +22,16 @@ DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 RESULT_REF_PATTERN = r"^attempt-result-[A-Za-z0-9._:-]{1,160}$"
 REPAIR_HANDLE_PATTERN = r"^v11rh1\.[A-Za-z0-9_-]{22}\.[0-9a-f]{32}$"
 
+PUBLIC_SUCCESS_ACTIONS = (
+    "invoke_dispatches", "wait_for_bound_workers", "obtain_user_decision",
+    "obtain_plan_approval", "deliver_handoff", "continue", "terminal_continue",
+    "read_more", "use_result_as_context", "none",
+)
+PUBLIC_FAILURE_ACTIONS = (
+    "retry_same_operation", "repair_patch_only", "inspect_or_retry", "none",
+)
+PUBLIC_ACTIONS = tuple(dict.fromkeys(PUBLIC_SUCCESS_ACTIONS + PUBLIC_FAILURE_ACTIONS))
+
 
 class ResponseValidationError(ValueError):
     """A pure response-contract failure with stable JSON Pointer diagnostics."""
@@ -29,8 +41,10 @@ class ResponseValidationError(ValueError):
         super().__init__("; ".join(str(item.get("message") or "invalid response") for item in self.diagnostics))
 
 
-def _string(*, pattern: str | None = None, enum: list[str] | None = None, minimum: int = 1, maximum: int = 8192) -> dict[str, Any]:
-    value: dict[str, Any] = {"type": "string", "minLength": minimum, "maxLength": maximum}
+def _string(*, pattern: str | None = None, enum: list[str] | None = None, minimum: int = 1, maximum: int | None = 8192) -> dict[str, Any]:
+    value: dict[str, Any] = {"type": "string", "minLength": minimum}
+    if maximum is not None:
+        value["maxLength"] = maximum
     if pattern:
         value["pattern"] = pattern
     if enum:
@@ -43,11 +57,8 @@ DIGEST_SCHEMA = _string(pattern=DIGEST_PATTERN, maximum=71)
 RESULT_REF_SCHEMA = _string(pattern=RESULT_REF_PATTERN, maximum=180)
 JSON_POINTER_SCHEMA = _string(pattern=r"^(|/.*)$", minimum=0, maximum=2048)
 
-# This is the single executable-action vocabulary exposed to coordinators.
-# Keep the instructions short enough for MCP tool descriptions and explicit
-# enough that a ready dispatch cannot be mistaken for an already-started
-# worker. Bundled skills and profile cards mirror these exact stable markers;
-# focused parity tests prevent those model-visible copies from drifting.
+# Private lifecycle composition still validates the engine's historical
+# nested action receipt before the sole public.flat projector consumes it.
 COORDINATOR_ACTION_SEMANTICS: dict[str, dict[str, Any]] = {
     "invoke_dispatches": {
         "marker": "spawn_all_exact_before_wait",
@@ -84,12 +95,11 @@ DISPATCH_ARGUMENTS_SCHEMA: dict[str, Any] = {
 }
 DISPATCH_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
-    "required": ["call", "dispatch_ref", "arguments", "bootstrap_repair_message"],
+    "required": ["call", "dispatch_ref", "arguments"],
     "properties": {
         "call": {"type": "string", "const": "spawn_agent"},
         "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
         "arguments": DISPATCH_ARGUMENTS_SCHEMA,
-        "bootstrap_repair_message": _string(maximum=4096),
     },
 }
 
@@ -160,10 +170,14 @@ REPAIR_DIAGNOSTIC_SCHEMA: dict[str, Any] = {
     "required": ["code", "json_pointer", "repair_pointer", "message", "field_schema", "allowed_ops"],
     "properties": {
         **DIAGNOSTIC_SCHEMA["properties"],
-        "repair_pointer": JSON_POINTER_SCHEMA,
+        "repair_pointer": {
+            **JSON_POINTER_SCHEMA,
+            "description": "Copy this exact value into patch.path; do not copy the repair_pointer property name.",
+        },
         "allowed_ops": {
             "type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": True,
             "items": _string(enum=["add", "replace", "remove"], maximum=16),
+            "description": "Choose one entry and copy that entry into patch.op; do not copy the allowed_ops array.",
         },
     },
 }
@@ -182,13 +196,65 @@ ERROR_SCHEMA: dict[str, Any] = {
         "code": _string(maximum=160),
         "category": _string(enum=["validation", "authority", "stale", "integrity", "unavailable", "internal"], maximum=32),
         "message": _string(maximum=512),
-        "diagnostics": {"type": "array", "minItems": 1, "maxItems": 64, "items": DIAGNOSTIC_SCHEMA},
+        "diagnostics": {"type": "array", "minItems": 1, "maxItems": MAX_DIAGNOSTICS, "items": DIAGNOSTIC_SCHEMA},
     },
+}
+PATCH_CONTRACT: dict[str, Any] = {
+    "repair_pointer_maps_to": "path",
+    "allowed_ops_choice_maps_to": "op",
+    "value_required_for": ["add", "replace"],
+    "value_forbidden_for": ["remove"],
+    "copy_diagnostic_metadata": False,
+    "example": {
+        "op": "replace",
+        "path": "/claims/0",
+        "value": {"summary": "...", "severity": "low"},
+    },
+}
+PATCH_CONTRACT_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": [
+        "repair_pointer_maps_to", "allowed_ops_choice_maps_to",
+        "value_required_for", "value_forbidden_for",
+        "copy_diagnostic_metadata", "example",
+    ],
+    "properties": {
+        "repair_pointer_maps_to": {"type": "string", "const": "path"},
+        "allowed_ops_choice_maps_to": {"type": "string", "const": "op"},
+        "value_required_for": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": _string(enum=["add", "replace"], maximum=16),
+        },
+        "value_forbidden_for": {
+            "type": "array", "minItems": 1, "maxItems": 1,
+            "items": {"type": "string", "const": "remove"},
+        },
+        "copy_diagnostic_metadata": {"type": "boolean", "const": False},
+        "example": {
+            "type": "object", "additionalProperties": False,
+            "required": ["op", "path", "value"],
+            "properties": {
+                "op": {"type": "string", "const": "replace"},
+                "path": {"type": "string", "const": "/claims/0"},
+                "value": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["summary", "severity"],
+                    "properties": {
+                        "summary": {"type": "string", "const": "..."},
+                        "severity": {"type": "string", "const": "low"},
+                    },
+                },
+            },
+        },
+    },
+    "description": (
+        "Executable RFC6902 mapping. Diagnostic metadata explains a patch but is never itself a patch property."
+    ),
 }
 REPAIR_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     "required": [
-        "repair_capsule", "base_payload_digest", "patch_paths", "diagnostics",
+        "repair_capsule", "base_payload_digest", "patch_paths", "diagnostics", "patch_contract",
     ],
     "properties": {
         "repair_capsule": {
@@ -196,12 +262,13 @@ REPAIR_SCHEMA: dict[str, Any] = {
             "description": "Opaque fixed-size server handle; copy exactly into the same complete_attempt repair form and never decode or reconstruct it.",
         },
         "base_payload_digest": DIGEST_SCHEMA,
-        "patch_paths": {"type": "array", "minItems": 1, "maxItems": 64, "items": JSON_POINTER_SCHEMA},
+        "patch_paths": {"type": "array", "minItems": 1, "maxItems": MAX_DIAGNOSTICS, "items": JSON_POINTER_SCHEMA},
         "diagnostics": {
-            "type": "array", "minItems": 1, "maxItems": 64,
+            "type": "array", "minItems": 1, "maxItems": MAX_DIAGNOSTICS,
             "items": REPAIR_DIAGNOSTIC_SCHEMA,
             "description": "Complete self-contained validation cards; repair_pointer is the exact semantic RFC6902 patch path.",
         },
+        "patch_contract": PATCH_CONTRACT_SCHEMA,
     },
 }
 TERMINAL_FAILURE_ACTION_SCHEMA: dict[str, Any] = {
@@ -217,34 +284,75 @@ TERMINAL_FAILURE_ACTION_SCHEMA: dict[str, Any] = {
         "The child status marker is not authority; finalize_worker_failure verifies and consumes this evidence."
     ),
 }
+_RECOVERY_COMMON_PROPERTIES: dict[str, Any] = {
+    "operation": RETRY_SCHEMA["properties"]["operation"],
+    "retryable": {"type": "boolean"},
+    "state_mutated": {"type": "boolean", "const": False},
+}
+_ALLOWED_CHANGES_SCHEMA: dict[str, Any] = {
+    "type": "array", "minItems": 1, "maxItems": MAX_DIAGNOSTICS,
+    "items": ALLOWED_CHANGE_SCHEMA,
+    "description": "Exact request paths and operations that make a same_operation retry legal; no Cortex-issued value is exposed here.",
+}
+# Recovery is a closed, discriminated union.  The rendered result is helpful,
+# but structuredContent is authoritative: do not let an incomplete or
+# cross-branch recovery become executable merely because it is well-formed JSON.
 RECOVERY_SCHEMA: dict[str, Any] = {
-    "type": "object", "additionalProperties": False,
-    "required": ["kind", "operation", "retryable", "state_mutated"],
-    "properties": {
-        **RETRY_SCHEMA["properties"],
-        "retryable": {"type": "boolean"},
-        "state_mutated": {"type": "boolean", "const": False},
-        "allowed_changes": {
-            "type": "array", "minItems": 1, "maxItems": 64,
-            "items": ALLOWED_CHANGE_SCHEMA,
-            "description": "Exact request paths and operations that make a same_operation retry legal; no Cortex-issued value is exposed here.",
+    "oneOf": [
+        {
+            "type": "object", "additionalProperties": False,
+            "required": ["kind", "operation", "retryable", "state_mutated", "allowed_changes"],
+            "properties": {
+                **_RECOVERY_COMMON_PROPERTIES,
+                "kind": {"type": "string", "const": "same_operation"},
+                "retryable": {"type": "boolean", "const": True},
+                "allowed_changes": _ALLOWED_CHANGES_SCHEMA,
+            },
         },
-        "repair": REPAIR_SCHEMA,
-        "terminal_failure": TERMINAL_FAILURE_ACTION_SCHEMA,
-    },
+        {
+            "type": "object", "additionalProperties": False,
+            "required": ["kind", "operation", "retryable", "state_mutated", "repair"],
+            "properties": {
+                **_RECOVERY_COMMON_PROPERTIES,
+                "kind": {"type": "string", "const": "repair_patch_only"},
+                "retryable": {"type": "boolean", "const": True},
+                "repair": REPAIR_SCHEMA,
+            },
+        },
+        {
+            "type": "object", "additionalProperties": False,
+            "required": ["kind", "operation", "retryable", "state_mutated"],
+            "properties": {
+                **_RECOVERY_COMMON_PROPERTIES,
+                "kind": {"type": "string", "const": "inspect_server_state"},
+                "retryable": {"type": "boolean", "const": True},
+            },
+        },
+        {
+            "type": "object", "additionalProperties": False,
+            "required": ["kind", "operation", "retryable", "state_mutated"],
+            "properties": {
+                **_RECOVERY_COMMON_PROPERTIES,
+                "kind": {"type": "string", "const": "terminal_stop"},
+                "retryable": {"type": "boolean", "const": False},
+                "terminal_failure": TERMINAL_FAILURE_ACTION_SCHEMA,
+            },
+        },
+    ],
 }
 QUESTION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     "required": ["question_ref", "prompt"],
     "properties": {
         "question_ref": _string(pattern=r"^question-[A-Za-z0-9._:-]{1,160}$", maximum=180),
-        "prompt": _string(maximum=8000),
-        "options": {"type": "array", "maxItems": 16, "items": {
+        "prompt": _string(maximum=None),
+        "options": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["number", "label"],
+            "required": ["number", "option_id", "label"],
             "properties": {
                 "number": {"type": "integer", "minimum": 1},
-                "label": _string(maximum=1000), "description": _string(minimum=0, maximum=2000),
+                "option_id": _string(maximum=None),
+                "label": _string(maximum=None), "description": _string(minimum=0, maximum=None),
             },
         }},
     },
@@ -259,8 +367,9 @@ DISPLAY_QUESTION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     "required": ["prompt"],
     "properties": {
-        "prompt": _string(maximum=8000),
+        "prompt": _string(maximum=None),
         "options": QUESTION_SCHEMA["properties"]["options"],
+        "recommendation": _string(minimum=1, maximum=None),
     },
 }
 CANONICAL_ANSWER_SCHEMA: dict[str, Any] = {
@@ -335,7 +444,13 @@ DECISION_SCHEMA: dict[str, Any] = {
     "properties": {
         "request_id": _string(pattern=r"^approval-[A-Za-z0-9._:-]{1,160}$", maximum=180),
         "plan_result_ref": RESULT_REF_SCHEMA, "plan_digest": DIGEST_SCHEMA,
-        "choices": {"type": "array", "minItems": 3, "maxItems": 3, "items": _string(enum=["approve", "revise", "cancel"], maximum=16)},
+        "choices": {
+            "type": "array", "minItems": 3, "maxItems": 3,
+            "items": _string(
+                enum=["approve_with_recommendations", "approve_without_recommendations", "cancel"],
+                maximum=32,
+            ),
+        },
     },
 }
 HANDOFF_SCHEMA: dict[str, Any] = {
@@ -358,6 +473,8 @@ _LIFECYCLE_COMMON: dict[str, Any] = {
         "dispatches": {"type": "array", "minItems": 1, "maxItems": 32, "items": DISPATCH_SCHEMA},
         "coordinator_ref": _string(pattern=COORDINATOR_REF_PATTERN, maximum=64),
         "question": QUESTION_SCHEMA, "decision": DECISION_SCHEMA, "handoff": HANDOFF_SCHEMA,
+        "content": _string(minimum=0, maximum=65_536),
+        "next_cursor": _string(pattern=r"^c11p\.[A-Za-z0-9_-]{16,512}$", maximum=517),
         "error": ERROR_SCHEMA, "recovery": RECOVERY_SCHEMA,
     },
 }
@@ -394,7 +511,7 @@ LIFECYCLE_RESPONSE_SCHEMA: dict[str, Any] = {
             "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "needs_input"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "obtain_user_decision"}}},
         }),
-        _variant(["schema", "ok", "outcome", "task_ref", "action", "decision"], properties={
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "decision"], optional=("content", "next_cursor"), properties={
             "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "plan_approval"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "obtain_plan_approval"}}},
         }),
@@ -428,41 +545,6 @@ START_RESPONSE_SCHEMA: dict[str, Any] = {
     "oneOf": [
         *[_start_variant(variant) for variant in LIFECYCLE_RESPONSE_SCHEMA["oneOf"][:5]],
         *copy.deepcopy(LIFECYCLE_RESPONSE_SCHEMA["oneOf"][5:]),
-    ]
-}
-
-GOVERNANCE_RECEIPT_SCHEMA: dict[str, Any] = {
-    "type": "object", "additionalProperties": False,
-    "required": ["resource_kind", "resource_ref", "digest"],
-    "properties": {
-        "resource_kind": _string(enum=["initiative", "record", "link", "dependency", "exception", "promotion"], maximum=32),
-        "resource_ref": _string(pattern=r"^[A-Za-z][A-Za-z0-9._:-]{1,180}$", maximum=192),
-        "revision": {"type": "integer", "minimum": 0}, "digest": DIGEST_SCHEMA,
-    },
-}
-GOVERNANCE_INSPECTION_SCHEMA: dict[str, Any] = {
-    "type": "object", "additionalProperties": False,
-    "required": ["ref", "digest"],
-    "properties": {
-        "ref": _string(pattern=r"^governance-[A-Za-z0-9._:-]{1,180}$", maximum=192),
-        "digest": DIGEST_SCHEMA, "cursor": _string(minimum=1, maximum=1024),
-        "items": {"type": "array", "maxItems": 64, "items": GOVERNANCE_RECEIPT_SCHEMA},
-    },
-}
-GOVERNANCE_RESPONSE_SCHEMA: dict[str, Any] = {
-    "oneOf": [
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "receipt"], "properties": {
-            "schema": {"type": "string", "const": "cortex/governance-response/v11"}, "ok": {"type": "boolean", "const": True},
-            "outcome": {"type": "string", "const": "updated"}, "receipt": GOVERNANCE_RECEIPT_SCHEMA,
-        }},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "inspection"], "properties": {
-            "schema": {"type": "string", "const": "cortex/governance-response/v11"}, "ok": {"type": "boolean", "const": True},
-            "outcome": {"type": "string", "const": "inspected"}, "inspection": GOVERNANCE_INSPECTION_SCHEMA,
-        }},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "error", "recovery"], "properties": {
-            "schema": {"type": "string", "const": "cortex/governance-response/v11"}, "ok": {"type": "boolean", "const": False},
-            "outcome": {"type": "string", "const": "failed"}, "error": ERROR_SCHEMA, "recovery": RECOVERY_SCHEMA,
-        }},
     ]
 }
 
@@ -549,7 +631,6 @@ COORDINATOR_QUESTION_MANAGEMENT_SCHEMA: dict[str, Any] = {
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_answered_not_resumable"}, "question_ref": QUESTION_REF_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_answered_not_resumable"}, "batch_ref": BATCH_REF_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "batch_superseded"}, "batch_ref": BATCH_REF_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "translation"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "awaiting_translation"}, "translation": TRANSLATION_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "error", "recovery"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": False}, "outcome": {"type": "string", "const": "needs_correction"}, "error": ERROR_SCHEMA, "recovery": RECOVERY_SCHEMA}},
     ],
 }
@@ -560,23 +641,73 @@ WORKER_COMPLETION_SCHEMA: dict[str, Any] = {
     ]
 }
 
-RESPONSE_SCHEMA_REGISTRY: dict[str, dict[str, Any]] = {
-    "coordinator.lifecycle": LIFECYCLE_RESPONSE_SCHEMA,
-    "coordinator.start": START_RESPONSE_SCHEMA,
-    "coordinator.governance": GOVERNANCE_RESPONSE_SCHEMA,
-    "result.read": RESULT_READ_SCHEMA,
-    "worker.briefing": BRIEFING_READ_SCHEMA,
-    "worker.event": WORKER_EVENT_SCHEMA,
-    "worker.question": WORKER_QUESTION_SCHEMA,
-    "coordinator.question_management": COORDINATOR_QUESTION_MANAGEMENT_SCHEMA,
-    "worker.completion": WORKER_COMPLETION_SCHEMA,
+# The public MCP boundary is intentionally flatter than the private v11
+# lifecycle families above.  Keep one closed schema with scalar action and do
+# the small success/failure dependency checks in ``validate_response`` so the
+# advertised tool surface needs no response union or discriminator wrapper.
+FLAT_CHANGE_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["path", "op", "expected"],
+    "properties": {
+        "path": _string(pattern=r"^(?:|(?:/(?:[^~/]|~[01])*)+)$", minimum=0, maximum=2048),
+        "op": _string(enum=["add", "replace", "remove"], maximum=16),
+        "expected": _string(minimum=0, maximum=8192),
+    },
+}
+FLAT_DISPATCH_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["dispatch_ref", "task_name", "message", "fork_turns"],
+    "properties": {
+        "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
+        "task_name": _string(maximum=256), "message": _string(maximum=65536),
+        "fork_turns": _string(maximum=16), "model": _string(maximum=64),
+        "reasoning_effort": _string(maximum=32),
+    },
+}
+FLAT_PUBLIC_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["ok", "action", "retryable", "state_mutated"],
+    "properties": {
+        "ok": {"type": "boolean"}, "action": _string(enum=list(PUBLIC_ACTIONS), maximum=64),
+        "retryable": {"type": "boolean"}, "state_mutated": {"type": "boolean"},
+        "task_ref": _string(pattern=TASK_REF_PATTERN, maximum=160),
+        "coordinator_ref": _string(pattern=COORDINATOR_REF_PATTERN, maximum=64),
+        "step": {"type": "integer", "minimum": 1},
+        "dispatches": {"type": "array", "maxItems": 8, "items": FLAT_DISPATCH_SCHEMA},
+        "content": _string(minimum=0, maximum=65_536), "report": _string(minimum=0, maximum=65_536),
+        "next_cursor": _string(pattern=r"^c11p\.[A-Za-z0-9_-]{16,512}$", maximum=517),
+        "question_ref": _string(maximum=256), "request_id": _string(maximum=256),
+        "choices": {"type": "array", "maxItems": 32, "items": _string(maximum=4096)},
+        "result_refs": {"type": "array", "maxItems": 32, "items": _string(pattern=RESULT_REF_PATTERN, maximum=180)},
+        "receipt_ref": _string(maximum=256), "digest": _string(maximum=256),
+        "terminal": {"type": "boolean"}, "error_code": _string(maximum=160),
+        "error": _string(maximum=2000),
+        "allowed_changes": {"type": "array", "maxItems": MAX_DIAGNOSTICS, "items": FLAT_CHANGE_SCHEMA},
+        "repair_capsule": _string(pattern=REPAIR_HANDLE_PATTERN, maximum=128),
+        "base_payload_digest": _string(pattern=DIGEST_PATTERN, maximum=71),
+        "repair_changes": {"type": "array", "minItems": 1, "maxItems": MAX_DIAGNOSTICS, "items": FLAT_CHANGE_SCHEMA},
+    },
+}
+
+PUBLIC_RESPONSE_SCHEMA_REGISTRY: dict[str, dict[str, Any]] = {
+    "public.flat": FLAT_PUBLIC_RESPONSE_SCHEMA,
+}
+_PRIVATE_RESPONSE_SCHEMA_REGISTRY: dict[str, dict[str, Any]] = {
+    "private.coordinator.lifecycle": LIFECYCLE_RESPONSE_SCHEMA,
+    "private.coordinator.start": START_RESPONSE_SCHEMA,
+    "private.result.read": RESULT_READ_SCHEMA,
+    "private.worker.briefing": BRIEFING_READ_SCHEMA,
+    "private.worker.event": WORKER_EVENT_SCHEMA,
+    "private.worker.question": WORKER_QUESTION_SCHEMA,
+    "private.coordinator.question_management": COORDINATOR_QUESTION_MANAGEMENT_SCHEMA,
+    "private.worker.completion": WORKER_COMPLETION_SCHEMA,
 }
 
 
 def response_schema(name: str) -> dict[str, Any]:
     """Return a defensive copy of one public response schema."""
     try:
-        return copy.deepcopy(RESPONSE_SCHEMA_REGISTRY[name])
+        return copy.deepcopy(PUBLIC_RESPONSE_SCHEMA_REGISTRY[name])
     except KeyError as exc:
         raise KeyError(f"unknown v11 response schema: {name}") from exc
 
@@ -604,16 +735,14 @@ def _validate(value: Any, schema: Mapping[str, Any], path: str, diagnostics: lis
             if not variant_errors:
                 matching += 1
         if matching != 1:
-            # Public response unions must never make a caller reverse-engineer
-            # a generic oneOf failure.  Project the narrowest candidate's own
-            # field diagnostics; the model can correct the selected public
-            # shape without looking at Cortex source or hidden runtime state.
+            # Project the narrowest candidate's own field diagnostics rather
+            # than replacing useful validation evidence with a generic oneOf.
             viable = [item for item in variant_diagnostics if item]
             if viable:
                 best = min(viable, key=len)
                 diagnostics.extend(best)
             else:
-                diagnostics.append(_diagnostic(path, "response outcome has no executable public branch"))
+                diagnostics.append(_diagnostic(path, "response outcome has no executable branch"))
         return
     expected = schema.get("type")
     valid_type = {
@@ -664,23 +793,64 @@ def _validate(value: Any, schema: Mapping[str, Any], path: str, diagnostics: lis
                 _validate(value[key], child, f"{path}.{key}", diagnostics)
 
 
+def _validate_registered_response(schema: Mapping[str, Any], value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and deep-copy against one already-selected schema."""
+    if not isinstance(value, Mapping):
+        raise ResponseValidationError([_diagnostic("$", "must be an object")])
+    normalized = copy.deepcopy(dict(value))
+    diagnostics: list[dict[str, Any]] = []
+    _validate(normalized, schema, "$", diagnostics)
+    if diagnostics:
+        raise ResponseValidationError(diagnostics)
+    return normalized
+
+
+def validate_private_response(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one active private engine receipt; never use for MCP output."""
+    try:
+        schema = _PRIVATE_RESPONSE_SCHEMA_REGISTRY[name]
+    except KeyError as exc:
+        raise KeyError(f"unknown private v11 response schema: {name}") from exc
+    return _validate_registered_response(schema, value)
+
+
 def validate_response(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and deep-copy one selected public response family."""
     if not isinstance(value, Mapping):
         raise ResponseValidationError([_diagnostic("$", "must be an object")])
     normalized = copy.deepcopy(dict(value))
     diagnostics: list[dict[str, Any]] = []
-    _validate(normalized, RESPONSE_SCHEMA_REGISTRY[name], "$", diagnostics)
+    try:
+        schema = PUBLIC_RESPONSE_SCHEMA_REGISTRY[name]
+    except KeyError as exc:
+        raise KeyError(f"unknown public v11 response schema: {name}") from exc
+    _validate(normalized, schema, "$", diagnostics)
+    if name == "public.flat" and not diagnostics:
+        if normalized["ok"] is False:
+            if normalized["action"] not in PUBLIC_FAILURE_ACTIONS:
+                diagnostics.append(_diagnostic("$.action", "must be a canonical failure action"))
+            for field in ("error_code", "error"):
+                if field not in normalized:
+                    diagnostics.append(_diagnostic(f"$.{field}", "is required on failure"))
+            if normalized["action"] == "repair_patch_only":
+                for field in ("repair_capsule", "base_payload_digest", "repair_changes"):
+                    if field not in normalized:
+                        diagnostics.append(_diagnostic(f"$.{field}", "is required for repair"))
+            elif normalized["action"] == "retry_same_operation" and not normalized.get("allowed_changes"):
+                diagnostics.append(_diagnostic("$.allowed_changes", "is required for a retryable failure"))
+        else:
+            if normalized["action"] not in PUBLIC_SUCCESS_ACTIONS:
+                diagnostics.append(_diagnostic("$.action", "must be a canonical success action"))
+            if normalized["retryable"]:
+                diagnostics.append(_diagnostic("$.retryable", "must be false on success"))
     if diagnostics:
         raise ResponseValidationError(diagnostics)
     return normalized
 
 
 __all__ = [
-    "ACTION_SCHEMA", "BRIEFING_READ_SCHEMA", "COORDINATOR_REF_PATTERN", "DIGEST_PATTERN", "ERROR_SCHEMA", "RECOVERY_SCHEMA",
-    "DISPATCH_SCHEMA", "GOVERNANCE_RESPONSE_SCHEMA", "LIFECYCLE_RESPONSE_SCHEMA", "REPAIR_SCHEMA", "START_RESPONSE_SCHEMA",
-    "RESPONSE_SCHEMA_REGISTRY", "RESULT_READ_SCHEMA", "ResponseValidationError", "TASK_REF_PATTERN",
-    "TERMINAL_FAILURE_ACTION_SCHEMA",
-    "WORKER_COMPLETION_SCHEMA", "WORKER_EVENT_SCHEMA", "WORKER_QUESTION_SCHEMA", "COORDINATOR_QUESTION_MANAGEMENT_SCHEMA",
-    "response_schema", "validate_response",
+    "COORDINATOR_REF_PATTERN", "DIGEST_PATTERN", "PATCH_CONTRACT",
+    "PUBLIC_RESPONSE_SCHEMA_REGISTRY", "ResponseValidationError", "TASK_REF_PATTERN", "FLAT_PUBLIC_RESPONSE_SCHEMA",
+    "PUBLIC_ACTIONS", "PUBLIC_FAILURE_ACTIONS", "PUBLIC_SUCCESS_ACTIONS",
+    "response_schema", "validate_private_response", "validate_response",
 ]

@@ -34,7 +34,6 @@ bind_symbols(
         "_is_knowledge_harvest_task",
         "_project_knowledge_context",
         "_resolved_user_decisions",
-        "_v11_task_ref",
         "_write_delegation_package",
         "active_gates",
         "authorize",
@@ -42,10 +41,9 @@ bind_symbols(
         "capture_project_manifest",
         "digest_text",
         "db_put_worker_session",
-        "host_bootstrap_repair_message",
         "host_spawn_bootstrap",
         "host_spawn_prompt",
-        "issue_worker_assignment",
+        "issue_worker_dispatch_authority",
         "ledger_root",
         "load_state",
         "load_task_definition",
@@ -66,7 +64,6 @@ bind_symbols(
         "store_manifest_snapshot",
         "worker_display_name",
         "worker_module_label",
-        "worker_assignment_ref",
     ),
 )
 from cortex_runtime.projection_service import enqueue as enqueue_projection, materialize_job
@@ -317,7 +314,7 @@ def _ensure_briefing_task_directory(task_dir: Path) -> None:
     task_dir.chmod(0o700, follow_symlinks=False)
 
 
-_EPHEMERAL_SPAWN_FIELDS = frozenset({"briefing_path", "message", "prompt", "bootstrap_repair_message"})
+_EPHEMERAL_SPAWN_FIELDS = frozenset({"briefing_path", "message", "prompt"})
 
 
 def _durable_spawn_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -346,14 +343,14 @@ def rehydrate_dispatch_spawn_request(
     briefing_file = str(attempt.get("briefing_file") or "")
     briefing_digest = str(attempt.get("briefing_digest") or "")
     project_root = Path(str(task_definition.get("project_root") or ""))
-    assignment_claim = attempt.get("worker_assignment")
+    worker_authority = attempt.get("worker_authority")
     relative = Path(briefing_file)
     if (
         not task_id or not attempt_id or not dispatch_ref or not profile or not briefing_digest
-        or not isinstance(assignment_claim, dict)
+        or not isinstance(worker_authority, dict)
         or not project_root.is_absolute() or relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts)
     ):
-        raise ValueError("legacy_worker_assignment_quarantined")
+        raise ValueError("worker_dispatch_authority_unavailable")
     briefing_path = _contained_path(task_dir, task_dir / relative, "dispatch briefing")
     intent_relative = Path(str(task_definition.get("user_intent_artifact_path") or "intent/user-request.txt"))
     if intent_relative.is_absolute() or any(part in {"", ".", ".."} for part in intent_relative.parts):
@@ -370,19 +367,12 @@ def rehydrate_dispatch_spawn_request(
     request["briefing_path"] = str(briefing_path)
     request["briefing_digest"] = briefing_digest
     request["dispatch_ref"] = dispatch_ref
-    assignment_ref = worker_assignment_ref(project_root, assignment_claim, create_key=False)
     request["message"] = host_spawn_bootstrap(
         profile, briefing_path, briefing_digest, dispatch_ref, task_id, attempt_id, project_root,
-        task_ref=str(assignment_claim.get("task_ref") or ""),
-        assignment_ref=assignment_ref,
         intent_path=str(intent_path),
         intent_digest=str(task_definition.get("user_request_digest") or ""),
         plan_unit_path=str(plan_path) if plan_path is not None else None,
         plan_unit_digest=str(attempt.get("plan_unit_digest") or ""),
-    )
-    request["bootstrap_repair_message"] = host_bootstrap_repair_message(
-        task_ref=str(assignment_claim.get("task_ref") or ""),
-        assignment_ref=assignment_ref,
     )
     if request.get("host_tool") != "spawn_agent":
         raise ValueError("native_spawn_agent_transport_required")
@@ -639,7 +629,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         dispatch_ref = "dispatch-" + digest_text(
             "\0".join((state["task_id"], attempt_id, agent, task_name))
         )[:24]
-        assignment_claim, assignment_ref = issue_worker_assignment(
+        worker_authority = issue_worker_dispatch_authority(
             project_root,
             task_id=state["task_id"],
             attempt_id=attempt_id,
@@ -667,7 +657,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         acceptance_criteria = _canonical_text_items(task_definition.get("acceptance_criteria"), field="acceptance_criteria")
         verification = _canonical_text_items(task_definition.get("verification"), field="verification")
         pause_conditions = _canonical_text_items(task_definition.get("pause_conditions"), field="pause_conditions")
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v11_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "requirements": requirements, "constraints": constraints, "scope": scope, "acceptance_criteria": acceptance_criteria, "verification": verification, "user_request": redact(task_definition.get("user_request", ""), 4000), "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs)}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": False, "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]], "governance_context": governance_context, "project_root": str(project_root), "internal_language": "en", "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "requirements": requirements, "constraints": constraints, "scope": scope, "acceptance_criteria": acceptance_criteria, "verification": verification, "user_request": redact(task_definition.get("user_request", ""), 4000), "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs)}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": False, "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]], "governance_context": governance_context, "project_root": str(project_root), "internal_language": "en", "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = pause_conditions
@@ -714,7 +704,6 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         task_contract = {
             "schema": "cortex/task-contract/v1",
             "task_id": state["task_id"],
-            "task_ref": _v11_task_ref(state["task_id"]),
             "task_revision": state.get("task_revision") or state.get("revision"),
             "user_request": task_definition.get("user_request"),
             "current_user_intent": task_definition.get("current_user_intent"),
@@ -859,8 +848,6 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         spawn_request["briefing_digest"] = briefing_digest
         spawn_request["message"] = host_spawn_bootstrap(
             agent, briefing_path, briefing_digest, dispatch_ref, state["task_id"], attempt_id, project_root,
-            task_ref=str(assignment_claim["task_ref"]),
-            assignment_ref=assignment_ref,
             intent_path=package["user_intent"]["artifact_path"],
             intent_digest=package["user_intent"]["digest_sha256"],
             plan_unit_path=(package.get("plan_unit") or {}).get("artifact_path"),
@@ -868,16 +855,12 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             task_contract_path=(package.get("task_contract") or {}).get("artifact_path"),
             task_contract_digest=(package.get("task_contract") or {}).get("digest_sha256"),
         )
-        spawn_request["bootstrap_repair_message"] = host_bootstrap_repair_message(
-            task_ref=str(assignment_claim["task_ref"]),
-            assignment_ref=assignment_ref,
-        )
         # The package and state are both durable.  Retain only the logical
         # dispatch contract there; absolute briefing paths and the rendered
         # host prompt are recreated after a restart/host-store relocation.
         package["spawn_request"] = _durable_spawn_request(spawn_request)
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "worker_assignment": assignment_claim, "assignment_delivery_status": "pending", "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "plan_unit_file": compiled_relative, "plan_unit_digest": compiled_plan_digest, "spawn_request": _durable_spawn_request(spawn_request), **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "worker_authority": worker_authority, "dispatch_delivery_status": "pending", "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "plan_unit_file": compiled_relative, "plan_unit_digest": compiled_plan_digest, "spawn_request": _durable_spawn_request(spawn_request), **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "created_at": now()})
         db_put_worker_session(ledger_root(params), {
             "task_id": state["task_id"],
             "attempt_id": attempt_id,

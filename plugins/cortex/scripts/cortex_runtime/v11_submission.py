@@ -1,7 +1,7 @@
 """Pure validation and same-attempt repair primitives for the v11 worker API.
 
 The module deliberately has no ledger, host, session, transport, or persistence
-dependency.  A caller resolves ``task_ref`` / ``assignment_ref`` separately and
+dependency. A caller resolves the opaque ``dispatch_ref`` separately and
 may use these functions to validate a public submission before it performs any
 state transition.  Rejected drafts live only in the server's private escrow;
 the public ``repair_capsule`` field carries a fixed-size signed lookup handle.
@@ -18,16 +18,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-TASK_REF_PATTERN = r"^task-[0-9a-f]{12}$"
-ASSIGNMENT_REF_PATTERN = r"^assignment-v1-[0-9a-f]{64}$"
+DISPATCH_REF_PATTERN = r"^dispatch-[0-9a-f]{24}$"
 COORDINATOR_REF_PATTERN = r"^[0-9a-f]{64}$"
 DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 REPAIR_HANDLE_PATTERN = r"^v11rh1\.[A-Za-z0-9_-]{22}\.[0-9a-f]{32}$"
 REPAIR_HANDLE_LENGTH = 62
-MAX_ITEMS = 32
-MAX_WORK_PACKAGES = 32
-MAX_MICROTASKS_PER_PACKAGE = 32
-MAX_MICROTASKS_PER_PLAN = 128
+# A repair card may expose one patch for every public diagnostic. Keep this
+# distinct from semantic collection limits so the diagnostic ceiling remains
+# executable in one immutable-capsule retry.
+MAX_DIAGNOSTICS = 64
 
 
 class ValidationFailure(ValueError):
@@ -36,195 +35,6 @@ class ValidationFailure(ValueError):
     def __init__(self, diagnostics: Sequence[Mapping[str, Any]]) -> None:
         self.diagnostics = [copy.deepcopy(dict(item)) for item in diagnostics]
         super().__init__("; ".join(str(item.get("message") or "validation failed") for item in self.diagnostics))
-
-
-_CARD_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary"],
-    "properties": {
-        "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
-        "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
-    },
-}
-
-_MICROTASK_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"],
-    "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "title": {"type": "string", "minLength": 1, "maxLength": 500},
-        "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "profile": {"type": "string", "minLength": 1, "maxLength": 128},
-        "allowed_paths": {"type": "array", "minItems": 1, "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 512}},
-        "depends_on": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
-        "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
-        "verification": {"type": "array", "minItems": 1, "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
-    },
-}
-
-_PACKAGE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["id", "title", "objective", "allowed_paths", "microtasks"],
-    "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "title": {"type": "string", "minLength": 1, "maxLength": 500},
-        "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "allowed_paths": {"type": "array", "minItems": 1, "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 512}},
-        "depends_on": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
-        "microtasks": {"type": "array", "minItems": 1, "maxItems": MAX_MICROTASKS_PER_PACKAGE, "items": _MICROTASK_SCHEMA},
-    },
-}
-
-_RECOMMENDATION_ACTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["issue", "action", "plan_refs", "verification"],
-    "properties": {
-        "issue": {"type": "string", "minLength": 1, "maxLength": 2000},
-        "action": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "plan_refs": {
-            "type": "array", "maxItems": MAX_ITEMS,
-            "items": {"type": "string", "minLength": 1, "maxLength": 128},
-        },
-        "verification": {"type": "string", "minLength": 1, "maxLength": 4000},
-    },
-}
-
-_REQUIREMENT_COVERAGE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["requirement", "plan_refs", "verification", "status"],
-    "properties": {
-        "requirement": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "plan_refs": {
-            "type": "array", "minItems": 1, "maxItems": MAX_ITEMS,
-            "items": {"type": "string", "minLength": 1, "maxLength": 128},
-        },
-        "verification": {
-            "type": "array", "minItems": 1, "maxItems": MAX_ITEMS,
-            "items": {"type": "string", "minLength": 1, "maxLength": 2000},
-        },
-        "status": {"type": "string", "const": "covered"},
-    },
-}
-
-PLANNER_PLAN_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["overview", "work_packages"],
-    "properties": {
-        "overview": {"type": "string", "minLength": 1, "maxLength": 8000},
-        "work_packages": {"type": "array", "minItems": 1, "maxItems": MAX_WORK_PACKAGES, "items": _PACKAGE_SCHEMA},
-        "requirement_coverage": {"type": "array", "maxItems": MAX_ITEMS, "items": _REQUIREMENT_COVERAGE_SCHEMA},
-        "recommendation": {"type": "string", "enum": ["approve", "revise"]},
-        "recommendation_rationale": {"type": "string", "maxLength": 4000},
-        "recommendation_actions": {"type": "array", "maxItems": MAX_ITEMS, "items": _RECOMMENDATION_ACTION_SCHEMA},
-        "resolved_questions": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 4000}},
-        "risks": {"type": "array", "maxItems": MAX_ITEMS, "items": {"type": "string", "minLength": 1, "maxLength": 4000}},
-    },
-}
-
-OUTCOME_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["status", "summary"],
-    "properties": {
-        "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
-        "summary": {"type": "string", "minLength": 1, "maxLength": 8000},
-        "findings": {"type": "array", "maxItems": MAX_ITEMS, "items": _CARD_SCHEMA},
-        "decisions_needed": {"type": "array", "maxItems": MAX_ITEMS, "items": _CARD_SCHEMA},
-        "unresolved": {"type": "array", "maxItems": MAX_ITEMS, "items": _CARD_SCHEMA},
-        "claims": {"type": "array", "maxItems": MAX_ITEMS, "items": _CARD_SCHEMA},
-    },
-}
-
-PATCH_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["op", "path"],
-    "properties": {
-        "op": {
-            "type": "string", "enum": ["add", "replace", "remove"],
-            "description": "Use exactly add, replace, or remove. Any other value is a retryable unchanged repair.",
-        },
-        "path": {"type": "string", "pattern": r"^/.*"},
-        "value": {},
-    },
-}
-
-PUBLIC_SUBMISSION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["task_ref", "assignment_ref"],
-    "description": (
-        "Choose exactly one branch. A planner assignment on the plan gate requires `plan`; "
-        "every non-planner assignment requires `outcome`. After the server returns a repair "
-        "capsule, only the repair branch is accepted until that exact patch succeeds."
-    ),
-    "properties": {
-        "task_ref": {"type": "string", "pattern": TASK_REF_PATTERN},
-        "assignment_ref": {"type": "string", "pattern": ASSIGNMENT_REF_PATTERN},
-        "plan": PLANNER_PLAN_SCHEMA,
-        "outcome": OUTCOME_SCHEMA,
-        "base_payload_digest": {
-            "type": "string", "pattern": DIGEST_PATTERN,
-            "description": "Copy the exact digest returned with the repair handle; never recompute or alter it.",
-        },
-        "patches": {
-            "type": "array", "minItems": 1, "maxItems": MAX_ITEMS, "items": PATCH_SCHEMA,
-            "description": (
-                "Non-empty RFC6902 patches limited to the exact paths returned with this repair handle. "
-                "An empty or invalid patch is retryable and leaves the pending repair unchanged."
-            ),
-        },
-        "repair_capsule": {
-            "type": "string", "minLength": REPAIR_HANDLE_LENGTH,
-            "maxLength": REPAIR_HANDLE_LENGTH, "pattern": REPAIR_HANDLE_PATTERN,
-            "description": "Copy this opaque fixed-size server handle exactly from repair.repair_capsule; never decode, reconstruct, summarize, or manually transcribe it.",
-        },
-    },
-    "oneOf": [
-        {
-            "title": "Planner assignment: plan branch",
-            "description": "Required for profile=planner on gate=plan; outcome and repair fields are forbidden.",
-            "required": ["task_ref", "assignment_ref", "plan"],
-            "not": {"anyOf": [
-                {"required": ["outcome"]}, {"required": ["repair_capsule"]},
-                {"required": ["base_payload_digest"]}, {"required": ["patches"]},
-            ]},
-        },
-        {
-            "title": "Non-planner assignment: outcome branch",
-            "description": "Required for every non-planner assignment; plan and repair fields are forbidden.",
-            "required": ["task_ref", "assignment_ref", "outcome"],
-            "not": {"anyOf": [
-                {"required": ["plan"]}, {"required": ["repair_capsule"]},
-                {"required": ["base_payload_digest"]}, {"required": ["patches"]},
-            ]},
-        },
-        {
-            "title": "Pending repair: patch-only branch",
-            "description": (
-                "Use only after complete_attempt returns repair. Copy the exact capsule and digest, "
-                "omit plan/outcome, and patch only the returned paths."
-            ),
-            "required": [
-                "task_ref", "assignment_ref", "repair_capsule", "base_payload_digest", "patches",
-            ],
-            "not": {"anyOf": [{"required": ["plan"]}, {"required": ["outcome"]}]},
-        },
-    ],
-}
-
-PUBLIC_SCHEMA_REGISTRY: dict[str, dict[str, Any]] = {
-    "v11.submit": PUBLIC_SUBMISSION_SCHEMA,
-    "v11.plan": PLANNER_PLAN_SCHEMA,
-    "v11.outcome": OUTCOME_SCHEMA,
-    "v11.patch": PATCH_SCHEMA,
-}
 
 
 def canonical_digest(value: Any) -> str:
@@ -266,11 +76,9 @@ def _path_parts(path: object) -> list[str]:
     return _pointer_parts(pointer) if pointer else []
 
 
-def schema_for_path(schema: Mapping[str, Any], path: object, *, aliases: Mapping[str, str] | None = None) -> dict[str, Any]:
+def schema_for_path(schema: Mapping[str, Any], path: object) -> dict[str, Any]:
     """Project the closest public schema node for an actionable diagnostic."""
     parts = _path_parts(path)
-    if aliases and parts and parts[0] in aliases:
-        parts = _path_parts(aliases[parts[0]]) + parts[1:]
     selected: Any = schema
     for part in parts:
         if not isinstance(selected, Mapping):
@@ -288,7 +96,7 @@ def schema_for_path(schema: Mapping[str, Any], path: object, *, aliases: Mapping
 def normalize_diagnostics(
     diagnostics: Sequence[Mapping[str, Any]],
     *,
-    schema: Mapping[str, Any] = PUBLIC_SUBMISSION_SCHEMA,
+    schema: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return stable, path-aware public diagnostics without mutating inputs."""
     normalized: list[dict[str, Any]] = []
@@ -306,7 +114,19 @@ def normalize_diagnostics(
         )
         copied.setdefault("code", "validation_invalid")
         copied.setdefault("message", "invalid value")
-        copied["field_schema"] = schema_for_path(schema, copied["json_pointer"] or path)
+        # Unknown-property diagnostics are actionable only as a removal. The
+        # Repeating the parent schema per unknown key bloats a no-mutation
+        # correction receipt without adding a legal retry option.
+        supplied_schema = copied.get("field_schema")
+        copied["field_schema"] = (
+            {"type": "object", "additionalProperties": False}
+            if copied["code"] == "validation_unknown" else
+            copy.deepcopy(dict(supplied_schema))
+            if isinstance(supplied_schema, Mapping) else
+            schema_for_path(schema, copied["json_pointer"] or path)
+            if isinstance(schema, Mapping) else
+            {"type": "object"}
+        )
         normalized.append(copied)
     return normalized
 
@@ -331,12 +151,16 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], path: str, diagnosti
         "object": isinstance(value, Mapping),
         "array": isinstance(value, list),
         "string": isinstance(value, str),
+        "integer": type(value) is int,
+        "boolean": type(value) is bool,
     }
     if expected in matches and not matches[expected]:
         _issue(diagnostics, path, f"must be a {expected}")
         return
     if "enum" in schema and value not in schema["enum"]:
         _issue(diagnostics, path, "must be one of the allowed values")
+    if "const" in schema and value != schema["const"]:
+        _issue(diagnostics, path, "must match the server-selected value")
     if isinstance(value, str):
         if len(value) < int(schema.get("minLength", 0)):
             _issue(diagnostics, path, "must not be empty")
@@ -377,64 +201,98 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], path: str, diagnosti
                 _validate_schema(value[key], child_schema, f"{path}.{key}", diagnostics)
 
 
-def _plan_microtask_limit(plan: Mapping[str, Any], diagnostics: list[dict[str, Any]]) -> None:
-    packages = plan.get("work_packages")
-    if not isinstance(packages, list):
+def _validate_patch_integrity(payload: Mapping[str, Any], diagnostics: list[dict[str, Any]]) -> None:
+    """Enforce RFC6902 value presence without owning the public patch schema."""
+    # Local import avoids a module cycle: public_contracts owns this schema but
+    # imports the shared protocol constants defined above while it builds the
+    # complete public registry.
+    from cortex_runtime.public_contracts import PUBLIC_PATCH_SCHEMA
+
+    patches = payload.get("patches")
+    if not isinstance(patches, list):
         return
-    total = sum(len(item.get("microtasks", [])) for item in packages if isinstance(item, Mapping) and isinstance(item.get("microtasks"), list))
-    if total > MAX_MICROTASKS_PER_PLAN:
-        _issue(diagnostics, "$.plan.work_packages", f"contains more than {MAX_MICROTASKS_PER_PLAN} total microtasks")
+    patch_properties = PUBLIC_PATCH_SCHEMA.get("properties")
+    if not isinstance(patch_properties, Mapping):
+        raise TypeError("canonical public patch schema is unavailable")
+    op_schema = patch_properties.get("op")
+    canonical_ops = (
+        set(op_schema.get("enum") or ())
+        if isinstance(op_schema, Mapping) else
+        set()
+    )
+    if not canonical_ops:
+        raise TypeError("canonical public patch operations are unavailable")
+    for index, patch in enumerate(patches):
+        if not isinstance(patch, Mapping):
+            continue
+        op = patch.get("op")
+        if op not in canonical_ops:
+            continue
+        if op == "remove" and "value" in patch:
+            _issue(
+                diagnostics,
+                f"$.patches[{index}].value",
+                "is forbidden when patch op is remove",
+                "validation_unknown",
+            )
+        elif op != "remove" and "value" not in patch:
+            _issue(
+                diagnostics,
+                f"$.patches[{index}].value",
+                f"is required when patch op is {op}",
+                "validation_required",
+            )
 
 
-def validate_submission(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate and deep-copy one closed v11 full or repair submission.
+def validate_submission(
+    payload: Mapping[str, Any],
+    *,
+    schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one action-specific submission against its canonical schema.
 
-    No identity is inferred here.  The returned ``mode`` is ``full`` or
-    ``repair``; a full submission additionally has ``kind`` of ``plan`` or
-    ``outcome``.  Any error is aggregated before raising ``ValidationFailure``.
+    The caller obtains ``schema`` from :func:`public_contracts.backend_schema_for`;
+    this module owns no public input field, required-field, or allowed-field
+    table. No identity is inferred here. The returned ``mode`` is ``full`` or
+    ``repair``; a submit action has ``kind`` of ``report``.
     """
     diagnostics: list[dict[str, Any]] = []
     if not isinstance(payload, Mapping):
-        raise ValidationFailure(normalize_diagnostics([{"path": "$", "message": "must be an object"}]))
-    _validate_schema(payload, PUBLIC_SUBMISSION_SCHEMA, "$", diagnostics)
-    has_plan = "plan" in payload
-    has_outcome = "outcome" in payload
-    has_digest = "base_payload_digest" in payload
-    has_patches = "patches" in payload
-    has_capsule = "repair_capsule" in payload
-    full = has_plan or has_outcome
-    repair = has_digest or has_patches or has_capsule
-    if full and repair:
-        _issue(diagnostics, "$", "full submission and repair fields are mutually exclusive", "validation_branch")
-    elif not full and not repair:
-        _issue(diagnostics, "$", "provide exactly one plan, outcome, or digest-bound patch repair", "validation_branch")
-    elif full:
-        if has_plan == has_outcome:
-            _issue(diagnostics, "$", "provide exactly one of plan or outcome", "validation_branch")
-        if has_plan and isinstance(payload.get("plan"), Mapping):
-            _plan_microtask_limit(payload["plan"], diagnostics)
+        raise ValidationFailure(normalize_diagnostics(
+            [{"path": "$", "message": "must be an object"}],
+            schema=schema,
+        ))
+    _validate_schema(payload, schema, "$", diagnostics)
+    action = payload.get("action")
+    submit = action == "submit"
+    repair_action = action == "repair"
+    if submit:
+        if not isinstance(payload.get("report"), str) or not payload["report"].strip():
+            _issue(diagnostics, "$.report", "submit requires a non-empty report", "validation_required")
+    elif repair_action:
+        _validate_patch_integrity(payload, diagnostics)
     else:
-        if not (has_digest and has_patches and has_capsule):
-            _issue(diagnostics, "$", "repair requires repair_capsule, base_payload_digest, and patches", "validation_branch")
+        _issue(diagnostics, "$.action", "submission action is unsupported", "validation_branch")
     if diagnostics:
-        raise ValidationFailure(normalize_diagnostics(diagnostics))
+        raise ValidationFailure(normalize_diagnostics(diagnostics, schema=schema))
     result = copy.deepcopy(dict(payload))
-    result["mode"] = "repair" if repair else "full"
-    if full:
-        result["kind"] = "plan" if has_plan else "outcome"
+    result["mode"] = "repair" if repair_action else "full"
+    if submit:
+        result["kind"] = "report"
     return result
 
 
 def _target_from_submission(submission: Mapping[str, Any]) -> tuple[str, Any]:
-    if "plan" in submission:
-        return "plan", submission["plan"]
-    if "outcome" in submission:
-        return "outcome", submission["outcome"]
+    if submission.get("action") == "submit":
+        return "report", {"status": submission.get("status"), "report": submission.get("report")}
     raise ValueError("rejected-draft escrow requires a full submission")
 
 
 def create_rejected_draft_escrow(
-    submission: Mapping[str, Any], diagnostics: Sequence[Mapping[str, Any]],
+    submission: Mapping[str, Any],
+    diagnostics: Sequence[Mapping[str, Any]],
+    *,
+    schema: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Create immutable private repair input from a rejected v11 draft.
 
@@ -446,24 +304,22 @@ def create_rejected_draft_escrow(
     """
     if not isinstance(submission, Mapping):
         raise ValueError("rejected-draft escrow requires an object submission")
-    permitted = {"task_ref", "assignment_ref", "plan", "outcome"}
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        raise TypeError("canonical submit schema properties are unavailable")
+    permitted = set(properties)
     if set(submission) - permitted:
         raise ValueError("rejected-draft escrow permits only a full v11 submission")
-    task_ref = submission.get("task_ref")
-    assignment_ref = submission.get("assignment_ref")
-    if not isinstance(task_ref, str) or re.fullmatch(TASK_REF_PATTERN, task_ref) is None:
-        raise ValueError("rejected-draft task_ref is invalid")
-    if not isinstance(assignment_ref, str) or re.fullmatch(ASSIGNMENT_REF_PATTERN, assignment_ref) is None:
-        raise ValueError("rejected-draft assignment_ref is invalid")
-    has_plan = "plan" in submission
-    has_outcome = "outcome" in submission
-    if has_plan == has_outcome:
-        raise ValueError("rejected-draft escrow requires exactly one plan or outcome")
+    dispatch_ref = submission.get("dispatch_ref")
+    if not isinstance(dispatch_ref, str) or re.fullmatch(DISPATCH_REF_PATTERN, dispatch_ref) is None:
+        raise ValueError("rejected-draft dispatch_ref is invalid")
+    if submission.get("action") != "submit":
+        raise ValueError("rejected-draft escrow requires action=submit")
     kind, target = _target_from_submission(submission)
     if not isinstance(target, Mapping):
         raise ValueError("rejected-draft semantic payload must be an object")
     prefix = f"/{kind}"
-    normalized = normalize_diagnostics(diagnostics)
+    normalized = normalize_diagnostics(diagnostics, schema=schema)
     scoped: list[dict[str, Any]] = []
     for item in normalized:
         pointer = str(item["json_pointer"])
@@ -479,8 +335,7 @@ def create_rejected_draft_escrow(
         raise ValueError("rejected-draft diagnostics contain no repairable semantic paths")
     return {
         "schema": "cortex/private-repair-draft/v1",
-        "task_ref": task_ref,
-        "assignment_ref": assignment_ref,
+        "dispatch_ref": dispatch_ref,
         "kind": kind,
         "base_payload_digest": canonical_digest(target),
         "payload": copy.deepcopy(target),
@@ -625,22 +480,25 @@ def _apply_patches(value: Any, patches: Sequence[Mapping[str, Any]]) -> Any:
 def apply_repair_escrow(
     escrow: Mapping[str, Any],
     repair: Mapping[str, Any],
+    *,
+    repair_schema: Mapping[str, Any],
+    submit_schema: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Return a validated repaired full submission without mutating either input.
 
-    The task and assignment refs in the repair must exactly match the immutable
-    escrow.  Patch paths are rooted at the semantic payload, so they cannot
+    The dispatch ref in the repair must exactly match the immutable escrow.
+    Patch paths are rooted at the semantic payload, so they cannot
     mutate identity or envelope fields.
     """
-    candidate = validate_submission(repair)
+    candidate = validate_submission(repair, schema=repair_schema)
     if candidate["mode"] != "repair":
         raise ValueError("repair escrow requires a digest-bound patch submission")
-    required = {"schema", "task_ref", "assignment_ref", "kind", "base_payload_digest", "payload", "diagnostics"}
+    required = {"schema", "dispatch_ref", "kind", "base_payload_digest", "payload", "diagnostics"}
     if not required.issubset(escrow):
         raise ValueError("rejected-draft escrow is invalid")
     if escrow.get("schema") != "cortex/private-repair-draft/v1":
         raise ValueError("rejected-draft escrow schema is unsupported")
-    if candidate["task_ref"] != escrow["task_ref"] or candidate["assignment_ref"] != escrow["assignment_ref"]:
+    if candidate["dispatch_ref"] != escrow["dispatch_ref"]:
         raise ValueError("repair identity does not match the rejected draft")
     base = escrow["payload"]
     digest = canonical_digest(base)
@@ -658,5 +516,10 @@ def apply_repair_escrow(
     repaired = _apply_patches(base, patches)
     if not diagnostic_scope_allows(escrow["diagnostics"], changed_paths(base, repaired)):
         raise ValueError("repair changed a path outside the diagnosed semantic scope")
-    full = {"task_ref": escrow["task_ref"], "assignment_ref": escrow["assignment_ref"], str(escrow["kind"]): repaired}
-    return validate_submission(full)
+    if str(escrow["kind"]) != "report" or not isinstance(repaired, Mapping):
+        raise ValueError("repair escrow has an unsupported semantic target")
+    full = {
+        "dispatch_ref": escrow["dispatch_ref"],
+        "action": "submit", "status": repaired.get("status"), "report": repaired.get("report"),
+    }
+    return validate_submission(full, schema=submit_schema)

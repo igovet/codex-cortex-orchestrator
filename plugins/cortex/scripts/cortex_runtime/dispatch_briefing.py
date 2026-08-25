@@ -15,7 +15,6 @@ from typing import Any
 
 import cortex as _runtime
 from cortex import (
-    AGENTS,
     AWAITING_HOST_SPAWN,
     PUBLIC_ORCHESTRATION_SCHEMA,
     _attempt,
@@ -28,29 +27,24 @@ from cortex import (
     select_project_root,
 )
 from cortex_runtime import attempt_protocol
+from cortex_runtime.ledger_db import _governance_lifecycle_hmac_key
+from cortex_runtime.pagination import decode_cursor, encode_cursor, scope_digest
+from cortex_runtime.public_contracts import backend_schema_for
 from cortex_runtime.validation import ValidationFailure
 from cortex_runtime.v11_submission import json_pointer
 
 
-_MISSING = object()
-
 # Briefings are model-facing MCP payloads.  Keep each response small enough
 # that a normal assignment cannot consume a worker's context window before it
-# has read the actual task.  The caller may ask for a smaller page, but never
-# for an unbounded or oversized one.
+# has read the actual task.  Page size is entirely server-owned.
 DEFAULT_DISPATCH_BRIEFING_PAGE_BYTES = 16 * 1024
-MAX_DISPATCH_BRIEFING_PAGE_BYTES = 64 * 1024
 
-_DISPATCH_FIELD_SCHEMAS: dict[str, dict[str, Any]] = {
-    "task_ref": {"type": "string", "pattern": "^task-[0-9a-f]{12}$"},
-    "assignment_ref": {"type": "string", "pattern": "^assignment-v1-[0-9a-f]{64}$"},
-    "cursor": {"type": "string", "minLength": 1},
-    "max_bytes": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": MAX_DISPATCH_BRIEFING_PAGE_BYTES,
-    },
-}
+def _dispatch_schema(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Materialize the private adapter view of the canonical public schema."""
+    registry = getattr(_runtime, "PUBLIC_CONTRACTS", None)
+    return backend_schema_for(registry, "read_dispatch_briefing", params) if isinstance(registry, dict) else {
+        "type": "object", "additionalProperties": False, "properties": {}, "required": [],
+    }
 
 
 def _dispatch_diagnostic_defaults(item: dict[str, Any]) -> dict[str, Any]:
@@ -64,9 +58,8 @@ def _dispatch_diagnostic_defaults(item: dict[str, Any]) -> dict[str, Any]:
     source = dict(item)
     path = str(source.get("path") or "$")
     field = path.rsplit(".", 1)[-1]
-    schema = _DISPATCH_FIELD_SCHEMAS.get(field, {"type": "object"})
-    if field == "profile":
-        schema = {**schema, "enum": sorted(AGENTS)}
+    properties = _dispatch_schema().get("properties") or {}
+    schema = properties.get(field, {"type": "object"}) if isinstance(properties, dict) else {"type": "object"}
     supplied_pointer = source.get("json_pointer")
     pointer = (
         str(supplied_pointer)
@@ -81,16 +74,17 @@ def _dispatch_diagnostic_defaults(item: dict[str, Any]) -> dict[str, Any]:
         "message": redact(str(source.get("message") or "invalid value"), 300),
         "field_schema": dict(source.get("field_schema") or schema),
     }
-    if field in {"task_ref", "assignment_ref", "cursor"}:
+    if field in {"dispatch_ref", "cursor"}:
         diagnostic["value_source"] = "cortex"
     return diagnostic
 
 
 def _dispatch_preflight(params: dict[str, Any]) -> list[dict[str, Any]]:
-    """Collect the complete bounded read form before assignment lookup."""
-    allowed = set(_DISPATCH_FIELD_SCHEMAS)
+    """Validate the direct adapter from the exact advertised contract."""
+    schema = _dispatch_schema(params)
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
     diagnostics: list[dict[str, Any]] = []
-    for field in sorted(set(params) - allowed):
+    for field in sorted(set(params) - set(properties)):
         pointer = "/" + field.replace("~", "~0").replace("/", "~1")
         diagnostics.append({
             "code": "dispatch_briefing_request_invalid",
@@ -99,51 +93,37 @@ def _dispatch_preflight(params: dict[str, Any]) -> list[dict[str, Any]]:
             "message": "unsupported read_dispatch_briefing field",
             "field_schema": {"type": "object", "additionalProperties": False},
         })
-    for field in ("task_ref", "assignment_ref"):
+    for field in schema.get("required", []) if isinstance(schema.get("required"), list) else []:
         value = params.get(field)
-        pattern = _DISPATCH_FIELD_SCHEMAS[field]["pattern"]
         if not isinstance(value, str) or not value.strip():
             diagnostics.append({
                 "code": "dispatch_briefing_request_invalid", "path": f"$.{field}",
                 "message": f"{field} is required",
             })
-        elif re.fullmatch(pattern, value) is None:
+    for field, value in params.items():
+        field_schema = properties.get(field)
+        if not isinstance(field_schema, dict):
+            continue
+        if field_schema.get("type") == "string" and not isinstance(value, str):
             diagnostics.append({
                 "code": "dispatch_briefing_request_invalid", "path": f"$.{field}",
-                "message": f"{field} has an invalid format",
+                "message": f"{field} must be a string",
             })
-    if "cursor" in params:
-        cursor = params.get("cursor")
-        if not isinstance(cursor, str) or not cursor:
-            diagnostics.append({
-                "code": "dispatch_briefing_request_invalid", "path": "$.cursor",
-                "message": "cursor must be a non-empty opaque string returned by Cortex",
-            })
-    if "max_bytes" in params:
-        value = params.get("max_bytes")
-        if isinstance(value, bool) or not isinstance(value, int) or not (1 <= value <= MAX_DISPATCH_BRIEFING_PAGE_BYTES):
-            diagnostics.append({
-                "code": "dispatch_briefing_request_invalid", "path": "$.max_bytes",
-                "message": f"max_bytes must be an integer from 1 through {MAX_DISPATCH_BRIEFING_PAGE_BYTES}",
-            })
+            continue
+        if isinstance(value, str):
+            pattern = field_schema.get("pattern")
+            if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+                diagnostics.append({
+                    "code": "dispatch_briefing_request_invalid", "path": f"$.{field}",
+                    "message": f"{field} has an invalid format",
+                })
     return [_dispatch_diagnostic_defaults(item) for item in diagnostics]
-def _bounded_artifact_max_bytes(value: Any, *, label: str) -> int:
-    """Return a bounded page size, applying the server default when omitted."""
-    if value is _MISSING:
-        return DEFAULT_DISPATCH_BRIEFING_PAGE_BYTES
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{label} max_bytes must be a positive integer")
-    if value > MAX_DISPATCH_BRIEFING_PAGE_BYTES:
-        raise ValueError(
-            f"{label} max_bytes must not exceed {MAX_DISPATCH_BRIEFING_PAGE_BYTES}"
-        )
-    return value
 
 
 def _dispatch_briefing_error_path(message: str) -> str:
     lowered = message.lower()
     for marker, path in (
-        ("max_bytes", "max_bytes"), ("cursor", "cursor"),
+        ("cursor", "cursor"),
         ("briefing_digest", "briefing_digest"), ("digest does not match", "briefing_digest"),
         ("dispatch_ref", "dispatch_ref"), ("attempt_id", "attempt_id"),
         ("task_id", "task_id"), ("profile", "profile"), ("project_root", "project_root"),
@@ -163,8 +143,8 @@ def _dispatch_briefing_failure(
     message = redact(str(exc), 1000)
     if isinstance(exc, _runtime.WorkerAssignmentError):
         return {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "assignment_unavailable",
-            "code": "worker_assignment_unavailable",
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "dispatch_unavailable",
+            "code": "worker_dispatch_unavailable",
             "retryable": False,
         }
     lowered = message.lower()
@@ -175,7 +155,7 @@ def _dispatch_briefing_failure(
         "unsupported read_dispatch_briefing fields", "is required; copy the exact value",
         "profile must be an exact cortex worker profile", "profile does not match",
         "dispatch_ref does not match", "briefing_digest must be", "briefing_digest does not match",
-        "briefing cursor", "briefing max_bytes",
+        "briefing cursor",
     )))
     if caller_correctable:
         path = _dispatch_briefing_error_path(message)
@@ -244,31 +224,29 @@ def _read_dispatch_briefing_impl(params: dict[str, Any]) -> dict[str, Any]:
         if _runtime.db_read_artifact_content(root, state["task_id"], artifact["artifact_ref"]) != briefing:
             raise ValueError("dispatch briefing export differs from its immutable artifact")
         audience = f"worker:{attempt_id}:{profile}"
+        selector = "read_dispatch_briefing"
+        cursor_binding = scope_digest({
+            "task_id": state["task_id"], "artifact_ref": artifact["artifact_ref"],
+            "digest_sha256": briefing_digest,
+        })
+        cursor_secret = _governance_lifecycle_hmac_key(root, create=False)
         byte_offset = 0
         has_cursor = "cursor" in params
         raw_cursor = params.get("cursor")
         if has_cursor:
             if not isinstance(raw_cursor, str) or not raw_cursor:
                 raise ValueError("briefing cursor must be a non-empty opaque string returned by this server")
-            try:
-                decoded = _runtime.db_decode_artifact_cursor(root, raw_cursor)
-            except ValueError as exc:
-                raise ValueError("briefing cursor is invalid") from exc
-            expected = {"type": "briefing_read", "task_id": state["task_id"], "artifact_ref": artifact["artifact_ref"], "digest_sha256": briefing_digest, "audience": audience}
-            if any(decoded.get(key) != value for key, value in expected.items()):
-                raise ValueError("briefing cursor is not valid for this dispatch, assignment authority, or content version")
-            byte_offset = decoded.get("byte_offset")
-            if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
-                raise ValueError("briefing cursor byte offset is invalid")
-        raw_max_bytes = params["max_bytes"] if "max_bytes" in params else _MISSING
-        effective_max = _bounded_artifact_max_bytes(raw_max_bytes, label="briefing")
+            byte_offset = decode_cursor(
+                raw_cursor, cursor_secret, selector=selector,
+                audience=audience, digest=cursor_binding,
+            )
         base = {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": True, "outcome": "briefing_read"}
         part = _runtime.db_read_artifact_range(
             root,
             state["task_id"],
             artifact["artifact_ref"],
             byte_offset=byte_offset,
-            max_bytes=effective_max,
+            max_bytes=DEFAULT_DISPATCH_BRIEFING_PAGE_BYTES,
         )
         result = {
             **base,
@@ -281,7 +259,10 @@ def _read_dispatch_briefing_impl(params: dict[str, Any]) -> dict[str, Any]:
             "complete": bool(part["complete"]),
         }
         if part["next_byte_offset"] is not None:
-            result["next_cursor"] = _runtime.db_encode_artifact_cursor(root, {"type": "briefing_read", "task_id": state["task_id"], "artifact_ref": artifact["artifact_ref"], "digest_sha256": briefing_digest, "byte_offset": part["next_byte_offset"], "audience": audience})
+            result["next_cursor"] = encode_cursor(
+                cursor_secret, selector=selector, audience=audience,
+                digest=cursor_binding, offset=part["next_byte_offset"],
+            )
         if part["complete"]:
             attempt_protocol.acknowledge_briefing(root, task_id=state["task_id"], attempt_id=attempt_id, dispatch_ref=dispatch_ref, digest=briefing_digest)
         return result

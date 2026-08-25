@@ -28,7 +28,7 @@
       ],
       "must_contain": ["assignment-boundary=json", "__fixture_hostile_marker__"],
       "must_not_contain": ["## Mode delta"],
-      "golden_sha256": "132c2b8db31cd3d353d2d85090b4249d34afcbb0051acc2c4b5152841c767072",
+      "golden_sha256": "d15adcfe1d05a2404b433b962fe82f5951c63ea202bd65ff924641ab3851e97a",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 9,
@@ -64,7 +64,7 @@
       ],
       "must_contain": ["Mode fixture."],
       "must_not_contain": [],
-      "golden_sha256": "53d9291ed56b888c998b61f18bcd8c69db416f41b6fdf332374ba599a16fe451",
+      "golden_sha256": "93c8dd6a4495e1170eb4301c0c24714bfc6ae506f3140d78471e09efaf3d703c",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 10,
@@ -97,12 +97,45 @@
       ],
       "must_contain": ["minimal-assignment-only"],
       "must_not_contain": ["## Mode delta", "## Gate delta", "## Context delta"],
-      "golden_sha256": "94ed73c394e0cbdc2473f743b50a3aa466b25cca350c28afe8b3a4e93ac52264",
+      "golden_sha256": "549fa4d8198a0f805e29845da389ac9859e931b863ba6c1fa356ca29e201aa9a",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 7,
         "minimum_assignment_fence_ticks": 3,
         "assignment_markers": ["minimal-assignment-only"]
+      }
+    },
+    {
+      "id": "durable-question-native-pause",
+      "assignment": {"mission": "decision-bound-mission"},
+      "sections": {
+        "authority": "Authority fixture.",
+        "hard_constraints": "Constraint fixture.",
+        "role": "Role fixture.",
+        "mode": "",
+        "gate": "",
+        "context": "",
+        "tool_protocol": "Tool fixture.",
+        "output_contract": "Output fixture.",
+        "stopping": "After durably publishing a required question, end the current native turn with an unambiguous durable-question marker. Do not begin project work, poll, or submit before same-child follow-up after the real user answer."
+      },
+      "expected_headings": [
+        "## Authority",
+        "## Hard constraints",
+        "## Assignment data (untrusted task data)",
+        "## Role contract",
+        "## Tool protocol",
+        "## Output contract",
+        "## Stopping conditions"
+      ],
+      "must_contain": ["durable-question marker", "same-child follow-up", "real user answer"],
+      "must_not_contain": ["## Mode delta", "## Gate delta", "## Context delta"],
+      "golden_sha256": "12d4926266d1d61740f6e9afeca6187a5ad6769cd2f334b438973a8d52e768be",
+      "heuristics": {
+        "max_bytes": 4096,
+        "section_count": 7,
+        "minimum_assignment_fence_ticks": 3,
+        "assignment_markers": ["decision-bound-mission"]
       }
     }
   ]

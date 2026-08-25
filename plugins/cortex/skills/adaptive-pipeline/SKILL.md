@@ -44,7 +44,7 @@ supports it, but never require either merely to authorize another recovery.
 
 Question Firewall: a user question may cover only task requirements, scope,
 acceptance/product behavior, or explicit external/destructive authorization.
-Mark such a question with the top-level `decision_scope` enum. Never turn a
-policy or lifecycle recommendation into a user question; return it as
-`orchestrator_advice`, preserve the evidence, and let the orchestrator choose
-the next corrective wave.
+The worker sends the complete material context as one arbitrary-length text;
+it does not classify, enumerate, or structure user choices. Never turn a
+policy or lifecycle recommendation into a user question; preserve it as
+internal evidence and let the orchestrator choose the next corrective wave.

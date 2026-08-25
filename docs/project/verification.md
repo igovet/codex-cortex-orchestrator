@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 
 This page describes source-mode checks for Cortex 11.0.1 and the v11 task and
-capability contract on SQLite schema v17. A command is evidence only
+capability contract on SQLite schema v18. A command is evidence only
 when it was actually run; installation and live-model checks must be recorded
 separately.
 
@@ -17,15 +17,16 @@ python3 scripts/cortex-prompt-eval.py
 git diff --check
 ~~~
 
-Run focused tests for changed areas, then the complete source suite:
+Run the sole release gate after the static checks:
 
 ~~~bash
-python3 -m pytest -q tests/test_attempt_protocol.py tests/test_attempt_facade_lifecycle.py
-python3 -m pytest -q
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests.test_marketplace_release_gate
 ~~~
 
-The repository uses pytest discovery for the unittest-style suite. Record total,
-passed, skipped, and failed counts, plus the exact command and environment.
+Record the release-gate outcome, exact command, and environment. The current
+prompt evaluators are `scripts/cortex-prompt-eval.py` and the opt-in
+`scripts/cortex-prompt-live-eval.py --live`; do not treat retired fixture suites
+as release evidence.
 
 ## Protocol acceptance
 
@@ -38,43 +39,49 @@ Focused protocol checks must cover:
 - same-attempt finalization after view, serialization, or infrastructure failure;
 - server-derived changed files, checks, timestamps, identity, and observations;
 - exact task/attempt/result scope for briefing and predecessor-result reads;
-- exact coordinator `task_ref`/`coordinator_ref` and worker
-  `task_ref`/`assignment_ref` capability scope;
-- native `spawn_agent`/exact `wait`/read/continue ordering, with no
+- private coordinator task authority and exact native worker dispatch authority;
+- native `spawn_agent`/exact `wait`/action-specific wave-read/continue ordering, with no
   session/environment authorization or manually authored advance/completions;
-- digest- and capsule-bound plan and outcome repair through `complete_attempt`,
-  including self-contained multi-error patch cards, retryable malformed-copy
-  recovery, explicit allowed patch operations, and terminal correctly-shaped
-  MAC tampering;
-- malformed calls for every public tool branch, each with an exact JSON Pointer,
-  executable `error` + `recovery` kind/operation, no generic union diagnostic, no private
-  path/capability leakage, and no source/cache/ledger/session lookup needed to
-  form the next legal call;
-- terminal recovery with `action=none` and no contradictory retry/inspect/
-  continuation action; `same_operation` only when explicit `allowed_changes`
-  makes the same-tool retry deterministic;
-- Cortex-issued `task_ref`/`coordinator_ref`/`assignment_ref` values copied
-  byte-for-byte with no session/host inference or value echo on a missing-ref
-  failure;
-- one same-child server-built bootstrap repair, full automatic briefing cursor
-  pagination through `complete=true`, and exact same-child poll resumption for
-  scalar and stable-option durable answers without question recreation;
-- compact worker payloads with backend-derived identity and evidence;
-- quarantine and fail-closed handling for legacy rows and lost capabilities;
+- coordinator-model ownership of the worker waves submitted at start,
+  with backend validation/dispatch but no server-selected replacement pipeline;
+- one action per MCP tool, with no multiplexed selector, branch registry,
+  compatibility alias, or audience-dependent shared request shape;
+- every advertised tool owning a complete closed one-level `inputSchema` from
+  `public_contracts.py`, with runtime validation consuming that same schema;
+- short semantic tool descriptions and no argument fields, constraints, or
+  schema templates duplicated in skills or prompts;
+- separate `submit_attempt` and `repair_attempt` operations, with repair bound
+  to the same capsule, digest, retained draft, and attempt;
+- malformed calls producing bounded diagnostics and deterministic structured
+  recovery without private path/capability leakage or source/cache/ledger/session lookup;
+- Cortex-issued coordinator and worker authority copied byte-for-byte
+  with no session/host inference or value echo on a missing-authority failure;
+- server-returned same-child recovery, complete briefing pagination, and exact
+  same-child question/answer resumption without question recreation;
+- server-fixed opaque `c11p` cursor paging for every growing read; fixed
+  receipts and repair cards do not paginate;
+- compact language-neutral worker text/report payloads with backend-derived
+  identity and evidence, server-owned known-locale/canonical-fallback display,
+  and no language blocker or `label_en`/localized alias;
+- exact signed V11 v1--v8 lineage upgrade atomically to v18, private
+  non-selectable old task authority, and fail-closed unknown history/lost
+  capability handling;
 - ContextCompiler and target-specific HandoffCompiler projections;
-- public operation union of exactly nine operations and fixed audiences.
+- action-specific `tools/list` inventory and fixed audiences.
 
 ## Package and host checks
 
 ~~~bash
-bash scripts/sync-cortex.sh --dry-run
+./scripts/sync-cortex.sh --dry-run
 python3 scripts/cortex-host-preflight.py --json
 python3 scripts/probe-fresh-cortex-plugin.py
 ~~~
 
-The first command is a no-write package preview. Host preflight and the fresh
+The first command is the sole supported installation/update path in no-write
+preview mode. Host preflight and the fresh
 plugin probe depend on the local Codex installation and may be unavailable in
-source-only environments. A skipped or blocked host check is not a pass.
+source-only environments. Do not substitute Marketplace or direct `codex
+plugin` commands. A skipped or blocked host check is not a pass.
 
 ## Prompt checks
 

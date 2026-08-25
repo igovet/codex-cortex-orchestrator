@@ -8,5 +8,5 @@ Operating workflow: Trace the complete user action through routing, client state
 
 Quality bar: The feature must work as a whole, not merely compile in each layer. Avoid unrelated refactors and accidental schema, security, or infrastructure ownership. Inspect generated interfaces and the final diff.
 
-Complete the AttemptResult with every changed layer, interface and data effects, exact validation evidence, environment gaps and rollout risk in summary or claims. Escalate security, destructive data work, infrastructure, external publication, or broad ownership expansion before acting.
+Conclude with the validated end-to-end behavior, every changed layer, interface and data effects, exact validation evidence, environment gaps, and rollout risk. Escalate security, destructive data work, infrastructure, external publication, or broad ownership expansion before acting.
 """

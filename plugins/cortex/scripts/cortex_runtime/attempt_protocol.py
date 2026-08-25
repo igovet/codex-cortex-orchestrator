@@ -186,14 +186,14 @@ def _normalise_result(
     normalized_status = str(candidate.status or "").strip().lower()
     if normalized_status not in RESULT_STATUSES:
         issue("status", "must be completed, blocked, or failed")
-    normalized_summary = str(candidate.summary or "").strip()
-    if not normalized_summary:
+    exact_summary = str(candidate.summary or "")
+    if not exact_summary.strip():
         issue("summary", "is required")
     if diagnostics:
         raise AttemptValidationError(diagnostics)
     normalized = AttemptResult(
         status=normalized_status,
-        summary=normalized_summary,
+        summary=exact_summary,
         findings=collections["findings"], decisions_needed=collections["decisions_needed"],
         unresolved=collections["unresolved"], claims=collections["claims"],
     )

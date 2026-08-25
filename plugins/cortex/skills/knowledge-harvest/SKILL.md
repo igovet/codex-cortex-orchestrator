@@ -53,8 +53,8 @@ is mandatory merely because this route is a harvest.
    large repository. Each explorer exhaustively inventories its assigned
    domain and traces feature-bearing surfaces through entry points, workflows,
    state, persistence, configuration, integrations, failure paths, and tests.
-   Give each explorer the available scope AttemptResult projection through
-   `depends_on: ["scope"]` when that projection exists.
+   Give each explorer the available scope conclusion as predecessor evidence
+   when that projection exists.
 3. **Architecture synthesis:** Dispatch `architect` with the scope,
    discovery, and all domain handoffs. It deduplicates features, defines stable
    feature boundaries, maps cross-domain flows and shared infrastructure,
@@ -85,13 +85,9 @@ is mandatory merely because this route is a harvest.
 
 Planning is deliberately separate from early scope when the orchestrator
 selects both: scope partitions evidence, while planning can inform the
-implementation/documentation decision. Worker
-completion uses the small `cortex/attempt-result/v1` semantic result with
-`status`, `summary`, `findings`, `decisions_needed`, and `unresolved`; typed
-gate payloads are allowed when applicable. Plan may add only one nested
-`planning` sibling. AttemptResult and
-AttemptEvent are the worker transport; result refs and complete handoff
-projections are derived server outputs.
+implementation/documentation decision. Every worker publishes one semantic
+conclusion through `submit_attempt`; the tool registry owns its call contract.
+Canonical results and handoff projections are server-derived outputs.
 
 The coordinator owns domain partitioning and may change the future pipeline
 when verified evidence exposes additional domains, shared ownership, or an
@@ -133,29 +129,24 @@ canonical entry point.
 
 ## Worker result shape
 
-Harvest workers use the same explicit v11 worker authority as every Cortex
-worker: preserve the exact `task_ref + assignment_ref` from the native
-bootstrap on every worker call. Never infer, replace, or reconstruct that pair
-from a session, environment, hook, path, process, task record, or parent
-message. Backend-derived attempt, profile, phase, dispatch, receipt, timestamp,
-project, and evidence fields are never worker input.
+Harvest workers use the same explicit worker authority as every Cortex worker:
+preserve the exact opaque value from the native dispatch on every worker-side
+Cortex call. Never infer, replace, or reconstruct it from a
+session, environment, hook, path, process, task record, or parent message.
+Server-derived lifecycle and evidence facts are never worker-authored input.
 
-`complete_attempt` accepts one compact `plan` or `outcome` draft. A planner
-places `overview` and `work_packages` inside `plan`; root-level planning fields
-and legacy planning envelopes are invalid. When validation returns a repair
-capsule, retry the same `complete_attempt` with the exact worker pair,
-`repair_capsule`, `base_payload_digest`, and diagnostic-scoped patches only.
-There is no separate repair call and no replacement worker for a correctable
-submission error. Scope records its discovery brief, context paths, and domain
-boundaries in its compact outcome and events.
+`submit_attempt` uses only the active public tool contract. A Planner publishes
+its work breakdown as the semantic conclusion, not through a second planning
+transport. When validation returns a repair route, retry only as its public
+repair contract permits; there is no replacement worker. Scope publishes its
+discovery brief, context paths, and domain boundaries as semantic evidence.
 
-The repair capsule is an opaque fixed-size server handle. Copy it directly
-from structured tool output; never decode, reconstruct, or manually transcribe
-it. `complete_attempt` with `ok=true` and `terminal=true` ends every worker
-Cortex call: the worker final message must be exactly `ATTEMPT_COMPLETED`,
-with no `attempt_result_ref` handoff and no later event or worker result read.
-A response with `retryable=false` likewise ends all
-task-scoped calls and is reported neutrally without capability values.
+Repair material is opaque. Copy it directly from structured tool output; never
+decode, reconstruct, or manually transcribe it. A successful terminal response
+from `submit_attempt` ends every worker Cortex call and requires the advertised
+terminal final message, with no later event or result read. A nonretryable
+response likewise ends all task-scoped calls and is reported neutrally without
+capability values.
 
 ## Evidence and preservation
 
@@ -169,32 +160,25 @@ facts. Preserve text outside generated blocks and do not overwrite a manual
 ADR, gotcha, or feature explanation without evidence and explicit scope. Never
 expose secrets, source dumps, private operational values, or personal data.
 
-Every Cortex worker uses the strict five-operation worker surface:
-`worker_question`, `record_attempt_event`, `complete_attempt`,
-`read_dispatch_briefing`, and `read_worker_result`. Each call includes the
-exact `task_ref + assignment_ref`; a predecessor read additionally includes the
-one granted `attempt_result_ref`. The worker may checkpoint semantic facts
-during execution with `record_attempt_event`; critical findings, decision
-evidence, blockers, or observed checks should not wait for the final message.
+Every Cortex worker uses only the public worker operation surface. Each call
+preserves exact native worker authority; predecessor access is limited only by
+the active schema and the server-issued continuation. The worker may checkpoint
+semantic facts during execution; critical findings, decision evidence, blockers,
+or observed checks should not wait for the final message.
 
-The worker first calls `read_dispatch_briefing({task_ref, assignment_ref})` and
-follows only the returned cursor until `complete=true`, preserving the same
-pair. A success exposes only briefing content, encoding, `complete`, and an
-opaque next cursor; server receipt recording remains internal. After success,
-do not reconstruct its path, shell-read the briefing again, or locally hash it.
-If the worker pair is missing or rejected, it fails closed and returns only the
-neutral limitation to the coordinator; it does not inspect a ledger, ask a
-hook, query an environment, or substitute an artifact. An initial native
-bootstrap missing either ref permits zero Cortex/project calls and the exact
-sanitized `CORTEX_WORKER_BOOTSTRAP_MISSING` final. The coordinator may repair
-that same native child once with `followup_task` by byte-copying the returned
-server-built `bootstrap_repair_message`; a second failure is terminal and
-never authorizes a replacement.
+The worker first reads its dispatch briefing and follows only the returned
+server continuation until completion. A success exposes only the briefing content and its
+server-issued continuation; server receipt recording remains internal. After
+success, do not reconstruct its path, shell-read the briefing again, or locally
+hash it. If dispatch authority is missing or rejected, fail closed and return
+only the neutral limitation to the coordinator; do not inspect a ledger, ask a
+hook, query an environment, or substitute an artifact. Same-child recovery is
+allowed only when the server returns it; a failure never authorizes a
+replacement.
 
 A successor reads only each explicitly granted predecessor. Workers do not
-emit project identity, changed-file lists, timestamps, receipts, or evidence
-markers as authoritative data. Caller/input/schema diagnostics contain only
-the code, retryability, RFC6901 paths, and minimal field cards; correct every
-path and retry on the same attempt. A successor may not read an ungranted result
+emit lifecycle identity, workspace observations, receipts, or evidence markers
+as authoritative data. Follow only public diagnostics and retry on the same
+attempt when the response explicitly authorizes deterministic correction. A successor may not read an ungranted result
 or treat a scoped evidence read as permission to call coordinator lifecycle
 operations.

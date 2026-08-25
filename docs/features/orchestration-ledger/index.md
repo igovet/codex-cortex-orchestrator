@@ -5,13 +5,13 @@
 ## Purpose
 
 Cortex 11.0.1 is a database-centric orchestration control plane for the v11
-task and capability contract. Schema v17 separates worker semantic input from
+task and capability contract. Schema v18 separates worker semantic input from
 server-observed attempt state.
 
 ## Key files
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) is the executable facade.
-- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns schema v17, attempts, events, results, observations, governance, projections, private repair escrow, and tombstones.
+- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns schema v18, attempts, events, results, observations, governance, projections, private repair escrow, and tombstones.
 - [orchestration_engine.py](../../../plugins/cortex/scripts/cortex_runtime/orchestration_engine.py) owns waves, transitions, and dispatch assembly.
 - [context_compiler.py](../../../plugins/cortex/scripts/cortex_runtime/context_compiler.py) compiles complete task context.
 - [handoff_compiler.py](../../../plugins/cortex/scripts/cortex_runtime/handoff_compiler.py) builds target-specific handoffs.
@@ -30,8 +30,7 @@ Task intent → ContextCompiler → immutable briefing → worker attempt
                          HandoffCompiler → next target
 ```
 
-The worker result contains `status`, `summary`, `findings`,
-`decisions_needed`, `unresolved`, and optional typed `claims`. Events are
+The worker completion contains compact semantic result data. Events are
 append-only and bounded. Cortex adds identity, task revision, dispatch,
 profile, phase, predecessor scope, timestamps, workspace observations,
 executed checks, and verification metadata.
@@ -39,9 +38,16 @@ executed checks, and verification metadata.
 ## Lifecycle and recovery
 
 Workers call `record_attempt_event` zero or more times and then
-`complete_attempt`. A successful close commits `WORK_COMPLETED`; the server
+`submit_attempt`; a server-issued same-attempt correction uses
+`repair_attempt`. A successful close commits `WORK_COMPLETED`; the server
 then performs `FINALIZING` and reaches `COMPLETED` only after required views
 and handoffs finish. `BLOCKED` and `FAILED` are explicit semantic outcomes.
+
+Submission and repair are separate MCP tools. Each owns one complete closed
+one-level `inputSchema`, and runtime validation uses that same advertised
+schema. No action selector, branch registry, compatibility alias, or copied
+skill/prompt schema exists. Validation correction remains same-attempt and
+never authorizes inspection of private Cortex implementation or state.
 
 ```text
 RUNNING → WORK_COMPLETED → FINALIZING → COMPLETED
@@ -62,27 +68,31 @@ continuation before closing that child or presenting completion.
 
 ## Public operations
 
-The public union is exactly nine operations. Coordinator tasks expose
-`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
-`manage_governance`, and `read_worker_result`. Worker tasks expose
-`worker_question`, `record_attempt_event`, `complete_attempt`,
-`read_dispatch_briefing`, and `read_worker_result`.
+The public facade is action-specific across lifecycle, inspection, recovery,
+user interaction, approval, follow-up, steering, artifacts, lanes/resources,
+governance, attempt submission/repair, briefing, wave reads, and predecessor
+reads. `tools/list` is the authoritative inventory; prose does not maintain a
+duplicate tool registry.
 
-Every task-scoped call carries the exact opaque `task_ref`; no API chooses a
-task by scanning project directories. Coordinator calls also carry the exact
-`coordinator_ref`; worker calls carry the exact `assignment_ref`.
-Cortex issues those refs; callers only preserve and serialize the exact returned
+Coordinator calls carry private task authority and worker calls carry only
+exact native dispatch authority; no API chooses a task by scanning project directories.
+Cortex issues that authority; callers only preserve and serialize the exact returned
 bytes and never infer a missing value from a host, session, thread, path, or
 native child identity.
 
 `start_orchestration` is the sole task creator and initial coordinator
 capability issuer. Native execution is only the exact server-issued
-`spawn_agent` → `wait` → `read_worker_result` → server-derived continuation
+`spawn_agent` → exact `wait` → action-specific canonical wave read → server-derived continuation
 route. Session/environment identity, `create_thread`, server-owned
 CLI/executor launches, `repair_planning`, and manually authored
-`advance`/`completions` are not public contracts. All plan and outcome repair is
-a digest- and capsule-bound patch through `complete_attempt`; lost capability
-fails closed. Legacy rows are quarantined rather than imported.
+`advance`/`completions` are not public contracts. The coordinator model owns
+the worker waves passed to `start_orchestration`; Cortex validates,
+persists, and dispatches it, but does not choose an alternate pipeline or
+reconstruct workers. All submitted-report repair is a digest- and
+capsule-bound correction through `repair_attempt`; lost capability fails closed.
+Semantic content is compact language-neutral text/report data. Server-owned
+locale copy or canonical fallback presents approvals and questions, so no
+language can block a task.
 
 ## Context, handoff, and result links
 
@@ -90,8 +100,7 @@ fails closed. Legacy rows are quarantined rather than imported.
 allowed paths, acceptance/verification criteria, validated predecessor result
 references, and server observations. `HandoffCompiler` projects only the
 fields needed by implementation, QA, or review. Cross-stage links are
-`attempt_result_ref`, `context_result_refs`, and
-`predecessor_result_refs`.
+server-derived result links and assignment-granted predecessor context.
 
 Result views, journals, plans, and indexes are rebuildable and cannot authorize
 state transitions. SQLite commits canonical state before materializing any
@@ -99,50 +108,27 @@ filesystem view.
 
 ## Closed v11 response contract
 
-The nine operations expose closed, typed response unions. Lifecycle responses
-use a typed `action` union and a route-specific dispatch, wait, question,
-approval, handoff, or top-level `error` + `recovery` branch. Governance responses expose
-only a typed receipt, an explicit-inspect typed inspection, or top-level `error` + `recovery`.
-Ordinary responses never include generic `user_message`, `user_view`,
-`internal`, full pipeline/governance state, or prose `next_action` fields.
+Every action-specific operation exposes its closed v11 response contract.
+Worker responses remain minimal; successful completion is terminal, the final
+worker message is exactly `ATTEMPT_COMPLETED`, and the child never transports a
+result reference to its parent. Heavy state is read only through the relevant
+inspection tool.
 
-Worker responses remain minimal: briefing reads carry bounded content framing;
-questions carry a typed question; accepted events carry only the minimal
-success acknowledgement; successful completions are terminal acknowledgements with
-no `attempt_result_ref`, and the worker final message is exactly
-`ATTEMPT_COMPLETED`; result reads carry the compact semantic result plus a
-typed continuation or continuation reason. Coordinator result reads use
-`task_ref`, `coordinator_ref`, and `step`; the server derives the current wave
-and the child never transports a result reference to its parent. Error and recovery branches preserve patch-critical
-diagnostic codes, original JSON Pointer paths, exact semantic repair pointers,
-bounded nested field schemas, `error={code,category,message,diagnostics}`, and
-`recovery={kind,operation,retryable,state_mutated}`. Repair recovery carries
-`allowed_ops`, signed opaque repair handles, base payload digests,
-and allowed patch paths. Malformed handle copies reissue the
-same immutable repair; a correctly shaped handle with a failed integrity check
-remains terminal. Recovery responses explicitly report that canonical state was not mutated;
-creating or reusing the private immutable repair-escrow row is permitted and
-never becomes public evidence. Heavy state is available only through an
-explicit inspect operation. A caller uses only the advertised public tool
-schema and structured `error`/`recovery` card; it fails closed rather than
-searching plugin source, caches, ledger data, sessions, or environment state.
-`same_operation` is available only when the response or an already-held
-canonical server contract provides explicit `allowed_changes` and makes a
-deterministic legal retry possible. A
-`terminal_stop` recovery carries action `none`, never a retry, inspection, or
-continuation action.
+Errors and recovery provide the bounded structured data needed for the named
+next operation. A caller uses only the advertised MCP contract and returned
+recovery, never plugin source, caches, ledger data, sessions, environment state,
+or hidden paths. Same-attempt repair reuses immutable private escrow and never
+turns that escrow into public evidence.
 
-The first bounded briefing page may be incomplete. A worker repeats
-`read_dispatch_briefing` with the returned opaque `next_cursor` and its exact
-worker pair until `complete=true` before project work. A durable scalar answer
-or stable-option selection resumes only the same paused child, whose first
-worker call is the exact scalar `worker_question(action:"poll", task_ref,
-assignment_ref, question_ref)` form; do not remove and recreate a question to
-work around a ref mismatch.
+Briefings may require more than one page. Every growing read follows its exact
+opaque `c11p` cursor with unchanged authority. Fixed receipts and atomic repair
+cards do not paginate. Durable questions and answers are arbitrary-Unicode
+text; the coordinator shows and records that text and the worker LLM
+interprets adequacy without a structured-choice or localization schema.
 
-Bootstrap repair is limited to one same-child follow-up that byte-copies the
-server-built `bootstrap_repair_message` unchanged. A failed repair is terminally
-cleaned up through `finalize_bootstrap_failure`.
+Dispatch-authority recovery is limited to the server-returned same-child route.
+A failed recovery follows the returned terminal cleanup and never authorizes a
+replacement.
 An exact nonretryable child final is status text only. Cortex authorizes
 `finalize_worker_failure` through structured
 `recovery.terminal_failure.evidence="server_bound"` backed by private current
@@ -153,13 +139,12 @@ evidence rejects without a result, replacement, or lifecycle mutation.
 
 ## Historical compatibility boundary
 
-Exact canonical schema v16 is the only recognized historical predecessor and
-is not migration input. If that v16 namespace is encountered, Cortex
-quarantines the entire
-namespace—database, sidecars, task and lane files, coordination files, and
-lifecycle key—and creates a clean v17 namespace. No row, migration, task,
-lane, sidecar, or capability is adopted into the current ledger. V15 and older
-or unknown identities fail closed without archival.
+Only the exact signed V11 v1--v8 database lineage is migration input. Cortex
+validates that complete lineage and upgrades it atomically to schema v18. Any
+old task authority is retained only as private, non-selectable migration
+state; it is not a public reference choice or a fallback identity. Missing,
+unsigned, reordered, tampered, or otherwise unknown histories fail closed and
+are never silently quarantined, adopted, or treated as fresh state.
 
 ## Verification
 

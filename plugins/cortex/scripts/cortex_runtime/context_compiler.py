@@ -90,6 +90,19 @@ def _domain_text(value: object, *, label: str) -> str:
     return text
 
 
+def _durable_question_text(value: object, *, label: str) -> str:
+    """Accept one stored question/answer exactly as SQLite returned it.
+
+    Unlike task metadata, a durable question pair is ordinary user text.  Its
+    boundary whitespace and Unicode code points are part of the user's answer
+    and must not be normalized, translated, truncated, or treated as a legacy
+    display field while compiling a replacement worker's context.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"canonical {label} must be a non-empty string")
+    return value
+
+
 def _domain_values(value: object, *, label: str, limit: int, item_limit: int) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -140,12 +153,10 @@ def _domain_decisions(value: object) -> tuple[Decision, ...]:
     for raw in value:
         if not isinstance(raw, Mapping):
             raise ValueError("canonical decision must be an object")
-        # Durable decisions use explicit English canonical fields.  Localized
-        # display values are never compiler input.
-        question_value = raw.get("question_en")
-        answer_value = raw.get("answer_en")
-        question = _domain_text(question_value, label="decision question")
-        answer = _domain_text(answer_value, label="decision answer")
+        question_value = raw.get("question_text")
+        answer_value = raw.get("answer_text")
+        question = _durable_question_text(question_value, label="decision question_text")
+        answer = _durable_question_text(answer_value, label="decision answer_text")
         decisions.append(Decision(question=question, answer=answer))
     return tuple(decisions)
 
@@ -166,8 +177,8 @@ def _compiler_visible_events(canonical: Mapping[str, Any]) -> list[dict[str, str
         item = {
             "event_type": _text(event.get("event_type"), 64),
             "question_ref": _text(payload.get("question_ref"), 128),
-            "question": _text(payload.get("question"), 500),
-            "answer": _text(payload.get("answer"), 800),
+            "question_text": payload.get("question_text") if isinstance(payload.get("question_text"), str) else "",
+            "answer_text": payload.get("answer_text") if isinstance(payload.get("answer_text"), str) else "",
         }
         compact = {key: value for key, value in item.items() if value}
         if compact:
@@ -212,8 +223,8 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
         if event.get("event_type") != "decision_resolved":
             continue
         decisions.append(Decision(
-            question=_domain_text(event.get("question"), label="decision question"),
-            answer=_domain_text(event.get("answer"), label="decision answer"),
+            question=_durable_question_text(event.get("question_text"), label="decision question_text"),
+            answer=_durable_question_text(event.get("answer_text"), label="decision answer_text"),
         ))
     finding_texts: list[str] = []
     for predecessor in _sequence(canonical.get("predecessor_results")):

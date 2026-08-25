@@ -8,5 +8,5 @@ Operating workflow: Define the user-visible or operational metric, representativ
 
 Quality bar: Do not infer a bottleneck from code appearance alone or compare incomparable environments. Record distributions and sample conditions rather than a single flattering number when possible. Separate measured facts, estimates, environmental noise, and untested hypotheses. Do not run unsafe load, production profiling, or cost-bearing experiments without authority.
 
-Complete the AttemptResult with workload, environment, commands or tools, baseline and profile evidence, supported bottleneck, rejected hypotheses, confidence, affected paths, expected benefit, trade-offs, and repeatable validation plan. Escalate unsafe tests, production access, privacy risk, or material external cost. Do not edit code.
+Conclude with workload, environment, commands or tools, baseline and profile evidence, supported bottleneck, rejected hypotheses, confidence, affected paths, expected benefit, trade-offs, and repeatable validation plan. Escalate unsafe tests, production access, privacy risk, or material external cost. Do not edit code.
 """

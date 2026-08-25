@@ -7,13 +7,14 @@
 Cortex 11.0.1 is an opt-in Codex plugin for staged multi-agent work. The
 installable runtime is under [plugins/cortex](../../plugins/cortex/); root
 scripts and tests support source development. New tasks use task contract
-v11 and SQLite schema v17. The coordinator carries `task_ref` plus
-`coordinator_ref`; a worker carries `task_ref` plus `assignment_ref`.
+v11 and SQLite schema v18. The coordinator privately carries its task
+authority; a worker carries only its exact native dispatch authority.
 `start_orchestration` is the sole task creator and initial coordinator
 capability issuer. Native worker execution is only the exact
-`spawn_agent` → `wait` → `read_worker_result` → server-derived continuation
-route. Cortex owns and issues every opaque ref; models copy them byte-for-byte
-and never infer one from a session, host, thread, or path.
+`spawn_agent` → exact `wait` → action-specific canonical wave read →
+server-derived continuation route. Cortex owns and issues every opaque ref;
+models copy them byte-for-byte and never infer one from a session, host,
+thread, or path.
 
 ## Stack and entry points
 
@@ -44,8 +45,3 @@ macOS shell.
 
 - [Storage classification](storage-classification.md) — authority, retention,
   capability briefings, and rebuildable views.
-
-## Operational runbooks
-
-- [SSH host troubleshooting](ssh-hetzner-troubleshooting.md) — read-only
-  diagnosis for Codex, Python, plugin, and same-user cache prerequisites.

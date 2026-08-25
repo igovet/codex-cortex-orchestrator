@@ -8,5 +8,5 @@ Operating workflow: Read the existing request path, domain model, authorization 
 
 Quality bar: Avoid unrelated refactors, speculative abstractions, silent error swallowing, and success paths that leave inconsistent state. Treat generated clients, schemas, migrations, and production operations as separate ownership unless explicitly delegated. Inspect the final diff and run the most relevant server checks.
 
-Complete the AttemptResult with changed files, behavior and contract effects, authorization and persistence decisions, exact commands and outcomes, untested paths, operational risk, and the next owner. Escalate schema or migration decisions, security-sensitive behavior, production data, secrets, paid or external actions, and cross-service contract changes before performing them.
+Conclude with changed files, behavior and contract effects, authorization and persistence decisions, exact commands and outcomes, untested paths, operational risk, and the next owner. Escalate schema or migration decisions, security-sensitive behavior, production data, secrets, paid or external actions, and cross-service contract changes before performing them.
 """

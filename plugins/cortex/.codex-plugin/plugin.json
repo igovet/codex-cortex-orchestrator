@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "11.0.1+codex.20260825035607",
+  "version": "11.0.1+codex.20260825162206",
   "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
   "author": {
     "name": "igovet"
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, evidence-first scope and planning gates, approval-fresh adaptive pipelines, scoped immutable dispatch briefings, governance policy and initiative management, and semantic attempt-event/result transport over the canonical local Cortex v11 task ledger with schema v17 integrity. Cortex preserves the exact user-authored request, dispatches workers only through native V2 spawn_agent/wait, authorizes every worker call with explicit task and assignment capabilities, requires observable task and microtask contracts, reconciles worker observations with database-backed immutable evidence, quarantines incompatible prior ledger namespaces before creating fresh canonical state, and keeps receipt-backed gates, verification, maintenance, and handoff state.",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, evidence-first scope and planning gates, approval-fresh adaptive pipelines, scoped immutable dispatch briefings, governance policy and initiative management, and semantic attempt-event/result transport over the canonical local Cortex v11 task ledger with schema v18 integrity. Cortex preserves the exact user-authored request, exposes one alias-free MCP tool per semantic action with a tool-owned closed schema shared by runtime validation, dispatches workers only through native V2 spawn_agent/wait, preserves exact native worker authority without ambient identity inference, supports durable arbitrary-text questions and answers, reconciles worker observations with database-backed immutable evidence, upgrades only the exact signed V11 lineage, and keeps receipt-backed gates, repair, verification, maintenance, and handoff state.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [

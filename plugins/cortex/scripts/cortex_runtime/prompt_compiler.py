@@ -35,21 +35,6 @@ _EXPECTED_GATES = frozenset((
     "implementation", "qa", "security", "performance", "accessibility", "ux",
     "review", "documentation", "close", "governance_activation", "governance_close",
 ))
-_COORDINATOR_COMPLETION_CONTRACT = (
-    "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned "
-    "spawn_agent call with unmodified arguments; a self-authored task name or replacement child cannot bind to or advance "
-    "a Cortex attempt. For every terminal worker, the worker final must be exactly ATTEMPT_COMPLETED. The coordinator calls "
-    "read_worker_result with task_ref plus coordinator_ref plus the exact server-derived step; the server returns all canonical "
-    "results for the current wave and the continuation. The coordinator then follows only that server-returned continuation and "
-    "closes the completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the "
-    "continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed. "
-    "A successful continuation is one-shot: follow only its returned native dispatch, wait, or terminal outcome; never call "
-    "continue again with copied refs, request artifacts, a replacement pipeline, or a replacement worker. A task-identity or "
-    "step-mismatch diagnostic is recoverable only with the same explicit coordinator capability: inspect the same task and "
-    "follow server-owned recovery or a concrete user question; never infer authority from a host session."
-)
-
-
 @dataclass(frozen=True)
 class PromptSection:
     """A single canonical prompt section supplied by a compiler caller."""
@@ -100,15 +85,15 @@ def _validate_contract(payload: object) -> dict[str, Any]:
     sources = payload.get("sources")
     if not isinstance(sources, dict) or not all(isinstance(value, str) and value.strip() for value in sources.values()):
         raise RuntimeError("bundled Cortex prompt sources are invalid")
-    if sources.get("operation_cards") != "profiles.json.shared_worker_contract.operation_cards":
-        raise RuntimeError("bundled Cortex operation-card source is invalid")
+    if sources.get("tool_schema_registry") != "active public MCP schema registry":
+        raise RuntimeError("bundled Cortex tool-schema source is invalid")
     lint_contract = payload.get("lint")
     if not isinstance(lint_contract, dict) or not isinstance(lint_contract.get("source_ownership"), dict):
         raise RuntimeError("bundled Cortex prompt source ownership is invalid")
     required_source_owners = {
-        "worker_operation_cards": "profiles.json.shared_worker_contract.operation_cards",
-        "worker_assignment_authorization": "explicit task_ref plus assignment_ref capability",
-        "planner_shape": "profiles.json.shared_worker_contract.planner_completion_shape",
+        "worker_tool_schema": "active public MCP schema registry",
+        "worker_assignment_authorization": "one exact opaque authority carried by the native dispatch",
+        "planner_shape": "semantic work breakdown published through the current worker completion tool",
         "attachment_preflight": "profiles.json.shared_worker_contract.attachment_preflight",
         "activation_context": "profiles.json.shared_worker_contract.activation_context",
     }
@@ -123,12 +108,16 @@ def _validate_contract(payload: object) -> dict[str, Any]:
         or set(v3.get("conditional_sections") or []) != {"mode", "gate", "context"}
     ):
         raise RuntimeError("bundled Cortex v3 prompt contract is invalid")
-    attempt_result_contract = payload.get("attempt_result_contract")
+    worker_completion_contract = payload.get("worker_completion_contract")
     if (
-        not isinstance(attempt_result_contract, dict)
-        or attempt_result_contract.get("coordinator_completion") != _COORDINATOR_COMPLETION_CONTRACT
+        not isinstance(worker_completion_contract, dict)
+        or set(worker_completion_contract) != {
+            "worker_authority", "worker_question_pause", "coordinator_waiting",
+            "coordinator_completion",
+        }
+        or not all(isinstance(value, str) and value.strip() for value in worker_completion_contract.values())
     ):
-        raise RuntimeError("bundled Cortex coordinator completion contract is invalid")
+        raise RuntimeError("bundled Cortex worker completion contract is invalid")
     budgets = payload.get("budgets")
     if not isinstance(budgets, dict) or not all(isinstance(value, int) and value > 0 for value in budgets.values()):
         raise RuntimeError("bundled Cortex prompt budgets are invalid")
@@ -139,23 +128,13 @@ def _validate_contract(payload: object) -> dict[str, Any]:
         raise RuntimeError("prompt evals must be pinned to Luna high")
     if prompt_eval.get("allow_model_fallback") is not False or prompt_eval.get("offline_default") is not True:
         raise RuntimeError("prompt evals must be offline by default and fail closed without fallback")
-    live_runner = prompt_eval.get("live_runner")
+    live_verification = prompt_eval.get("live_verification")
     if (
-        not isinstance(live_runner, dict)
-        or live_runner.get("scope") != "development_source_prompt_eval_only"
-        or live_runner.get("command") != "codex exec"
-        or live_runner.get("sandbox") != "read-only"
-        or live_runner.get("response_schema") != "cortex/prompt-live-eval-response/v1"
-        or live_runner.get("required_route") != "worker"
-        or live_runner.get("required_completion") != "attempt_completed"
-        or live_runner.get("live_default") is not False
-        or set(live_runner.get("forbidden_models") or []) != {"gpt-5.6-terra", "gpt-5.6-sol"}
-        or not all(
-            isinstance(live_runner.get(key), int) and live_runner[key] > 0
-            for key in ("timeout_seconds", "max_stream_bytes", "max_output_bytes", "max_output_tokens")
-        )
+        not isinstance(live_verification, str)
+        or not live_verification.strip()
+        or "not a release gate" not in live_verification
     ):
-        raise RuntimeError("prompt live-eval runner contract is invalid")
+        raise RuntimeError("prompt live-verification contract is invalid")
     return payload
 
 
@@ -300,6 +279,113 @@ def _has_package_fstring(function: ast.FunctionDef) -> bool:
     return False
 
 
+def _string_literals(tree: ast.AST) -> tuple[str, ...]:
+    """Return only static prose that can become part of a compiled policy."""
+    return tuple(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
+
+
+def _structured_prompt_form(prompt: str) -> str | None:
+    """Identify a code-like payload field form in a role prompt.
+
+    Role deltas may describe the work that belongs in a report, but must not
+    restate a schema by spelling dotted fields, array fields, or JSON objects.
+    Restrict this to inline-code spans so ordinary prose and required Markdown
+    labels remain available to role authors.
+    """
+    for span in re.findall(r"`([^`\n]+)`", prompt):
+        if re.search(r"\b[A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*\b", span):
+            return span
+        if re.search(r"\b[A-Za-z][A-Za-z0-9_]*\s*\[\s*\]", span):
+            return span
+        if re.search(r"\{[^{}\n]*\b[A-Za-z][A-Za-z0-9_]*\s*:", span):
+            return span
+    return None
+
+
+def _api_template_operation(policy: str, operations: Iterable[str]) -> str | None:
+    """Return an operation whose prose contains an exact invocation template."""
+    for operation in operations:
+        if re.search(rf"\b{re.escape(operation)}\s*(?:\(|\{{|\[)", policy):
+            return operation
+    return None
+
+
+def _schema_property_names(value: object) -> set[str]:
+    """Derive every public argument identifier from the canonical tool registry."""
+    names: set[str] = set()
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            names.update(str(name) for name in properties)
+        for nested in value.values():
+            names.update(_schema_property_names(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            names.update(_schema_property_names(nested))
+    return names
+
+
+def _all_strings(value: object) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for nested in value.values():
+            yield from _all_strings(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _all_strings(nested)
+
+
+def _contains_schema_identifier(text: str, name: str) -> bool:
+    """Detect a public property presented as schema syntax, not ordinary prose."""
+    escaped = re.escape(name)
+    patterns = (
+        rf"`{escaped}`",
+        rf"[\"']{escaped}[\"']\s*:",
+        rf"(?<![A-Za-z0-9_]){escaped}\s*=",
+        rf"\b(?:field|argument|property)\s+{escaped}\b",
+    )
+    if "_" in name:
+        patterns += (rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])",)
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _tool_catalog_by_audience(text: str) -> dict[str, tuple[str, ...]] | None:
+    """Read the generated Cortex control catalog without treating prose as schema."""
+    begin = "<!-- BEGIN GENERATED CORTEX TOOL CATALOG -->"
+    end = "<!-- END GENERATED CORTEX TOOL CATALOG -->"
+    if text.count(begin) != 1 or text.count(end) != 1:
+        return None
+    body = text.split(begin, 1)[1].split(end, 1)[0]
+    heading_audiences = {
+        "### Coordinator tools": "coordinator",
+        "### Worker tools": "worker",
+    }
+    rows: dict[str, list[str]] = {audience: [] for audience in heading_audiences.values()}
+    current: str | None = None
+    seen_headings: set[str] = set()
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped in heading_audiences:
+            current = heading_audiences[stripped]
+            if current in seen_headings:
+                return None
+            seen_headings.add(current)
+            continue
+        match = re.match(r"^\| `([^`]+)` \|", stripped)
+        if match:
+            if current is None:
+                return None
+            rows[current].append(match.group(1))
+    if seen_headings != set(rows):
+        return None
+    return {audience: tuple(names) for audience, names in rows.items()}
+
+
 def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
     """Return deterministic contract/source issues without reading runtime state."""
     issues: list[str] = []
@@ -319,6 +405,67 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
     seen_names: set[str] = set()
     required_markers = tuple(contract["role_delta_required_markers"])
     role_budget = int(contract["budgets"]["role_delta_target_bytes"])
+    lint_policy = contract["lint"]
+    shared_contract = profile_contract.get("shared_worker_contract")
+    if not isinstance(shared_contract, dict):
+        return ["profiles.json shared worker contract is unreadable"]
+    coordinator_wait = str(shared_contract.get("coordinator_wait_contract") or "").lower()
+    wait_action = (shared_contract.get("coordinator_action_semantics") or {}).get(
+        "wait_for_bound_workers",
+    )
+    if (
+        not all(marker in coordinator_wait for marker in (
+            "explicit 300-second native wait", "same child", "never use the native default",
+            "another explicit 300-second native wait",
+            "durable-question marker", "terminal-completion marker",
+        ))
+        or not isinstance(wait_action, dict)
+        or wait_action.get("per_wait_timeout_seconds") != 300
+        or wait_action.get("minimum_overall_wait_seconds") != 300
+        or wait_action.get("native_default_wait_allowed") is not False
+        or wait_action.get("repeat_after_no_marker") is not True
+        or wait_action.get("timeout_authorizes_result_read") is not False
+    ):
+        issues.append("profiles.json coordinator native-wait contract is incomplete")
+    worker_question_pause = str(shared_contract.get("worker_question_pause_contract") or "").lower()
+    if not all(marker in worker_question_pause for marker in (
+        "durably publishing", "durable-question marker", "same-child follow-up",
+        "real user answer",
+    )):
+        issues.append("profiles.json worker durable-question pause contract is incomplete")
+    completion_contract = contract.get("worker_completion_contract")
+    completion_policy = "\n".join(_all_strings(completion_contract)).lower()
+    if not all(marker in completion_policy for marker in (
+        "explicit 300-second native wait", "never use the native default",
+        "another explicit 300-second native wait", "durable-question marker",
+        "terminal-completion marker",
+        "same-child follow-up", "real user answer",
+    )):
+        issues.append("prompt contract lacks native wait and durable-question pause semantics")
+    try:
+        from cortex_runtime.public_contracts import build_public_contracts
+
+        public_contracts = build_public_contracts(agents=profiles_by_name)
+    except (ImportError, TypeError, ValueError) as exc:
+        return [f"canonical public tool registry is unreadable: {type(exc).__name__}"]
+    answer_contract = public_contracts.get("answer_orchestration_question")
+    answer_schema = (
+        ((answer_contract or {}).get("inputSchema") or {}).get("properties", {}).get("answer_text")
+    )
+    answer_guidance = str((answer_schema or {}).get("description") or "").lower()
+    if not all(marker in answer_guidance for marker in (
+        "exact arbitrary-unicode", "answer text", "durable question",
+    )):
+        issues.append("canonical answer guidance is missing from the answer input schema")
+    if _contains_schema_identifier(str((answer_contract or {}).get("description") or ""), "answer_text"):
+        issues.append("canonical answer argument guidance leaked into the tool description")
+    public_operations = tuple(public_contracts)
+    public_argument_names: set[str] = set()
+    for public_contract in public_contracts.values():
+        public_argument_names.update(_schema_property_names(public_contract.get("inputSchema")))
+    model_visible_sources: list[tuple[str, str]] = []
+    model_visible_sources.extend(("profiles.json", value) for value in _all_strings(profile_contract))
+    model_visible_sources.extend(("prompt-contracts.json", value) for value in _all_strings(contract))
     for path in sorted(agents_dir.glob("*.toml")):
         try:
             payload = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -338,6 +485,7 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
         ):
             issues.append(f"{path.name}: description or sandbox differs from profiles.json")
         prompt = str(payload.get("developer_instructions") or "")
+        model_visible_sources.append((path.name, prompt))
         missing_markers = [marker for marker in required_markers if marker not in prompt]
         if missing_markers:
             issues.append(f"{path.name}: missing role-delta markers {missing_markers}")
@@ -346,7 +494,10 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
         for literal in contract["lint"]["forbidden_model_literals"]:
             if literal.lower() in prompt.lower():
                 issues.append(f"{path.name}: prompt contains forbidden model literal {literal}")
-        for phrase in contract["lint"].get("forbidden_role_protocol_phrases", []):
+        structured_form = _structured_prompt_form(prompt)
+        if structured_form is not None:
+            issues.append(f"{path.name}: role prompt duplicates a structured payload form {structured_form!r}")
+        for phrase in lint_policy.get("forbidden_role_protocol_phrases", []):
             if phrase.lower() in prompt.lower():
                 issues.append(f"{path.name}: role prompt duplicates shared protocol phrase {phrase!r}")
     if seen_names != set(profiles_by_name):
@@ -373,12 +524,15 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
     section_requirements = contract["skill_section_requirements"]
     if set(section_requirements) != required_skills:
         issues.append("prompt contract skill requirements differ from lint skill set")
+    scanned_skill_paths: set[Path] = set()
     for skill in sorted(required_skills):
         path = skill_root / skill / "SKILL.md"
         if not path.is_file():
             issues.append(f"missing required skill: {skill}")
             continue
         text = path.read_text(encoding="utf-8")
+        model_visible_sources.append((str(path.relative_to(root)), text))
+        scanned_skill_paths.add(path)
         if not text.startswith("---\n") or "name:" not in text.split("---\n", 2)[1]:
             issues.append(f"{skill}: missing YAML frontmatter")
         headings = [line.strip() for line in text.splitlines() if line.startswith("## ")]
@@ -387,6 +541,30 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
         for required_heading in section_requirements.get(skill, []):
             if required_heading not in headings:
                 issues.append(f"{skill}: missing required section {required_heading}")
+        if skill in {"orchestrator", "cortex-control"}:
+            lifecycle_text = text.lower()
+            if not all(marker in lifecycle_text for marker in (
+                "explicit 300-second native wait", "never use the native default",
+                "another explicit 300-second native wait", "durable-question marker",
+                "terminal-completion marker", "`read_worker_wave`", "does not authorize",
+            )):
+                issues.append(f"{skill}: native wait-timeout routing is incomplete")
+        if skill == "cortex-control":
+            catalog = _tool_catalog_by_audience(text)
+            expected_catalog = {
+                audience: tuple(
+                    name for name, public_contract in public_contracts.items()
+                    if public_contract.get("audience") == audience
+                )
+                for audience in ("coordinator", "worker")
+            }
+            if catalog != expected_catalog:
+                issues.append(
+                    "cortex-control: generated tool catalog differs from canonical audience order"
+                )
+    for path in sorted(skill_root.rglob("*.md")):
+        if path not in scanned_skill_paths:
+            model_visible_sources.append((str(path.relative_to(root)), path.read_text(encoding="utf-8")))
     briefings_path = root / "plugins/cortex/scripts/cortex_runtime/briefings.py"
     try:
         tree = ast.parse(briefings_path.read_text(encoding="utf-8"))
@@ -403,6 +581,42 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
             issues.append("v3 briefing does not use the canonical compiler")
         elif _has_package_fstring(v3):
             issues.append("v3 briefing interpolates task data into normative prose")
+        if v3 is not None:
+            policy = "\n".join(_string_literals(v3))
+            model_visible_sources.append((str(briefings_path.relative_to(root)), policy))
+            policy_lower = policy.lower()
+            if not all(marker in policy_lower for marker in (
+                "durably publishing", "durable-question marker", "same-child follow-up",
+                "real user answer",
+            )):
+                issues.append("v3 briefing lacks durable-question native-pause semantics")
+            api_template = _api_template_operation(policy, public_operations)
+            if api_template is not None:
+                issues.append(
+                    f"generated briefing policy contains a public API invocation template: {api_template}"
+                )
+    fixtures_path = root / "plugins/cortex/prompt-evals/fixtures.json"
+    try:
+        fixture_payload = json.loads(fixtures_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        issues.append("prompt-evals/fixtures.json is unreadable")
+    else:
+        model_visible_sources.extend(
+            (str(fixtures_path.relative_to(root)), value)
+            for value in _all_strings(fixture_payload)
+        )
+    for source, text in model_visible_sources:
+        invocation = _api_template_operation(text, public_operations)
+        if invocation is not None:
+            issues.append(
+                f"{source}: model-visible text duplicates public invocation template {invocation!r}"
+            )
+        for argument_name in sorted(public_argument_names):
+            if _contains_schema_identifier(text, argument_name):
+                issues.append(
+                    f"{source}: model-visible text duplicates public argument name {argument_name!r}"
+                )
+                break
     if set(contract["compiler"]["xml_boundaries"]) & {"all", "prompt"}:
         issues.append("XML must remain selective; whole-prompt XML is forbidden")
     return issues

@@ -676,9 +676,9 @@ def classify_governance(
     policy_warnings: list[str] = []
     safety_hits = sorted(set(hits) & HARD_TRIGGER_KEYS)
     if mode == "off" and safety_hits:
-        raise GovernanceError(
-            "governance_mode=off violates safety boundary: " + ", ".join(safety_hits),
-            code="governance_safety_boundary",
+        policy_warnings.append(
+            "governance_mode=off was promoted to the server safety minimum for: "
+            + ", ".join(safety_hits)
         )
     if mode == "off" and (complexity_value != "C1" or hits):
         why = "C2/C3 is conventionally governed" if complexity_value != "C1" else "risk triggers conventionally raise governance depth"
@@ -712,8 +712,11 @@ def classify_governance(
         effective = "minimal"
     assessment_mode = effective
     if mode == "off":
-        effective = "minimal"
         reasons.append("requested:off")
+        if effective != "minimal" and not safety_hits:
+            policy_warnings.append(
+                f"governance_mode=off was promoted to the server safety minimum: {effective}"
+            )
     if not reasons:
         reasons.append(f"baseline:{complexity_value}")
 
@@ -742,7 +745,7 @@ def classify_governance(
         "schema": GOVERNANCE_SCHEMA,
         "requested_mode": mode,
         "recommended_mode": recommended_mode,
-        "chosen_mode": "minimal" if mode == "off" else recommended_mode,
+        "chosen_mode": effective,
         "policy_warnings": policy_warnings,
         "policy_advisory": bool(policy_warnings),
         "recommended_next": "run_governance_review" if recommended_mode != effective else "continue_selected_pipeline",
@@ -2340,7 +2343,14 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
         return {"exception": request_exception(root, trigger=payload.get("trigger", ""), reason=payload.get("reason", ""), actor_role=actor_role, initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), created_by=payload.get("created_by", actor_role))}
     if action in {"evaluate_promotion", "promotion_inspect"}:
         if action == "promotion_inspect":
-            records = list_records(root, record_type="promotion", initiative_ref=payload.get("initiative_ref"), active_only=False)
+            records = list_records(
+                root,
+                record_type="promotion",
+                initiative_ref=payload.get("initiative_ref"),
+                active_only=False,
+                limit=payload.get("limit", 256),
+                offset=payload.get("offset", 0),
+            )
             if payload.get("record_ref"):
                 records = [item for item in records if item.get("record_ref") == payload.get("record_ref")]
             return {"proposals": records}

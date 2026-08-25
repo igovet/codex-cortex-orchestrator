@@ -1,13 +1,17 @@
 """Bounded coordinator transport for immutable SQLite-backed artifacts."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import cortex as _runtime
+from cortex_runtime.ledger_db import _governance_lifecycle_hmac_key
+from cortex_runtime.pagination import decode_cursor, encode_cursor, scope_digest
 
 
-MAX_ARTIFACT_PAGE_SIZE = 50
 DEFAULT_ARTIFACT_PAGE_SIZE = 20
+DEFAULT_ARTIFACT_READ_BYTES = 16_384
+DEFAULT_ARTIFACT_METADATA_CHARS = 16_384
 
 
 def _payload(params: dict[str, Any]) -> dict[str, Any]:
@@ -15,32 +19,31 @@ def _payload(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("artifact management requires an object payload")
     unknown = sorted(set(payload) - {
-        "action", "artifact_ref", "kind", "cursor", "page_size", "max_bytes",
+        "action", "artifact_ref", "kind", "cursor",
     })
     if unknown:
         raise ValueError("unsupported artifact management payload fields: " + ", ".join(unknown))
     return payload
 
 
-def _cursor(root, *, cursor: object, expected: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(cursor, str) or not cursor:
-        raise ValueError("artifact cursor must be a non-empty opaque string returned by this server")
-    decoded = _runtime.db_decode_artifact_cursor(root, cursor)
-    for key, value in expected.items():
-        if decoded.get(key) != value:
-            raise ValueError("artifact cursor is not valid for this task, artifact, permission scope, or content version")
-    return decoded
+def _cursor(
+    root, *, cursor: object, selector: str, audience: str, digest: str,
+) -> int:
+    return decode_cursor(
+        cursor, _governance_lifecycle_hmac_key(root, create=False),
+        selector=selector, audience=audience, digest=digest,
+    )
 
 
 def _read_cursor(root, metadata: dict[str, Any], *, byte_offset: int) -> str:
-    return _runtime.db_encode_artifact_cursor(root, {
-        "type": "artifact_read",
-        "task_id": metadata["task_id"],
-        "artifact_ref": metadata["artifact_ref"],
-        "digest_sha256": metadata["digest_sha256"],
-        "byte_offset": byte_offset,
-        "audience": "coordinator",
-    })
+    return encode_cursor(
+        _governance_lifecycle_hmac_key(root, create=False),
+        selector="manage_orchestration.artifact_read", audience="coordinator",
+        digest=scope_digest({
+            "task_id": metadata["task_id"], "artifact_ref": metadata["artifact_ref"],
+            "digest_sha256": metadata["digest_sha256"],
+        }), offset=byte_offset,
+    )
 
 
 def manage_task_artifacts(
@@ -51,8 +54,7 @@ def manage_task_artifacts(
 ) -> dict[str, Any]:
     """List metadata or read one exact immutable artifact.
 
-    Paging remains available when a caller explicitly chooses it; the runtime
-    never imposes a content-size cap or silently normalizes a requested read.
+    Every growing result uses a server-fixed bounded page and opaque cursor.
     """
     payload = _payload(params)
     action = str(payload.get("action") or "list").strip().lower()
@@ -62,17 +64,15 @@ def manage_task_artifacts(
     root = _runtime._task_document_root(task_dir, task_id)
     if action == "list":
         kind = str(payload.get("kind") or "").strip() or None
-        page_size = payload.get("page_size", DEFAULT_ARTIFACT_PAGE_SIZE)
-        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= MAX_ARTIFACT_PAGE_SIZE:
-            raise ValueError(f"artifact page_size must be an integer from 1 through {MAX_ARTIFACT_PAGE_SIZE}")
+        selector = "manage_orchestration.artifact_list"
+        binding = scope_digest({"task_id": task_id, "kind": kind})
+        page_size = DEFAULT_ARTIFACT_PAGE_SIZE
         offset = 0
         if "cursor" in payload:
-            decoded = _cursor(root, cursor=payload["cursor"], expected={
-                "type": "artifact_list", "task_id": task_id, "kind": kind, "audience": "coordinator",
-            })
-            offset = decoded.get("offset")
-            if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-                raise ValueError("artifact list cursor offset is invalid")
+            offset = _cursor(
+                root, cursor=payload["cursor"], selector=selector,
+                audience="coordinator", digest=binding,
+            )
         artifacts, next_offset = _runtime.db_list_artifacts(
             root, task_id, kind=kind, offset=offset, page_size=page_size,
         )
@@ -85,13 +85,14 @@ def manage_task_artifacts(
             "complete": next_offset is None,
         }
         if next_offset is not None:
-            result["next_cursor"] = _runtime.db_encode_artifact_cursor(root, {
-                "type": "artifact_list", "task_id": task_id, "kind": kind,
-                "offset": next_offset, "audience": "coordinator",
-            })
+            result["next_cursor"] = encode_cursor(
+                _governance_lifecycle_hmac_key(root, create=False),
+                selector=selector, audience="coordinator", digest=binding,
+                offset=next_offset,
+            )
         result["next_action"] = (
-            "Use next_cursor only with manage_orchestration(intent='artifacts', payload={action:'list', ...}) "
-            "to retrieve the next metadata page; never request all artifact bodies together."
+            "Call manage_orchestration again with action='artifact_list', unchanged read fields, "
+            "and this exact next_cursor."
         )
         return result
 
@@ -102,41 +103,54 @@ def manage_task_artifacts(
     if metadata is None:
         raise ValueError("artifact_ref is unavailable for the selected task")
     if action == "metadata":
-        return {
+        selector = "manage_orchestration.artifact_metadata"
+        binding = scope_digest({
+            "task_id": task_id, "artifact_ref": artifact_ref,
+            "digest_sha256": metadata["digest_sha256"],
+        })
+        char_offset = 0
+        if "cursor" in payload:
+            char_offset = _cursor(
+                root, cursor=payload["cursor"], selector=selector,
+                audience="coordinator", digest=binding,
+            )
+        full = json.dumps(metadata, ensure_ascii=False, sort_keys=True, default=str)
+        content = full[char_offset:char_offset + DEFAULT_ARTIFACT_METADATA_CHARS]
+        next_offset = char_offset + len(content)
+        result = {
             "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
             "outcome": "artifact_metadata",
             "task_ref": task_ref,
-            "artifact": metadata,
-            "read_cursor": _read_cursor(root, metadata, byte_offset=0),
-            "next_action": "Use the opaque read_cursor to request the next artifact part; its digest and task scope are checked on every read.",
+            "content": content,
+            "complete": next_offset >= len(full),
         }
+        if next_offset < len(full):
+            result["next_cursor"] = encode_cursor(
+                _governance_lifecycle_hmac_key(root, create=False),
+                selector=selector, audience="coordinator", digest=binding,
+                offset=next_offset,
+            )
+        return result
 
-    requested_max_bytes = payload.get("max_bytes")
-    if requested_max_bytes is not None and (
-        isinstance(requested_max_bytes, bool) or not isinstance(requested_max_bytes, int) or requested_max_bytes < 1
-    ):
-        raise ValueError("artifact max_bytes must be a positive integer when supplied")
     byte_offset = 0
     if "cursor" in payload:
-        decoded = _cursor(root, cursor=payload["cursor"], expected={
-            "type": "artifact_read", "task_id": task_id, "artifact_ref": artifact_ref,
-            "digest_sha256": metadata["digest_sha256"], "audience": "coordinator",
-        })
-        byte_offset = decoded.get("byte_offset")
-        if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
-            raise ValueError("artifact read cursor offset is invalid")
+        byte_offset = _cursor(
+            root, cursor=payload["cursor"], selector="manage_orchestration.artifact_read",
+            audience="coordinator", digest=scope_digest({
+                "task_id": task_id, "artifact_ref": artifact_ref,
+                "digest_sha256": metadata["digest_sha256"],
+            }),
+        )
     part = _runtime.db_read_artifact_range(
-        root, task_id, artifact_ref, byte_offset=byte_offset, max_bytes=requested_max_bytes,
+        root, task_id, artifact_ref,
+        byte_offset=byte_offset, max_bytes=DEFAULT_ARTIFACT_READ_BYTES,
     )
     result = {
         "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": True,
         "outcome": "artifact_part",
         "task_ref": task_ref,
-        "requested_max_bytes": requested_max_bytes,
-        "effective_max_bytes": requested_max_bytes,
-        "max_bytes_normalized": False,
         **part,
     }
     if part["next_byte_offset"] is not None:

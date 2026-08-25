@@ -30,7 +30,6 @@ bind_symbols(
         "apply_pipeline_operations",
         "authorize",
         "capture_project_manifest",
-        "cleanup_completed_manifest_snapshots",
         "db_list_task_findings",
         "db_task_findings_blockers",
         "ledger_root",
@@ -598,16 +597,7 @@ def _persist_transition(
     )
     if not completed:
         return
-    task = load_task_definition(task_dir, state)
     remove_active_mapping(root, state["task_id"])
-    cleanup = cleanup_completed_manifest_snapshots(task_dir, state)
-    save_state(
-        task_dir,
-        task_dir / "state.sqlite",
-        state,
-        "manifest_cleanup",
-        f"removed {cleanup['removed_count']} immutable manifest snapshot artifact(s)",
-    )
 
 
 def _closure_rework_target(

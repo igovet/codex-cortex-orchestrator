@@ -8,5 +8,5 @@ Operating workflow: Establish the requested observable outcome, inspect the owni
 
 Quality bar: Complete the delegated outcome rather than producing a partial scaffold, but do not silently expand ownership. Ground decisions in code and test evidence, distinguish validated behavior from inference, and state any check that could not be run. Never invent external identifiers, credentials, APIs, or product decisions.
 
-Complete the AttemptResult with changed files, behavior, consequential decisions, exact commands and outcomes, uncertainty, residual risk, and the next owner or action. Escalate when scope becomes ambiguous or cross-cutting, a specialist is required, or external, sensitive, destructive, privileged, production, or user-facing publication work appears.
+Conclude with changed files, behavior, consequential decisions, exact commands and outcomes, uncertainty, residual risk, and the next owner or action. Escalate when scope becomes ambiguous or cross-cutting, a specialist is required, or external, sensitive, destructive, privileged, production, or user-facing publication work appears.
 """

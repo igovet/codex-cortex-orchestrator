@@ -7,7 +7,7 @@
     "selection": "config.communication_profile or CORTEX_COMMUNICATION_PROFILE; invalid values use natural",
     "quality_checks": ["plain_language", "no_internal_metadata", "no_repetition", "next_step", "profile_match", "quality_gate"],
     "internal_metadata": "Never include transport identity, digests, ledger references, or tool names in user prose.",
-    "user_view": "The only user-facing projection is user_view; internal is the bounded machine receipt projection and must never be rendered as user prose.",
+    "visible_output": "User-facing prose is rendered only from server-derived semantic result projections; internal receipts are never user prose.",
     "languages": ["en", "ru"],
     "profile_behavior": {
       "natural": "Plain human language with a short bounded summary and one decision.",
@@ -34,20 +34,14 @@
     "scope": "operate_only_within_delegated_ownership_and_allowed_paths",
     "external_side_effects": "require_explicit_main_agent_authorization_and_applicable_approval",
     "sensitive_data": "never_expose_or_persist_secrets_credentials_personal_data_or_secret_canaries",
-    "attempt_result_schema": "cortex/attempt-result/v1",
-    "attempt_event_schema": "cortex/attempt-event/v1",
-    "attempt_result_ref_schema": "cortex/attempt-result-ref/v1",
-    "question_schema": "cortex/question/v3",
     "question_route": "worker_publish_main_chat_ui_worker_poll",
-    "question_resume_contract": "accepted worker_question(action=ask) returns only QUESTION_RECORDED with the exact ref and pauses the same attempt; coordinator records the durable scalar answer or stable-option selection then followup_task resumes the same child; first resumed call is exactly worker_question({action:'poll',task_ref:<unchanged string>,assignment_ref:<unchanged string>,question_ref:<same exact string>}); coordinator resume.kind is copied into scalar action and is never passed as an object; never remove/recreate a question to repair question_ref; answered decisions are recorded with record_attempt_event, affected checks rerun, and complete_attempt is mandatory; pending poll returns QUESTION_RECORDED; no OTHER_TERMINAL, freeform terminal, or replacement worker",
+    "question_resume_contract": "One arbitrary-length Unicode question and one arbitrary-length Unicode user answer are bound to the same paused child. The coordinator presents the complete question and records the complete answer; the worker model decides whether that answer addresses the question. Never remove or recreate the exchange, infer authority, or replace the worker. Resume and complete the same attempt.",
+    "worker_question_pause_contract": "After durably publishing a required question, end the current native turn with an unambiguous durable-question marker. Do not begin project work, poll, or submit before same-child follow-up after the real user answer.",
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
-    "internal_language": "en",
-    "user_facing_language": "main_coordinator_only_task_language",
-    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "worker_question", "record_attempt_event", "complete_attempt", "read_dispatch_briefing", "read_worker_result"],
-    "coordinator_operations": ["start_orchestration", "read_worker_result", "continue_orchestration", "manage_orchestration", "manage_governance"],
-    "worker_operations": ["worker_question", "record_attempt_event", "complete_attempt", "read_dispatch_briefing", "read_worker_result"],
-    "normal_flow": ["start_orchestration", "worker_question", "read_dispatch_briefing", "record_attempt_event", "complete_attempt", "read_worker_result", "continue_orchestration"],
-    "recovery_operations": ["manage_orchestration"],
+    "coordinator_operations": ["start_orchestration", "show_orchestration_question", "answer_orchestration_question", "read_worker_wave", "continue_orchestration", "inspect_orchestration", "inspect_orchestration_recovery", "recover_blocked_orchestration", "resume_orchestration", "stop_orchestration"],
+    "worker_operations": ["read_dispatch_briefing", "read_predecessor_result", "ask_worker_question", "poll_worker_question", "record_attempt_event", "submit_attempt", "repair_attempt"],
+    "normal_flow": ["start_orchestration", "read_dispatch_briefing", "ask_worker_question", "show_orchestration_question", "answer_orchestration_question", "poll_worker_question", "record_attempt_event", "submit_attempt", "read_worker_wave", "continue_orchestration"],
+    "recovery_operations": ["inspect_orchestration_recovery", "recover_blocked_orchestration", "resume_orchestration", "finalize_bootstrap_failure", "finalize_worker_failure", "repair_attempt"],
     "coordinator_action_semantics": {
       "invoke_dispatches": {
         "marker": "spawn_all_exact_before_wait",
@@ -56,100 +50,34 @@
       },
       "wait_for_bound_workers": {
         "marker": "wait_existing_returned_child_ids_only",
-        "instruction": "Wait only on existing child IDs returned by successful spawn_agent calls.",
-        "requires_child_ids": true
+        "instruction": "Request one explicit 300-second native wait on the exact existing child and never use the native default wait duration. If no marker returns, request another explicit 300-second native wait on that exact child. A timeout or no child message leaves it live and authorizes no canonical result read.",
+        "requires_child_ids": true,
+        "per_wait_timeout_seconds": 300,
+        "minimum_overall_wait_seconds": 300,
+        "native_default_wait_allowed": false,
+        "repeat_after_no_marker": true,
+        "timeout_authorizes_result_read": false
       }
     },
-    "capability_handoff": "Cortex owns and issues refs; models only copy and serialize the exact opaque bytes. A coordinator preserves its exact task_ref and coordinator_ref only in a bounded private compaction handoff. If either value is lost, every task-scoped coordinator operation fails closed; never infer a task, session, project, ledger row, dispatch, or replacement capability.",
-    "worker_bootstrap_recovery": {
-      "required_fields": ["task_ref", "assignment_ref"],
-      "missing_final": "CORTEX_WORKER_BOOTSTRAP_MISSING missing_fields=[task_ref,assignment_ref] retryable=true",
-      "calls_before_complete_pair": 0,
-      "repair_primitive": "followup_task",
-      "repair_target": "same_native_child",
-      "repair_payload": "byte_exact_server_bootstrap_repair_message_only",
-      "repair_positive_branch": "read_briefing_then_continue_original_assignment_no_gate_acknowledgement",
-      "post_repair_terminal_allowlist": ["bootstrap_missing_marker", "question_recorded", "attempt_completed"],
-      "invalid_post_repair_action": "finalize_bootstrap_failure_only_for_exact_second_bootstrap_missing_marker; post_briefing failures follow_returned_structured_recovery",
-      "max_repairs": 1,
-      "replacement_spawn": false,
-      "ambient_reconstruction": false,
-      "terminal_management": "manage_orchestration(intent=finalize_bootstrap_failure, payload={dispatch_ref,reason_code:bootstrap_missing_identity})"
-    },
-    "worker_nonretryable_terminal": {
-      "child_final": "CORTEX_ATTEMPT_FAILED retryable=false",
-      "management": "manage_orchestration(intent=finalize_worker_failure,payload={dispatch_ref,reason_code:worker_nonretryable_terminal})",
-      "authority": "single_use_private_server_evidence_bound_to_task_attempt_dispatch_assignment_generation_and_allowlisted_error_classification; child_final_is_status_only",
-      "scope": "exact_current_bound_nonterminal_assignment",
-      "preserve": ["briefing_receipt", "attempt_events", "repair_escrow"],
-      "create": [],
-      "task_state": "blocked",
-      "session": "terminal_nonresumable",
-      "exact_replay": "rejected_after_evidence_consumption",
-      "forbidden": ["read_worker_result", "continue_orchestration", "replacement_spawn"]
-    },
-    "dispatch_transport": "minimal_native_capability_bootstrap_plus_structured_dispatch_ref_to_one_scoped_immutable_briefing",
+    "coordinator_wait_contract": "Request one explicit 300-second native wait on the exact child and never use the native default wait duration. On no marker, request another explicit 300-second native wait on that exact same child. A timeout, no child message, partial output, or unrelated event leaves the child live. Only a durable-question marker authorizes the exact-question user pause; only a terminal-completion marker authorizes a canonical wave or result read.",
+    "capability_handoff": "Cortex issues separate opaque coordinator and worker authority. Preserve each byte-for-byte within its lifecycle and never expose, infer, reconstruct, or exchange it.",
+    "worker_bootstrap_recovery": "A worker requires the exact opaque authority supplied by its native dispatch before any Cortex call or project access. Recovery is only the server-returned same-child route; replacement and ambient reconstruction are forbidden.",
+    "worker_nonretryable_terminal": "A nonretryable child final is informational only. Follow the server-derived terminal route for the original assignment; never infer authority, read a result, continue, or replace the worker from child prose.",
+    "dispatch_transport": "minimal_native_authority_to_one_scoped_immutable_briefing",
     "dispatch_briefing_scope": "assignment_scoped_api_read_only; never list or read other Cortex ledger paths",
-    "dispatch_briefing_fallback": "only an actual host-file-unavailable read failure returns one exact host path with max_reads=1",
     "dispatch_briefing_integrity": "server receipt and complete read are authoritative; no shell reread or local hash after success",
-    "dispatch_briefing_evidence": "a_successful_full_read_dispatch_briefing_call creates a server-owned AttemptEvent receipt",
-    "predecessor_read_evidence": "a_successful_scoped_read_worker_result_call creates a server-owned AttemptEvent receipt",
-    "worker_final_response": "complete_attempt_ok_true_terminal_true_requires_worker_final_exactly_ATTEMPT_COMPLETED_with_no_attempt_result_ref_handoff; retryable_false_stops_task_scoped_calls; only_recovery_terminal_failure_evidence_server_bound_requests_exact_CORTEX_ATTEMPT_FAILED_retryable_false_status_for_server_verified_cleanup",
-    "attempt_result_lifecycle": "read_dispatch_briefing_receipt_then_record_attempt_event_checkpoints_then_complete_attempt_closes_one_attempt; missing briefing receipt is retryable and cannot mutate the attempt; finalization_or_projection_failures_retry_server_side_without_respawning_the_worker",
-    "result_lifecycle": "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker",
-    "result_projection": "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord",
-    "worker_result_authority": "workers_publish_semantic_facts_only; Cortex owns identity, task_revision, dispatch, profile, phase, predecessors, receipts, changed_files, timestamps, workspace_observations, verification_metadata, and evidence_markers",
-    "worker_result_fields": ["status", "summary", "findings", "decisions_needed", "unresolved"],
-    "worker_submission_fields": ["task_ref", "assignment_ref", "plan_or_outcome_or_digest_bound_repair"],
-    "worker_result_unresolved_semantics": "ordinary status=completed may use unresolved only for concrete material open items required by a successor handoff; closure verifier gates review, governance_activation, governance_close, and close that pass require unresolved=[]; non-success results may use unresolved only for concrete material findings or unanswered required decisions; internal governance/evidence findings are routed through findings and corrective dispatch, never a user question or lifecycle pause; residual risk, omitted or environment checks, retrospective notes, uncertainty, and placeholder none belong in summary, claims, or AttemptEvents",
-    "worker_result_optional_data": "typed_gate_payloads_are_allowed_when_applicable_but_do_not_make_server_observed_facts_worker_authoritative",
-    "server_bound_fields": ["project_root", "task_id", "attempt_id", "profile", "phase", "dispatch_ref", "briefing_digest", "timestamps", "receipts", "changed_files", "verification_metadata"],
-    "semantic_only_rule": "Workers preserve the exact task_ref and assignment_ref from the native bootstrap on every worker operation. All other identity and evidence fields are backend-derived; sessions, hooks, environment, and process identity are telemetry only.",
-    "worker_response_contract": "Worker success responses carry only a closed outcome plus immediate action data. MCP isError=true is the tool-execution-error channel and may carry Cortex ok=false plus error/recovery; process that structured contract normally. Every expected domain failure is ok=false with top-level error={code,category,message,diagnostics} and recovery={kind,operation,retryable,state_mutated}. same_operation is legal only when retryable=true, state_mutated=false, and nonempty allowed_changes define one deterministic retry; each change supplies an exact json_pointer and nonempty allowed_ops. Apply those exact changes once, then follow the new response. repair_patch_only uses only the returned opaque capsule, digest, and allowed patches. terminal_stop ends task-scoped calls. Only recovery.terminal_failure={evidence:server_bound,coordinator_intent:finalize_worker_failure,reason_code:worker_nonretryable_terminal} requests the neutral child marker; the marker never authorizes failure, and the server verifies and consumes private current evidence. state_mutated=false describes the rejected domain operation; private control-evidence recording is audit state, not application of that operation. A raw JSON-RPC/protocol failure without the Cortex structured contract fails closed with CORTEX_PROTOCOL_FAILURE retryable=false. Never inspect Cortex source, installed cache, database, session, environment, hidden path, or process state. No output echoes a capability, submitted value, receipt, identity, telemetry, or prose instruction.",
-    "operation_cards": {
-      "start_orchestration": {
-        "input": "{project_root, task, waves?}",
-        "purpose": "Start one explicitly activated task and retain the returned private {task_ref, coordinator_ref} pair for every later coordinator operation. Each wave has exactly {phase,workers}; workers inherit the wave phase and must not carry phase. Put multiple same-phase workers in one wave and different phases in separate waves. Omit worker.profile for the server-owned phase owner; an expert override must use the containing wave phase's exact closed profile enum.",
-        "action_semantics": ["invoke_dispatches", "wait_for_bound_workers"]
-      },
-      "read_dispatch_briefing": {
-        "input": "{task_ref, assignment_ref, cursor?}",
-        "purpose": "Read the one assignment-scoped immutable briefing before project work. The first bounded page may be incomplete; continue with its opaque next_cursor until complete=true."
-      },
-      "read_worker_result": {
-        "input": "worker: {task_ref, assignment_ref, attempt_result_ref}; coordinator: {task_ref, coordinator_ref, step}",
-        "purpose": "Workers read only a predecessor ref explicitly granted by the verified worker assignment. Coordinators provide task_ref, coordinator_ref, and server-derived step; the server derives the current wave and returns all canonical wave results plus continuation. A worker never reads its own terminal result."
-      },
-      "record_attempt_event": {
-        "input": "{task_ref, assignment_ref, event_type, payload, event_key?}",
-        "purpose": "Checkpoint pre-completion semantic evidence; the server supplies actor, attempt, timestamps, and receipts. Never call after complete_attempt succeeds."
-      },
-      "complete_attempt": {
-        "input": "{task_ref, assignment_ref, plan} or {task_ref, assignment_ref, outcome} or {task_ref, assignment_ref, repair_capsule, base_payload_digest, patches}",
-        "purpose": "Close one attempt with a compact plan/outcome: planner plan-gate assignments require plan; all non-planner assignments require outcome. After validation issues repair, recovery.kind=repair_patch_only locks the attempt to the exact capsule, base digest, and diagnostic paths until success. Each repair diagnostic supplies its exact repair_pointer, allowed_ops, and valid field_schema; choose only an advertised patch operation. Never inspect Cortex source, installed cache, schema, log, ledger, session, environment, or hidden path to construct a retry. Full draft replay and invalid/empty/out-of-scope patches or a malformed capsule copy reissue that same retryable repair. retryable=false ends task-scoped calls. Return the exact terminal status marker only when recovery.terminal_failure.evidence=server_bound requests it; the marker alone never authorizes cleanup. ok=true terminal=true ends worker calls and requires exact final ATTEMPT_COMPLETED."
-      },
-      "worker_question": {
-        "input": "closed union: ask single_select={task_ref,assignment_ref,action:'ask',question_type:'single_select',decision_scope,question,recommendation,options,recommended_option_ids:[one]}; ask multi_select={task_ref,assignment_ref,action:'ask',question_type:'multi_select',decision_scope,question,recommendation,options,recommended_option_ids:[one_or_more]}; ask text={task_ref,assignment_ref,action:'ask',question_type:'text',decision_scope,question,recommendation,recommended_answer}; poll={task_ref,assignment_ref,action:'poll',question_ref}; ask_batch={task_ref,assignment_ref,action:'ask_batch',batch:{batch_key,questions:[same question_type/decision_scope item union]}}; poll_batch={task_ref,assignment_ref,action:'poll_batch',batch_ref}",
-        "purpose": "Pause only for a material task decision under the exact verified worker assignment. question_type, decision_scope, and recommendation are mandatory for every asked question. Never send answer_mode, context, type, or multiple, and never infer the question type from answer-field presence. single_select/multi_select/text fields never mix, and poll/batch fields never mix with ask fields. A durable scalar answer or stable-option selection resumes the same child; its first worker call is exactly action:'poll' with the original refs and exact scalar question_ref."
-      },
-      "continue_orchestration": {
-        "input": "{task_ref, coordinator_ref, step, results}",
-        "purpose": "Continue only the exact coordinator task and server-derived result references.",
-        "action_semantics": ["invoke_dispatches", "wait_for_bound_workers"]
-      },
-      "manage_orchestration": {
-        "input": "{task_ref, coordinator_ref, intent, payload?}",
-        "purpose": "Manage only the exact coordinator task; it never accepts a session, project root, ledger path, task guess, or recovered capability."
-      },
-      "manage_governance": {
-        "input": "{task_ref, coordinator_ref, action, payload?}",
-        "purpose": "Perform only the exact task-scoped governance action under the coordinator capability."
-      }
-    },
-    "complete_attempt_v11": "Every worker call carries task_ref and assignment_ref. Planner plan-gate assignments require plan and all non-planner assignments require outcome. complete_attempt accepts that compact full branch or the same-attempt repair form {repair_capsule, base_payload_digest, patches}. Copy the opaque capsule directly. Every expected failure has top-level error={code,category,message,diagnostics}; repair uses recovery.kind=repair_patch_only with recovery.repair={repair_capsule,base_payload_digest,patch_paths,diagnostics}. Each self-contained diagnostic supplies repair_pointer, allowed_ops, and code/message/field_schema; choose only an advertised operation, and never inspect Cortex source, installed cache, schema, log, ledger, session, environment, or hidden path after a recovery response. Once issued, the exact repair base and diagnostic path set remain locked: full draft replay, malformed capsule copies, and invalid, empty, or out-of-scope patches return the same retryable recovery without state mutation. A structurally valid capsule that fails integrity, other authority/identity/base integrity, or an already-terminal attempt is nonretryable. ok=true terminal=true ends worker calls; the worker final is exactly ATTEMPT_COMPLETED with no attempt_result_ref handoff. The coordinator obtains all current-wave canonical results and continuation through read_worker_result({task_ref, coordinator_ref, step}).",
-    "attachment_preflight": "Before start_orchestration, materialize any referenced attachment or pasted text through the host attachment surface and place its exact content in task.user_request; never send an attachment path as a placeholder, duplicate a path, or paraphrase material task text.",
-    "activation_context": "Activation is host-owned context. The model selects the Cortex route, but does not copy activation markers or skill links into worker payloads; start_orchestration receives activation context from the host and rejects inactive launches with structured error and recovery cards.",
-    "caller_correctable_tool_errors": "retry_same_operation_only_when_retryable_state_unmutated_and_allowed_changes_nonempty_otherwise_stop",
+    "dispatch_briefing_evidence": "a successful full dispatch-briefing read creates a server-owned receipt",
+    "predecessor_read_evidence": "a successful scoped predecessor-result read creates a server-owned receipt",
+    "worker_final_response": "After successful submission, end with the advertised terminal marker and make no further task-scoped Cortex calls. A nonretryable response also stops the affected route.",
+    "worker_lifecycle": "Read the dispatch briefing before project work, checkpoint material semantic evidence when useful, ask only material user questions, and submit once. After publishing a required question, end the native turn with its durable-question marker and wait for same-child follow-up before polling the real answer or continuing project work. Missing read evidence prevents completion; retry finalization only through server-directed same-child recovery.",
+    "result_projection": "the coordinator receives server-derived semantic result projections and renders any human-facing content from them",
+    "worker_result_authority": "workers_publish_semantic_facts_only; Cortex derives lifecycle identity, provenance, workspace observations, and durable evidence",
+    "semantic_only_rule": "Workers preserve issued opaque authority exactly where the current tool contract requires it. Cortex derives lifecycle and verification facts; host runtime identity is telemetry only.",
+    "worker_response_contract": "Follow only the lifecycle direction returned by the current tool. Retry the same operation once only when the response explicitly makes that safe, preserve opaque repair material unchanged, follow server-issued pagination until complete, and otherwise fail closed without private-state inspection.",
+    "operation_guidance": "Start creates one explicitly activated task and returns native dispatches. Workers read their immutable assignment, may checkpoint evidence, may ask one complete material question, and submit their semantic conclusion. A question pauses the native child turn until a real answer is recorded and the same child resumes to poll it. Coordinators request explicit 300-second native waits, repeat the same duration after no marker, present the complete question, record the complete user answer, and read the current worker wave only after terminal child completion. The active tool registry exclusively defines every call shape.",
+    "attachment_preflight": "Before starting, materialize referenced attachments or pasted text through the host input surface; preserve their material content rather than passing a path placeholder or paraphrasing it.",
+    "activation_context": "Activation is host-owned context. The model selects the Cortex route but does not copy activation markers or skill links into worker calls; inactive launches fail closed.",
+    "caller_correctable_tool_errors": "retry_the_same_operation_once_only_when_the_public_response_explicitly_authorizes_a_deterministic_correction_otherwise_stop",
     "read_only_workspace_delta": "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified",
     "repository_intelligence": "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
     "codebase_memory_project_resolution": "derive_canonical_path_key_then_single_exact_root_list_fallback",
@@ -167,7 +95,7 @@
       "harvest_briefing_target_bytes": 18432,
       "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule"
     },
-    "required_attempt_result_fields": ["status", "summary", "findings", "decisions_needed", "unresolved"]
+    "worker_completion": "Every profile publishes one semantic conclusion through submit_attempt; the active tool contract alone defines its arguments."
   },
   "profile_execution_contracts": {
     "accessibility_engineer": {
@@ -177,7 +105,7 @@
     },
     "architect": {
       "inputs": "Read current code boundaries, interfaces, data flow, deployment configuration, tests, integrations, and existing decisions relevant to the mission.",
-      "project_artifacts": "Result-only: do not create implementation files; identify ADR-worthy decisions and writer-ready contracts in the AttemptResult.",
+      "project_artifacts": "Result-only: do not create implementation files; publish ADR-worthy decisions and writer-ready contracts in the semantic conclusion.",
       "completion": "Produce current-state evidence, proposed boundaries, interfaces, failure behavior, alternatives, rollout, rollback, and material unanswered decisions that block acceptance."
     },
     "backend_dev": {
@@ -193,7 +121,7 @@
     "code_reviewer": {
       "inputs": "Read the bounded diff plus callers, contracts, state transitions, tests, deployment implications, and predecessor evidence supplied by the dispatch.",
       "project_artifacts": "Result-only: do not edit fixes, tests, or documentation.",
-      "completion": "Produce severity-ordered defect findings with path and line, preconditions, impact, proof, remedy, and non-blocking verification gaps in summary or claims."
+      "completion": "Produce severity-ordered defect findings with path and line, preconditions, impact, proof, remedy, and non-blocking verification gaps."
     },
     "data_engineer": {
       "inputs": "Read delegated schemas, pipeline definitions, fixtures or safe metadata, delivery semantics, privacy constraints, and operational checks.",
@@ -208,7 +136,7 @@
     "debugger": {
       "inputs": "Read and reproduce the exact symptom through the owning control and data path, logs, state, tests, and recent relevant changes.",
       "project_artifacts": "Create or update only the smallest delegated root-cause fix and regression tests inside allowed paths; remove diagnostic residue.",
-      "completion": "Deliver reproduction, causal proof, rejected hypotheses, focused fix, failure-before or equivalent control, success-after evidence, and remaining uncertainty in summary or claims."
+      "completion": "Deliver reproduction, causal proof, rejected hypotheses, focused fix, failure-before or equivalent control, success-after evidence, and remaining uncertainty."
     },
     "devops_engineer": {
       "inputs": "Read delegated desired-state files, pipelines, modules, policies, secret boundaries, health checks, rollout, and rollback definitions.",
@@ -247,8 +175,8 @@
     },
     "planner": {
       "inputs": "Read supplied knowledge indexes and relevant pages, then current entry points, contracts, configuration, tests, requirements, acceptance, and predecessor result projections.",
-      "project_artifacts": "Result-only: Planner Scope and Planner Plan publish semantic AttemptResults through complete_attempt; Planner Plan places its structured work breakdown under the nested planning sibling. Never create planning or ledger files directly.",
-      "completion": "For scope, publish a non-solution discovery brief with context and validated non-overlapping domains in the semantic result and events. For plan, consume every supplied predecessor result projection and publish nested planning with overview, work packages, requirement coverage, recommendation, dependencies, acceptance, verification, risk gates, and no unresolved material decision."
+      "project_artifacts": "Result-only: publish Scope and Plan conclusions through the common worker completion; never create planning or ledger files directly.",
+      "completion": "For scope, publish a non-solution discovery brief with context and validated non-overlapping domains. For plan, consume supplied predecessor evidence and publish the decision-complete work breakdown, ownership, dependencies, acceptance, verification, risks, and unresolved material decisions."
     },
     "qa_engineer": {
       "inputs": "Read every delegated acceptance criterion, changed contract, implementation path, existing test layer, fixtures, and predecessor evidence.",
@@ -283,7 +211,7 @@
       "acceptance": [
         "Separate known repository context from unknowns and define no more than eight non-overlapping discovery domains with explicit boundaries and dependencies.",
         "Name relevant context files and give each domain a bounded objective, paths, acceptance criteria, and verification method without making solution decisions.",
-        "Gather enough evidence to formulate a precise material question when needed, but route the decision itself through worker_question."
+        "Gather enough evidence to formulate a precise material question when needed, but route the decision itself through ask_worker_question."
       ],
       "verification": [
         "Ground the discovery brief in supplied knowledge indexes and current repository structure.",
@@ -308,7 +236,7 @@
       "acceptance": [
         "Separate repository-discoverable facts from product decisions and resolve discoverable facts before asking questions.",
         "Cover interfaces, data flow, failure behavior, compatibility, validation, rollout, ownership, and material assumptions so an implementer has no decisions left to make.",
-        "Surface only unresolved choices that materially change scope or behavior, with concrete options and a recommended default."
+        "Surface only unresolved choices that materially change scope or behavior, and use the durable free-text question route when user input is required."
       ],
       "verification": [
         "Cite the repository paths, symbols, tests, or configuration that ground each consequential plan decision.",
@@ -356,11 +284,11 @@
       "ownership": "Own only the delegated implementation and its focused tests inside the allowed paths.",
       "acceptance": [
         "Preserve existing contracts unless a change is explicit, handle relevant errors and boundaries, and avoid unrelated cleanup or features.",
-        "Complete the requested behavior end to end within delegated ownership and AttemptResult any required cross-owner follow-up."
+        "Complete the requested behavior end to end within delegated ownership and publish any required cross-owner follow-up."
       ],
       "verification": [
         "Run focused positive, negative, boundary, and regression checks for changed behavior.",
-        "AttemptResult exact commands and outcomes, and identify any validation that could not be run."
+        "Publish exact commands and outcomes, and identify any validation that could not be run."
       ]
     },
     "qa": {
@@ -372,7 +300,7 @@
       ],
       "verification": [
         "Run the smallest authoritative test set that proves the claimed behavior and include controls where practical.",
-        "AttemptResult exact commands, outcomes, coverage gaps, and reproducible failure evidence."
+        "Publish exact commands, outcomes, coverage gaps, and reproducible failure evidence."
       ]
     },
     "security": {
@@ -404,7 +332,7 @@
       "ownership": "Own WCAG 2.2 AA and assistive-technology analysis; do not make general visual-design judgments or edit unless explicitly delegated.",
       "acceptance": [
         "Cover semantics, name/role/value, keyboard and pointer operation, focus, reflow, contrast, labels, errors, status, motion, and screen-reader behavior where relevant.",
-        "AttemptResult criterion, user impact, reproduction, affected path, remediation, and untested browser/AT combinations."
+        "Publish the criterion, user impact, reproduction, affected path, remediation, and untested browser/AT combinations."
       ],
       "verification": [
         "Distinguish automated signals from manual confirmation and use DOM, accessibility-tree, keyboard, zoom, and rendered evidence when available.",
@@ -425,7 +353,7 @@
     },
     "review": {
       "objective": "Independently review the relevant change for real defects affecting: {task_user_request}",
-      "ownership": "Own review findings only; do not implement fixes or AttemptResult style preferences as defects.",
+      "ownership": "Own review findings only; do not implement fixes or report style preferences as defects.",
       "acceptance": [
         "Trace the diff through callers, state, errors, concurrency, security, performance, compatibility, and tests.",
         "For each finding provide severity, path and line, preconditions, impact, proof, and a concrete remedy; if none exist, state residual gaps."
@@ -455,7 +383,7 @@
         "Confirm that claimed changes, tests, documentation, and handoff evidence are mutually consistent."
       ],
       "verification": [
-        "AttemptResult exact commands, cwd, exit codes, decisive sanitized output, and omitted checks.",
+        "Publish exact commands, working directory, exit codes, decisive sanitized output, and omitted checks.",
         "Treat any claim without observed successful execution as unverified."
       ]
     },
@@ -463,12 +391,12 @@
       "objective": "Independently verify full-governance closure and retrospective evidence for: {task_user_request}",
       "ownership": "Own the final governance review only; verify the acceptance oracle, risk disposition, falsification review, policy snapshot, independent review, and retrospective without editing source files.",
       "acceptance": [
-        "Use this independent AttemptResult and its verified predecessor receipts to provide concrete evidence for every full-governance close obligation at the current task revision.",
-        "Record residual risk, falsification results, retrospective conclusions, and any required corrective route in summary, claims, or AttemptEvents; put only concrete unresolved findings or unanswered required decisions in unresolved. Do not require the post-review server evidence projection or final handoff to exist before this AttemptResult."
+        "Use this independent semantic conclusion, together with verified predecessor evidence, to address every full-governance close obligation at the current task revision.",
+        "Record residual risk, falsification results, retrospective conclusions, and any required corrective route in the semantic conclusion; include only concrete unresolved findings or unanswered required decisions. Do not require the post-review server evidence projection or final handoff before completing the review."
       ],
       "verification": [
-        "Cross-check the supplied governance context, task contract, current source, verification results, predecessor AttemptResult receipts, and dependency state for matching scope and digests.",
-        "Attempt to falsify the oracle, risk, implementation, documentation, and retrospective claims before recording; Cortex projects the independent-review evidence and audit receipt only after a valid AttemptResult is consumed."
+        "Cross-check the supplied governance context, task contract, current source, verification results, predecessor read evidence, and dependency state for matching scope and digests.",
+        "Attempt to falsify the oracle, risk, implementation, documentation, and retrospective claims before recording; Cortex projects the independent-review evidence and audit receipt only after a valid semantic conclusion is consumed."
       ]
     }
   },

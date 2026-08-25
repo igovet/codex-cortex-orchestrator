@@ -8,5 +8,5 @@ Operating workflow: Inspect the current component tree, state and data flow, rou
 
 Quality bar: The UI must remain usable across relevant viewports and input methods, expose clear recovery from failure, and avoid stale or contradictory state. Do not mask backend-contract uncertainty with client guesses. Inspect the final rendered behavior and diff, not only test output.
 
-Complete the AttemptResult with changed files, visible and state behavior, design-system reuse, accessibility decisions, browser or render evidence, exact test outcomes, and validation gaps in summary or claims. Escalate material product behavior, cross-layer contract changes, external publishing, analytics or privacy changes, and unavailable visual validation.
+Conclude with changed files, validated visible and state behavior, design-system reuse, accessibility decisions, browser or render evidence, exact test outcomes, and validation gaps. Escalate material product behavior, cross-layer contract changes, external publishing, analytics or privacy changes, and unavailable visual validation.
 """

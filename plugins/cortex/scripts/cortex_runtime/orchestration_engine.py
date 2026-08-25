@@ -93,6 +93,8 @@ bind_symbols(
         "V11_LIFECYCLES",
         "ORCHESTRATION_PLAN_SCHEMA",
         "ORCHESTRATION_TRANSACTION_SCHEMA",
+        "PLAN_TRACKER_SCHEMA",
+        "PLANNING_SCHEMA",
         "PIPELINE_CONTRACT_VERSION",
         "SUPPORTED_MODELS",
         "TERMINAL_ATTEMPT_STATUSES",
@@ -138,7 +140,9 @@ bind_symbols(
         "db_upsert_task_finding",
         "db_load_task",
         "db_put_operation",
+        "db_put_task_document",
         "db_put_worker_session",
+        "db_transaction",
         "db_update_task_plan",
         "deactivate_orchestration",
         "digest_text",
@@ -183,6 +187,7 @@ bind_symbols(
         "select_project_root",
         "state_lock",
         "status",
+        "store_immutable_artifact",
         "sync_current_wave",
         "task_manifest_baseline",
         "task_paths",
@@ -347,7 +352,7 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
         quality["fallback_applied"] = True
         # All rejected candidates were replaced with complete safe copy.
         quality["ok"] = True
-    user_view = {
+    visible_output = {
         "message": rendered.get("message"),
         "profile": rendered.get("profile"),
         "detail_level": rendered.get("detail_level"),
@@ -362,9 +367,9 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
     dispatches = response.get("dispatches")
     if not isinstance(dispatches, list) or not dispatches:
         dispatches = response.get("spawn_requests", [])
-    response["user_view"] = user_view
+    response["visible_output"] = visible_output
     if state == "waiting_workers":
-        response["user_view"] = None
+        response["visible_output"] = None
         response["allowed_visible_events"] = []
     internal = {}
     existing_internal = response.get("internal")
@@ -445,7 +450,7 @@ def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
         "recommended_parallel_groups": [list(group) for group in state.get("recommended_parallel_groups") or []],
         "pipeline_authority": state.get("pipeline_authority") or "orchestrator",
         "remaining_gates": [gate for gate in state.get("current_pipeline", []) if gate not in done],
-        "close_verified": any(
+        "close_verified": bool(state.get("close_verified")) or any(
             item.get("gate") == "close"
             and item.get("verified_execution")
             and item.get("exit_code") == 0
@@ -850,6 +855,225 @@ def _orchestrate_wave_contract(waves: object) -> list[dict[str, Any]]:
     ]
 
 
+def _coordinator_plan_digest(waves: object) -> str:
+    """Bind generated planning artifacts to the exact normalized start waves."""
+    return digest_text(canonical_json.dumps(_orchestrate_wave_contract(waves)))
+
+
+def _coordinator_planning_payload(
+    task: dict[str, Any],
+    waves: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Derive the machine plan solely from coordinator-authored start waves.
+
+    Worker completion remains one free-form report.  All structure required by
+    scheduling, plan review, and the live tracker is generated here from the
+    already validated orchestration plan instead of being reconstructed from a
+    planner's prose.
+    """
+    phase_packages = {
+        str(wave.get("phase") or ""): f"package-{safe_id(str(wave.get('wave_id') or 'wave'))}"
+        for wave in waves
+        if isinstance(wave, dict)
+    }
+    packages: list[dict[str, Any]] = []
+    for wave_index, wave in enumerate(waves, 1):
+        phase = canonical_pipeline_gate(wave.get("phase") or "")
+        package_id = phase_packages[phase]
+        delegations = [item for item in wave.get("delegations") or [] if isinstance(item, dict)]
+        microtasks: list[dict[str, Any]] = []
+        package_paths: list[str] = []
+        package_dependencies: list[str] = []
+        package_artifacts: list[dict[str, Any]] = []
+        for spec_index, spec in enumerate(delegations, 1):
+            gate = canonical_pipeline_gate(spec.get("gate") or phase)
+            for dependency_gate in spec.get("context_gates") or []:
+                dependency = phase_packages.get(canonical_pipeline_gate(dependency_gate))
+                if dependency and dependency != package_id and dependency not in package_dependencies:
+                    package_dependencies.append(dependency)
+            allowed_paths = [str(item) for item in spec.get("allowed_paths") or ["."] if str(item).strip()]
+            for path in allowed_paths:
+                if path not in package_paths:
+                    package_paths.append(path)
+            required_artifacts = [
+                dict(item) for item in spec.get("required_artifacts") or [] if isinstance(item, dict)
+            ]
+            package_artifacts.extend(required_artifacts)
+            microtask_id = safe_id(str(
+                spec.get("orchestration_delegation_key")
+                or f"{wave.get('wave_id')}-{gate}-{spec_index:02d}"
+            ))
+            microtasks.append({
+                "id": microtask_id,
+                "title": f"{gate.replace('_', ' ').title()} worker {spec_index}",
+                "objective": str(spec.get("objective") or f"Complete the {gate} phase."),
+                "profile": str(spec.get("agent") or _default_profile_for_gate(gate)),
+                "status": "pending",
+                "order": spec_index,
+                "gates": [gate],
+                "allowed_paths": allowed_paths,
+                "depends_on": [],
+                "acceptance_criteria": [str(item) for item in spec.get("acceptance_criteria") or []],
+                "verification": [str(item) for item in spec.get("verification") or []],
+                "required_artifacts": required_artifacts,
+            })
+        packages.append({
+            "id": package_id,
+            "title": f"{phase.replace('_', ' ').title()} phase",
+            "objective": "\n".join(str(item.get("objective") or "") for item in delegations).strip()
+            or f"Complete the {phase} phase.",
+            "status": "pending",
+            "order": wave_index,
+            "gates": [phase],
+            "allowed_paths": package_paths or ["."],
+            "depends_on": package_dependencies,
+            "required_artifacts": package_artifacts,
+            "microtasks": microtasks,
+        })
+    plan_refs = [str(package["id"]) for package in packages]
+    user_request = str(task.get("user_request") or "").strip()
+    return {
+        "schema": PLANNING_SCHEMA,
+        "overview": user_request,
+        "work_packages": packages,
+        "requirement_coverage": ([{
+            "requirement": user_request,
+            "plan_refs": plan_refs,
+            "verification": [str(item) for item in task.get("verification") or []],
+            "status": "covered",
+        }] if user_request and plan_refs else []),
+        "recommendation": "approve",
+        "recommendation_rationale": "The coordinator-authored waves passed the canonical start validation.",
+        "recommendation_actions": [],
+        "resolved_questions": [],
+        "risks": [],
+    }
+
+
+def _materialize_coordinator_plan(
+    task_dir: Path,
+    state: dict[str, Any],
+    task: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish one idempotent immutable plan derived from normalized waves."""
+    task_id = safe_id(str(state.get("task_id") or ""))
+    root = _ledger_root_for_artifact(task_dir)
+    plan_digest = _coordinator_plan_digest(plan.get("waves"))
+    existing = current_planning_manifest(task_dir)
+    if isinstance(existing, dict):
+        if existing.get("source_authority") != "coordinator_start_waves" or existing.get("source_plan_digest") != plan_digest:
+            raise ValueError("current planning manifest does not match the coordinator-authored start waves")
+        return existing
+    planning = _coordinator_planning_payload(task, list(plan.get("waves") or []))
+    revision = f"plan-coordinator-{plan_digest[:24]}"
+    revision_root = f"planning/revisions/{revision}"
+    overview_path = f"{revision_root}/overview.md"
+    summaries: list[dict[str, Any]] = []
+    package_artifacts: list[tuple[dict[str, Any], str, str]] = []
+    for package in planning["work_packages"]:
+        package_id = str(package["id"])
+        package_path = f"{revision_root}/packages/{package_id}.json"
+        package_artifacts.append(({
+            "schema": PLANNING_SCHEMA,
+            "revision": revision,
+            "source_authority": "coordinator_start_waves",
+            "source_plan_digest": plan_digest,
+            "package": package,
+        }, package_id, package_path))
+        summaries.append({
+            "id": package_id,
+            "title": package["title"],
+            "depends_on": list(package.get("depends_on") or []),
+            "microtask_count": len(package.get("microtasks") or []),
+            "artifact_path": package_path,
+        })
+    manifest = {
+        "schema": PLANNING_SCHEMA,
+        "revision": revision,
+        "source_authority": "coordinator_start_waves",
+        "source_plan_digest": plan_digest,
+        "overview": planning["overview"],
+        "overview_artifact_path": overview_path,
+        "overview_artifact_ref": None,
+        "work_packages": summaries,
+        "requirement_coverage": list(planning.get("requirement_coverage") or []),
+        "recommendation": "approve",
+        "recommendation_rationale": planning["recommendation_rationale"],
+        "recommendation_actions": [],
+        "resolved_questions": [],
+        "risks": [],
+        "created_at": now(),
+        "updated_at": now(),
+    }
+    tracker_items = [
+        {
+            "kind": kind,
+            "id": str(item.get("id") or ""),
+            "title": item.get("title"),
+            "objective": item.get("objective"),
+            "status": item.get("status") or "pending",
+            "order": item.get("order", 1),
+            "gates": list(item.get("gates") or []),
+            "depends_on": list(item.get("depends_on") or []),
+            "allowed_paths": list(item.get("allowed_paths") or []),
+            "acceptance_criteria": list(item.get("acceptance_criteria") or []),
+            "verification": list(item.get("verification") or []),
+            "required_artifacts": list(item.get("required_artifacts") or []),
+            "package_id": package_id,
+            **({"profile": item.get("profile")} if kind == "microtask" else {}),
+        }
+        for package in planning["work_packages"]
+        for package_id in [str(package["id"])]
+        for kind, item in [("package", package)] + [
+            ("microtask", microtask)
+            for microtask in package.get("microtasks") or []
+            if isinstance(microtask, dict)
+        ]
+    ]
+    tracker = {
+        "schema": PLAN_TRACKER_SCHEMA,
+        "task_id": task_id,
+        "revision": revision,
+        "source_authority": "coordinator_start_waves",
+        "source_plan_digest": plan_digest,
+        "task_revision": int(state.get("task_revision") or 1),
+        "recommendation": "approve",
+        "recommendation_rationale": planning["recommendation_rationale"],
+        "recommendation_actions": [],
+        "requirement_coverage": list(planning.get("requirement_coverage") or []),
+        "resolved_questions": [],
+        "risks": [],
+        "items": tracker_items,
+        "updated_at": now(),
+        "last_event": "plan_created",
+    }
+    overview = "# Work plan\n\n" + planning["overview"] + "\n"
+    with db_transaction(root):
+        overview_metadata = store_immutable_artifact(
+            task_dir, task_id,
+            kind="planning_revision",
+            title=f"{revision}:overview",
+            mime_type="text/markdown; charset=utf-8",
+            content=overview,
+            export_path=overview_path,
+        )
+        manifest["overview_artifact_ref"] = overview_metadata["artifact_ref"]
+        for package_record, package_id, package_path in package_artifacts:
+            metadata = store_immutable_artifact(
+                task_dir, task_id,
+                kind="planning_revision",
+                title=f"{revision}:package:{package_id}",
+                mime_type="application/json",
+                content=canonical_json.dumps(package_record),
+                export_path=package_path,
+            )
+            next(item for item in summaries if item["id"] == package_id)["artifact_ref"] = metadata["artifact_ref"]
+        db_put_task_document(root, task_id, "planning_current", manifest)
+        db_put_task_document(root, task_id, "plan_tracker_current", tracker)
+    return manifest
+
+
 def _load_orchestrate_plan(task_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
     """Load the canonical plan; tasks without one are not orchestration tasks."""
     loaded = db_load_task(_ledger_root_for_artifact(task_dir), safe_id(str(state.get("task_id") or "")))
@@ -985,7 +1209,9 @@ def _compiled_implementation_spec(
         {**microtask, "package_id": package["id"]}
         for package in packages
         for microtask in package.get("microtasks", [])
-        if isinstance(microtask, dict)
+        if isinstance(microtask, dict) and "implementation" in {
+            canonical_pipeline_gate(gate) for gate in microtask.get("gates") or []
+        }
     ]
     if not microtasks:
         raise ValueError("approved plan contains no implementation microtasks")
@@ -996,7 +1222,9 @@ def _compiled_implementation_spec(
     }
     package_microtasks = {
         str(package["id"]): {
-            str(item["id"]) for item in package.get("microtasks", []) if isinstance(item, dict)
+            str(item["id"])
+            for item in package.get("microtasks", [])
+            if isinstance(item, dict) and str(item.get("id") or "") in by_id
         }
         for package in packages
     }
@@ -1028,9 +1256,11 @@ def _compiled_implementation_spec(
         if str(path).strip()
     ))
     if not paths or any(path.strip() in {".", "*"} for path in paths):
-        raise ValueError(
-            "approved implementation microtasks require explicit non-broad allowed_paths before dispatch"
-        )
+        # An omitted public allowed_paths field is legal and the normalized
+        # start wave already carries its server-approved broad scope.  Keep the
+        # original coordinator delegation instead of manufacturing a stricter
+        # composite worker that the caller never requested.
+        return None
     profiles = [str(item.get("profile") or "") for item in ordered if str(item.get("profile") or "")]
     non_devops = [profile for profile in profiles if profile != "devops_engineer"]
     profile_set = set(non_devops or profiles)
@@ -1050,24 +1280,36 @@ def _compiled_implementation_spec(
         not str(path).startswith((".github/", "infra/", "deploy/", "ops/")) for path in paths
     ):
         agent = "general"
+    base = dict((wave.get("delegations") or [{}])[0])
+    authored_mission = str(base.get("objective") or "").strip()
+    compiled_mission = "Execute the approved immutable coordinator plan in dependency order."
+    mission = "\n\n".join(dict.fromkeys(
+        value for value in (authored_mission, compiled_mission) if value
+    ))
     acceptance = list(dict.fromkeys(
         str(value)
-        for item in ordered
-        for value in item.get("acceptance_criteria", [])
+        for source in (
+            base.get("acceptance_criteria", []),
+            *(item.get("acceptance_criteria", []) for item in ordered),
+        )
+        for value in source
         if str(value).strip()
     ))
     verification = list(dict.fromkeys(
         str(value)
-        for item in ordered
-        for value in item.get("verification", [])
+        for source in (
+            base.get("verification", []),
+            *(item.get("verification", []) for item in ordered),
+        )
+        for value in source
         if str(value).strip()
     ))
-    base = dict((wave.get("delegations") or [{}])[0])
     revision = str(manifest.get("revision") or "")
     plan_unit = {
         "schema": "cortex/compiled-plan-unit/v1",
         "plan_revision": revision,
-        "source_result_ref": manifest.get("source_result_ref"),
+        "source_authority": manifest.get("source_authority"),
+        "source_plan_digest": manifest.get("source_plan_digest"),
         "package_ids": [str(package["id"]) for package in packages],
         "microtasks": [
             {
@@ -1098,11 +1340,13 @@ def _compiled_implementation_spec(
         **base,
         "gate": "implementation",
         "agent": agent,
-        # The exact work breakdown is a digest-bound immutable artifact.  Do
-        # not repeat its titles (or any other plan content) in this field:
-        # ``objective`` reaches the worker briefing and would otherwise bloat
-        # the transport with a second copy of the plan.
-        "objective": "Execute the approved immutable Planner plan in dependency order.",
+        # The exact work breakdown remains in its digest-bound immutable
+        # artifact, but the coordinator-authored mission is independent
+        # semantic authority. Preserve it verbatim in the briefing-facing
+        # objective, then append only the compact execution-order directive;
+        # never replace user-decision or other mission obligations with a
+        # generic implementation summary.
+        "objective": mission,
         "selection_reason": (
             f"Compiled from approved plan revision {revision}; selected {agent} from microtask profiles while "
             "preventing deployment-only routing from owning application-code changes."
@@ -1620,11 +1864,10 @@ def _orchestrate_response(
         )
     elif facade_state == "awaiting_plan_approval":
         next_action = (
-            "read the planner result, present a concise main-chat plan summary, and call plan_approval with "
-            "decision=prompt. An initialized stdio host receives native Approve/Cancel controls plus free-form "
-            "input; direct callers use the canonical plan_approval operation through this lifecycle contract. Non-empty "
-            "custom text requests Planner revision; otherwise submit only the selected action's embedded response "
-            "arguments, or leave the plan pending when the host cannot render it"
+            "Read the bounded plan card with manage_orchestration action='plan_prompt' and follow every returned "
+            "cursor page. Use action='plan' with the exact request_id and decision='approve_with_recommendations', "
+            "decision='approve_without_recommendations', or decision='cancel'. Use action='plan_revise' with the exact "
+            "request_id and the user's requested changes in text. Leave the plan pending when no decision is available."
         )
     else:
         next_action = "inspect the returned diagnostics or provide the required completion data"
@@ -1687,7 +1930,7 @@ def _plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -
         "task_id": str(state.get("task_id") or ""),
         "pending_basis": pending_basis,
     }
-    return "plan-approval-" + digest_text(canonical_json.dumps(seed))[:32]
+    return "approval-" + digest_text(canonical_json.dumps(seed))[:32]
 
 
 def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
@@ -1749,16 +1992,20 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
                 })
                 classification_id = classified["classification_id"]
                 _checkpoint_orchestrate_transaction(transaction_path, transaction, "classified", classification_id=classification_id)
-            # Only explicit start-level markers are trusted as a user request
-            # for a visible plan review.  Nested ``task.plan_approval`` is a
-            # policy/configuration field and must not manufacture user intent.
-            trusted_start_plan_review = any(
-                params.get(marker) is True or task.get(marker) is True
-                for marker in (
-                    "plan_approval_user_requested",
-                    "user_requested_plan_approval",
-                    "plan_review_requested",
-                    "explicit_plan_approval_requested",
+            # The flat public start adapter records the caller's
+            # ``plan_approval=required`` selection on the canonical task.
+            # Preserve that exact choice alongside the older private intent
+            # markers so the required post-plan gate remains executable.
+            trusted_start_plan_review = bool(
+                task.get("plan_approval") == "required"
+                or any(
+                    params.get(marker) is True or task.get(marker) is True
+                    for marker in (
+                        "plan_approval_user_requested",
+                        "user_requested_plan_approval",
+                        "plan_review_requested",
+                        "explicit_plan_approval_requested",
+                    )
                 )
             )
             created = init_task({
@@ -1823,6 +2070,15 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
             "pipeline_authority": "orchestrator",
         })
         _write_orchestrate_plan(task_dir, plan)
+        # The public planner completion is intentionally text-only.  Persist
+        # the structure needed by approval and scheduling from the exact
+        # coordinator-authored start waves before the first worker dispatch.
+        _materialize_coordinator_plan(
+            task_dir,
+            state,
+            load_task_definition(task_dir, state),
+            plan,
+        )
         state = _record_chosen_pipeline(
             task_dir,
             state,
@@ -1832,11 +2088,11 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
             recommended_parallel_groups=recommended_groups,
             reason="Recorded orchestrator-selected pipeline; Cortex recommendation is advisory.",
         )
-        # C2/C3 defaults may populate ``plan_approval=required`` as policy
-        # metadata. That default is not user intent. Only an explicit
-        # request marker may make plan review visible and pause the pipeline.
+        # Preserve the flat public plan-approval selection as exact user
+        # choice; private start callers may still use the explicit markers.
         explicit_plan_review = bool(
-            any(
+            task.get("plan_approval") == "required"
+            or any(
                 params.get(marker) is True or task.get(marker) is True
                 for marker in (
                     "plan_approval_user_requested",
@@ -2265,8 +2521,12 @@ def _current_plan_basis(
     result_ref: str,
 ) -> dict[str, Any]:
     manifest = current_planning_manifest(task_dir)
-    if not isinstance(manifest, dict) or manifest.get("source_result_ref") != result_ref:
-        raise ValueError("plan approval requires the current planning revision from the finalized planner result")
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("source_authority") != "coordinator_start_waves"
+        or manifest.get("source_plan_digest") != _coordinator_plan_digest(plan.get("waves"))
+    ):
+        raise ValueError("plan approval requires the current coordinator-authored planning revision")
     predecessor_AttemptResults, predecessor_digest = _verified_plan_predecessor_basis(task_dir, state)
     return {
         "pipeline_contract_version": _pipeline_contract_version(state),
@@ -2321,7 +2581,11 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
     artifact_summary = None
     work_package_details: list[dict[str, Any]] = []
     verification_summary: list[str] = []
-    if manifest and manifest.get("source_result_ref") == result_ref:
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("source_authority") == "coordinator_start_waves"
+        and manifest.get("source_plan_digest") == _coordinator_plan_digest(plan.get("waves"))
+    ):
         artifact_summary = {
             "manifest_ref": "sqlite:task_documents/planning_current",
             # Plans always persist an explicit immutable revision-scoped path.
@@ -2444,36 +2708,37 @@ def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any], plan: dict[st
     ):
         return None
     if approval.get("status") == "approved":
-        # Older ledgers can retain an approved basis while a replacement
-        # planner result has already become ``planning_current``.  This is
-        # most visible when that replacement result is completion-pending:
-        # consuming it used to reach _assert_approved_plan_fresh and fail on
-        # the old result ref.  Recover inside this state transaction by
-        # retiring the old approval and immediately producing a review for the
-        # current immutable planner revision.
+        # Structured plan authority is the immutable coordinator start waves,
+        # not a worker-authored result.  An approved basis remains current as
+        # long as the manifest is still bound to those exact waves.
         manifest = current_planning_manifest(task_dir)
-        approved_result_ref = safe_id(str(approval.get("plan_result_ref") or ""))
-        current_result_ref = safe_id(
-            str(manifest.get("source_result_ref") or "")
-        ) if isinstance(manifest, dict) else ""
-        if current_result_ref and current_result_ref != approved_result_ref:
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("source_authority") != "coordinator_start_waves"
+            or manifest.get("source_plan_digest") != _coordinator_plan_digest(plan.get("waves"))
+        ):
             invalidate_plan_approval_for_reopened_plan(
                 state,
-                reason=(
-                    "Recovered a stale approved plan after a replacement planner result "
-                    "became the current planning revision."
-                ),
+                reason="The approved coordinator wave manifest is missing or no longer matches.",
                 event="stale_approved_recovery",
             )
             approval = _plan_approval(state)
         else:
             return None
     if approval.get("status") == "awaiting_user":
+        changed = False
         if not str(approval.get("request_id") or "").strip():
             approval["request_id"] = _plan_approval_request_id(state, approval)
+            changed = True
+        review = dict(approval.get("review") or {})
+        if review.get("request_id") != approval.get("request_id"):
+            review["request_id"] = approval["request_id"]
+            approval["review"] = review
+            changed = True
+        if changed:
             state["plan_approval"] = approval
             save_state(task_dir, task_dir / "state.sqlite", state, "plan_approval_request", "bound request id to the pending plan approval")
-        return dict(approval.get("review") or {})
+        return review
     review = _plan_review_payload(task_dir, state, plan)
     history = approval.setdefault("history", [])
     history.append({"event": "requested", "at": now(), "plan_review": dict(review)})
@@ -2490,6 +2755,8 @@ def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any], plan: dict[st
         "requested_at": now(),
     })
     approval["request_id"] = _plan_approval_request_id(state, approval)
+    review["request_id"] = approval["request_id"]
+    approval["review"] = review
     state["plan_approval"] = approval
     save_state(task_dir, task_dir / "state.sqlite", state, "plan_approval", "awaiting explicit user approval of the completed plan")
     return review
@@ -2910,6 +3177,18 @@ def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any],
     })
 
 
+def _finalize_completed_lifecycle(
+    params: dict[str, Any], task_dir: Path, state: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist the canonical handoff and close receipt before projection."""
+    if not state.get("handoff_created"):
+        handed = _auto_handoff(params, task_dir, state, "Close the Cortex task.")
+        if handed.get("recorded") is False:
+            raise ValueError(str(handed.get("reason") or "automatic handoff was not recorded"))
+        state = handed["state"]
+    return close_audit({**params, "task_id": state["task_id"]})
+
+
 def _consume_attempt_outcome(
     params: dict[str, Any],
     task_dir: Path,
@@ -3218,7 +3497,7 @@ def _orchestrate_continue(params: dict[str, Any], transaction_path: Path, transa
             # transaction receipt was committed. Continue only the remaining
             # post-gate phases; never replay its result refs into the new wave.
             if state.get("status") == "completed":
-                audited = close_audit({**params, "task_id": task_id})
+                audited = _finalize_completed_lifecycle(params, task_dir, state)
                 if audited["state"].get("status") != "completed":
                     # close_audit downgraded a stale completion projection
                     # because a worker was still non-terminal. Treat that as
@@ -3643,7 +3922,7 @@ def _orchestrate_continue(params: dict[str, Any], transaction_path: Path, transa
         _write_orchestrate_plan(task_dir, plan)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=original_gates)
         if state.get("status") == "completed":
-            audited = close_audit({**params, "task_id": task_id})
+            audited = _finalize_completed_lifecycle(params, task_dir, state)
             return _orchestrate_response("continue", audited["state"], wave_id=requested_wave_id, result={"result_count": audited["result_count"]}, plan=plan)
         if state.get("status") == "blocked":
             # A terminal worker result is recoverable orchestration evidence,
@@ -4682,7 +4961,6 @@ def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
         call_payload["submission_id"] = "chat-" + digest_text(canonical_json.dumps({
             "question_id": payload.get("question_id"),
             "answer": payload.get("answer"),
-            "answer_en": payload.get("answer_en"),
         }))[:24]
         call_payload["resume_context"] = {
             "source": "ordinary_chat_message",

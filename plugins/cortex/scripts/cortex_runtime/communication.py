@@ -205,10 +205,6 @@ def public_plan_copy(summary: object, steps: list[object], *, config: Mapping[st
         candidate = _public_text(raw, profile)
         if not candidate:
             return fallback
-        if language == "ru" and not _CYRILLIC_RE.search(candidate):
-            return fallback
-        if language != "ru" and _CYRILLIC_RE.search(candidate):
-            return fallback
         return candidate
 
     public_summary = safe(summary, default_summary)
@@ -246,10 +242,6 @@ def public_risks(values: object, *, config: Mapping[str, Any] | None = None, lim
             continue
         candidate = _public_text(raw, profile)
         if not candidate:
-            continue
-        if language == "ru" and not _CYRILLIC_RE.search(candidate):
-            continue
-        if language != "ru" and _CYRILLIC_RE.search(candidate):
             continue
         result.append(candidate)
     return result[:limit] or ([fallback] if values else [])

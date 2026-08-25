@@ -8,5 +8,5 @@ Operating workflow: Establish source and destination schemas, ownership, retenti
 
 Quality bar: Never treat job completion as proof of data correctness. Reconcile inputs, outputs, rejects, and duplicates; make uncertainty visible. Avoid logging sensitive rows and do not access production data unless explicitly authorized.
 
-Complete the AttemptResult with changed assets, schemas and invariants, row or event reconciliation, checksum or quality evidence, rerun and checkpoint behavior, exact commands, rollback state, cost and privacy risk, and remaining uncertainty in summary or claims. Escalate destructive work, production access, personal data exposure, irreversible cleanup, or expensive external jobs.
+Conclude with the validated pipeline scope, changed assets, schemas and invariants, row or event reconciliation, checksum or quality evidence, rerun and checkpoint behavior, exact commands, rollback state, cost and privacy risk, and remaining uncertainty. Escalate destructive work, production access, personal data exposure, irreversible cleanup, or expensive external jobs.
 """

@@ -5,33 +5,50 @@
 ### Fixed
 
 - Harden the v11 worker boundary with a fixed-size opaque repair handle backed
-  by immutable, task-cascaded schema-v17 escrow and exact-v16 predecessor
-  quarantine; v15 and older namespaces are unsupported historical input.
+  by immutable, task-cascaded schema-v18 escrow. Only the exact signed V11
+  v1--v8 database lineage upgrades atomically to v18; its old task authority
+  remains private and non-selectable, while every unknown history fails
+  closed.
 - Shorten the signed repair handle, retry malformed model copies against the
   same immutable escrow, and expose self-contained per-path patch diagnostics;
   correctly shaped handles that fail integrity remain terminal.
-- Require same-child bootstrap recovery to use one bounded repair follow-up,
-  and make accepted worker completion terminal without a result-reference
-  handoff.
-- Compact the native bootstrap and immutable briefing, expose `dispatch_ref`
-  structurally, keep private host paths on the failure-only recovery branch,
-  and remove duplicate task intent and unused event success metadata.
+- Replace worker capability pairs and bootstrap repair messages with one exact
+  native dispatch authority preserved on every worker-side Cortex call; recovery is
+  server-returned, same-child, and never reconstructs worker authority.
+- Keep immutable briefings compact and task-specific, with native dispatch
+  authority as the sole worker transport authority and no duplicate task intent.
 - Add atomic `finalize_worker_failure` cleanup for exact nonretryable child
   terminals without deleting forensic receipts/events/repair escrow or
   creating a result, continuation, replacement, or resumable orphan.
-- Minimize all nine public response projections and align package validators,
-  prompts, profiles, and release metadata with the v11 contract.
+- Minimize public response projections and align package validators, prompts,
+  profiles, and release metadata with the v11 contract.
+
+### Changed
+
+- Adopt the approved breaking no-legacy public-input contract without changing
+  the package version: the manifest remains **11.0.1**. The coordinator model
+  supplies the initial worker waves; the backend validates,
+  persists, and dispatches it rather than selecting a replacement pipeline.
+- Split every public semantic action into its own MCP tool. Each tool owns its
+  complete closed one-level schema in `public_contracts.py`, and runtime
+  validation consumes that same schema. Tool descriptions stay short and
+  semantic; skills and prompts contain no copied argument fields or schemas.
+  The hard cut retains no multiplexed selectors or compatibility aliases.
+- Split worker submission and same-attempt repair into `submit_attempt` and
+  `repair_attempt`, preserving digest/capsule binding and immutable escrow.
+- Make every growing read use its exact server-issued opaque `c11p` cursor.
+  Fixed receipts and atomic repair cards do not paginate.
 
 ## [11.0.0] - 2026-08-24
 
 ### Changed
 
-- Make explicit server-issued `task_ref` plus audience-specific capability
-  references the only public coordinator and worker authorization contract.
+- Make explicit server-issued task and audience-specific capability authority
+  the only public coordinator and worker authorization contract.
 - Preserve native V2 `spawn_agent` and exact-child wait/follow-up as the only
   worker lifecycle transport; hooks remain bounded telemetry only.
-- Replace compatibility lifecycle and completion forms with the nine-operation
-  v11 public registry, compact typed responses, and canonical AttemptResult and
+- Replace compatibility lifecycle and completion forms with the then-current
+  v11 public facade, compact typed responses, and canonical AttemptResult and
   AttemptEvent persistence.
 - Add digest-bound structural repair for invalid planner and outcome
   submissions, with aggregated JSON Pointer diagnostics and validation before
@@ -63,8 +80,8 @@
 
 ### Fixed
 
-- Carry the planner work-breakdown sibling through the canonical
-  `complete_attempt` transport and persist its immutable planning projection
+- Carry the planner work-breakdown sibling through the then-current completion
+  transport and persist its immutable planning projection
   atomically, while requiring the final native child close in live audits.
 
 ## [10.0.4] - 2026-08-22
@@ -113,15 +130,14 @@ facade attempt lacks its finalized canonical `AttemptResult`.
 ## [10.0.0] - 2026-08-22
 
 This breaking release makes the database-centric attempt protocol the only
-worker transport. The public v10 registry contains nine operations; workers
-checkpoint `AttemptEvent` facts with `record_attempt_event` and close a
-semantic `AttemptResult` with `complete_attempt`. Cortex owns identity,
+worker transport. The public v10 facade used the then-current operation set;
+workers checkpointed `AttemptEvent` facts and closed a semantic
+`AttemptResult` through its completion transport. Cortex owns identity,
 timestamps, changed paths, verification observations, read receipts, and
 result projections. The prior 9.x draft/report transport is historical and is
 not part of the v10 public contract.
 
-- Added the fresh-only nine-operation public registry and strict coordinator /
-  worker projections.
+- Added the fresh-only public facade and strict coordinator/worker projections.
 - Promoted SQLite schema v15 and the Prompt Contract v3 compiler.
 - Separated `WORK_COMPLETED` from finalization and projection retries so
   infrastructure failures never respawn a completed worker.
@@ -153,8 +169,8 @@ durable question/resume boundary.
 - Require the immutable worker bootstrap to validate briefing, applicable
   acceptance/verification, predecessor references, and gate evidence before
   project work. A missing or unreadable required input produces one durable
-  `worker_question`, then the same worker polls its answer and reruns the full
-  bootstrap validation before proceeding.
+  then-current durable-question operation, then the same worker polls its
+  answer and reruns the full bootstrap validation before proceeding.
 - Extend hook-trust/preflight and marketplace validation to the six-hook
   contract, and add lifecycle, prompt-contract, and trust regressions.
 
@@ -253,7 +269,7 @@ snapshots without weakening ledger integrity.
   separated internal metadata and quality checks for start, progress, plan
   approval, questions, errors, blockers, and completion; aggregate all report
   validation diagnostics in one safe retry response.
-- Make `user_view` the human-facing boundary and keep a bounded machine
+- Make `visible_output` the human-facing boundary and keep a bounded machine
   receipt/compatibility projection under `internal`; localize Russian and
   English lifecycle/plan messages, map `neutral` to `natural`, enforce quality
   fallbacks, keep worker waiting silent, and cover delegation/report
@@ -383,8 +399,8 @@ corrective waves.
 This source-tree patch hardens the public worker-report boundary and hook
 runtime loading without weakening report evidence or write-attribution checks.
 
-- Keep `task_ref`, `dispatch_ref`, and `submission_id` coordinator-only, and
-  return a precise same-attempt correction when a worker sends them to
+- Keep coordinator and submission authority coordinator-only, and return a
+  precise same-attempt correction when a worker sends them to
   `record_report`.
 - Create and read report drafts through private descriptors: a draft must be a
   current-user, regular non-symlink file with exact `0600` mode, and a failed
@@ -560,19 +576,13 @@ remote, and installed-plugin parity remain separate release gates.
 - Attach a task-wide `resolved_user_decisions` snapshot to every immutable
   report, and forbid successors from asking an equivalent resolved question
   under new wording, keys, phases, or attempts unless the user reopens it.
-- Render optional free-form input beside every batch choice. Preserve and,
-  when needed, translate it into the canonical answer without changing the
-  selected stable option IDs.
+- Historical structured-choice rendering was superseded by the current durable
+  plain-text question and answer contract.
 
 ## [9.1.1] - 2026-08-19
 
-- Require every material worker question to reach the coordinator with its
-  decision context, self-contained outcome-based choices, trade-offs, and a
-  recommendation. The coordinator now explains that context in the user's
-  language before opening the native answer control.
-- Accept the documented localized batch field names alongside their
-  compatibility aliases, render localized option descriptions, and reject
-  generic numbered, A/B, or recommended/alternative placeholder choices.
+- Historical question presentation was superseded by one arbitrary-Unicode
+  plain-text question blob and one arbitrary-Unicode plain-text answer blob.
 
 ## [9.1.0] - 2026-08-19
 
@@ -599,10 +609,8 @@ remote, and installed-plugin parity remain separate release gates.
 
 ## [9.0.4] - 2026-08-19
 
-- Treat localized batch questions and option IDs as display projections. A
-  complete exact canonical key set remains supported, but generated, missing,
-  or duplicate display IDs now safely map by canonical position instead of
-  rejecting the native user-question form.
+- Historical localized structured-question presentation was superseded by the
+  current plain-text durable-question contract.
 - Recover a missing matching parent-session binding from the task's durable
   parent session when a worker stops, while rejecting every different session.
   Every normal stop-hook return now includes an explicit `outcome`.
@@ -612,10 +620,10 @@ remote, and installed-plugin parity remain separate release gates.
 
 ## [9.0.3] - 2026-08-19
 
-- Fail a new start closed when the operation registry is incompatible: the
-  result is non-retryable and creates neither a task nor a recoverable
-  `task_ref`, so a coordinator cannot recover an unrelated older task.
-- Require the exact `task_ref` from a successful lifecycle response for every
+- Fail a new start closed when the then-current MCP catalog is incompatible: the
+  result is non-retryable and creates neither a task nor recoverable task
+  authority, so a coordinator cannot recover an unrelated older task.
+- Require the exact task authority from a successful lifecycle response for every
   task-scoped continue, management, recovery, and report-read call. Cortex no
   longer falls back to a project-wide active task.
 - Give every internal worker profile a turn-local read discipline: reuse a
@@ -633,11 +641,11 @@ remote, and installed-plugin parity remain separate release gates.
   recursive content-addressed manifest capture. A project root must be a
   specific repository or worktree, preventing an oversized synchronous MCP
   request from appearing hung.
-- Make localized durable-question translation self-contained: the public
-  `answer` + `answer_en` contract now records a single-question answer directly,
-  and `awaiting_translation` returns an exact `translation_request` for either
-  a single question or batch. Coordinator guidance explicitly forbids searching
-  plugin source/cache or runtime internals to infer public arguments.
+- Historical note: question-answer protocol behavior was revised in this
+  release. The current contract preserves submitted Unicode answer text
+  directly and does not expose a translation lifecycle. Coordinator guidance
+  explicitly forbids searching plugin source/cache or runtime internals to
+  infer public arguments.
 
 ## [9.0.1] - 2026-08-18
 
@@ -671,8 +679,8 @@ same base version.
 - Normalize oversized dispatch-briefing, worker-report, and coordinator
   artifact `max_bytes` requests to the safe 32768-byte SQLite transport bound
   and continue through opaque cursors instead of returning an MCP error.
-- Return structured field diagnostics from `worker_question`,
-  `get_report_template`, and `read_worker_report`, and recover report numbering
+- Return structured field diagnostics from the then-current worker-question
+  operation, `get_report_template`, and `read_worker_report`, and recover report numbering
   from the immutable artifact catalog so interrupted index writes do not reuse
   an export path.
 - Bind required plan approval to an opaque request ID and expose the pending

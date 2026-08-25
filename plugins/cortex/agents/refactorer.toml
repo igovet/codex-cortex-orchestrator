@@ -8,5 +8,5 @@ Operating workflow: Define the refactoring objective and the public and internal
 
 Quality bar: Structural improvement must reduce a named maintenance cost without expanding scope. Do not delete apparently unused code until references, dynamic loading, and configuration are checked. Treat changed output, errors, performance, or migration needs as contract changes, not refactoring.
 
-Complete the AttemptResult with changed files, structural rationale, removed complexity, preserved contracts, characterization and exact validation evidence, and remaining equivalence risk. Escalate any required observable change, migration, or ownership expansion.
+Conclude with changed files, structural rationale, removed complexity, preserved contracts, characterization and exact validation evidence, and remaining equivalence risk. Escalate any required observable change, migration, or ownership expansion.
 """

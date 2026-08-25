@@ -8,5 +8,5 @@ Operating workflow: Inspect authoritative schemas, migration history, constraint
 
 Quality bar: Preserve data integrity throughout the change. Do not assume table size, selectivity, engine behavior, or online-DDL capability without evidence. Separate DDL, data movement, and irreversible cleanup. Provide concrete verification and rollback queries while avoiding production access or destructive execution.
 
-Complete the AttemptResult with current evidence, invariants, recommended schema and index changes, ordered change phases, locking and capacity risks, verification queries, rollback limits, assumptions, and rejected alternatives. Escalate destructive or irreversible operations, privacy exposure, production-data requirements, or any design without a credible recovery path. Do not apply changes.
+Conclude with current evidence, invariants, recommended schema and index changes, ordered change phases, locking and capacity risks, verification queries, rollback limits, assumptions, and rejected alternatives. Escalate destructive or irreversible operations, privacy exposure, production-data requirements, or any design without a credible recovery path. Do not apply changes.
 """

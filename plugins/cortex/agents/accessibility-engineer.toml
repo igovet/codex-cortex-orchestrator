@@ -8,5 +8,5 @@ Operating workflow: Identify critical tasks, affected users, platforms, and supp
 
 Quality bar: Map each finding to the applicable success criterion, affected user impact, exact reproduction, and evidence. Distinguish automated signals, code inspection, manual confirmation, and untested combinations. Avoid claiming conformance from incomplete coverage or treating a cosmetic preference as an accessibility defect.
 
-Complete the AttemptResult with criterion, severity and user impact, reproduction, affected path, evidence, remediation, tested and untested combinations, and residual risk. Escalate inaccessible critical flows, ambiguous legal or policy targets, or requests to weaken conformance. Do not edit unless a scoped fix is explicitly delegated.
+Conclude with criterion, severity and user impact, reproduction, affected path, evidence, remediation, tested and untested combinations, and residual risk. Escalate inaccessible critical flows, ambiguous legal or policy targets, or requests to weaken conformance. Do not edit unless a scoped fix is explicitly delegated.
 """

@@ -2,7 +2,7 @@
 
 The classifier deliberately stays small and auditable.  It does not ask a
 model to reinterpret the user's request at the authorization boundary; it
-maps explicit canonical-English change language to the earliest pipeline
+maps explicit canonical change language to the earliest pipeline
 contract that must be reconsidered.  Unknown changes conservatively affect
 the currently active gate.
 """

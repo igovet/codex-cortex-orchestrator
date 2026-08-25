@@ -6,44 +6,38 @@ Status: source-mode release contract for Cortex 11.0.1.
 
 - release label: 11.0.1
 - task and capability contract: v11
-- SQLite schema: v17
-- public operations: 9
+- SQLite schema: v18
+- public facade: action-specific, alias-free MCP tools
 - prompt contract: v3, sole stable renderer
 - lifecycle hooks: 5
 
 The v11 gate requires `start_orchestration` to be the sole task creator and
-initial coordinator capability issuer. Coordinator calls must carry
-`task_ref`/`coordinator_ref`; worker calls must carry
-`task_ref`/`assignment_ref`. Native execution must prove the exact
-`spawn_agent` → `wait` → `read_worker_result` → server-derived continuation
-sequence. Session/environment authorization, `create_thread`, server-owned
+initial coordinator capability issuer. Coordinator calls carry private task
+authority; worker calls preserve only their exact native dispatch authority.
+Native execution must prove the exact
+`spawn_agent` → exact `wait` → action-specific canonical wave read →
+server-derived continuation sequence. Session/environment authorization,
+`create_thread`, server-owned
 CLI/executor launches, `repair_planning`, and manually authored
-`advance`/`completions` are forbidden. Plan and outcome repair must use only a
-digest- and capsule-bound patch through `complete_attempt`. Legacy rows and
-lost capabilities fail closed; incompatible old namespaces are quarantined.
+`advance`/`completions` are forbidden. Submitted-result repair uses only the
+dedicated digest- and capsule-bound `repair_attempt` operation. Lost
+capabilities and unknown histories fail closed.
 
-The public response boundary is closed at v11. Lifecycle and governance
-responses use typed action, receipt, inspection, and top-level error/recovery unions;
-worker briefing, question, event, completion, and result responses carry only
-their minimal canonical fields. Generic `user_message`, `user_view`,
-`internal`, full pipeline/governance state, and prose `next_action` fields are
-not public outputs. Patch-critical diagnostics, original JSON Pointer paths,
-exact semantic repair pointers, bounded nested field schemas,
-`error={code,category,message,diagnostics}`, and explicit
-`recovery={kind,operation,retryable,state_mutated}`. Repair recovery retains
-opaque handles, base payload digests, and allowed
-patch operations/paths are retained. A
-malformed handle copy reissues the same repair; a correctly shaped handle that
-fails integrity is terminal.
-Heavy state is available only through explicit inspect. The exact canonical
-v16 predecessor is quarantined as a complete unit with no state adoption into
-v17; v15 and older or unknown namespaces fail closed without archival.
+The public response boundary is closed at v11. Every semantic action is a
+separate MCP tool with its own complete closed one-level schema, and runtime
+validation uses the same schema advertised by `tools/list`. Tool descriptions
+are short semantics; skills and prompts duplicate no argument fields or schema
+templates. There are no aliases or multiplexed action branches. Errors and
+recovery provide bounded structured data for the named next operation. Heavy
+state is available only through action-specific inspection. Only the exact
+signed V11 v1--v8 lineage upgrades atomically to v18; historical authority
+remains private and non-selectable, and unknown histories fail closed.
 
-Worker bootstrap validates its required briefing and capability references before
-any project or tool operation. A missing pair permits at most one same-child
-repair follow-up using the exact server-retained references; no replacement
-child or ambient inference is allowed. A successful `complete_attempt` returns
-`terminal: true` with no result-reference handoff, after which the
+Worker dispatch validation occurs before any project or tool operation. A
+missing or rejected native dispatch authority follows only server-returned same-child
+recovery; no replacement
+child or ambient inference is allowed. A successful `submit_attempt` is
+terminal with no result-reference handoff, after which the
 worker makes no further task-scoped calls. Invalid repair remains fail-closed.
 Exact `CORTEX_ATTEMPT_FAILED retryable=false` is status only. The fixed
 dispatch-scoped `finalize_worker_failure` transition is legal only after
@@ -55,19 +49,20 @@ The source tree is ready for a release decision only after the checks below
 are run against the exact working tree. This page does not claim an installed
 plugin, trusted hooks, or live-model access.
 
-## Blocking gates
+## Sole release gate
 
-1. Python 3.11+ compilation succeeds for bundled scripts.
-2. Marketplace validation accepts the root plugin entry, manifest, MCP
-   configuration, launcher, profiles, skills, hooks, and schema.
-3. Prompt lint and deterministic evaluation pass for the v3 renderer.
-4. Focused protocol, facade, context, handoff, governance, lifecycle, and
-   packaging tests pass.
-5. The complete source test suite passes with exact counts recorded.
-6. git diff --check is clean.
-7. README.md, SECURITY.md, and every affected Markdown page has current links,
-   commands, version identity, and schema references.
-8. No secrets, private state, caches, or generated temporary files are included.
+The current source tree has exactly one release gate and one test:
+
+~~~bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests.test_marketplace_release_gate
+~~~
+
+That test composes the publishable package checks, bundled Python compilation,
+marketplace validation, prompt-contract checks, and black-box MCP lifecycle
+coverage into one source-mode result. There is no separate focused suite or
+complete source suite. Prompt lint/evaluation, `git diff --check`, documentation
+review, and the read-only commands below may provide supporting diagnostic
+evidence, but they are not additional release gates or tests.
 
 ## Runtime acceptance
 
@@ -81,19 +76,22 @@ attempt. It must not create a replacement worker. ContextCompiler must produce
 a complete immutable dispatch briefing, and HandoffCompiler must produce
 target-specific implementation, QA, and review projections.
 
-The public facade must expose exactly nine operations. Coordinator and worker
-audiences are fixed at launch, and both use read_worker_result for scoped
-result access. Cross-stage links are limited to attempt_result_ref,
-context_result_refs, and predecessor_result_refs.
+The public facade must expose the action-specific `tools/list` inventory with
+fixed coordinator and worker audiences. No tool may multiplex unrelated
+actions or expose aliases. MCP catalog schemas, runtime validation, and
+`public_contracts.py` must remain identical.
 
-## Package checks
+## Supporting source diagnostics
+
+Run the sole release gate above for the release decision. The following
+commands are optional focused diagnostics for investigating or recording its
+constituent checks; running them does not create additional release gates:
 
 ~~~bash
 python3 scripts/validate-cortex-marketplace.py
 python3 scripts/cortex-prompt-lint.py
 python3 scripts/cortex-prompt-eval.py
 bash scripts/sync-cortex.sh --dry-run
-python3 -m pytest -q
 ~~~
 
 If host checks are available, also run:
@@ -113,7 +111,7 @@ The release handoff records:
 - exact git revision and working-tree status;
 - commands, environment, and test counts;
 - package and prompt validator output summaries;
-- schema, manifest, public-operation, and hook-set verification;
+- schema, manifest, MCP catalog/runtime parity, and hook-set verification;
 - links and Markdown review status;
 - unavailable host or live-model checks and their reason.
 

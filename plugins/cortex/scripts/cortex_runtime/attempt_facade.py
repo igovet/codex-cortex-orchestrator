@@ -14,165 +14,37 @@ from typing import Any
 
 import cortex as _runtime
 
-from cortex_runtime import attempt_protocol, ledger_db
+from cortex_runtime import attempt_protocol, ledger_db, pagination
 from cortex_runtime.validation import ValidationFailure
 from cortex_runtime import v11_submission
+from cortex_runtime.public_contracts import backend_schema_for
 
 
 _CLOSURE_GATES = {"review", "governance_activation", "governance_close", "close"}
 _ACTIVE_ATTEMPT_STATUSES = {_runtime.AWAITING_HOST_SPAWN, "running"}
-_WORKER_REFERENCE_FIELDS = {"task_ref", "assignment_ref"}
-# Keep the worker-facing error contract next to the worker-facing adapters.
-# The runtime's orchestration validator has a richer plan schema, but these
-# tools must still describe their own envelope when a worker submits malformed
-# JSON.  In particular, an unknown-field error is useful only when the caller
-# can see the complete allowed property set and the received value.
-_FACADE_FIELDS: dict[str, dict[str, Any]] = {
-    "complete_attempt": {
-        **v11_submission.PUBLIC_SUBMISSION_SCHEMA,
-    },
-    "record_attempt_event": {
-        "type": "object", "required": ["event_type", "payload"],
-        "properties": {
-            "task_ref": {"type": "string"}, "assignment_ref": {"type": "string"},
-            "event_type": {"type": "string"}
-        } | {"payload": {}, "event_key": {"type": "string"}},
-    },
-    "read_worker_result": {
-        "type": "object", "required": ["task_ref"],
-        "properties": {
-            "task_ref": {"type": "string"}, "assignment_ref": {"type": "string"},
-            "coordinator_ref": {"type": "string"},
-            "attempt_result_ref": {"type": "string"},
-            "step": {"type": "integer", "minimum": 1},
-        },
-        "oneOf": [
-            {"required": ["assignment_ref", "attempt_result_ref"]},
-            {"required": ["coordinator_ref", "step"]},
-        ],
-    },
-}
+_WORKER_REFERENCE_FIELDS = {"dispatch_ref"}
 
 
-def _facade_schema(operation: str) -> dict[str, Any]:
-    """Use the exact MCP schema once the runtime registry is initialized."""
-    registry = getattr(_runtime, "PUBLIC_SCHEMA_REGISTRY", None)
-    schema = registry.get(operation) if isinstance(registry, dict) else None
-    return schema if isinstance(schema, dict) else _FACADE_FIELDS[operation]
+def _facade_schema(operation: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Derive the backend view from the same action-specific MCP contract."""
+    registry = getattr(_runtime, "PUBLIC_CONTRACTS", None)
+    return backend_schema_for(registry, operation, params) if isinstance(registry, Mapping) else {
+        "type": "object", "additionalProperties": False, "properties": {}, "required": [],
+    }
 
 
 def _compact_facade_schema(operation: str) -> dict[str, Any]:
     """Return a bounded public envelope for validation receipts.
 
-    The generated ``complete_attempt`` schema contains the entire planner
-    contract (and can be very large in a real installation).  It is useful to
-    the tool registry, but is the wrong payload for a field-level error: a
-    worker must receive the invalid field's contract, never the whole request
-    schema or a private worker-session property.
+    A worker must receive the invalid field's contract, never a private
+    worker-session property.
     """
-    fallback = _FACADE_FIELDS.get(operation, {"type": "object"})
-    if operation != "complete_attempt":
-        return json.loads(json.dumps(fallback, ensure_ascii=False))
-    return json.loads(json.dumps(v11_submission.PUBLIC_SUBMISSION_SCHEMA, ensure_ascii=False))
-
-
-def _planning_path_segments(path: object) -> list[str]:
-    """Extract segments below the planning root from a public diagnostic."""
-    raw = str(path or "").strip()
-    if raw.startswith("/"):
-        segments = [part.replace("~1", "/").replace("~0", "~") for part in raw[1:].split("/")]
-        if segments and segments[0] == "planning":
-            segments = segments[1:]
-        return [segment for segment in segments if segment]
-    if raw.startswith("$."):
-        raw = raw[2:]
-    elif raw.startswith("$"):
-        raw = raw[1:]
-    if raw == "planning":
-        return []
-    if raw.startswith("planning."):
-        raw = raw[len("planning."):]
-    segments: list[str] = []
-    for part in raw.split("."):
-        if not part:
-            continue
-        head, _, indexes = part.partition("[")
-        if head:
-            segments.append(head)
-        while indexes:
-            index, _, indexes = indexes.partition("]")
-            if index:
-                segments.append(index)
-            if indexes.startswith("["):
-                indexes = indexes[1:]
-            else:
-                break
-    return segments
-
-
-def _is_planning_diagnostic(diagnostic: Mapping[str, Any]) -> bool:
-    path = str(diagnostic.get("path") or diagnostic.get("canonical_path") or "").strip()
-    code = str(diagnostic.get("code") or "").strip().lower()
-    return (
-        path == "planning"
-        or path.startswith("planning.")
-        or path.startswith("$.planning")
-        or path.startswith("/planning")
-        or code.startswith("planning_")
-    )
-
-
-def _planning_field_schema(path: object) -> dict[str, Any]:
-    """Project only the invalid planning field's schema for a receipt."""
-    schema = _facade_schema("complete_attempt")
-    planning = schema.get("properties", {}).get("planning") if isinstance(schema, dict) else None
-    if not isinstance(planning, dict):
-        return {"type": "object"}
-    selected: Any = planning
-    for segment in _planning_path_segments(path):
-        if not isinstance(selected, dict):
-            break
-        properties = selected.get("properties")
-        if isinstance(properties, dict) and segment in properties:
-            selected = properties[segment]
-            continue
-        items = selected.get("items")
-        if isinstance(items, dict) and segment.isdigit():
-            selected = items
-            continue
-        break
-    if not isinstance(selected, dict):
-        return {"type": "object"}
-    # A planning schema cannot contain worker credentials, but copy it before
-    # attaching it to a response so future registry mutations cannot leak into
-    # an already-created diagnostic.
-    return json.loads(json.dumps(selected, ensure_ascii=False))
-
-
-def _planning_json_pointer(path: object) -> str:
-    """Return an RFC 6901 pointer rooted at the rejected planning draft."""
-    segments = _planning_path_segments(path)
-    return "/" + "/".join(
-        segment.replace("~", "~0").replace("/", "~1") for segment in segments
-    ) if segments else "/"
+    return json.loads(json.dumps(_facade_schema(operation), ensure_ascii=False))
 
 
 def _validation_request_schema(operation: str, diagnostics: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Keep validation receipts bounded and free of worker-session fields."""
-    if operation == "complete_attempt" and any(
-        isinstance(item, Mapping) and _is_planning_diagnostic(item) for item in diagnostics
-    ):
-        # The rejected draft and planning_repair.patch_paths carry the precise
-        # planning contract.  Do not repeat the complete nested schema here.
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "planning": {"type": "object"},
-                "base_payload_digest": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
-                "patches": {"type": "array", "items": {"type": "object"}},
-            },
-        }
+    del diagnostics
     return _compact_facade_schema(operation)
 
 
@@ -234,18 +106,10 @@ def _facade_validation_failure(operation: str, params: Mapping[str, Any], fields
 
 def _facade_required_failure(operation: str, params: Mapping[str, Any]) -> ValidationFailure | None:
     """Collect missing required properties before any context lookup or write."""
-    schema = _facade_schema(operation)
+    schema = _facade_schema(operation, params)
     receipt_schema = _compact_facade_schema(operation)
     diagnostics: list[dict[str, Any]] = []
     required_fields = list(schema.get("required", []))
-    # The public completion form has two valid branches: a normal semantic
-    # result and a PATCH-only planner repair.  The schema expresses this with
-    # oneOf, while this direct Python facade must enforce the same branch rule
-    # before touching the bound attempt or ledger.
-    if operation == "complete_attempt" and not {
-        "base_payload_digest", "patches",
-    }.issubset(params):
-        required_fields.extend(field for field in ("status", "summary") if field not in required_fields)
     for field in required_fields:
         value = params.get(field)
         if value is None or (isinstance(value, str) and not value.strip()):
@@ -264,111 +128,74 @@ def _facade_required_failure(operation: str, params: Mapping[str, Any]) -> Valid
     return ValidationFailure(diagnostics) if diagnostics else None
 
 
-def _record_attempt_event_preflight(params: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Collect the complete public event form before assignment lookup."""
-    operation = "record_attempt_event"
-    schema = _facade_schema(operation)
-    properties = schema.get("properties", {}) if isinstance(schema, Mapping) else {}
-    allowed = set(properties)
+def _schema_preflight(operation: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Collect closed-form corrections from the selected canonical schema."""
+    schema = _facade_schema(operation, params)
+    properties = schema.get("properties") if isinstance(schema.get("properties"), Mapping) else {}
     diagnostics = [
         _facade_diagnostic(
             operation,
-            field,
+            str(field),
             f"unsupported {operation} field {field!r}",
+            code="validation_unknown",
             unknown=True,
         )
-        for field in sorted(set(params) - allowed)
+        for field in sorted(set(params) - set(properties))
     ]
-    for field in ("task_ref", "assignment_ref"):
-        value = params.get(field)
-        field_schema = properties.get(field, {}) if isinstance(properties, Mapping) else {}
-        pattern = field_schema.get("pattern") if isinstance(field_schema, Mapping) else None
-        if not isinstance(value, str) or not value.strip():
-            diagnostics.append(_facade_diagnostic(operation, field, f"{field} is required"))
-        elif isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
-            diagnostics.append(_facade_diagnostic(operation, field, f"{field} has an invalid format"))
-    event_type = params.get("event_type")
-    event_schema = properties.get("event_type", {}) if isinstance(properties, Mapping) else {}
-    if not isinstance(event_type, str) or not event_type.strip():
-        diagnostics.append(_facade_diagnostic(operation, "event_type", "event_type is required"))
-    elif isinstance(event_schema, Mapping) and isinstance(event_schema.get("enum"), list) and event_type not in event_schema["enum"]:
-        diagnostics.append(_facade_diagnostic(operation, "event_type", "event_type must be one of the allowed values"))
-    if "payload" not in params:
-        diagnostics.append(_facade_diagnostic(operation, "payload", "payload is required"))
-    if "event_key" in params:
-        event_key = params.get("event_key")
-        key_schema = properties.get("event_key", {}) if isinstance(properties, Mapping) else {}
-        pattern = key_schema.get("pattern") if isinstance(key_schema, Mapping) else None
-        if not isinstance(event_key, str) or not event_key:
-            diagnostics.append(_facade_diagnostic(operation, "event_key", "event_key must be a non-empty string"))
-        elif isinstance(pattern, str) and re.fullmatch(pattern, event_key) is None:
-            diagnostics.append(_facade_diagnostic(operation, "event_key", "event_key has an invalid format"))
+    for field in schema.get("required", []) if isinstance(schema.get("required"), list) else []:
+        if field not in params:
+            diagnostics.append(_facade_diagnostic(
+                operation, str(field), f"required field {field!r} is missing",
+                code="validation_required",
+            ))
+    for field, value in params.items():
+        field_schema = properties.get(field)
+        if not isinstance(field_schema, Mapping):
+            continue
+        expected_type = field_schema.get("type")
+        valid_type = (
+            (expected_type == "string" and isinstance(value, str))
+            or (expected_type == "integer" and type(value) is int)
+            or (expected_type == "boolean" and type(value) is bool)
+            or (expected_type == "array" and isinstance(value, list))
+            or (expected_type == "object" and isinstance(value, Mapping))
+        )
+        if expected_type in {"string", "integer", "boolean", "array", "object"} and not valid_type:
+            diagnostics.append(_facade_diagnostic(operation, str(field), f"{field} has an invalid type"))
+            continue
+        enum = field_schema.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            diagnostics.append(_facade_diagnostic(operation, str(field), f"{field} is outside the advertised enum"))
+        if "const" in field_schema and value != field_schema["const"]:
+            diagnostics.append(_facade_diagnostic(operation, str(field), f"{field} differs from the server-selected operation"))
+        if isinstance(value, str):
+            pattern = field_schema.get("pattern")
+            minimum = field_schema.get("minLength")
+            maximum = field_schema.get("maxLength")
+            if isinstance(minimum, int) and len(value) < minimum:
+                diagnostics.append(_facade_diagnostic(operation, str(field), f"{field} is shorter than the advertised minimum"))
+            elif isinstance(maximum, int) and len(value) > maximum:
+                diagnostics.append(_facade_diagnostic(operation, str(field), f"{field} exceeds the advertised maximum"))
+            elif isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+                diagnostics.append(_facade_diagnostic(operation, str(field), f"{field} has an invalid format"))
     return diagnostics
+
+
+def _complete_attempt_preflight(
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate the selected completion form from its canonical MCP schema."""
+    return _schema_preflight("complete_attempt", params)
+
+
+def _record_attempt_event_preflight(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Validate the event form from its canonical MCP schema."""
+    return _schema_preflight("record_attempt_event", params)
 
 
 def _read_worker_result_preflight(params: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Validate one closed coordinator or worker result-read branch."""
-    operation = "read_worker_result"
-    schema = _facade_schema(operation)
-    properties = schema.get("properties", {}) if isinstance(schema, Mapping) else {}
-    allowed = set(properties)
-    diagnostics = [
-        _facade_diagnostic(
-            operation,
-            field,
-            f"unsupported {operation} field {field!r}",
-            unknown=True,
-        )
-        for field in sorted(set(params) - allowed)
-    ]
-    task_ref = params.get("task_ref")
-    if not isinstance(task_ref, str) or not task_ref.strip():
-        diagnostics.append(_facade_diagnostic(operation, "task_ref", "task_ref is required"))
-
-    worker_present = any(field in params for field in ("assignment_ref", "attempt_result_ref"))
-    coordinator_present = any(field in params for field in ("coordinator_ref", "step"))
-    if worker_present and coordinator_present:
-        # Treat a coordinator form as authoritative when its complete identity
-        # is present and flag each child-only field at its executable RFC 6901
-        # path.  A root-level union error cannot be repaired by an LLM without
-        # guessing which field to remove; these field-level cards preserve the
-        # strict closed branches while making the correction deterministic.
-        coordinator_complete = "coordinator_ref" in params and "step" in params
-        forbidden = (
-            ("assignment_ref", "attempt_result_ref") if coordinator_complete
-            else ("coordinator_ref", "step")
-        )
-        for field in forbidden:
-            if field in params:
-                diagnostic = _facade_diagnostic(
-                    operation,
-                    field,
-                    "is not allowed with the selected result-read branch",
-                    code="read_worker_result_branch_conflict",
-                    unknown=True,
-                )
-                diagnostic["branch"] = "closed_result_read_union"
-                diagnostics.append(diagnostic)
-        return diagnostics
-
-    branch = "worker" if worker_present else "coordinator"
-    required = (
-        ("assignment_ref", "attempt_result_ref")
-        if branch == "worker" else ("coordinator_ref", "step")
-    )
-    for field in required:
-        value = params.get(field)
-        if field == "step":
-            if type(value) is not int or value < 1:
-                diagnostics.append(_facade_diagnostic(operation, field, "step must be an integer greater than or equal to 1"))
-            continue
-        field_schema = properties.get(field, {}) if isinstance(properties, Mapping) else {}
-        pattern = field_schema.get("pattern") if isinstance(field_schema, Mapping) else None
-        if not isinstance(value, str) or not value.strip():
-            diagnostics.append(_facade_diagnostic(operation, field, f"{field} is required"))
-        elif isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
-            diagnostics.append(_facade_diagnostic(operation, field, f"{field} has an invalid format"))
-    return diagnostics
+    """Validate the selected result read from its canonical MCP schema."""
+    return _schema_preflight("read_worker_result", params)
 
 
 def _coordinator_continuation(
@@ -592,16 +419,16 @@ def _worker_context(
 def _public_failure(operation: str, exc: Exception, *, finalization: bool = False) -> dict[str, Any]:
     message = _runtime.redact(str(exc), 1000)
     if isinstance(exc, _runtime.WorkerAssignmentError) and not finalization:
-        pointer = "/assignment_ref"
+        pointer = "/dispatch_ref"
         return {
             "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": False,
             "outcome": "needs_input",
-            "code": "worker_assignment_unavailable",
+            "code": "worker_dispatch_unavailable",
             "diagnostics": [{
-                "code": "worker_assignment_unavailable",
-                "path": "$.assignment_ref",
-                "json_pointer": "/assignment_ref",
+                "code": "worker_dispatch_unavailable",
+                "path": "$.dispatch_ref",
+                "json_pointer": "/dispatch_ref",
                 "message": message,
                 "received": "<redacted>",
                 "field_schema": _facade_field_schema(operation, pointer),
@@ -610,7 +437,7 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
             "retryable": False,
             "attempt_budget_consumed": False,
             "worker_replacement_authorized": False,
-            "next_action": "Do not infer or repair assignment authority. Coordinator recovery must create a fresh v11 assignment.",
+            "next_action": "Do not infer or replace dispatch authority; stop this worker.",
         }
     terminal_code: str | None = None
     terminal_pointer = ""
@@ -675,7 +502,7 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
             "message": message,
             "field_schema": (
                 _facade_field_schema(operation, pointer)
-                if pointer and operation in _FACADE_FIELDS else {"type": "object"}
+                if pointer else {"type": "object"}
             ),
         }]
     # Do not leak the coordinator-only routing lock for caller-correctable
@@ -683,27 +510,19 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
     # operation; its contract is supplemented with the exact tool schema.
     for item in diagnostics:
         if isinstance(item, dict) and not finalization:
-            planning_diagnostic = operation == "complete_attempt" and _is_planning_diagnostic(item)
             if item.get("path") and not (
                 isinstance(item.get("json_pointer"), str)
                 and (item["json_pointer"] == "" or item["json_pointer"].startswith("/"))
             ):
-                item["json_pointer"] = (
-                    _planning_json_pointer(item["path"])
-                    if planning_diagnostic else _json_pointer(item["path"])
-                )
+                item["json_pointer"] = _json_pointer(item["path"])
             item.setdefault("phase", "payload")
             item.setdefault("fix", f"Correct {item.get('path', '$')} and retry {operation} on the same attempt.")
-            if planning_diagnostic:
-                item["field_schema"] = _planning_field_schema(item.get("path"))
-                item["expected"] = item["field_schema"]
-            else:
-                pointer = str(item.get("json_pointer") or "")
-                item.setdefault(
-                    "field_schema",
-                    _facade_field_schema(operation, pointer)
-                    if pointer and operation in _FACADE_FIELDS else {"type": "object"},
-                )
+            pointer = str(item.get("json_pointer") or "")
+            item.setdefault(
+                "field_schema",
+                _facade_field_schema(operation, pointer)
+                if pointer else {"type": "object"},
+            )
     result = {
         "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": False,
@@ -742,96 +561,6 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
     return result
 
 
-def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) -> dict[str, Any]:
-    """Attach the server-owned repair contract to a rejected planner draft.
-
-    The rejected draft is immutable and already contains every field that
-    passed persistence-level copying.  Returning only its digest and the
-    diagnostic paths prevents the coordinator from regenerating a full plan
-    and accidentally rewriting valid packages, paths, or verification data.
-    """
-    # A rejected draft is immutable and is the authoritative source of the
-    # planning validation contract.  If the caller accidentally resubmits the
-    # full planning object, the boundary error is intentionally generic
-    # (PATCH-only is required), but that generic error must not replace the
-    # original field-level diagnostics.  Replaying the draft diagnostics keeps
-    # the retry actionable and prevents a second regeneration loop.
-    draft_diagnostics = draft.get("diagnostics")
-    if isinstance(draft_diagnostics, list) and draft_diagnostics:
-        diagnostics = [dict(item) for item in draft_diagnostics if isinstance(item, dict)]
-    else:
-        diagnostics = [dict(item) for item in (response.get("diagnostics") or []) if isinstance(item, dict)]
-    # Draft diagnostics are replayed from the immutable document, so apply the
-    # same public receipt normalization that _public_failure applies to a fresh
-    # exception.  This also covers a direct recovery receipt whose response
-    # already contains diagnostics but no persisted draft details.
-    for item in diagnostics:
-        path = item.get("path")
-        if path:
-            item["json_pointer"] = _planning_json_pointer(path)
-        item.setdefault("phase", "payload")
-        item.setdefault(
-            "fix",
-            f"Correct {path or '$'} and retry complete_attempt on the same attempt.",
-        )
-        item["field_schema"] = _planning_field_schema(path)
-        item["expected"] = item["field_schema"]
-    if diagnostics:
-        response["diagnostics"] = diagnostics
-    response["base_payload_digest"] = draft.get("base_payload_digest")
-    response["rejected_draft_ref"] = f"planning_rejected_draft:{draft.get('attempt_id', '')}"
-    response["planning_repair"] = {
-        "mode": "same_attempt_patch",
-        "base_payload_digest": draft.get("base_payload_digest"),
-        "diagnostic_paths": [
-            item.get("path") for item in diagnostics
-            if isinstance(item, dict) and item.get("path")
-        ],
-        "patch_paths": _runtime.planning_diagnostic_patch_paths(diagnostics),
-        "preserve_other_fields": True,
-        "replacement_worker_authorized": False,
-        "coordinator_must_not": [
-            "regenerate or resend the full planning object",
-            "perform project inspection or edits",
-            "spawn, request, or authorize a replacement worker",
-        ],
-        "instruction": (
-            "Use complete_attempt on this same attempt with base_payload_digest and JSON patches only. "
-            "Use planning_repair.patch_paths as the RFC6901 JSON Pointer path source. "
-            "Patch only those paths; all other rejected-draft fields are retained server-side."
-        ),
-    }
-    patch_paths = _runtime.planning_diagnostic_patch_paths(diagnostics)
-    path_hint = (
-        " Exact PATCH paths: " + ", ".join(patch_paths) + "."
-        if patch_paths else
-        " Use only the diagnostic-scoped paths returned by planning_repair.patch_paths."
-    )
-    response["next_action"] = (
-        "Call complete_attempt on this same planner attempt with base_payload_digest copied exactly from "
-        "the rejected draft and patches containing only the returned planning_repair.patch_paths. "
-        "Do not resend the full planning object, inspect or modify the project, or spawn/request/authorize "
-        "a replacement worker; the server preserves every valid rejected-draft field."
-        + path_hint
-    )
-    # _public_failure may have built a generic envelope before the immutable
-    # draft was loaded.  Re-project the validation receipt to the bounded
-    # planning-only contract after replaying the draft diagnostics.
-    if isinstance(response.get("validation"), dict):
-        response["validation"]["request_schema"] = _validation_request_schema(
-            "complete_attempt", diagnostics,
-        )
-        response["validation"]["invalid_paths"] = [
-            item.get("path") for item in diagnostics
-            if isinstance(item, dict) and item.get("path")
-        ]
-        response["validation"]["invalid_json_pointers"] = [
-            item.get("json_pointer") for item in diagnostics
-            if isinstance(item, dict) and item.get("json_pointer") is not None
-        ]
-    return response
-
-
 def _record_attempt_event_impl(params: dict[str, Any]) -> dict[str, Any]:
     """Persist one bounded semantic checkpoint for the active worker."""
     try:
@@ -844,15 +573,13 @@ def _record_attempt_event_impl(params: dict[str, Any]) -> dict[str, Any]:
         if attempt.get("status") not in _ACTIVE_ATTEMPT_STATUSES:
             raise ValueError("attempt event stream is closed")
         event_type = str(params.get("event_type") or "").strip()
-        if "payload" not in params:
-            raise ValueError("payload is required")
         result = attempt_protocol.record_attempt_event(
             _runtime.ledger_root({"project_root": str(project)}),
             task_id=state["task_id"],
             attempt_id=str(attempt["attempt_id"]),
             event_type=event_type,
-            payload=params["payload"],
-            event_key=(str(params.get("event_key") or "").strip() or None),
+            payload={"text": str(params["text"]).strip()},
+            event_key=None,
         )
         return {
             "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
@@ -1005,8 +732,30 @@ def _v11_repair_failure(
     if not isinstance(diagnostics, list) or not diagnostics:
         return None
     try:
-        normalized = v11_submission.normalize_diagnostics(diagnostics)
-        draft = v11_submission.create_rejected_draft_escrow(original, normalized)
+        submit_schema = _facade_schema("complete_attempt", original)
+        normalized = v11_submission.normalize_diagnostics(
+            diagnostics,
+            schema=submit_schema,
+        )
+        # ``create_rejected_draft_escrow`` scopes diagnostics below the
+        # semantic kind prefix.  The current public submission is already
+        # flat, while its private repair target remains
+        # ``{"status": ..., "report": ...}``.  Add that private-only prefix
+        # so public /status and /report failures become executable semantic
+        # /status and /report patches instead of collapsing /report to the
+        # forbidden whole-payload root.
+        escrow_diagnostics: list[dict[str, Any]] = []
+        for item in normalized:
+            pointer = str(item.get("json_pointer") or "")
+            if pointer in {"/status", "/report"} or pointer.startswith(("/status/", "/report/")):
+                item = dict(item)
+                item["json_pointer"] = "/report" + pointer
+                escrow_diagnostics.append(item)
+        draft = v11_submission.create_rejected_draft_escrow(
+            original,
+            escrow_diagnostics,
+            schema=submit_schema,
+        )
         patch_paths = list(dict.fromkeys(
             str(item.get("repair_pointer") or "")
             for item in draft.get("diagnostics") or []
@@ -1016,8 +765,7 @@ def _v11_repair_failure(
             root,
             task_id=str(state["task_id"]),
             attempt_id=str(attempt["attempt_id"]),
-            task_ref_digest=v11_submission.canonical_digest(str(original["task_ref"])),
-            assignment_ref_digest=v11_submission.canonical_digest(str(original["assignment_ref"])),
+            dispatch_ref_digest=v11_submission.canonical_digest(str(original["dispatch_ref"])),
             kind=str(draft["kind"]),
             base_payload_digest=str(draft["base_payload_digest"]),
             payload=draft["payload"],
@@ -1032,6 +780,8 @@ def _v11_repair_failure(
 def _v11_pending_repair_response(
     root: Any,
     escrow: Mapping[str, Any],
+    *,
+    submission_diagnostics: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Project the exact immutable repair contract already bound to an attempt."""
     token = v11_submission.sign_repair_handle(
@@ -1041,6 +791,11 @@ def _v11_pending_repair_response(
     )
     normalized = v11_submission.normalize_diagnostics(
         list(escrow.get("diagnostics") or [])
+    )
+    public_diagnostics = (
+        [dict(item) for item in submission_diagnostics]
+        if submission_diagnostics else
+        normalized
     )
     repair_diagnostics: list[dict[str, Any]] = []
     kind_prefix = "/" + str(escrow.get("kind") or "")
@@ -1059,15 +814,19 @@ def _v11_pending_repair_response(
         "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": False,
         "outcome": "needs_correction",
-        "code": "complete_attempt_validation_failed",
-        "diagnostics": normalized,
+        "code": (
+            "complete_attempt_repair_patch_invalid"
+            if submission_diagnostics else
+            "complete_attempt_validation_failed"
+        ),
+        "diagnostics": public_diagnostics,
         "retryable": True,
         "attempt_budget_consumed": False,
         "worker_replacement_authorized": False,
         "validation": {
             "schema": "cortex/validation-error/v1",
             "diagnostics_are_complete": True,
-            "invalid_json_pointers": [item.get("json_pointer") for item in normalized],
+            "invalid_json_pointers": [item.get("json_pointer") for item in public_diagnostics],
             "zero_state_mutation": True,
         },
         "repair": {
@@ -1077,16 +836,100 @@ def _v11_pending_repair_response(
             "patch_paths": patch_paths,
             "diagnostics": repair_diagnostics,
             "preserve_valid_fields": True,
-            "preserve_exact_task_ref": True,
-            "preserve_exact_assignment_ref": True,
+            "preserve_exact_dispatch_ref": True,
             "rejected_draft_unchanged": True,
         },
         "next_action": (
-            "Retry complete_attempt on this same worker with the exact unchanged task_ref and assignment_ref, "
+            "Retry complete_attempt on this same worker with the exact unchanged dispatch_ref, "
             "the same repair_capsule and base_payload_digest, and the repair branch only: patches must be "
-            "limited to repair.patch_paths. Do not submit plan or outcome while this repair is pending."
+        "limited to the server-issued repair paths. Do not submit a new report while this repair is pending."
         ),
     }
+
+
+def _repair_submission_failure_diagnostics(
+    repair_submission: Mapping[str, Any],
+    escrow: Mapping[str, Any],
+    exc: BaseException,
+) -> list[dict[str, Any]]:
+    """Return deterministic request-local diagnostics for one bad patch retry.
+
+    The immutable semantic repair cards stay in ``recovery.repair``.  These
+    cards identify what was malformed in the *current* patches array, so a
+    worker can correct that array without changing the capsule, digest, or
+    rejected semantic base.
+    """
+    repair_schema = _facade_schema("complete_attempt", repair_submission)
+    raw = getattr(exc, "diagnostics", None)
+    if isinstance(raw, list) and raw:
+        diagnostics = v11_submission.normalize_diagnostics(
+            raw,
+            schema=repair_schema,
+        )
+    else:
+        message = _runtime.redact(str(exc), 1000) or "repair patch is invalid"
+        lowered = message.lower()
+        if "handle" in lowered:
+            pointers = ["/repair_capsule"]
+        elif "digest" in lowered:
+            pointers = ["/base_payload_digest"]
+        else:
+            patches = repair_submission.get("patches")
+            patch_count = len(patches) if isinstance(patches, list) and patches else 1
+            field = (
+                "op" if " op " in f" {lowered} " else
+                "path" if any(token in lowered for token in ("path", "scope", "parent", "index", "field")) else
+                "value"
+            )
+            pointers = [f"/patches/{index}/{field}" for index in range(patch_count)]
+        diagnostics = v11_submission.normalize_diagnostics([{
+            "code": "repair_patch_invalid",
+            "path": pointer,
+            "json_pointer": pointer,
+            "message": message,
+            "field_schema": v11_submission.schema_for_path(
+                repair_schema,
+                pointer,
+            ),
+        } for pointer in pointers], schema=repair_schema)
+
+    # Post-patch semantic validation points into the flat report submission. Translate
+    # each such diagnostic back to the submitted patch value that produced it.
+    kind_prefix = "/" + str(escrow.get("kind") or "")
+    patches = repair_submission.get("patches")
+    patch_items = patches if isinstance(patches, list) else []
+    localized: list[dict[str, Any]] = []
+    for raw_diagnostic in diagnostics:
+        diagnostic = dict(raw_diagnostic)
+        pointer = str(diagnostic.get("json_pointer") or "")
+        semantic_pointer = (
+            pointer[len(kind_prefix):]
+            if kind_prefix != "/" and (
+                pointer == kind_prefix or pointer.startswith(kind_prefix + "/")
+            ) else
+            ""
+        )
+        if semantic_pointer:
+            for index, patch in enumerate(patch_items):
+                if not isinstance(patch, Mapping):
+                    continue
+                patch_path = str(patch.get("path") or "")
+                if semantic_pointer == patch_path:
+                    suffix = ""
+                elif patch_path and semantic_pointer.startswith(patch_path + "/"):
+                    suffix = semantic_pointer[len(patch_path):]
+                else:
+                    continue
+                request_pointer = f"/patches/{index}/value{suffix}"
+                diagnostic["path"] = request_pointer
+                diagnostic["json_pointer"] = request_pointer
+                diagnostic["message"] = (
+                    f"patch value reconstructs invalid {semantic_pointer}: "
+                    + str(diagnostic.get("message") or "invalid value")
+                )
+                break
+        localized.append(diagnostic)
+    return localized
 
 
 def _v11_repair_retry_failure(
@@ -1101,8 +944,16 @@ def _v11_repair_retry_failure(
     idempotent and prevents a partially valid patch from rewriting already
     valid fields in the originally rejected semantic payload.
     """
-    del repair_submission, exc
-    return _v11_pending_repair_response(root, escrow)
+    diagnostics = _repair_submission_failure_diagnostics(
+        repair_submission,
+        escrow,
+        exc,
+    )
+    return _v11_pending_repair_response(
+        root,
+        escrow,
+        submission_diagnostics=diagnostics,
+    )
 
 
 def _v11_repair_rejected(exc: BaseException) -> dict[str, Any]:
@@ -1129,33 +980,8 @@ def _v11_repair_rejected(exc: BaseException) -> dict[str, Any]:
     }
 
 
-def _v11_backend_plan_failure(exc: BaseException) -> v11_submission.ValidationFailure | None:
-    """Translate backend planner diagnostics to the one public ``plan`` root."""
-    diagnostics = getattr(exc, "diagnostics", None)
-    if not isinstance(diagnostics, list) or not diagnostics:
-        return None
-    mapped: list[dict[str, Any]] = []
-    for raw in diagnostics:
-        if not isinstance(raw, Mapping):
-            continue
-        item = dict(raw)
-        path = str(item.get("path") or "").strip()
-        if path == "planning":
-            item["path"] = "$.plan"
-        elif path.startswith("planning."):
-            item["path"] = "$.plan." + path[len("planning."):]
-        elif path.startswith("$.planning"):
-            item["path"] = "$.plan" + path[len("$.planning"):]
-        elif path.startswith("/planning"):
-            item["path"] = "$.plan" + path[len("/planning"):].replace("/", ".")
-        else:
-            continue
-        mapped.append(item)
-    return v11_submission.ValidationFailure(mapped) if mapped else None
-
-
 def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
-    """Validate one compact v11 plan/outcome, then persist canonical evidence."""
+    """Validate one flat v11 report/repair submission, then persist evidence."""
     project: Any = None
     state: dict[str, Any] | None = None
     attempt: dict[str, Any] | None = None
@@ -1164,37 +990,39 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
     full_submission: dict[str, Any] | None = None
     pending_repair: dict[str, Any] | None = None
     try:
-        task_ref = original.get("task_ref")
-        assignment_ref = original.get("assignment_ref")
+        submission_schema = _facade_schema("complete_attempt", original)
+        submit_schema = _facade_schema("complete_attempt", {"action": "submit"})
+        repair_schema = _facade_schema("complete_attempt", {"action": "repair"})
+        dispatch_ref = original.get("dispatch_ref")
         authority_valid = (
-            isinstance(task_ref, str)
-            and re.fullmatch(v11_submission.TASK_REF_PATTERN, task_ref) is not None
-            and isinstance(assignment_ref, str)
-            and re.fullmatch(v11_submission.ASSIGNMENT_REF_PATTERN, assignment_ref) is not None
+            isinstance(dispatch_ref, str)
+            and re.fullmatch(v11_submission.DISPATCH_REF_PATTERN, dispatch_ref) is not None
         )
         if not authority_valid:
             try:
-                v11_submission.validate_submission(original)
+                v11_submission.validate_submission(
+                    original,
+                    schema=submission_schema,
+                )
             except v11_submission.ValidationFailure as exc:
                 diagnostics = [dict(item) for item in exc.diagnostics]
             else:
                 diagnostics = []
             if not diagnostics:
-                for field in ("task_ref", "assignment_ref"):
+                for field in ("dispatch_ref",):
                     diagnostics.append(_facade_diagnostic(
                         "complete_attempt", field, f"{field} is unavailable",
                     ))
             return {
                 "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
                 "ok": False,
-                "outcome": "assignment_unavailable",
-                "code": "worker_assignment_unavailable",
+                "outcome": "dispatch_unavailable",
+                "code": "worker_dispatch_unavailable",
                 "diagnostics": diagnostics,
                 "retryable": False,
             }
         project, task_dir, state, attempt, profile = _worker_context(original, "complete_attempt")
         root = _runtime.ledger_root({"project_root": str(project)})
-        plan_attempt = profile == "planner" and str(attempt.get("gate") or "") == "plan"
         existing_result = attempt_protocol.get_attempt_result(
             root, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
         )
@@ -1210,7 +1038,7 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
 
         if pending_repair is not None:
             # Once a rejected draft has an issued repair handle, the attempt is
-            # locked to that exact immutable base.  Full plan/outcome retries
+            # locked to that exact immutable base. Full report retries
             # are never evaluated and cannot replace the diagnostic scope.
             supplied_capsule = original.get("repair_capsule")
             if supplied_capsule is None:
@@ -1232,20 +1060,21 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
                 if (
                     str(pending_repair["task_id"]) != str(state["task_id"])
                     or str(pending_repair["attempt_id"]) != str(attempt["attempt_id"])
-                    or str(pending_repair["task_ref_digest"]) != v11_submission.canonical_digest(original.get("task_ref"))
-                    or str(pending_repair["assignment_ref_digest"]) != v11_submission.canonical_digest(original.get("assignment_ref"))
+                    or str(pending_repair["dispatch_ref_digest"]) != v11_submission.canonical_digest(original.get("dispatch_ref"))
                 ):
-                    raise ValueError("repair handle does not match this task and assignment pair")
+                    raise ValueError("repair handle does not match this dispatch")
                 supplied_digest = original.get("base_payload_digest")
                 if supplied_digest is not None and supplied_digest != pending_repair["base_payload_digest"]:
                     raise ValueError("repair base_payload_digest integrity check failed")
                 if supplied_digest is None:
                     return _v11_pending_repair_response(root, pending_repair)
-                checked = v11_submission.validate_submission(original)
+                checked = v11_submission.validate_submission(
+                    original,
+                    schema=repair_schema,
+                )
                 escrow = {
                     "schema": "cortex/private-repair-draft/v1",
-                    "task_ref": checked["task_ref"],
-                    "assignment_ref": checked["assignment_ref"],
+                    "dispatch_ref": checked["dispatch_ref"],
                     "kind": pending_repair["kind"],
                     "base_payload_digest": pending_repair["base_payload_digest"],
                     "payload": pending_repair["payload"],
@@ -1254,6 +1083,8 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
                 full_submission = v11_submission.apply_repair_escrow(
                     escrow,
                     original,
+                    repair_schema=repair_schema,
+                    submit_schema=submit_schema,
                 )
             except v11_submission.ValidationFailure as exc:
                 return _v11_repair_retry_failure(root, original, pending_repair, exc)
@@ -1268,29 +1099,16 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
                     return _v11_repair_rejected(exc)
                 return _v11_repair_retry_failure(root, original, pending_repair, exc)
         else:
-            has_plan = "plan" in original
-            has_outcome = "outcome" in original
-            if has_plan != has_outcome:
-                required_kind = "plan" if plan_attempt else "outcome"
-                supplied_kind = "plan" if has_plan else "outcome"
-                if supplied_kind != required_kind:
-                    required_schema = (
-                        v11_submission.PLANNER_PLAN_SCHEMA
-                        if required_kind == "plan" else
-                        v11_submission.OUTCOME_SCHEMA
-                    )
-                    raise v11_submission.ValidationFailure([{
-                        "code": "submission_kind_invalid",
-                        "path": f"$.{required_kind}",
-                        "json_pointer": f"/{required_kind}",
-                        "message": (
-                            "planner plan assignments require the plan branch; outcome is not accepted"
-                            if required_kind == "plan" else
-                            "non-planner assignments require the outcome branch; plan is not accepted"
-                        ),
-                        "field_schema": required_schema,
-                    }])
-            checked = v11_submission.validate_submission(original)
+            preflight = _complete_attempt_preflight(original)
+            if preflight:
+                # These are envelope/branch-shape corrections, not rejected
+                # semantic drafts. They must not create repair escrow: the
+                # caller can apply the complete remove/add edit set directly.
+                return _public_failure("complete_attempt", ValidationFailure(preflight))
+            checked = v11_submission.validate_submission(
+                original,
+                schema=submission_schema,
+            )
             if checked["mode"] == "repair":
                 secret = _runtime._governance_lifecycle_hmac_key(root, create=False)
                 try:
@@ -1310,60 +1128,39 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
                         str(escrow_row["handle_id"]) != handle_id
                         or str(escrow_row["task_id"]) != str(state["task_id"])
                         or str(escrow_row["attempt_id"]) != str(attempt["attempt_id"])
-                        or str(escrow_row["task_ref_digest"]) != v11_submission.canonical_digest(checked["task_ref"])
-                        or str(escrow_row["assignment_ref_digest"]) != v11_submission.canonical_digest(checked["assignment_ref"])
+                        or str(escrow_row["dispatch_ref_digest"]) != v11_submission.canonical_digest(checked["dispatch_ref"])
                         or str(escrow_row["base_payload_digest"]) != str(checked["base_payload_digest"])
                     ):
-                        raise ValueError("repair handle does not match this task and assignment pair")
+                        raise ValueError("repair handle does not match this dispatch")
                     escrow = {
                         "schema": "cortex/private-repair-draft/v1",
-                        "task_ref": checked["task_ref"],
-                        "assignment_ref": checked["assignment_ref"],
+                        "dispatch_ref": checked["dispatch_ref"],
                         "kind": escrow_row["kind"],
                         "base_payload_digest": escrow_row["base_payload_digest"],
                         "payload": escrow_row["payload"],
                         "diagnostics": escrow_row["diagnostics"],
                     }
-                    full_submission = v11_submission.apply_repair_escrow(escrow, original)
+                    full_submission = v11_submission.apply_repair_escrow(
+                        escrow,
+                        original,
+                        repair_schema=repair_schema,
+                        submit_schema=submit_schema,
+                    )
                 except (ValueError, TypeError, OSError, RuntimeError) as exc:
                     return _v11_repair_rejected(exc)
             else:
                 full_submission = checked
         kind = str(full_submission.get("kind") or "")
-        normalized_planning: dict[str, Any] | None = None
-        if kind == "plan":
-            if not plan_attempt:
-                raise ValidationFailure([{
-                    "code": "submission_kind_invalid", "path": "$.plan",
-                    "message": "plan is allowed only for the planner profile on the plan gate",
-                }])
-            normalized_planning = _runtime.sanitize_planning_payload(
-                full_submission["plan"], persisted=True,
-            )
+        if kind == "report":
             semantic_result = {
-                "status": "completed",
-                "summary": str(full_submission["plan"].get("overview") or "Plan completed."),
+                "status": full_submission.get("status"),
+                "summary": full_submission.get("report"),
                 "findings": [], "decisions_needed": [], "unresolved": [], "claims": [],
-            }
-        elif kind == "outcome":
-            if plan_attempt:
-                raise ValidationFailure([{
-                    "code": "submission_kind_invalid", "path": "$.outcome",
-                    "message": "planner plan attempts require the compact plan branch",
-                }])
-            outcome = full_submission["outcome"]
-            semantic_result = {
-                "status": outcome.get("status"),
-                "summary": outcome.get("summary"),
-                "findings": outcome.get("findings", []),
-                "decisions_needed": outcome.get("decisions_needed", []),
-                "unresolved": outcome.get("unresolved", []),
-                "claims": outcome.get("claims", []),
             }
         else:
             raise ValidationFailure([{
                 "code": "submission_kind_invalid", "path": "$",
-                "message": "complete_attempt requires exactly one compact plan or outcome",
+                "message": "complete_attempt requires action=submit with status and report",
             }])
 
         # Everything above is read-only.  Receipt checks and backend-derived
@@ -1384,9 +1181,9 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
             if existing is not None else
             _workspace_observation(project, task_dir, state, attempt)
         )
-        # Every retry, including planner materialization retries, must pass
+        # Every retry must pass
         # through the protocol's immutable semantic comparison.  A corrected
-        # planning sibling may be materialized, but it may not smuggle a new
+        # through immutable semantic comparison and may not smuggle a new
         # AttemptResult into an already completed attempt.
         completed = attempt_protocol.complete_attempt(
             root,
@@ -1410,19 +1207,6 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "ok": True,
                 "terminal": True,
             }
-        if plan_attempt:
-            if normalized_planning is not None:
-                _runtime.materialize_planning_payload(
-                    task_dir,
-                    state,
-                    attempt,
-                    str(canonical["result_ref"]),
-                    normalized_planning,
-                )
-            else:
-                current = _runtime.current_planning_manifest(task_dir)
-                if not isinstance(current, dict) or current.get("source_result_ref") != canonical.get("result_ref"):
-                    raise ValueError("planner plan attempts require a planning payload")
         _mark_attempt(
             project, state["task_id"], attempt["attempt_id"],
             lifecycle_status="work_completed",
@@ -1466,20 +1250,12 @@ def _complete_attempt_impl(params: dict[str, Any]) -> dict[str, Any]:
             # part of the same locked repair.  Never replace its private base
             # or strand the worker on a generic correction branch.
             return _v11_repair_retry_failure(root, original, pending_repair, exc)
-        if full_submission is None and set(original).intersection({
-            "repair_capsule", "base_payload_digest", "patches",
-        }):
+        if full_submission is None and original.get("action") == "repair":
             return _v11_repair_rejected(exc)
         if root is not None and state is not None and attempt is not None and full_submission is None:
             repair = _v11_repair_failure(original, root, state, attempt, exc)
             if repair is not None:
                 return repair
-        if root is not None and full_submission is not None and "plan" in original:
-            translated = _v11_backend_plan_failure(exc)
-            if translated is not None:
-                repair = _v11_repair_failure(original, root, state, attempt, translated)
-                if repair is not None:
-                    return repair
         if root is not None and state is not None and attempt is not None:
             existing = attempt_protocol.get_attempt_result(
                 root, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
@@ -1518,12 +1294,12 @@ def _read_worker_result_impl(params: dict[str, Any]) -> dict[str, Any]:
         preflight = _read_worker_result_preflight(original)
         if preflight:
             raise ValidationFailure(preflight)
-        worker_context = "assignment_ref" in original
+        worker_context = "dispatch_ref" in original
         if worker_context:
             project, task_dir, state, worker_attempt, worker_profile = _runtime.authorize_worker_assignment(
                 original, "read_worker_result",
             )
-            task_ref = str(original["task_ref"])
+            task_ref = ""
             raw_attempt_id = str(worker_attempt["attempt_id"])
             raw_profile = worker_profile
         else:
@@ -1564,7 +1340,6 @@ def _read_worker_result_impl(params: dict[str, Any]) -> dict[str, Any]:
             result = {
                 "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
                 "ok": True,
-                "task_ref": task_ref,
                 "attempt_result_ref": result_ref,
                 "result_view": view,
                 "complete": True,
@@ -1691,9 +1466,95 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _public_result_projection(value: Any) -> Any:
+    """Project one canonical internal result as the flat public report form."""
+    if isinstance(value, list):
+        return [_public_result_projection(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    canonical = value.get("result")
+    if isinstance(canonical, Mapping):
+        status = str(canonical.get("result_status") or canonical.get("status") or "")
+        report = canonical.get("summary")
+        if isinstance(report, str) and status:
+            return {"status": status, "report": report}
+    # Fail closed for a malformed server view: do not expose private view
+    # topology or silently invent a second public result representation.
+    raise ValueError("canonical result view cannot be projected as status and report")
+
+
+def _flat_result_page(result: dict[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
+    """Return deterministic immutable report pages bound to the selected action."""
+    if not result.get("ok"):
+        return result
+    action = str(params.get("action") or "")
+    refs = [str(item.get("attempt_result_ref") or "") for item in result.get("result_views") or []]
+    if action == "read_predecessor":
+        refs = [str(result.get("attempt_result_ref") or "")]
+        source = _public_result_projection(result.get("result_view") or {})
+        text = json.dumps(source, ensure_ascii=False, sort_keys=True)
+    else:
+        source = _public_result_projection(result.get("result_views") or [])
+        text = json.dumps(source, ensure_ascii=False, sort_keys=True)
+    selector = {
+        "authority": params.get("dispatch_ref") if action == "read_predecessor" else result.get("task_ref"),
+        "action": action,
+        "refs": refs,
+    }
+    digest = pagination.scope_digest({"selector": selector, "text": text})
+    selector_name = f"result.{action}"
+    if action == "read_predecessor":
+        project, _task_dir, state, attempt, _profile = _runtime.authorize_worker_assignment(
+            params, "read_worker_result",
+        )
+        audience_basis = {
+            "task_id": state.get("task_id"),
+            "attempt_id": attempt.get("attempt_id"),
+        }
+    else:
+        project, _task_dir, state, _task, _task_ref = _runtime.authorize_coordinator_ref(
+            params, "read_worker_result",
+        )
+        audience_basis = {"task_id": state.get("task_id"), "role": "coordinator"}
+    # Bind the cursor to the already-authorized durable subject, not to a
+    # digest of the bearer capability. The opaque cursor therefore carries
+    # no reusable verifier derived from dispatch_ref or coordinator_ref.
+    audience = f"{action}.{pagination.scope_digest(audience_basis)[:32]}"
+    root = _runtime.ledger_root({"project_root": str(project)})
+    secret = _runtime._governance_lifecycle_hmac_key(root, create=False)
+    offset = 0
+    cursor = params.get("cursor")
+    if cursor is not None:
+        offset = pagination.decode_cursor(
+            cursor,
+            secret,
+            selector=selector_name,
+            audience=audience,
+            digest=digest,
+        )
+    if offset > len(text):
+        raise ValueError("cursor is outside the selected result content")
+    content = text[offset:offset + 8000]
+    page = {"schema": result.get("schema"), "ok": True, "action": "read_more", "content": content}
+    if offset + len(content) < len(text):
+        page["next_cursor"] = pagination.encode_cursor(
+            secret,
+            selector=selector_name,
+            audience=audience,
+            digest=digest,
+            offset=offset + len(content),
+        )
+        return page
+    page["action"] = "use_result_as_context" if action == "read_predecessor" else ("continue" if result.get("continuation") else "terminal_continue")
+    if action == "read_wave":
+        page["result_refs"] = refs[:32]
+        page["step"] = params.get("step")
+    return page
+
+
 def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
     """Return the canonical semantic result without its internal projection."""
     from cortex_runtime.mcp_api import project_public_response
     return project_public_response(
-        "read_worker_result", _read_worker_result_impl(params), arguments=params,
+        "read_worker_result", _flat_result_page(_read_worker_result_impl(params), params), arguments=params,
     )
