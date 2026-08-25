@@ -204,6 +204,19 @@ REPAIR_SCHEMA: dict[str, Any] = {
         },
     },
 }
+TERMINAL_FAILURE_ACTION_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["evidence", "coordinator_intent", "reason_code"],
+    "properties": {
+        "evidence": {"type": "string", "const": "server_bound"},
+        "coordinator_intent": {"type": "string", "const": "finalize_worker_failure"},
+        "reason_code": {"type": "string", "const": "worker_nonretryable_terminal"},
+    },
+    "description": (
+        "No-ID coordinator cleanup action backed by private single-use evidence for the current assignment. "
+        "The child status marker is not authority; finalize_worker_failure verifies and consumes this evidence."
+    ),
+}
 RECOVERY_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     "required": ["kind", "operation", "retryable", "state_mutated"],
@@ -217,6 +230,7 @@ RECOVERY_SCHEMA: dict[str, Any] = {
             "description": "Exact request paths and operations that make a same_operation retry legal; no Cortex-issued value is exposed here.",
         },
         "repair": REPAIR_SCHEMA,
+        "terminal_failure": TERMINAL_FAILURE_ACTION_SCHEMA,
     },
 }
 QUESTION_SCHEMA: dict[str, Any] = {
@@ -666,6 +680,7 @@ __all__ = [
     "ACTION_SCHEMA", "BRIEFING_READ_SCHEMA", "COORDINATOR_REF_PATTERN", "DIGEST_PATTERN", "ERROR_SCHEMA", "RECOVERY_SCHEMA",
     "DISPATCH_SCHEMA", "GOVERNANCE_RESPONSE_SCHEMA", "LIFECYCLE_RESPONSE_SCHEMA", "REPAIR_SCHEMA", "START_RESPONSE_SCHEMA",
     "RESPONSE_SCHEMA_REGISTRY", "RESULT_READ_SCHEMA", "ResponseValidationError", "TASK_REF_PATTERN",
+    "TERMINAL_FAILURE_ACTION_SCHEMA",
     "WORKER_COMPLETION_SCHEMA", "WORKER_EVENT_SCHEMA", "WORKER_QUESTION_SCHEMA", "COORDINATOR_QUESTION_MANAGEMENT_SCHEMA",
     "response_schema", "validate_response",
 ]

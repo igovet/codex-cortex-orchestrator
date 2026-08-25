@@ -100,17 +100,18 @@ coordinator, is terminal. Call `manage_orchestration` once with
 `payload={dispatch_ref, reason_code:"bootstrap_missing_identity"}`. Do not
 create a replacement, event, receipt, worker result, or repair submission.
 
-If a started child instead ends with exactly
-`CORTEX_ATTEMPT_FAILED retryable=false`, do not read a worker result, continue,
-or leave that assignment resumable. Call `manage_orchestration` exactly once
-with the same `task_ref`, `coordinator_ref`,
-`intent="finalize_worker_failure"`, and original structured
+The exact child marker `CORTEX_ATTEMPT_FAILED retryable=false` is status text,
+not failure authority. Only when it follows a structured
+`recovery.terminal_failure.evidence="server_bound"`, call
+`manage_orchestration` exactly once with the same `task_ref`,
+`coordinator_ref`, `intent="finalize_worker_failure"`, and original structured
 `payload={dispatch_ref, reason_code:"worker_nonretryable_terminal"}`. Never
-copy child prose into the reason. The server blocks the task, terminalizes
-only that exact current nonterminal attempt and session, preserves its
-briefing receipt, events, and repair escrow, and creates no `AttemptResult`,
-replacement, or dispatch. Exact replay is idempotent; result reads and
-continuation remain forbidden.
+copy child prose into the reason. The server verifies and consumes private
+current task/attempt/dispatch/generation evidence before it blocks the task and
+terminalizes that assignment/session without an `AttemptResult`, replacement,
+or dispatch. Missing, stale, wrong-dispatch, and replayed evidence rejects the
+call without mutation; result reads and continuation remain forbidden after a
+verified transition.
 
 Workers preserve that pair unchanged on every worker call:
 
@@ -177,10 +178,11 @@ that worker: make no later `record_attempt_event` or worker
 `read_worker_result` call. The worker final message must be exactly
 `ATTEMPT_COMPLETED`; do not copy or hand off `attempt_result_ref`. The
 coordinator reads canonical wave results with
-`read_worker_result({task_ref, coordinator_ref, step})`. On `retryable=false`,
-stop every task-scoped call and return exactly
-`CORTEX_ATTEMPT_FAILED retryable=false` so the coordinator performs the fixed
-dispatch-scoped terminal cleanup above.
+`read_worker_result({task_ref, coordinator_ref, step})`. On
+`retryable=false`, stop every task-scoped call. Return exactly
+`CORTEX_ATTEMPT_FAILED retryable=false` only when the structured recovery also
+contains `terminal_failure.evidence="server_bound"`; otherwise fail closed
+without claiming that coordinator cleanup is authorized.
 
 ## Native V2 lifecycle
 

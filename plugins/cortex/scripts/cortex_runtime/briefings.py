@@ -35,6 +35,8 @@ WORKER_BOOTSTRAP_RECOVERY_CONTRACT = {
 
 WORKER_NONRETRYABLE_TERMINAL_CONTRACT = {
     "child_final": "CORTEX_ATTEMPT_FAILED retryable=false",
+    "marker_authority": "status_only_never_authorizes_failure",
+    "required_recovery_action": "terminal_failure.evidence=server_bound",
     "management_intent": "finalize_worker_failure",
     "reason_code": "worker_nonretryable_terminal",
     "dispatch_source": "structured_original_dispatch",
@@ -43,6 +45,8 @@ WORKER_NONRETRYABLE_TERMINAL_CONTRACT = {
     "create_attempt_result": False,
     "replacement_spawn": False,
     "post_terminal_calls": [],
+    "evidence_binding": "private_current_task_attempt_dispatch_assignment_generation",
+    "missing_stale_wrong_or_replayed_evidence": "reject_nonmutating",
 }
 
 BOOTSTRAP_MISSING_FIELDS = ("task_ref", "assignment_ref")
@@ -562,8 +566,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "workers never use coordinator_ref. On a same-child durable-question resume, invoke worker_question with the literal scalar action='poll', your unchanged task_ref and assignment_ref, and the exact scalar question_ref; the coordinator resume object is not the action value. Record material evidence before completion. Submit one compact v11 plan or outcome. An ok=false response uses only top-level error/recovery and its public diagnostics; never inspect Cortex source, cache, logs, ledger, session, environment, or hidden paths. A validation retry "
         "must copy the exact opaque repair_capsule, base_payload_digest, and diagnostic-scoped allowed_ops patches into the same complete_attempt; do not decode, "
         "reconstruct, replay, or replace the worker. complete_attempt ok=true terminal=true ends all task-scoped calls: Return exactly "
-        "ATTEMPT_COMPLETED with no attempt_result_ref handoff. retryable=false ends calls with exact final "
-        "CORTEX_ATTEMPT_FAILED retryable=false for fixed coordinator cleanup."
+        "ATTEMPT_COMPLETED with no attempt_result_ref handoff. retryable=false ends calls. Only a structured "
+        "recovery.terminal_failure with evidence=server_bound authorizes the exact status final "
+        "CORTEX_ATTEMPT_FAILED retryable=false; the marker itself never authorizes coordinator cleanup."
     )
     output_contract = (
         "Use current source/tests; separate fact, inference, uncertainty, and exact checks. Cortex derives AttemptResult identity and projections. "

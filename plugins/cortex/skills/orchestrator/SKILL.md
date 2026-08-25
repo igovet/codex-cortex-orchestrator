@@ -90,13 +90,18 @@ If the repaired child still lacks a valid pair, or the coordinator lost the
 server-built message, fail closed terminally.
 
 A different exact terminal child marker,
-`CORTEX_ATTEMPT_FAILED retryable=false`, means the started worker cannot
-continue. Call `manage_orchestration(intent=finalize_worker_failure)` exactly
-once with the same coordinator pair and original dispatch's structured
+`CORTEX_ATTEMPT_FAILED retryable=false`, is status text only, never failure
+authority. When the worker emitted it only after a structured
+`recovery.terminal_failure.evidence="server_bound"`, call
+`manage_orchestration(intent=finalize_worker_failure)` with the same
+coordinator pair and original dispatch's structured
 `payload={dispatch_ref, reason_code:"worker_nonretryable_terminal"}`. Do not
 read a worker result, continue, copy child prose into the reason, or spawn a
-replacement. The server closes that current assignment/session nonresumably,
-preserves briefing, event, and repair evidence, and creates no AttemptResult.
+replacement. Cortex alone verifies and consumes the private current
+task/attempt/dispatch/generation evidence; a missing, stale, wrong-dispatch, or
+replayed receipt leaves the task unchanged. A verified call closes that
+assignment/session nonresumably, preserves briefing, event, and repair
+evidence, and creates no AttemptResult.
 
 On compaction, keep the existing coordinator pair in the bounded private
 handoff described by Cortex Control. If either component is lost, fail closed:
@@ -109,12 +114,13 @@ fresh user-directed task starts through a fresh explicit activation.
    `task.user_request`. For ordinary tasks, provide grounded non-empty
    `task.acceptance_criteria` and `task.verification`; ask one task-relevant
    question if material intent is missing. Use only fields advertised by the
-   current tool schema.
+   current tool schema. Omit `waves.workers[].profile` for the server-owned
+   phase owner; when expert routing is required, use only the selected phase
+   branch's exact profile enum.
 2. Invoke every returned native `spawn_agent` dispatch exactly as returned. A
    returned child ID is bound only by the runtime; never guess or transform it.
    `action.kind=invoke_dispatches` is the `spawn_all_exact_before_wait`
-   contract: execute every exact returned native `spawn_agent` dispatch before
-   any wait. Execute every exact returned native spawn_agent dispatch before any wait.
+   contract. Execute every exact returned native spawn_agent dispatch before any wait.
    It grants no wait permission and does not mean a worker exists.
 3. Wait only for the exact eligible live native child IDs. Generic wait
    failures, timeouts, unknown IDs, partial responses, and another child's

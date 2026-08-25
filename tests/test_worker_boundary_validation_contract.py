@@ -19,7 +19,7 @@ from cortex_runtime.questions import worker_question
 
 
 class WorkerBoundaryValidationContractTests(unittest.TestCase):
-    def test_nonretryable_worker_terminal_cleanup_preserves_forensics_without_result_or_replacement(self):
+    def test_retryable_repair_and_bare_terminal_marker_cannot_block_task(self):
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "project"
             project.mkdir()
@@ -55,7 +55,7 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                     "payload": {"summary": "Durable evidence before terminal failure."},
                 })
                 self.assertTrue(checkpoint["ok"], checkpoint)
-                rejected = attempt_facade.complete_attempt({
+                rejected = cortex.complete_worker_attempt({
                     **pair,
                     "outcome": {
                         "status": "completed", "summary": "", "findings": [],
@@ -90,22 +90,18 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                 finalized = cortex.manage_orchestration(request)
                 replayed = cortex.manage_orchestration(request)
                 self.assertFalse(finalized["ok"])
-                self.assertEqual(finalized["error"]["code"], "worker_terminal_failure")
                 self.assertFalse(replayed["ok"])
-                self.assertEqual(replayed["error"]["code"], "worker_terminal_failure")
 
                 resolved = cortex._v11_resolve_task(bound, include_completed=True)
                 assert isinstance(resolved, tuple)
                 _task_dir, state, _task, _task_ref = resolved
                 attempt = state["attempts"][0]
-                self.assertEqual(state["status"], "blocked")
-                self.assertEqual(attempt["status"], "failed")
-                self.assertEqual(attempt["lifecycle_status"], "worker_terminal_failure")
-                self.assertFalse(attempt["host_resumable"])
+                self.assertEqual(state["status"], "active")
+                self.assertNotEqual(attempt["status"], "failed")
+                self.assertNotEqual(attempt["lifecycle_status"], "worker_terminal_failure")
                 sessions = cortex.db_list_worker_sessions(root, state["task_id"])
                 self.assertTrue(sessions)
-                self.assertTrue(all(item["status"] == "terminated_unavailable" for item in sessions))
-                self.assertTrue(all(not item["resumable"] for item in sessions))
+                self.assertTrue(any(item["resumable"] for item in sessions))
                 self.assertEqual(
                     attempt_protocol.list_attempt_events(
                         root, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
@@ -119,13 +115,194 @@ class WorkerBoundaryValidationContractTests(unittest.TestCase):
                 self.assertIsNone(attempt_protocol.get_attempt_result(
                     root, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
                 ))
-                self.assertEqual(finalized.get("dispatches", []), [])
-                read = attempt_facade.read_worker_result({
+                self.assertIsNone(ledger_db.get_task_document(
+                    root, state["task_id"], cortex.TERMINAL_FAILURE_EVIDENCE_KEY,
+                ))
+            finally:
+                if previous is None:
+                    os.environ.pop(cortex.HOST_CONTROL_STORE_ENV, None)
+                else:
+                    os.environ[cortex.HOST_CONTROL_STORE_ENV] = previous
+
+    def test_server_terminal_evidence_is_safe_single_use_expiring_and_assignment_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir()
+            host_store = Path(temporary) / "host-private-store"
+            host_store.mkdir(mode=0o700)
+            previous = os.environ.get(cortex.HOST_CONTROL_STORE_ENV)
+            os.environ[cortex.HOST_CONTROL_STORE_ENV] = str(host_store)
+            try:
+                started = cortex.start_orchestration({
+                    "project_root": str(project),
+                    "task": {
+                        "user_request": "Exercise server-authoritative terminal evidence.",
+                        "acceptance_criteria": ["Only genuine server evidence can block the task."],
+                        "verification": ["Inspect evidence binding and one-time consumption."],
+                    },
+                    "waves": [{"workers": [{
+                        "phase": "implementation", "profile": "general",
+                        "objective": "Exercise terminal evidence.",
+                        "allowed_paths": ["result.txt"],
+                    }]}],
+                })
+                self.assertTrue(started["ok"], started)
+                dispatch = started["dispatches"][0]
+                match = re.search(
+                    r"read_dispatch_briefing\((\{[^\n]+?\})\)",
+                    str(dispatch["arguments"]["message"]),
+                )
+                self.assertIsNotNone(match)
+                assert match is not None
+                pair = json.loads(match.group(1))
+                self.assertTrue(cortex.read_dispatch_briefing(pair)["complete"])
+
+                bound = {"project_root": str(project), "task_ref": started["task_ref"]}
+                root = cortex.ledger_root(bound)
+                resolved = cortex._v11_resolve_task(bound, include_completed=True)
+                assert isinstance(resolved, tuple)
+                _task_dir, initial_state, _task, _task_ref = resolved
+                task_id = initial_state["task_id"]
+
+                retryable = {
+                    "schema": "cortex/worker-completion/v11", "ok": False,
+                    "error": {
+                        "code": "complete_attempt_validation_failed", "category": "validation",
+                        "message": "Correct the summary.",
+                        "diagnostics": [{
+                            "code": "complete_attempt_validation_failed",
+                            "json_pointer": "/outcome/summary", "message": "summary is required",
+                            "field_schema": {"type": "string", "minLength": 1},
+                        }],
+                    },
+                    "recovery": {
+                        "kind": "same_operation", "operation": "complete_attempt",
+                        "retryable": True, "state_mutated": False,
+                        "allowed_changes": [{
+                            "json_pointer": "/outcome/summary", "allowed_ops": ["replace"],
+                        }],
+                    },
+                }
+                with patch.object(cortex, "_complete_worker_attempt_operation", return_value=retryable):
+                    correction = cortex.complete_worker_attempt(pair)
+                self.assertTrue(correction["recovery"]["retryable"])
+                self.assertNotIn("terminal_failure", correction["recovery"])
+                self.assertIsNone(ledger_db.get_task_document(
+                    root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY,
+                ))
+
+                terminal = {
+                    "schema": "cortex/worker-completion/v11", "ok": False,
+                    "error": {
+                        "code": "complete_attempt_repair_rejected", "category": "integrity",
+                        "message": "Cortex rejected invalid repair authority.",
+                        "diagnostics": [{
+                            "code": "complete_attempt_repair_rejected", "json_pointer": "",
+                            "message": "repair authority failed integrity validation",
+                            "field_schema": {"type": "object"},
+                        }],
+                    },
+                    "recovery": {
+                        "kind": "terminal_stop", "operation": "complete_attempt",
+                        "retryable": False, "state_mutated": False,
+                    },
+                }
+                with patch.object(cortex, "_complete_worker_attempt_operation", return_value=terminal):
+                    failed = cortex.complete_worker_attempt(pair)
+                self.assertEqual(failed["recovery"]["terminal_failure"], cortex.TERMINAL_FAILURE_ACTION)
+                evidence = ledger_db.get_task_document(
+                    root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY,
+                )
+                self.assertIsInstance(evidence, dict)
+                assert isinstance(evidence, dict)
+                self.assertEqual(evidence["dispatch_ref"], dispatch["dispatch_ref"])
+                self.assertEqual(evidence["error_category"], "integrity")
+                self.assertEqual(evidence["error_code"], "complete_attempt_repair_rejected")
+                rendered_evidence = json.dumps(evidence, sort_keys=True)
+                self.assertNotIn(pair["assignment_ref"], rendered_evidence)
+                self.assertNotIn("diagnostics", rendered_evidence)
+                self.assertNotIn("prompt", rendered_evidence)
+                self.assertNotIn("capability", rendered_evidence)
+
+                request = {
                     "task_ref": started["task_ref"],
                     "coordinator_ref": started["coordinator_ref"],
-                    "step": 1,
-                })
-                self.assertFalse(read["ok"])
+                    "intent": "finalize_worker_failure",
+                    "payload": {
+                        "dispatch_ref": "dispatch-" + "f" * 24,
+                        "reason_code": "worker_nonretryable_terminal",
+                    },
+                }
+                wrong = cortex.manage_orchestration(request)
+                self.assertFalse(wrong["ok"])
+                self.assertEqual(
+                    ledger_db.get_task_document(root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY),
+                    evidence,
+                )
+                resolved = cortex._v11_resolve_task(bound, include_completed=True)
+                assert isinstance(resolved, tuple)
+                self.assertEqual(resolved[1]["status"], "active")
+
+                stale = {**evidence, "assignment_generation": evidence["assignment_generation"] + 1}
+                ledger_db.put_task_document(
+                    root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY, stale,
+                )
+                request["payload"]["dispatch_ref"] = dispatch["dispatch_ref"]
+                rejected_stale = cortex.manage_orchestration(request)
+                self.assertFalse(rejected_stale["ok"])
+                resolved = cortex._v11_resolve_task(bound, include_completed=True)
+                assert isinstance(resolved, tuple)
+                self.assertEqual(resolved[1]["status"], "active")
+
+                with patch.object(cortex, "_complete_worker_attempt_operation", return_value=terminal):
+                    cortex.complete_worker_attempt(pair)
+                expiring = ledger_db.get_task_document(
+                    root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY,
+                )
+                self.assertIsInstance(expiring, dict)
+                assert isinstance(expiring, dict)
+                expired = {**expiring, "expires_at": "2000-01-01T00:00:00+00:00"}
+                unrelated_key = "unrelated_control_evidence"
+                unrelated = {"schema": "test/unrelated/v1", "updated_at": expired["updated_at"]}
+                ledger_db.put_task_document(root, task_id, unrelated_key, unrelated)
+                ledger_db.put_task_document(
+                    root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY, expired,
+                )
+                rejected_expired = cortex.manage_orchestration(request)
+                self.assertFalse(rejected_expired["ok"])
+                self.assertIsNone(ledger_db.get_task_document(
+                    root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY,
+                ))
+                self.assertEqual(
+                    ledger_db.get_task_document(root, task_id, unrelated_key), unrelated,
+                )
+                after_expiry = cortex._v11_resolve_task(bound, include_completed=True)
+                assert isinstance(after_expiry, tuple)
+                self.assertEqual(after_expiry[1]["status"], "active")
+                self.assertNotEqual(after_expiry[1]["attempts"][0]["status"], "failed")
+
+                with patch.object(cortex, "_complete_worker_attempt_operation", return_value=terminal):
+                    cortex.complete_worker_attempt(pair)
+                finalized = cortex.manage_orchestration(request)
+                self.assertIsNone(ledger_db.get_task_document(
+                    root, task_id, cortex.TERMINAL_FAILURE_EVIDENCE_KEY,
+                ))
+                resolved = cortex._v11_resolve_task(bound, include_completed=True)
+                assert isinstance(resolved, tuple)
+                terminal_state = resolved[1]
+                self.assertEqual(terminal_state["status"], "blocked")
+                self.assertEqual(terminal_state["attempts"][0]["status"], "failed")
+                self.assertEqual(
+                    terminal_state["worker_terminal_failure"]["error_code"],
+                    "complete_attempt_repair_rejected",
+                )
+
+                replay = cortex.manage_orchestration(request)
+                self.assertFalse(replay["ok"])
+                replay_state = cortex._v11_resolve_task(bound, include_completed=True)
+                assert isinstance(replay_state, tuple)
+                self.assertEqual(replay_state[1], terminal_state)
+                self.assertFalse(finalized["ok"])
             finally:
                 if previous is None:
                     os.environ.pop(cortex.HOST_CONTROL_STORE_ENV, None)

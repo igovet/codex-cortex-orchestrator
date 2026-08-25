@@ -45,9 +45,11 @@ repair follow-up using the exact server-retained references; no replacement
 child or ambient inference is allowed. A successful `complete_attempt` returns
 `terminal: true` with no result-reference handoff, after which the
 worker makes no further task-scoped calls. Invalid repair remains fail-closed.
-Exact `CORTEX_ATTEMPT_FAILED retryable=false` requires the fixed
-dispatch-scoped `finalize_worker_failure` transition; result read,
-continuation, and replacement are forbidden.
+Exact `CORTEX_ATTEMPT_FAILED retryable=false` is status only. The fixed
+dispatch-scoped `finalize_worker_failure` transition is legal only after
+structured `recovery.terminal_failure.evidence="server_bound"`; the server
+verifies and consumes exact current evidence, while missing, stale,
+wrong-dispatch, or replayed evidence is nonmutating.
 
 The source tree is ready for a release decision only after the checks below
 are run against the exact working tree. This page does not claim an installed

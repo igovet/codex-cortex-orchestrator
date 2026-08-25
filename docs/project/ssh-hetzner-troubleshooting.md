@@ -148,10 +148,10 @@ from a thread, worker, or project directory.
    the exact scalar `worker_question(action:"poll", task_ref, assignment_ref,
    question_ref)` form. Do not remove and recreate a question for a ref
    mismatch.
-5. An exact `CORTEX_ATTEMPT_FAILED retryable=false` is terminal for its
-   original dispatch. Use only the prescribed one-time
-   `finalize_worker_failure` cleanup; do not read a result, continue, or
-   create a replacement.
+5. An exact `CORTEX_ATTEMPT_FAILED retryable=false` is status only. Use the
+   prescribed `finalize_worker_failure` cleanup only after structured
+   `recovery.terminal_failure.evidence="server_bound"`; missing, stale,
+   wrong-dispatch, or replayed server evidence rejects without mutation.
 
 ## Verification
 

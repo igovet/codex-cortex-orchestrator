@@ -143,11 +143,13 @@ work around a ref mismatch.
 Bootstrap repair is limited to one same-child follow-up that byte-copies the
 server-built `bootstrap_repair_message` unchanged. A failed repair is terminally
 cleaned up through `finalize_bootstrap_failure`.
-An exact nonretryable child final is closed through
-`finalize_worker_failure` for the original structured dispatch. That atomic
-transition blocks the task and closes the attempt/session nonresumably while
-preserving briefing, event, and repair evidence; it emits no result or
-replacement dispatch.
+An exact nonretryable child final is status text only. Cortex authorizes
+`finalize_worker_failure` through structured
+`recovery.terminal_failure.evidence="server_bound"` backed by private current
+task/attempt/dispatch/generation evidence. The finalizer verifies and consumes
+that evidence atomically before blocking the task and closing the
+attempt/session nonresumably; missing, stale, wrong-dispatch, or replayed
+evidence rejects without a result, replacement, or lifecycle mutation.
 
 ## Historical compatibility boundary
 

@@ -274,12 +274,12 @@ _WAIT_FOR_BOUND_WORKERS_INSTRUCTION = COORDINATOR_ACTION_SEMANTICS["wait_for_bou
 
 
 PUBLIC_TOOL_DESCRIPTIONS = {
-    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Host activation context must already be established by the host before this call. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale. action.kind=invoke_dispatches means: " + _INVOKE_DISPATCHES_INSTRUCTION + " It grants no wait permission. action.kind=wait_for_bound_workers means: " + _WAIT_FOR_BOUND_WORKERS_INSTRUCTION,
+    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Host activation context must already be established by the host before this call. Omit waves.worker.profile for the canonical server-owned phase owner; when an expert override is necessary, use only a phase/profile pair admitted by that phase's closed conditional enum. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale. action.kind=invoke_dispatches means: " + _INVOKE_DISPATCHES_INSTRUCTION + " It grants no wait permission. action.kind=wait_for_bound_workers means: " + _WAIT_FOR_BOUND_WORKERS_INSTRUCTION,
     "continue_orchestration": "Coordinator-only lifecycle operation. Preserve and submit the exact task_ref plus coordinator_ref returned by start_orchestration, together with the server-derived continuation step and result refs. Never infer authority from a host session, omit coordinator_ref, submit inline result bodies or replacement pipelines, or repeat a consumed dispatch. action.kind=invoke_dispatches means: " + _INVOKE_DISPATCHES_INSTRUCTION + " It grants no wait permission. action.kind=wait_for_bound_workers means: " + _WAIT_FOR_BOUND_WORKERS_INSTRUCTION,
-    "manage_orchestration": "Coordinator-only bounded task management. Every call requires the exact task_ref plus coordinator_ref returned by start_orchestration; Cortex derives project scope from task_ref and rejects project_root. For a durable worker question, call intent=question with exactly payload={question_ref}; Cortex renders the stored canonical prompt and all stored canonical options, so the coordinator never invents option IDs or counts. Optional localization is display-only and may omit localized_options; when localized_options is supplied it must contain one ordered display label for every stored canonical option. Never put localization at the top level and never invent plan-approval field names. On awaiting_user, render question and end the turn. On the next user message, submit the answer with the same payload.question_ref; on question_answered, forward the returned resume object unchanged to exactly the paused child with followup_task. The resume object's kind is not a worker_question action object: the child maps resume.kind to the string action field and preserves its own task_ref and assignment_ref. Bootstrap finalization is legal only after the exact bootstrap-missing sequence and is never a fallback for a child tool/protocol error. No ambient-authority recovery or project-wide prune/maintenance authority is model-facing. If coordinator_ref is lost, fail closed with coordinator_capability_lost and start a fresh user-authorized task; never reconstruct or mint authority from runtime state.",
+    "manage_orchestration": "Coordinator-only bounded task management. Every call requires the exact task_ref plus coordinator_ref returned by start_orchestration; Cortex derives project scope from task_ref and rejects project_root. For a durable worker question, call intent=question with exactly payload={question_ref}; Cortex renders the stored canonical prompt and all stored canonical options, so the coordinator never invents option IDs or counts. Optional localization is display-only and may omit localized_options; when localized_options is supplied it must contain one ordered display label for every stored canonical option. Never put localization at the top level and never invent plan-approval field names. On awaiting_user, render question and end the turn. On the next user message, submit the answer with the same payload.question_ref; on question_answered, forward the returned resume object unchanged to exactly the paused child with followup_task. The resume object's kind is not a worker_question action object: the child maps resume.kind to the action string and preserves its own task_ref and assignment_ref. Bootstrap finalization is legal only after the exact bootstrap-missing sequence and is never a fallback for a child tool/protocol error. A child's bare terminal marker is status text, never failure authority: call finalize_worker_failure only for the original dispatch and let Cortex verify and consume its current server-bound terminal evidence. Missing, stale, wrong-dispatch, or replayed evidence must leave the task unchanged. No ambient-authority recovery or project-wide prune/maintenance authority is model-facing. If coordinator_ref is lost, fail closed with coordinator_capability_lost and start a fresh user-authorized task; never reconstruct or mint authority from runtime state.",
     "worker_question": "Worker-only closed action union. Preserve the exact task_ref and assignment_ref from the native dispatch on every call and use one tools/list branch without cross-branch fields. action=ask requires top-level question_type and decision_scope plus question and recommendation. question_type=single_select requires options with stable option_id values and exactly one recommended_option_ids item; multi_select requires options and one or more recommended_option_ids; text requires recommended_answer. Never send answer_mode, context, type, multiple, or infer a question type from field presence. ask_batch applies the same question_type/decision_scope contract to every batch.questions item. ask_batch requires only batch beyond authorization/action; poll_batch requires only the exact scalar batch_ref. For action=poll, make exactly {action:\"poll\",task_ref:<same string>,assignment_ref:<same string>,question_ref:<exact returned scalar string>}. The coordinator resume value {kind:\"poll\",question_ref:...} is an instruction for followup_task, not a value for action: copy its kind into the action string and its question_ref string unchanged. Do not omit worker authorization, turn action into an object, mix ask/poll/batch fields, rename a ref, or replace its value. Questions may cover only task requirements, scope, acceptance, or explicit external/destructive authorization; they may never ask the user to repair Cortex validation, lifecycle, routing, ledger, or worker conditions. A retryable non-mutating recovery names every independent JSON pointer to fix on this same worker attempt exactly once.",
     "record_attempt_event": "Worker-only pre-completion event operation. Preserve the exact task_ref and assignment_ref from the native dispatch; identity is never inferred from a session, hook, environment, or process. Never call it after complete_attempt succeeds or to report completion. A nonretryable recovery ends every task-scoped worker call.",
-    "complete_attempt": "Worker-only compact v11 plan/outcome submission. Preserve exact task_ref and assignment_ref. Validation repair uses only the exact returned digest, directly copied opaque repair_capsule, and patches built from each self-contained repair diagnostic: use repair_pointer plus allowed_ops/code/message/field_schema; choose only an advertised patch operation. Never inspect Cortex source, installed plugin/cache, schemas, logs, ledger, session, environment, or hidden path after any error/recovery response. If the card is not executable, return exactly CORTEX_PROTOCOL_FAILURE retryable=false. A malformed capsule copy is retryable with the same repair; a structurally valid handle that fails integrity is terminal. ok=true with terminal=true ends every worker Cortex call: return exactly ATTEMPT_COMPLETED to the coordinator, with no reference, event write, or worker result read. A nonretryable recovery also ends every task-scoped worker call and is reported neutrally.",
+    "complete_attempt": "Worker-only compact v11 plan/outcome submission. Preserve exact task_ref and assignment_ref. Validation repair uses only the exact returned digest, directly copied opaque repair_capsule, and patches built from each self-contained repair diagnostic: use repair_pointer plus allowed_ops/code/message/field_schema; choose only an advertised patch operation. Never inspect Cortex source, installed plugin/cache, schemas, logs, ledger, session, environment, or hidden path after any error/recovery response. If the card is not executable, return exactly CORTEX_PROTOCOL_FAILURE retryable=false. A malformed capsule copy is retryable with the same repair; a structurally valid handle that fails integrity is terminal. ok=true with terminal=true ends every worker Cortex call: return exactly ATTEMPT_COMPLETED to the coordinator, with no reference, event write, or worker result read. A nonretryable recovery also ends every task-scoped worker call. Only recovery.terminal_failure with evidence=server_bound authorizes the status marker that asks the coordinator to attempt fixed cleanup; the marker itself is never authority.",
     "read_dispatch_briefing": "Worker-only scoped, bounded page read. Preserve the exact task_ref and assignment_ref from the native dispatch. The first call may be incomplete even without max_bytes: when complete=false, call this same tool again with the returned opaque next_cursor and the same authorization until complete=true. max_bytes is optional, bounded by the public schema, and never enables an unbounded read.",
     "read_worker_result": "Read canonical AttemptResult evidence. Immediately after every exact current child finishes, a coordinator sends task_ref+coordinator_ref+step; Cortex derives the complete current-wave result set in deterministic dispatch order and returns the only continuation accepted by continue_orchestration. Successor workers instead require task_ref+assignment_ref+attempt_result_ref and may read only predecessor refs granted in their dispatch before completion. The two closed forms cannot be mixed. A worker never reads its own completed result and makes no worker Cortex call after terminal=true.",
     "manage_governance": "Coordinator-only task-scoped governance. Every model-facing call requires the exact task_ref plus coordinator_ref returned by start_orchestration. Cortex derives project scope from task_ref, rejects project_root and ambient runtime authority, then enforces the signed action/scope claim before any mutation. Project-admin and lost-capability recovery actions are not MCP operations.",
@@ -308,6 +308,21 @@ def build_public_schemas(
     })
     public_phase_values = sorted(canonical_gates)
     public_profile_values = sorted(set(agents))
+    phase_profile_values: dict[str, list[str]] = {}
+    for gate in public_phase_values:
+        allowed: list[str] = []
+        for name, raw_profile in agents.items():
+            profile = raw_profile if isinstance(raw_profile, Mapping) else {}
+            gates = profile.get("gates") if isinstance(profile.get("gates"), list) else []
+            route_category = str(profile.get("route_category") or "")
+            if gate in gates or (gate == "implementation" and route_category == "manual"):
+                allowed.append(str(name))
+            elif not gates and not route_category and gate == "implementation":
+                # Pure schema tooling may supply only names/descriptions. Its
+                # narrow fallback mirrors the runtime's manual implementation
+                # rule without inventing ownership for any other phase.
+                allowed.append(str(name))
+        phase_profile_values[gate] = sorted(set(allowed))
     worker_ref_properties = {
         "task_ref": {"type": "string", "pattern": "^task-[0-9a-f]{12}$", "description": "Exact task_ref from the native dispatch."},
         "assignment_ref": {"type": "string", "pattern": "^assignment-v1-[0-9a-f]{64}$", "description": "Exact opaque assignment capability from the native dispatch."},
@@ -572,8 +587,10 @@ def build_public_schemas(
             },
             "profile": {
                 "type": "string",
-                "enum": public_profile_values,
-                "description": "Optional canonical Cortex profile name; omit it to use the phase owner.",
+                "description": (
+                    "Optional expert override. Omit it to use the canonical server-owned phase owner; "
+                    "when supplied, the selected phase branch below is the complete allowed enum."
+                ),
             },
             "objective": {"type": "string"},
             "paths": {"type": "array", "items": {"type": "string"}},
@@ -631,6 +648,21 @@ def build_public_schemas(
             "effort": {"type": "string", "description": "Optional expert reasoning-effort override."},
         },
         "required": ["phase"],
+        "oneOf": [
+            {
+                "properties": {
+                    "phase": {"const": gate},
+                    "profile": {
+                        "type": "string",
+                        "enum": phase_profile_values[gate],
+                        "description": (
+                            f"Optional expert override for phase {gate}; omit it to use the canonical server owner."
+                        ),
+                    },
+                },
+            }
+            for gate in public_phase_values
+        ],
     }
     V3_WAVE_SCHEMA = {
         "type": "object",
@@ -2875,6 +2907,12 @@ def serve_stdio(
                 and isinstance(allowed, list) and bool(allowed)
             ):
                 lines.append("instruction: apply only allowed_changes and retry the same operation; do not inspect Cortex implementation or private state.")
+            elif isinstance(recovery.get("terminal_failure"), Mapping):
+                lines.append(
+                    "instruction: stop task-scoped worker calls and return exactly CORTEX_ATTEMPT_FAILED retryable=false; "
+                    "the marker is status text only, and the coordinator must call the advertised finalize_worker_failure "
+                    "action for the original dispatch so Cortex can verify and consume its private server-bound evidence."
+                )
             else:
                 lines.append("instruction: stop this operation; do not retry or inspect Cortex implementation or private state.")
             text_value = "\n".join(lines)

@@ -34,7 +34,7 @@
 - A worker question is durable and attempt/revision-bound. A scalar answer or stable-option selection resumes the same child; its first worker call is exactly scalar `action:"poll"` with the original refs and `question_ref`. Never remove and recreate a question to fix a ref mismatch.
 - A lost native server receipt is recovered by inspecting canonical state before any new dispatch.
 - Bootstrap identity repair is allowed once on the same child by byte-copying the exact server-built `bootstrap_repair_message`. If that follow-up fails, call `finalize_bootstrap_failure` for terminal cleanup; do not retry or reconstruct the message.
-- Exact `CORTEX_ATTEMPT_FAILED retryable=false` is not a result handoff. Call `finalize_worker_failure` once for the original structured dispatch; never read a result, continue, copy child prose into the reason, or leave that session resumable.
+- Exact `CORTEX_ATTEMPT_FAILED retryable=false` is status text, not failure authority or a result handoff. Call `finalize_worker_failure` only after structured `recovery.terminal_failure.evidence="server_bound"`; Cortex verifies and consumes private current task/attempt/dispatch/generation evidence. Missing, stale, wrong-dispatch, or replayed evidence rejects without mutation.
 - A first briefing page can be incomplete; use its opaque `next_cursor` with the exact worker pair until `complete=true`. For any domain failure, use only top-level `error` and `recovery`; `same_operation` needs an explicit `allowed_changes` deterministic returned contract, while `terminal_stop` has action `none` and never authorizes retry or inspection.
 
 ## Maintenance and governance

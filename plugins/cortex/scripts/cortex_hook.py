@@ -23,6 +23,13 @@ HOOK_SCHEMA = "cortex/hook-telemetry/v11"
 LIFECYCLE_EVENTS = frozenset({"SessionStart", "SubagentStart", "SubagentStop", "Stop", "PostToolUse"})
 NATIVE_TOOLS = frozenset({"spawn_agent", "wait", "wait_agent"})
 
+# Codex validates hookSpecificOutput against the event-specific output wire.
+# These are the only registered events whose wire permits hookSpecificOutput;
+# the nested fields below are the complete fields this hook may emit. Internal
+# telemetry remains a private classification and is deliberately not serialized
+# into the host response.
+HOOK_SPECIFIC_OUTPUT_EVENTS = frozenset({"SessionStart", "SubagentStart", "PostToolUse"})
+
 # These constant markers intentionally contain no task, session, process,
 # dispatch, path, capability, or assignment authority. They are safe to render in a
 # host context window and safe when a hook sees only a partial event.
@@ -101,16 +108,23 @@ def hook_context(event: Mapping[str, Any]) -> str | None:
 
 
 def hook_response(event: Mapping[str, Any]) -> dict[str, Any]:
-    """Build bounded hook output without reflecting event values."""
-    record = telemetry_record(event)
-    if record is None:
+    """Build output accepted by the registered event's Codex output schema.
+
+    ``telemetry_record`` is intentionally computed only as an internal,
+    identity-free classification. Codex's strict event-specific wire schemas
+    do not define a ``telemetry`` field, so it is dropped at this boundary.
+    ``SubagentStop`` and ``Stop`` do not permit ``hookSpecificOutput`` at all.
+    """
+    kind = lifecycle_kind(event)
+    if kind is None:
         return {}
-    output: dict[str, Any] = {
-        "hookSpecificOutput": {
-            "hookEventName": lifecycle_kind(event),
-            "telemetry": record,
-        }
-    }
+    # Keep the classification available to direct callers/tests without
+    # leaking it into Codex's model-facing response schema.
+    _ = telemetry_record(event)
+    if kind not in HOOK_SPECIFIC_OUTPUT_EVENTS:
+        return {}
+
+    output: dict[str, Any] = {"hookSpecificOutput": {"hookEventName": kind}}
     context = hook_context(event)
     if context:
         output["hookSpecificOutput"]["additionalContext"] = context

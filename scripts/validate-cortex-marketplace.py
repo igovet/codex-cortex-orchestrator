@@ -303,9 +303,9 @@ def main() -> int:
         fail("coordinator operations must own lifecycle and result reading")
     if (
         shared.get("worker_final_response")
-        != "complete_attempt_ok_true_terminal_true_requires_worker_final_exactly_ATTEMPT_COMPLETED_with_no_attempt_result_ref_handoff; retryable_false_stops_task_scoped_calls_and_returns_exactly_CORTEX_ATTEMPT_FAILED_retryable_false_for_fixed_coordinator_cleanup"
+        != "complete_attempt_ok_true_terminal_true_requires_worker_final_exactly_ATTEMPT_COMPLETED_with_no_attempt_result_ref_handoff; retryable_false_stops_task_scoped_calls; only_recovery_terminal_failure_evidence_server_bound_requests_exact_CORTEX_ATTEMPT_FAILED_retryable_false_status_for_server_verified_cleanup"
     ):
-        fail("worker final response must select the exact success or nonretryable terminal marker")
+        fail("worker final response must keep terminal markers subordinate to server-bound evidence")
     if (
         shared.get("result_lifecycle")
         != "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker"

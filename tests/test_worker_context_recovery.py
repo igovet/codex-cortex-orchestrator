@@ -52,6 +52,61 @@ class WorkerContextRecoveryTests(unittest.TestCase):
         for private in ("private-child-id", "private-session-id", "/private/project", "private-bearer", "task-private"):
             self.assertNotIn(private, rendered)
         self.assertNotIn("additionalContext", cortex_hook.hook_response(event)["hookSpecificOutput"])
+        self.assertNotIn("telemetry", cortex_hook.hook_response(event)["hookSpecificOutput"])
+
+    def test_hook_response_matches_the_installed_codex_event_output_schemas(self):
+        # Codex 0.149.0's generated command-output schemas use strict nested
+        # objects. These are the fields this hook emits; PostToolUse also has
+        # a Codex-only updatedMCPToolOutput field that Cortex does not use.
+        # SubagentStop and Stop do not allow hookSpecificOutput.
+        allowed_fields = {
+            "SessionStart": {"hookEventName", "additionalContext"},
+            "SubagentStart": {"hookEventName", "additionalContext"},
+            "PostToolUse": {"hookEventName", "additionalContext"},
+        }
+        for event_name in cortex_hook.LIFECYCLE_EVENTS:
+            event = {"hook_event_name": event_name}
+            if event_name == "PostToolUse":
+                event["tool_name"] = "wait"
+            payload = cortex_hook.hook_response(event)
+            if event_name not in allowed_fields:
+                self.assertEqual(payload, {}, event_name)
+                continue
+            self.assertEqual(set(payload), {"hookSpecificOutput"}, event_name)
+            specific = payload["hookSpecificOutput"]
+            self.assertTrue(set(specific) <= allowed_fields[event_name], event_name)
+            self.assertEqual(specific["hookEventName"], event_name)
+            self.assertNotIn("telemetry", specific)
+
+    def test_stdio_hook_emits_valid_json_and_event_specific_schema_for_all_hooks(self):
+        command = [sys.executable, str(SCRIPTS / "cortex_hook.py")]
+        expected_nested = {
+            "SessionStart": {"hookEventName"},
+            "SubagentStart": {"hookEventName"},
+            "PostToolUse": {"hookEventName"},
+            "SubagentStop": set(),
+            "Stop": set(),
+        }
+        for event_name, expected_fields in expected_nested.items():
+            event = {"hook_event_name": event_name}
+            if event_name == "PostToolUse":
+                event["tool_name"] = "wait"
+            completed = subprocess.run(
+                command,
+                input=json.dumps(event),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(completed.stderr, "", event_name)
+            payload = json.loads(completed.stdout)
+            if not expected_fields:
+                self.assertEqual(payload, {}, event_name)
+                continue
+            specific = payload["hookSpecificOutput"]
+            self.assertEqual(set(specific), expected_fields, event_name)
+            self.assertEqual(specific["hookEventName"], event_name)
+            self.assertNotIn("telemetry", specific)
 
     def test_compaction_handoff_and_explicit_loss_are_private_and_fail_closed(self):
         handoff = cortex_hook.hook_response({"hook_event_name": "SessionStart", "source": "compact"})
@@ -108,7 +163,8 @@ class WorkerContextRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(completed.stderr, "")
         payload = json.loads(completed.stdout)
-        self.assertEqual(payload["hookSpecificOutput"]["telemetry"]["event"], "native_wait")
+        self.assertEqual(payload["hookSpecificOutput"], {"hookEventName": "PostToolUse"})
+        self.assertNotIn("telemetry", payload["hookSpecificOutput"])
         self.assertNotIn("private-child-id", completed.stdout)
         self.assertNotIn("private diagnostic", completed.stdout)
 

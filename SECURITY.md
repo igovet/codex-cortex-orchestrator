@@ -98,12 +98,15 @@ Planning and outcome repair use only a digest- and capsule-bound patch through
 `complete_attempt`. Bootstrap repair may be applied once to the same native
 child by byte-copying the server-built `bootstrap_repair_message` unchanged;
 if that repair fails, `finalize_bootstrap_failure` performs terminal cleanup.
-After an already-started child returns exact
-`CORTEX_ATTEMPT_FAILED retryable=false`, `finalize_worker_failure` accepts only
-the original structured `dispatch_ref` and fixed sanitized reason code. It
-terminalizes that exact current assignment atomically, keeps its briefing
-receipt, events, and repair escrow, and creates no result or replacement.
-Arbitrary child prose is never stored as the reason.
+The exact child marker `CORTEX_ATTEMPT_FAILED retryable=false` is status only
+and never authorizes failure. `finalize_worker_failure` accepts the original
+structured `dispatch_ref` and fixed sanitized reason only after a structured
+`recovery.terminal_failure.evidence="server_bound"` action backed by current,
+unexpired private task/attempt/dispatch/generation evidence. It verifies and
+consumes that evidence atomically before terminalizing the exact assignment;
+missing, stale, wrong-dispatch, expired, or replayed evidence rejects without
+domain mutation. Expired control evidence is removed by bounded exact-key
+cleanup. Arbitrary child prose is never stored as the reason.
 An issued completion repair is immutable for its active attempt: full draft
 replay and caller-correctable patch errors return the same handle, digest, and
 diagnostic path scope. A malformed model copy of the handle is caller-correctable

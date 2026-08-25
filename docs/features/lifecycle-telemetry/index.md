@@ -12,7 +12,7 @@ ledger and explicit capability-scoped public operations own attempts,
 ## Key files
 
 - [hooks.json](../../../plugins/cortex/hooks/hooks.json) registers the five lifecycle hooks.
-- [cortex_hook.py](../../../plugins/cortex/scripts/cortex_hook.py) emits sanitized, identity-free telemetry guidance.
+- [cortex_hook.py](../../../plugins/cortex/scripts/cortex_hook.py) classifies sanitized, identity-free telemetry and emits only Codex-schema-approved guidance.
 - [profiles.json](../../../plugins/cortex/profiles.json) is the profile source.
 - [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns canonical state.
 - [context_compiler.py](../../../plugins/cortex/scripts/cortex_runtime/context_compiler.py) builds bounded context.
@@ -20,10 +20,13 @@ ledger and explicit capability-scoped public operations own attempts,
 ## Behavior
 
 `SessionStart` may remind a coordinator to preserve its already-held exact
-capability pair through resume, clear, or compact. `SubagentStart`,
-`SubagentStop`, and `Stop` emit only neutral native-lifecycle observations.
-`PostToolUse` is limited to exact native `spawn_agent`, `wait`, and
-`wait_agent` calls. There is no `PreToolUse` hook.
+capability pair through resume, clear, or compact. `SubagentStart` and
+`PostToolUse` return only their event name plus optional `additionalContext`,
+using the fields permitted by Codex's event-specific output schemas.
+`SubagentStop` and `Stop` return `{}` because their output schemas do not
+permit `hookSpecificOutput`. Internal lifecycle classifications are dropped at
+the host boundary; `PostToolUse` is limited to exact native `spawn_agent`,
+`wait`, and `wait_agent` calls. There is no `PreToolUse` hook.
 
 No hook binds a child, carries or reconstructs a capability, reads or writes
 the ledger, records an attempt observation, selects a task, authorizes a
@@ -43,10 +46,11 @@ responses, credentials, tokens, or private worker diagnostics.
 
 ## Privacy and bounds
 
-Telemetry output is bounded, sanitized JSON and never contains a capability,
-task identity, assignment identity, briefing path, ledger path, or raw host
-response. Ambiguous or missing state produces neutral fail-closed guidance;
-it is never guessed from a session, environment, path, database, or thread.
+Hook output is bounded, sanitized JSON and never contains a capability, task
+identity, assignment identity, briefing path, ledger path, raw host response,
+or an extension field outside the registered event's Codex schema. Ambiguous
+or missing state produces neutral fail-closed guidance; it is never guessed
+from a session, environment, path, database, or thread.
 
 ## Installation and verification
 

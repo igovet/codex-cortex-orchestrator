@@ -77,11 +77,14 @@ not values a child must transport to its parent.
 Bootstrap recovery is bounded to one same-child follow-up using the exact
 server-built `bootstrap_repair_message` byte-for-byte. A failed repair is
 closed by `finalize_bootstrap_failure`, which performs terminal cleanup.
-An already-started worker's exact nonretryable terminal marker is closed by
-`finalize_worker_failure` for its original structured dispatch. The same
-transaction blocks the task and makes the attempt/session terminal and
-nonresumable without deleting briefing, event, or repair evidence and without
-creating an AttemptResult or replacement.
+An already-started worker's exact nonretryable terminal marker is status text
+only. Structured `recovery.terminal_failure.evidence="server_bound"` records
+private current task/attempt/dispatch/generation evidence; only then may the
+coordinator call `finalize_worker_failure` for the original dispatch. The same
+transaction verifies and consumes the evidence, blocks the task, and makes the
+attempt/session terminal and nonresumable without an AttemptResult or
+replacement. Missing, stale, wrong-dispatch, and replayed evidence cannot
+mutate lifecycle state.
 
 ## Governance and storage
 

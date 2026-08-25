@@ -85,6 +85,7 @@ from cortex_runtime.ledger_db import (
     delete_operations_for_tasks as db_delete_operations_for_tasks,
     delete_task_manifest_snapshots as db_delete_task_manifest_snapshots,
     delete_tasks as db_delete_tasks,
+    delete_task_document as db_delete_task_document,
     ensure_database as ensure_ledger_database,
     get_classification as db_get_classification,
     get_global as db_get_global,
@@ -4550,10 +4551,56 @@ def guard_revision(state: dict[str, Any], expected: int | None) -> None:
         raise ValueError(f"stale revision: expected {expected}, actual {state['revision']}")
 
 
+def _terminal_failure_evidence_expired(value: object) -> bool:
+    """Return whether one private control record has an aware past expiry."""
+    if not isinstance(value, Mapping):
+        return False
+    try:
+        expires_at = datetime.fromisoformat(str(value.get("expires_at") or ""))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        expires_at.tzinfo is not None
+        and expires_at <= datetime.now(timezone.utc)
+    )
+
+
 def save_state(task_dir: Path, state_path: Path, state: dict[str, Any], event: str, detail: str) -> dict[str, Any]:
     state["revision"] += 1
     state["updated_at"] = now()
-    db_update_task_state(_ledger_root_for_artifact(task_dir), state, event=event, detail=detail)
+    root = _ledger_root_for_artifact(task_dir)
+    db_update_task_state(root, state, event=event, detail=detail)
+    # Private terminal-failure evidence is valid only while its exact attempt
+    # generation remains the current nonterminal assignment.  Any ordinary
+    # task terminalization, attempt completion, invalidation, or reissue
+    # removes it as audit/control cleanup; it never becomes domain history.
+    evidence_key = globals().get("TERMINAL_FAILURE_EVIDENCE_KEY")
+    evidence_schema = globals().get("TERMINAL_FAILURE_EVIDENCE_SCHEMA")
+    if isinstance(evidence_key, str) and isinstance(evidence_schema, str):
+        evidence = db_get_task_document(root, str(state.get("task_id") or ""), evidence_key)
+        if isinstance(evidence, dict) and evidence.get("schema") == evidence_schema:
+            attempt_id = str(evidence.get("attempt_id") or "")
+            matches = [
+                item for item in state.get("attempts") or []
+                if isinstance(item, dict) and str(item.get("attempt_id") or "") == attempt_id
+            ]
+            current = matches[0] if len(matches) == 1 else None
+            claim = (
+                current.get("worker_assignment")
+                if isinstance(current, dict) and isinstance(current.get("worker_assignment"), dict)
+                else {}
+            )
+            remains_current = bool(
+                isinstance(current, dict)
+                and not _terminal_failure_evidence_expired(evidence)
+                and state.get("status") == "active"
+                and current.get("status") in {AWAITING_HOST_SPAWN, "running", "waiting_question"}
+                and not current.get("invalidated")
+                and str(current.get("dispatch_ref") or "") == str(evidence.get("dispatch_ref") or "")
+                and int(claim.get("generation") or 0) == int(evidence.get("assignment_generation") or 0)
+            )
+            if not remains_current:
+                db_delete_task_document(root, str(state.get("task_id") or ""), evidence_key)
     try:
         _sync_plan_tracker_document(task_dir, state, event=event, detail=detail)
     except (OSError, ValueError, TypeError, sqlite3.Error):
@@ -7917,6 +7964,18 @@ def _v11_schema_value_diagnostics(
     ) -> None:
         variants = node.get("oneOf")
         if isinstance(variants, list) and variants:
+            # JSON Schema applies sibling constraints together with ``oneOf``.
+            # Validate the common closed object first, then select exactly one
+            # conditional branch.  The start worker schema uses this to keep
+            # phase/profile ownership model-visible without duplicating its
+            # complete worker form in every phase branch.
+            common = {key: item for key, item in node.items() if key != "oneOf"}
+            if common:
+                common_diagnostics: list[dict[str, Any]] = []
+                visit(candidate, common, at, common_diagnostics)
+                if common_diagnostics:
+                    sink.extend(common_diagnostics)
+                    return
             evaluated: list[tuple[int, list[dict[str, Any]]]] = []
             for variant in variants:
                 if not isinstance(variant, Mapping):
@@ -8435,6 +8494,172 @@ def authorize_worker_assignment(
         raise
     except (ValueError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:
         raise WorkerAssignmentError() from exc
+
+
+# A native child's final text is model-authored and therefore cannot be task
+# failure authority.  The only authority accepted by finalize_worker_failure
+# is this private, single-use control record, created after an authenticated
+# assignment-bound MCP operation has itself produced a closed nonretryable
+# terminal response.  ``recovery.state_mutated=false`` continues to describe
+# the rejected domain operation: this audit/control evidence does not apply
+# that operation's requested state change or consume its attempt budget.
+TERMINAL_FAILURE_EVIDENCE_SCHEMA = "cortex/terminal-failure-evidence/v1"
+TERMINAL_FAILURE_EVIDENCE_KEY = "terminal_failure_evidence"
+TERMINAL_FAILURE_EVIDENCE_TTL_SECONDS = 60 * 60
+TERMINAL_FAILURE_ACTION = {
+    "evidence": "server_bound",
+    "coordinator_intent": "finalize_worker_failure",
+    "reason_code": "worker_nonretryable_terminal",
+}
+TERMINAL_FAILURE_CODES_BY_OPERATION: dict[str, frozenset[str]] = {
+    "worker_question": frozenset({
+        "worker_question_reference_mismatch",
+        "worker_question_unavailable",
+    }),
+    "record_attempt_event": frozenset({"record_attempt_event_closed"}),
+    "complete_attempt": frozenset({"complete_attempt_repair_rejected"}),
+    "read_dispatch_briefing": frozenset({
+        "dispatch_briefing_response_invalid",
+        "dispatch_briefing_unavailable",
+    }),
+    "read_worker_result": frozenset({"read_worker_result_not_authorized"}),
+}
+TERMINAL_FAILURE_CATEGORIES = frozenset({"authority", "integrity", "stale", "unavailable"})
+_WORKER_RESPONSE_FAMILY = {
+    "worker_question": "worker.question",
+    "record_attempt_event": "worker.event",
+    "complete_attempt": "worker.completion",
+    "read_dispatch_briefing": "worker.briefing",
+    "read_worker_result": "result.read",
+}
+
+
+def _terminal_failure_fact(
+    operation: str,
+    response: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    """Return one allowlisted server terminal classification, never prose."""
+    if response.get("ok") is not False:
+        return None
+    recovery = response.get("recovery")
+    error = response.get("error")
+    if not isinstance(recovery, Mapping) or not isinstance(error, Mapping):
+        return None
+    if (
+        recovery.get("kind") != "terminal_stop"
+        or recovery.get("retryable") is not False
+        or recovery.get("state_mutated") is not False
+        or str(recovery.get("operation") or "") != operation
+    ):
+        return None
+    category = str(error.get("category") or "")
+    code = str(error.get("code") or "")
+    if category not in TERMINAL_FAILURE_CATEGORIES:
+        return None
+    if code not in TERMINAL_FAILURE_CODES_BY_OPERATION.get(operation, frozenset()):
+        return None
+    return category, code
+
+
+def _with_terminal_failure_evidence(
+    operation: str,
+    params: dict[str, Any],
+    response: dict[str, Any],
+    *,
+    authority: tuple[Path, Path, dict[str, Any], dict[str, Any], str] | None = None,
+) -> dict[str, Any]:
+    """Persist or clear the current private terminal control evidence.
+
+    There is deliberately no receipt identifier in the public response.  The
+    coordinator already has the original dispatch reference, while Cortex can
+    resolve the exact task/attempt/generation from the authenticated worker
+    call and later compare that binding under the task mutation lock.
+    """
+    if operation not in _WORKER_RESPONSE_FAMILY or not isinstance(response, dict):
+        return response
+    fact = _terminal_failure_fact(operation, response)
+    try:
+        if authority is None:
+            authority = authorize_worker_assignment(params, operation)
+        project, task_dir, state, attempt, _profile = authority
+        root = ledger_root({"project_root": str(project)})
+        task_id = str(state.get("task_id") or "")
+        attempt_id = str(attempt.get("attempt_id") or "")
+        dispatch_ref = str(attempt.get("dispatch_ref") or "")
+        claim = attempt.get("worker_assignment") if isinstance(attempt.get("worker_assignment"), dict) else {}
+        generation = int(claim.get("generation") or 0)
+        with state_lock(root, operation="terminal_failure_evidence", task_id=task_id):
+            fresh = _v11_task_state(root, task_id)
+            if fresh is None or fresh[0] != task_dir:
+                return response
+            _fresh_dir, fresh_state, _fresh_task = fresh
+            matches = [
+                item for item in fresh_state.get("attempts") or []
+                if isinstance(item, dict) and str(item.get("attempt_id") or "") == attempt_id
+            ]
+            if len(matches) != 1:
+                return response
+            current = matches[0]
+            current_claim = (
+                current.get("worker_assignment")
+                if isinstance(current.get("worker_assignment"), dict) else {}
+            )
+            current_binding = (
+                str(current.get("dispatch_ref") or "") == dispatch_ref
+                and int(current_claim.get("generation") or 0) == generation
+                and not current.get("invalidated")
+                and str(current.get("gate") or "") in set(active_gates(fresh_state))
+            )
+            existing_evidence = db_get_task_document(
+                root, task_id, TERMINAL_FAILURE_EVIDENCE_KEY,
+            )
+            if _terminal_failure_evidence_expired(existing_evidence):
+                db_delete_task_document(root, task_id, TERMINAL_FAILURE_EVIDENCE_KEY)
+            if fact is None:
+                # A later authenticated current worker response (including a
+                # successful completion or a retryable repair) makes any
+                # older terminal observation stale. This also cleans an old
+                # attempt's record when a replacement generation starts.
+                if current_binding:
+                    db_delete_task_document(root, task_id, TERMINAL_FAILURE_EVIDENCE_KEY)
+                return response
+            if (
+                not current_binding
+                or fresh_state.get("status") != "active"
+                or current.get("status") not in {AWAITING_HOST_SPAWN, "running", "waiting_question"}
+                or current.get("assignment_delivery_status") != "delivered"
+                or current.get("attempt_result_ref")
+                or attempt_protocol.get_attempt_result(root, task_id=task_id, attempt_id=attempt_id) is not None
+            ):
+                return response
+            issued_at = now()
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=TERMINAL_FAILURE_EVIDENCE_TTL_SECONDS)
+            ).isoformat()
+            category, code = fact
+            db_put_task_document(root, task_id, TERMINAL_FAILURE_EVIDENCE_KEY, {
+                "schema": TERMINAL_FAILURE_EVIDENCE_SCHEMA,
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "dispatch_ref": dispatch_ref,
+                "assignment_generation": generation,
+                "operation": operation,
+                "error_category": category,
+                "error_code": code,
+                "issued_at": issued_at,
+                "expires_at": expires_at,
+                "updated_at": issued_at,
+            })
+    except (ValueError, TypeError, OSError, RuntimeError, sqlite3.Error):
+        # A terminal response without durable evidence remains a terminal stop
+        # for the worker, but must not advertise coordinator finalization.
+        return response
+
+    updated = json.loads(json.dumps(response, ensure_ascii=False))
+    recovery = updated.get("recovery")
+    if isinstance(recovery, dict):
+        recovery["terminal_failure"] = dict(TERMINAL_FAILURE_ACTION)
+    return validate_v11_response(_WORKER_RESPONSE_FAMILY[operation], updated)
 
 
 class OperationRegistryError(ValueError):
@@ -9592,13 +9817,16 @@ def _v11_compact_waves(
                         field_schema={"type": "string", "enum": sorted(AGENTS)},
                     )
                 elif not profile_can_own_gate(profile, gate):
-                    supported = PROFILES[profile].get("gates", []) or ["implementation"]
+                    allowed_profiles = sorted(
+                        candidate for candidate in AGENTS
+                        if profile_can_own_gate(candidate, gate)
+                    )
                     wave_diag(
                         f"{worker_path}.profile",
                         f"worker profile {profile!r} cannot own phase {gate!r}",
-                        f"a profile owning {gate!r}; supported phase(s) for {profile!r}: {', '.join(supported)}",
+                        f"one exact profile allowed for phase {gate!r}: {', '.join(allowed_profiles)}",
                         received=raw_profile,
-                        field_schema={"type": "string", "enum": sorted(AGENTS), "rule": f"profile must own phase {gate}"},
+                        field_schema={"type": "string", "enum": allowed_profiles},
                     )
             for model_key in ("model", "user_requested_model"):
                 if model_key in worker:
@@ -12174,7 +12402,7 @@ def _v11_finalize_worker_failure(
     task_ref: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """Close the exact current worker after a true nonretryable child terminal."""
+    """Consume current server evidence and close its exact worker once."""
     if str(params.get("reason") or "").strip():
         raise ValueError("finalize_worker_failure accepts only the fixed sanitized reason_code")
     payload = params.get("payload")
@@ -12191,7 +12419,7 @@ def _v11_finalize_worker_failure(
 
     root = ledger_root(params)
     task_id = str(state.get("task_id") or "")
-    terminal_record = {"dispatch_ref": dispatch_ref, "reason_code": reason_code}
+    expired_evidence = False
     with state_lock(root, operation="finalize_worker_failure", task_id=task_id):
         fresh = _v11_task_state(root, task_id)
         if fresh is None:
@@ -12199,23 +12427,6 @@ def _v11_finalize_worker_failure(
         fresh_dir, fresh_state, _fresh_task = fresh
         if fresh_dir != task_dir:
             raise ValueError("worker failure task projection is inconsistent")
-        prior = fresh_state.get("worker_terminal_failure")
-        if isinstance(prior, dict) and prior == terminal_record:
-            return {
-                "schema": LIFECYCLE_RUNTIME_SCHEMA,
-                "ok": True,
-                "lifecycle": "finalize_worker_failure",
-                "transaction_id": None,
-                "task_id": task_id,
-                "wave_id": None,
-                "state": "worker_terminal_failure",
-                "spawn_requests": [],
-                "diagnostics": [],
-                "result": {"finalized": True, "idempotent": True},
-                "code": "worker_terminal_failure",
-                "recoverable": False,
-                "next_action": "Worker failure is already terminal; do not continue or read a worker result for this dispatch.",
-            }
         matching = [
             item for item in fresh_state.get("attempts") or []
             if isinstance(item, dict) and str(item.get("dispatch_ref") or "") == dispatch_ref
@@ -12224,48 +12435,98 @@ def _v11_finalize_worker_failure(
             raise ValueError("worker failure dispatch does not identify exactly one task attempt")
         attempt = matching[0]
         attempt_id = str(attempt.get("attempt_id") or "")
-        sessions = [
-            item for item in db_list_worker_sessions(root, task_id)
-            if str(item.get("attempt_id") or "") == attempt_id
-        ]
+        claim = attempt.get("worker_assignment") if isinstance(attempt.get("worker_assignment"), dict) else {}
+        assignment_generation = int(claim.get("generation") or 0)
+        evidence = db_get_task_document(root, task_id, TERMINAL_FAILURE_EVIDENCE_KEY)
+        expected_evidence_fields = {
+            "schema", "task_id", "attempt_id", "dispatch_ref", "assignment_generation",
+            "operation", "error_category", "error_code", "issued_at", "expires_at", "updated_at",
+        }
+        if not isinstance(evidence, dict) or set(evidence) != expected_evidence_fields:
+            raise ValueError("worker terminal failure has no current server-bound evidence")
+        error_category = str(evidence.get("error_category") or "")
+        error_code = str(evidence.get("error_code") or "")
+        operation = str(evidence.get("operation") or "")
+        try:
+            expires_at = datetime.fromisoformat(str(evidence.get("expires_at") or ""))
+            if expires_at.tzinfo is None:
+                raise ValueError("naive expiry")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("worker terminal failure evidence expiry is invalid") from exc
         if (
-            fresh_state.get("status") != "active"
-            or attempt.get("invalidated")
-            or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running", "waiting_question"}
-            or attempt.get("assignment_delivery_status") != "delivered"
-            or str(attempt.get("gate") or "") not in set(active_gates(fresh_state))
-            or attempt.get("attempt_result_ref")
-            or attempt_protocol.get_attempt_result(root, task_id=task_id, attempt_id=attempt_id) is not None
-            or not sessions
-            or not any(bool(item.get("resumable")) for item in sessions)
+            evidence.get("schema") != TERMINAL_FAILURE_EVIDENCE_SCHEMA
+            or str(evidence.get("task_id") or "") != task_id
+            or str(evidence.get("attempt_id") or "") != attempt_id
+            or str(evidence.get("dispatch_ref") or "") != dispatch_ref
+            or int(evidence.get("assignment_generation") or 0) != assignment_generation
+            or error_category not in TERMINAL_FAILURE_CATEGORIES
+            or error_code not in TERMINAL_FAILURE_CODES_BY_OPERATION.get(operation, frozenset())
         ):
-            raise ValueError("worker failure target is not the current bound nonterminal assignment")
+            raise ValueError("worker terminal failure evidence is stale or bound to another assignment")
+        if expires_at <= datetime.now(timezone.utc):
+            # Commit deletion of this exact, fully bound expired control
+            # record, then report the lifecycle rejection outside the
+            # transaction. Raising here would roll the bounded cleanup back.
+            if not db_delete_task_document(root, task_id, TERMINAL_FAILURE_EVIDENCE_KEY):
+                raise ValueError("worker terminal failure evidence was already consumed")
+            expired_evidence = True
+        else:
+            sessions = [
+                item for item in db_list_worker_sessions(root, task_id)
+                if str(item.get("attempt_id") or "") == attempt_id
+            ]
+            if (
+                fresh_state.get("status") != "active"
+                or attempt.get("invalidated")
+                or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running", "waiting_question"}
+                or attempt.get("assignment_delivery_status") != "delivered"
+                or str(attempt.get("gate") or "") not in set(active_gates(fresh_state))
+                or attempt.get("attempt_result_ref")
+                or attempt_protocol.get_attempt_result(root, task_id=task_id, attempt_id=attempt_id) is not None
+                or not sessions
+                or not any(bool(item.get("resumable")) for item in sessions)
+            ):
+                raise ValueError("worker failure target is not the current bound nonterminal assignment")
 
-        terminal_at = now()
-        attempt["status"] = "failed"
-        attempt["lifecycle_status"] = "worker_terminal_failure"
-        attempt["assignment_delivery_status"] = "worker_terminal_failure"
-        attempt["host_resumable"] = False
-        attempt["finalized_at"] = terminal_at
-        attempt["finalization_reason"] = reason_code
-        fresh_state["status"] = "blocked"
-        fresh_state["blocked_gate"] = str(attempt.get("gate") or "")
-        fresh_state["blocked_reason"] = reason_code
-        fresh_state["worker_terminal_failure"] = terminal_record
-        for session in sessions:
-            db_put_worker_session(root, {
-                **session,
-                "status": "terminated_unavailable",
-                "resumable": False,
-                "terminated_at": terminal_at,
-            })
-        save_state(
-            fresh_dir,
-            fresh_dir / "state.sqlite",
-            fresh_state,
-            "worker_terminal_failure",
-            "current native worker returned a nonretryable terminal failure",
-        )
+            # Consumption and task terminalization share the same SQLite-backed
+            # state lock transaction. A crash cannot publish a blocked task while
+            # leaving replayable control evidence, or consume evidence without the
+            # corresponding terminal state transition.
+            if not db_delete_task_document(root, task_id, TERMINAL_FAILURE_EVIDENCE_KEY):
+                raise ValueError("worker terminal failure evidence was already consumed")
+
+            terminal_at = now()
+            attempt["status"] = "failed"
+            attempt["lifecycle_status"] = "worker_terminal_failure"
+            attempt["assignment_delivery_status"] = "worker_terminal_failure"
+            attempt["host_resumable"] = False
+            attempt["finalized_at"] = terminal_at
+            attempt["finalization_reason"] = reason_code
+            fresh_state["status"] = "blocked"
+            fresh_state["blocked_gate"] = str(attempt.get("gate") or "")
+            fresh_state["blocked_reason"] = reason_code
+            fresh_state["worker_terminal_failure"] = {
+                "dispatch_ref": dispatch_ref,
+                "reason_code": reason_code,
+                "error_category": error_category,
+                "error_code": error_code,
+            }
+            for session in sessions:
+                db_put_worker_session(root, {
+                    **session,
+                    "status": "terminated_unavailable",
+                    "resumable": False,
+                    "terminated_at": terminal_at,
+                })
+            save_state(
+                fresh_dir,
+                fresh_dir / "state.sqlite",
+                fresh_state,
+                "worker_terminal_failure",
+                "current native worker returned a nonretryable terminal failure",
+            )
+    if expired_evidence:
+        raise ValueError("worker terminal failure evidence is expired")
     return {
         "schema": LIFECYCLE_RUNTIME_SCHEMA,
         "ok": True,
@@ -12853,6 +13114,53 @@ from cortex_runtime.attempt_facade import (
     read_worker_result,
 )
 
+# Wrap the five assignment-bound public operations at the facade boundary.
+# Their domain handlers stay focused on their own transaction; only this
+# boundary may turn a verified terminal response into coordinator-consumable
+# private control evidence.
+_worker_question_operation = worker_question
+_record_worker_attempt_event_operation = record_worker_attempt_event
+_complete_worker_attempt_operation = complete_worker_attempt
+_read_dispatch_briefing_operation = read_dispatch_briefing
+_read_worker_result_operation = read_worker_result
+
+
+def _run_worker_public_operation(
+    operation: str,
+    handler: Callable[[dict[str, Any]], dict[str, Any]],
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    authority = None
+    with contextlib.suppress(WorkerAssignmentError):
+        authority = authorize_worker_assignment(params, operation)
+    return _with_terminal_failure_evidence(
+        operation, params, handler(params), authority=authority,
+    )
+
+
+def worker_question(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_worker_public_operation("worker_question", _worker_question_operation, params)
+
+
+def record_worker_attempt_event(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_worker_public_operation(
+        "record_attempt_event", _record_worker_attempt_event_operation, params,
+    )
+
+
+def complete_worker_attempt(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_worker_public_operation("complete_attempt", _complete_worker_attempt_operation, params)
+
+
+def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_worker_public_operation(
+        "read_dispatch_briefing", _read_dispatch_briefing_operation, params,
+    )
+
+
+def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
+    return _run_worker_public_operation("read_worker_result", _read_worker_result_operation, params)
+
 
 PIPELINE_OPERATION_SCHEMA = {"type": "object", "properties": {"op": {"type": "string", "enum": ["add", "remove", "move", "replace", "rework"]}, "gate": {"type": "string"}, "before": {"type": "string"}, "after": {"type": "string"}, "index": {"type": "integer"}, "with": {"type": "array", "items": {"type": "string"}}}, "required": ["op", "gate"]}
 QUESTION_OPTION_SCHEMA = {
@@ -12892,7 +13200,7 @@ QUESTION_TOOL_SCHEMA = {
     "required": ["task_id", "principal"],
 }
 PUBLIC_SCHEMA_REGISTRY = build_public_schemas(
-    agents=AGENTS,
+    agents=PROFILES,
     max_work_packages=MAX_WORK_PACKAGES,
     max_microtasks_per_package=MAX_MICROTASKS_PER_PACKAGE,
     max_discovery_domains=MAX_DISCOVERY_DOMAINS,

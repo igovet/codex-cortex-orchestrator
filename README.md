@@ -292,7 +292,12 @@ for the separate reviewer-agent flow.
 > a new plugin build may require renewed approval even when the hook names have
 > not changed.
 
-Cortex registers exactly five telemetry-only lifecycle hooks:
+Cortex registers exactly five telemetry-only lifecycle hooks. Hook output is
+validated against Codex's event-specific command-output schemas: only
+`SessionStart`, `SubagentStart`, and `PostToolUse` may return
+`hookSpecificOutput`, and the nested output contains only `hookEventName` plus
+optional `additionalContext`; `SubagentStop` and `Stop` return `{}`. Internal
+telemetry classifications are dropped at this boundary.
 
 | Hook | Purpose |
 | --- | --- |
@@ -1026,12 +1031,17 @@ Briefings have non-blocking compactness targets:
 1 KiB for the bootstrap, 12 KiB for ordinary work, and 18 KiB for harvest
 work. They are prompt guidance, not lifecycle authority.
 
-If a child ends with exact `CORTEX_ATTEMPT_FAILED retryable=false`, the
-coordinator calls fixed `finalize_worker_failure` with the original structured
-`dispatch_ref`. Cortex atomically blocks the task, terminalizes that attempt
-and session without making them resumable, preserves briefing receipts,
-events, and repair escrow for forensics, and creates no `AttemptResult`,
-replacement, or continuation.
+The exact child marker `CORTEX_ATTEMPT_FAILED retryable=false` is status text,
+not failure authority. Cortex asks for fixed `finalize_worker_failure` only by
+returning structured `recovery.terminal_failure.evidence="server_bound"` after
+it has recorded private current task/attempt/dispatch/generation evidence. The
+coordinator then supplies only the original structured `dispatch_ref`; no new
+receipt ID crosses the model boundary. Cortex atomically verifies and consumes
+that evidence before blocking the task and terminalizing the attempt/session.
+Missing, stale, wrong-dispatch, or replayed evidence rejects without mutation.
+The rejected worker operation's `state_mutated=false` remains truthful because
+private failure evidence is audit/control state, not application of the domain
+operation. Retryable recovery never records terminal evidence.
 
 Governance authorization is server-owned and capability-scoped; it is never
 returned as a raw capability or recovery proof in an MCP response. The project

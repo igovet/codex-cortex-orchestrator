@@ -279,6 +279,36 @@ class PublicSchemaParityTests(unittest.TestCase):
                     {"user_request": "canonical parity", "complexity": "C1"},
                 )
 
+    def test_start_worker_schema_exposes_closed_phase_profile_pairs(self) -> None:
+        worker = (
+            cortex.PUBLIC_SCHEMA_REGISTRY["start_orchestration"]["properties"]["waves"]
+            ["items"]["properties"]["workers"]["items"]
+        )
+        self.assertNotIn("enum", worker["properties"]["profile"])
+        branches = {
+            branch["properties"]["phase"]["const"]: branch
+            for branch in worker["oneOf"]
+        }
+        self.assertIn("general", branches["implementation"]["properties"]["profile"]["enum"])
+        self.assertIn("qa_engineer", branches["qa"]["properties"]["profile"]["enum"])
+        self.assertNotIn("general", branches["qa"]["properties"]["profile"]["enum"])
+        self.assertEqual(
+            cortex._v11_start_wave_preflight([
+                {"workers": [{"phase": "implementation", "profile": "general"}]},
+            ]),
+            [],
+        )
+
+        diagnostics = cortex._v11_start_wave_preflight([
+            {"workers": [{"phase": "qa", "profile": "general"}]},
+        ])
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["json_pointer"], "/waves/0/workers/0/profile")
+        self.assertEqual(
+            diagnostics[0]["field_schema"],
+            {"type": "string", "enum": ["build_verification", "qa_engineer"]},
+        )
+
     def test_management_validation_receipt_uses_the_complete_public_schema(self) -> None:
         receipt = cortex._validation_contract("manage_orchestration", [{
             "json_pointer": "/intent", "path": "intent",
