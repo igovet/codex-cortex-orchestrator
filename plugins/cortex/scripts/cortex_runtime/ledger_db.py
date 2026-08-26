@@ -30,6 +30,11 @@ from pathlib import Path
 from typing import Any
 
 from cortex_runtime import canonical_json
+from cortex_runtime.finding_severity import (
+    CANONICAL_FINDING_SEVERITY_RANK,
+    finding_severity_is_intrinsically_blocking,
+    normalize_finding_severity,
+)
 
 try:
     import fcntl
@@ -38,60 +43,32 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 18
-_PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION = 17
-# One released aggregate-v17 build wrote this exact signed history before the
-# report-only repair and plain-text question hard cuts.  It is a migration
-# input only: both the exact row below and the legacy v17 schema shape must
-# match before any DDL runs.
-_EXACT_LEGACY_PRE_REPORT_V17_HISTORY: tuple[tuple[int, str, str], ...] = (
-    (17, "canonical-current-ledger", "fe628a4a38ba4462ba0a53f3602bc4d0809e8073e5dfb62bc0e50bd0cd2a4dbb"),
-)
-# v11 is a hard namespace cutover. The immediately preceding canonical
-# database is eligible for whole-ledger quarantine only when its exact
-# version/name/checksum identity matches the release that wrote it. Unknown or
-# tampered ledgers remain fail-closed and are never replaced.
-_PRIOR_CANONICAL_DATABASE_SCHEMA_VERSIONS = frozenset({16})
-# Exact source identity of the one aggregate-v17 namespace that preceded the
-# current governance-v17 layout.  It is eligible only for whole-namespace
-# quarantine; no row or authority is imported.  Matching both the signed
-# migration row and the complete sqlite_master fingerprint prevents an
-# arbitrary checksum rewrite from turning current authority into a fresh
-# bootstrap.
-_SUPPORTED_PRIOR_AGGREGATE_V17_IDENTITIES = frozenset({
-    (
-        (17, "canonical-current-ledger", "549cac1cbdfb1c019ee9de2c1f0fe7c151d5c3bb2faeeb34e539ae3d6e0f6973"),
-        "c4680ffa5c652d5a190a5a180d86acc7aad081381aede19e1fb38cde1001de31",
-    ),
-})
-# These are the migration identities emitted by the pre-canonical ledger
-# format.  They are retained only as recognition data: the current runtime
-# never replays or imports these migrations.  A database is eligible for
-# quarantine only when its history can be positively identified as one of
-# these old lineages.
-_PRECANONICAL_MIGRATION_NAMES = {
-    1: "sqlite-ledger-base",
-    2: "immutable-artifact-catalog-and-chunks",
-    3: "canonical-task-findings",
-    4: "finding-waiver-and-resolution-metadata",
-    5: "projection-jobs",
-    6: "crash-safe-prune-tombstones",
-    7: "canonical-content-blobs-and-logical-artifacts",
-    8: "revision-aware-orchestration",
-    9: "governance-ledger",
-    10: "governance-integrity-hardening",
-    11: "governance-lifecycle-authority",
-    12: "governance-lifecycle-envelope-authentication",
-    13: "attempt-result-event-protocol",
-    14: "attempt-verification-authority",
-    15: "attempt-question-decision-events",
-}
-# The immediately previous V11 build recorded the incremental v1..v8 ledger
-# history below.  It is a supported storage predecessor, not a public
-# protocol: opening it upgrades the private database in place while the
-# current public operation registry is reissued empty.  The checksums are the
-# executable migration identities emitted by that build, not names supplied by
-# a caller or inferred from a project directory.
+NATIVE_HOST_START_SCHEMA = "cortex/native-host-subagent-start/v2"
+NATIVE_HOST_START_KEY_PREFIX = "native-host-start:"
+NATIVE_HOST_START_BOUNDARY_KEY_PREFIX = "native-host-start-boundary:"
+NATIVE_HOST_STOP_SCHEMA = "cortex/native-host-subagent-stop/v1"
+NATIVE_HOST_STOP_KEY_PREFIX = "native-host-stop:"
+NATIVE_HOST_STOP_RECEIPT_SCHEMA = "cortex/native-host-subagent-stop-receipt/v1"
+NATIVE_HOST_STOP_RECEIPT_KEY_PREFIX = "native-host-stop-receipt:"
+NATIVE_HOST_EPOCH_SCHEMA = "cortex/native-host-epoch/v1"
+NATIVE_HOST_EPOCH_KEY_PREFIX = "native-host-epoch:"
+NATIVE_CONTEXT_BOUNDARY_SCHEMA = "cortex/native-context-boundary/v1"
+NATIVE_CONTEXT_BOUNDARY_KEY_PREFIX = "native-context-boundary:"
+NATIVE_CONTEXT_BOUNDARY_ACK_SCHEMA = "cortex/native-context-boundary-ack/v1"
+NATIVE_CONTEXT_BOUNDARY_ACK_KEY_PREFIX = "native-context-boundary-ack:"
+NATIVE_LIFECYCLE_FAILURE_SCHEMA = "cortex/native-lifecycle-observer-failure/v1"
+NATIVE_LIFECYCLE_FAILURE_KEY_PREFIX = "native-lifecycle-observer:"
+NATIVE_LIFECYCLE_PROJECT_FAILURE_DOCUMENT = "native_lifecycle_observer_failure"
+NATIVE_LIFECYCLE_TASK_FAILURE_DOCUMENT = "native-lifecycle-observer:task"
+PRIVATE_LIFECYCLE_AUDIT_DOCUMENT = "native-lifecycle-audit"
+PRIVATE_LIFECYCLE_AUDIT_SCHEMA = "cortex/private-native-lifecycle-audit/v1"
+PRIVATE_LIFECYCLE_AUDIT_RETENTION = 96
+DATABASE_SCHEMA_VERSION = 19
+# Exact signed storage histories emitted by supported prior installations.
+# They are migration authority only; the current runtime never reads their
+# retired protocol shapes. Previous v17/v18 ledgers are upgraded in place;
+# the older v1..v8 namespace is preserved as a private quarantine before a
+# fresh current ledger is created.
 _SUPPORTED_PREVIOUS_V11_V8_HISTORY: tuple[tuple[int, str, str], ...] = (
     (1, "sqlite-ledger-base", "22987cef753fa59594fcb25794b0c29d63f9d9660879c15ae994cb13af354cbe"),
     (2, "immutable-artifact-catalog-and-chunks", "e9bb55107d182a08baa01826e8ff6e242956e5e7d32a730f097dcb49b07659ef"),
@@ -102,8 +79,25 @@ _SUPPORTED_PREVIOUS_V11_V8_HISTORY: tuple[tuple[int, str, str], ...] = (
     (7, "canonical-content-blobs-and-logical-artifacts", "1cf51c69cab95e7a1d678522d562ca19347d8494e3e145f1e5c46f48ecf6219b"),
     (8, "revision-aware-orchestration", "081812ef70c27cbe647a7c6988ffa61c4a29a25859272e0169a87be48e7ff6f8"),
 )
-_PRIVATE_LEGACY_OPERATION_REGISTRY_NAME = "private_legacy_operation_registry_v11"
-_PRIVATE_LEGACY_TASK_IDS_NAME = "private_legacy_task_ids_v11"
+_SUPPORTED_PREVIOUS_V17_HISTORIES: tuple[tuple[tuple[int, str, str], ...], ...] = (
+    ((17, "canonical-current-ledger", "8b63216b7cb574d2b5e66f2d6854dd282cffffca86e37d4e4976479fffade44b"),),
+    ((17, "canonical-current-ledger", "fe628a4a38ba4462ba0a53f3602bc4d0809e8073e5dfb62bc0e50bd0cd2a4dbb"),),
+    ((17, "canonical-current-ledger", "549cac1cbdfb1c019ee9de2c1f0fe7c151d5c3bb2faeeb34e539ae3d6e0f6973"),),
+)
+_SUPPORTED_PREVIOUS_V18_HISTORIES: tuple[tuple[tuple[int, str, str], ...], ...] = (
+    ((18, "canonical-current-ledger", "cba5622afa2a0771165d05866c5170901a7b2704127d559a23b8f8dedbaa46ac"),),
+    ((18, "canonical-current-ledger", "0ced9ba5442ca1df1eddc2c25d9e94be17c8a527e9a3d118407232cf45c7f20a"),),
+    (
+        (17, "canonical-current-ledger", "8b63216b7cb574d2b5e66f2d6854dd282cffffca86e37d4e4976479fffade44b"),
+        (18, "remove-retired-question-batches", "a3a526b3a3354d4c6dd39f0aa456f4c2a90e1c85bc8b1699169c0ec2cfd6a6c4"),
+    ),
+)
+_RELEASED_V18_HARD_CUT_ROW = (
+    18,
+    "remove-retired-question-batches",
+    "a3a526b3a3354d4c6dd39f0aa456f4c2a90e1c85bc8b1699169c0ec2cfd6a6c4",
+)
+_MIGRATED_PRE_V19_QUESTION_CATEGORY = "requirement"
 _CURRENT_OPERATION_REGISTRY_SCHEMA = "cortex/orchestration/v11"
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 # Paging is optional caller framing, not a server-side content quota.  A
@@ -343,6 +337,90 @@ def governance_lifecycle_envelope_hmac(
     ).hexdigest()
 
 
+def private_lifecycle_audit_digest(root: Path, label: str, value: object) -> str:
+    """Return one keyed, non-reversible private lifecycle identity digest."""
+    normalized = str(value or "")
+    if not normalized or len(normalized) > 1024 or "\x00" in normalized:
+        raise ValueError("private lifecycle audit identity is invalid")
+    payload = json.dumps([str(label), normalized], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return "hmac-sha256:" + hmac.new(
+        _governance_lifecycle_hmac_key(root, create=True), payload, hashlib.sha256,
+    ).hexdigest()
+
+
+def append_private_lifecycle_audit(
+    root: Path, entry: dict[str, Any], *, task_id: str | None = None,
+) -> bool:
+    """Append one bounded metadata-only audit event at the trusted local boundary."""
+    allowed = {"event", "tool", "outcome", "reason", "digests", "equality", "observed_at"}
+    digest_names = {
+        "mcp_thread", "hook_agent", "hook_session", "hook_turn", "hook_tool_use",
+        "task", "attempt", "wave",
+    }
+    try:
+        if set(entry) != allowed:
+            raise ValueError("private lifecycle audit entry shape is invalid")
+        if entry.get("event") not in {"mcp_call", "subagent_start", "subagent_stop", "invalid_hook"}:
+            raise ValueError("private lifecycle audit event is invalid")
+        if entry.get("tool") not in {"none", "spawn_agent", "wait_agent", "public_tool"}:
+            raise ValueError("private lifecycle audit tool is invalid")
+        if entry.get("outcome") not in {"received", "accepted", "rejected", "bound", "terminal", "confirmed", "retryable"}:
+            raise ValueError("private lifecycle audit outcome is invalid")
+        if entry.get("reason") not in {
+            "strict_shape", "unsupported_shape", "metadata_valid", "metadata_mismatch",
+            "candidate_missing", "candidate_ambiguous", "storage_retry", "exact_match",
+            "incomplete_stop", "terminal_stop",
+        }:
+            raise ValueError("private lifecycle audit reason is invalid")
+        digests = entry.get("digests")
+        equality = entry.get("equality")
+        if (
+            not isinstance(digests, dict) or not set(digests).issubset(digest_names)
+            or not all(re.fullmatch(r"hmac-sha256:[0-9a-f]{64}", str(value)) for value in digests.values())
+            or not isinstance(equality, dict)
+            or not set(equality).issubset({"thread_matches", "session_matches", "task_matches", "attempt_matches", "wave_matches"})
+            or not all(isinstance(value, bool) for value in equality.values())
+        ):
+            raise ValueError("private lifecycle audit protected fields are invalid")
+        document_key = PRIVATE_LIFECYCLE_AUDIT_DOCUMENT
+        with _hook_write_connection(root) as connection:
+            if task_id is None:
+                row = connection.execute(
+                    "SELECT payload_json FROM global_documents WHERE name=?", (document_key,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT payload_json FROM task_documents WHERE task_id=? AND document_key=?",
+                    (task_id, document_key),
+                ).fetchone()
+            prior = _decode_json(str(row["payload_json"]), "private lifecycle audit") if row else {}
+            events = list(prior.get("events") or [])[-(PRIVATE_LIFECYCLE_AUDIT_RETENTION - 1):]
+            events.append(dict(entry))
+            document = {
+                "schema": PRIVATE_LIFECYCLE_AUDIT_SCHEMA,
+                "retention": PRIVATE_LIFECYCLE_AUDIT_RETENTION,
+                "events": events,
+                "updated_at": str(entry["observed_at"]),
+            }
+            payload_json = _bounded_document_json(document, label="private lifecycle audit")
+            if task_id is None:
+                connection.execute(
+                    "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(name) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+                    (document_key, payload_json, str(entry["observed_at"])),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO task_documents(task_id,document_key,payload_json,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(task_id,document_key) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+                    (task_id, document_key, payload_json, str(entry["observed_at"])),
+                )
+        return True
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return False
+
+
 def _decode_json(text: str, label: str) -> dict[str, Any]:
     try:
         value = json.loads(text)
@@ -471,236 +549,6 @@ def _database_bootstrap_lock(root: Path) -> Iterator[None]:
             os.close(descriptor)
 
 
-def _is_recognized_precanonical_history(
-    history: list[tuple[object, ...]],
-    user_version: int,
-) -> bool:
-    """Return whether a history is a known pre-canonical migration lineage.
-
-    Checksums are intentionally not considered here: old ledgers used a
-    different checksum scheme and are never replayed.  Version/name identity
-    is sufficient to decide that the namespace is old, while rejecting an
-    arbitrary or damaged table as a candidate for destructive replacement.
-    """
-    if not history:
-        return False
-    try:
-        versions = [int(row[0]) for row in history]
-        names = [str(row[1]) for row in history]
-    except (IndexError, TypeError, ValueError):
-        return False
-    if user_version != versions[-1] or versions != list(range(versions[0], versions[-1] + 1)):
-        return False
-    for version, name in zip(versions, names):
-        if version not in _PRECANONICAL_MIGRATION_NAMES:
-            return False
-        expected = _PRECANONICAL_MIGRATION_NAMES.get(version)
-        # The historical fixture format used by early host bootstrap tests
-        # deliberately labels the same lineage as ``historical-vN``.
-        if name != expected and name != f"historical-v{version}":
-            return False
-    return True
-
-
-def _history_matches(
-    history: Sequence[tuple[object, ...]],
-    expected: Sequence[tuple[int, str, str]],
-    user_version: int,
-) -> bool:
-    """Return whether one stored history is the exact expected lineage."""
-    try:
-        normalized = tuple((int(row[0]), str(row[1]), str(row[2])) for row in history)
-    except (IndexError, TypeError, ValueError):
-        return False
-    expected_rows = tuple(expected)
-    return bool(expected_rows) and normalized == expected_rows and user_version == expected_rows[-1][0]
-
-
-def _is_supported_previous_v11_v8_history(
-    history: Sequence[tuple[object, ...]],
-    user_version: int,
-) -> bool:
-    """Recognize only the signed previous V11 v1..v8 storage lineage."""
-    try:
-        normalized = tuple((int(row[0]), str(row[1]), str(row[2])) for row in history)
-    except (IndexError, TypeError, ValueError):
-        return False
-    return normalized == _SUPPORTED_PREVIOUS_V11_V8_HISTORY and user_version == 8
-
-
-def _schema_identity_fingerprint(connection: sqlite3.Connection) -> str:
-    """Hash the complete normalized non-internal SQLite schema identity."""
-    rows = [
-        tuple(" ".join(str(value or "").split()) for value in row)
-        for row in connection.execute(
-            "SELECT type,name,COALESCE(sql,'') FROM sqlite_master "
-            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
-        )
-    ]
-    return hashlib.sha256(_canonical_json(rows).encode("utf-8")).hexdigest()
-
-
-def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]) -> bool:
-    """Return whether the private ledger is not the exact current one.
-
-    Untrusted prior namespaces are archived without importing any state.  The
-    filesystem boundary checks remain fail-closed before this helper runs.
-    """
-    path = database_path(root)
-    if not path.exists():
-        return False
-    try:
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            return False
-        connection = sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2,
-            isolation_level=None,
-        )
-        try:
-            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            migration = migrations[-1]
-            expected = (migration.version, migration.name, _migration_checksum(migration))
-            has_history = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
-            ).fetchone() is not None
-            if has_history:
-                history = [tuple(row) for row in connection.execute(
-                    "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
-                )]
-                if _is_current_migration_history(history, user_version, migrations):
-                    try:
-                        _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
-                    except (KeyError, TypeError, ValueError, sqlite3.Error):
-                        # A database that advertises the current canonical
-                        # migration but has lost or altered schema objects is
-                        # corruption, not an old namespace.  Do not quarantine
-                        # it: silently replacing it would hide an integrity
-                        # failure from the caller.
-                        raise
-                    return False
-
-                if _is_pre_question_batch_current_migration_history(history, user_version):
-                    _assert_migration_schema(
-                        connection,
-                        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
-                        pre_report_repair=_is_pre_report_current_migration_history(
-                            history, user_version,
-                        ),
-                    )
-                    return False
-
-                if _is_supported_previous_v11_v8_history(history, user_version):
-                    _assert_migration_schema(connection, 8)
-                    return False
-
-                # The prior aggregate v16 namespace remains a separately
-                # recognized hard cutover.  Only the installed incremental
-                # v1..v8 V11 lineage below is a supported in-place upgrade.
-                recognized_prior_canonical = {
-                    (
-                        version,
-                        migration.name,
-                        _migration_checksum(_prior_canonical_migration(version)),
-                    )
-                    for version in _PRIOR_CANONICAL_DATABASE_SCHEMA_VERSIONS
-                }
-                if (
-                    len(history) == 1
-                    and history[0] in recognized_prior_canonical
-                    and user_version == int(history[0][0])
-                ):
-                    prior_key = _governance_lifecycle_key_path(root)
-                    try:
-                        prior_key.lstat()
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        _governance_lifecycle_hmac_key(root, create=False)
-                    return True
-
-                # The one prior aggregate-v17 layout is a hard-cutover input
-                # only when both its exact migration row and complete schema
-                # fingerprint match the release that wrote it.  A same-name
-                # row with any other checksum/schema is untrusted and falls
-                # through to the fail-closed path below.
-                prior_aggregate_identity = (
-                    tuple((int(row[0]), str(row[1]), str(row[2])) for row in history),
-                    _schema_identity_fingerprint(connection),
-                )
-                if (
-                    user_version == DATABASE_SCHEMA_VERSION
-                    and len(prior_aggregate_identity[0]) == 1
-                    and (prior_aggregate_identity[0][0], prior_aggregate_identity[1])
-                    in _SUPPORTED_PRIOR_AGGREGATE_V17_IDENTITIES
-                ):
-                    return True
-
-                if _is_recognized_precanonical_history(history, user_version):
-                    # A known historical namespace is safe to isolate as a
-                    # whole and bootstrap afresh; no old rows are imported.
-                    return True
-
-                # Unknown or malformed history is not evidence of a prior
-                # Cortex lineage.  Preserve it and fail closed rather than
-                # risking destructive replacement of an unrelated database.
-                raise ValueError("Cortex database is an unsupported pre-canonical ledger")
-            has_objects = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type IN ('table','index','trigger','view') "
-                "AND name NOT LIKE 'sqlite_%' LIMIT 1"
-            ).fetchone() is not None
-            return has_objects or user_version != 0
-        finally:
-            connection.close()
-    except OSError:
-        return False
-    except sqlite3.Error:
-        # A regular, private but unreadable DB is untrusted and can be
-        # isolated. Symlinks/non-regular files/unsafe modes were rejected
-        # before this path.
-        return True
-
-
-def _quarantine_database(root: Path) -> Path:
-    """Move the complete old ledger namespace into a private archive.
-
-    SQLite is only one part of the host control plane.  Task/lane artifacts,
-    state locks, and the lifecycle authentication key must not remain visible
-    beside a fresh database, or a new task could accidentally observe stale
-    files even though no old rows were imported.
-    """
-    database = database_path(root)
-    stamp = _now().replace("+00:00", "Z").replace(":", "").replace("-", "")
-    archive_root = root / f"pre-canonical-ledger-{stamp}-{secrets.token_hex(8)}"
-    archive_root.mkdir(mode=0o700)
-    # Keep the bootstrap lock outside the archive so a crash/retry can still
-    # serialize recovery.  Every other child belongs to the old namespace and
-    # is moved as one same-filesystem rename, including SQLite sidecars and
-    # task/lane/capability artifacts.
-    lock_path = root / ".cortex-bootstrap.lock"
-    for child in list(root.iterdir()):
-        if child == lock_path or child == archive_root:
-            continue
-        os.replace(child, archive_root / child.name)
-
-    # Lifecycle authentication is intentionally stored outside the SQLite
-    # directory.  Preserve that old key with the archived state and leave the
-    # active key path absent so the fresh ledger receives a new key.
-    old_key = _governance_lifecycle_key_path(root)
-    if old_key.exists():
-        archived_key = archive_root / "governance-lifecycle.key"
-        os.replace(old_key, archived_key)
-        try:
-            os.chmod(archived_key, 0o600)
-        except OSError:
-            pass
-
-    archive = archive_root / DATABASE_NAME
-    _fsync_directory(archive_root)
-    _fsync_directory(root)
-    return archive
-
-
 def _active_connections() -> dict[str, sqlite3.Connection]:
     connections = getattr(_LOCAL, "connections", None)
     if connections is None:
@@ -790,8 +638,9 @@ def hook_snapshot(root: Path, *, timeout_ms: int = 100) -> Iterator[sqlite3.Conn
     apply migrations, acquire the filesystem state lock, or wait behind a
     result commit.  The database must already exist and advertise the current
     schema; any missing, busy, unreadable, or incompatible database is a
-    fail-open ``None`` snapshot.  Callers may perform all of their reads while
-    this single deferred transaction is open, then the connection is closed.
+    bounded ``None`` snapshot. Lifecycle observers distinguish and retry that
+    signal rather than collapsing it into an empty match set. Callers perform
+    all reads while this single deferred transaction is open, then close it.
     """
     try:
         timeout = max(0, min(int(timeout_ms), 100))
@@ -898,6 +747,40 @@ def hook_snapshot_task_context(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str] | None:
     """Read one task's definition, state, plan, and registered artifact path."""
     return hook_snapshot_load_task(connection, task_id)
+
+
+def hook_snapshot_worker_bindings(
+    connection: sqlite3.Connection,
+    host_agent_id: str,
+    *,
+    limit: int = 2,
+) -> list[tuple[str, str]]:
+    """Return a bounded exact private child binding without task JSON scans."""
+    if not isinstance(host_agent_id, str) or not host_agent_id or "\x00" in host_agent_id:
+        return []
+    bounded = max(1, min(int(limit), 2))
+    rows = connection.execute(
+        "SELECT task_id,attempt_id FROM worker_sessions "
+        "WHERE host_agent_id=? ORDER BY task_id,attempt_id LIMIT ?",
+        (host_agent_id, bounded),
+    ).fetchall()
+    return [(str(row["task_id"]), str(row["attempt_id"])) for row in rows]
+
+
+def hook_snapshot_awaiting_worker_sessions(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 65,
+) -> list[tuple[str, str]]:
+    """Return a bounded candidate set for an unbound trusted Start."""
+    bounded = max(1, min(int(limit), 65))
+    rows = connection.execute(
+        "SELECT task_id,attempt_id FROM worker_sessions "
+        "WHERE status='awaiting_spawn' AND resumable=1 AND host_agent_id IS NULL "
+        "ORDER BY last_seen_at,task_id,attempt_id LIMIT ?",
+        (bounded,),
+    ).fetchall()
+    return [(str(row["task_id"]), str(row["attempt_id"])) for row in rows]
 
 
 def hook_snapshot_artifact_directory(connection: sqlite3.Connection, task_id: str) -> str | None:
@@ -1281,32 +1164,11 @@ _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS tool_observations_attempt_idx ON tool_observations(task_id, attempt_id, context_epoch, last_seen_at)",
 )
 
-# This is recognition-only source for the exact v17 predecessor.  It is never
-# replayed for a new database: the v17 -> v18 migration drops these retired
-# storage objects after validating the predecessor's signed history and full
-# schema identity.
-_PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
-    *_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS[:4],
-    "CREATE TABLE IF NOT EXISTS question_batches(batch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, batch_key TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','answered','superseded')), language TEXT NOT NULL, created_at TEXT NOT NULL, answered_at TEXT, UNIQUE(task_id, attempt_id, batch_key))",
-    "CREATE TABLE IF NOT EXISTS question_items(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, question_type TEXT NOT NULL CHECK(question_type IN ('single_select','multi_select','text')), canonical_question TEXT NOT NULL, localized_question TEXT NOT NULL, options_json TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 1), PRIMARY KEY(batch_id, question_key), UNIQUE(batch_id, ordinal))",
-    "CREATE TABLE IF NOT EXISTS question_answers(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, answer_original TEXT NOT NULL, answer_original_language TEXT NOT NULL, answer_option_ids_json TEXT NOT NULL, answer_en TEXT, translation_status TEXT NOT NULL DEFAULT 'not_required' CHECK(translation_status = 'not_required'), translated_by TEXT, translated_at TEXT, PRIMARY KEY(batch_id, question_key), FOREIGN KEY(batch_id, question_key) REFERENCES question_items(batch_id, question_key))",
-    *_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS[4:10],
-    "CREATE INDEX IF NOT EXISTS question_batches_status_idx ON question_batches(task_id, status, created_at)",
-    *_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS[10:],
-)
-
-_QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS = (
-    "DROP INDEX question_batches_status_idx",
-    "DROP TABLE question_answers",
-    "DROP TABLE question_items",
-    "DROP TABLE question_batches",
-)
-
 # One durable record holds the human-visible question text and its optional
-# answer.  Structured batch/options/localization state is intentionally not
+# answer. Structured options and localization state is intentionally not
 # retained in the current ledger.
 _DURABLE_QUESTION_SCHEMA_STATEMENTS = (
-    "CREATE TABLE IF NOT EXISTS durable_questions(question_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, dispatch_ref TEXT NOT NULL, profile TEXT NOT NULL, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), attempt_generation INTEGER NOT NULL CHECK(attempt_generation >= 1), submission_id TEXT NOT NULL, question_text TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','answered','superseded')), content_digest TEXT NOT NULL, published_sequence INTEGER NOT NULL CHECK(published_sequence >= 1), answer_text TEXT, answer_submission_id TEXT, answer_digest TEXT, answered_sequence INTEGER CHECK(answered_sequence >= 1), created_at TEXT NOT NULL, answered_at TEXT, superseded_at TEXT, UNIQUE(task_id,attempt_id,submission_id), UNIQUE(task_id,published_sequence))",
+    "CREATE TABLE IF NOT EXISTS durable_questions(question_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, dispatch_ref TEXT NOT NULL, profile TEXT NOT NULL, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), attempt_generation INTEGER NOT NULL CHECK(attempt_generation >= 1), submission_id TEXT NOT NULL, question_category TEXT, question_text TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','answered','superseded')), content_digest TEXT NOT NULL, published_sequence INTEGER NOT NULL CHECK(published_sequence >= 1), answer TEXT, answer_submission_id TEXT, answer_digest TEXT, answered_sequence INTEGER CHECK(answered_sequence >= 1), created_at TEXT NOT NULL, answered_at TEXT, superseded_at TEXT, UNIQUE(task_id,attempt_id,submission_id), UNIQUE(task_id,published_sequence))",
     "CREATE INDEX IF NOT EXISTS durable_questions_task_status_published_idx ON durable_questions(task_id,status,published_sequence)",
 )
 
@@ -1454,7 +1316,7 @@ _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS = (
     "CREATE TABLE attempt_results(result_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, result_status TEXT NOT NULL CHECK(result_status IN ('completed','blocked','failed')), lifecycle_status TEXT NOT NULL CHECK(lifecycle_status IN ('WORK_COMPLETED','FINALIZING','COMPLETED','BLOCKED','FAILED')), summary TEXT NOT NULL, findings_json TEXT NOT NULL, decisions_needed_json TEXT NOT NULL, unresolved_json TEXT NOT NULL, claims_json TEXT NOT NULL, metadata_json TEXT NOT NULL, workspace_observation_json TEXT NOT NULL, changed_files_json TEXT NOT NULL, changed_files_status TEXT NOT NULL CHECK(changed_files_status IN ('server_observed','unavailable','incomplete','not_attributable')), content_digest TEXT NOT NULL, submission_id TEXT NOT NULL, work_completed_at TEXT, finalizing_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(task_id, attempt_id), UNIQUE(task_id, attempt_id, submission_id))",
     "CREATE INDEX attempt_results_task_lifecycle_idx ON attempt_results(task_id, lifecycle_status, updated_at)",
     "CREATE INDEX attempt_results_attempt_idx ON attempt_results(task_id, attempt_id)",
-    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_recorded','decision_evidence','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
     "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
     "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
 )
@@ -1465,7 +1327,7 @@ _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS = (
     "DROP INDEX attempt_events_task_type_idx",
     "DROP INDEX attempt_events_task_attempt_sequence_idx",
     "ALTER TABLE attempt_events RENAME TO attempt_events_v13",
-    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_recorded','decision_evidence','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
     "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) SELECT event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at FROM attempt_events_v13",
     "DROP TABLE attempt_events_v13",
     "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
@@ -1479,7 +1341,7 @@ _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS = (
     "DROP INDEX attempt_events_task_type_idx",
     "DROP INDEX attempt_events_task_attempt_sequence_idx",
     "ALTER TABLE attempt_events RENAME TO attempt_events_v14",
-    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','question_created','question_answered','decision_resolved','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_recorded','decision_evidence','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','question_created','question_answered','decision_resolved','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
     "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) SELECT event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at FROM attempt_events_v14",
     "DROP TABLE attempt_events_v14",
     "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
@@ -1492,327 +1354,29 @@ _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS = (
 # result, or workspace row is changed.  Rows live exactly as long as their
 # owning task and are immutable after insertion; identical rejected drafts
 # reuse one row and therefore one signed public handle.
-_PRE_REPORT_REPAIR_ESCROW_SCHEMA_STATEMENTS = (
-    "CREATE TABLE repair_escrow(handle_digest TEXT PRIMARY KEY, handle_id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, task_ref_digest TEXT NOT NULL, assignment_ref_digest TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('plan','outcome')), base_payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, allowed_paths_json TEXT NOT NULL, escrow_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, assignment_ref_digest, escrow_digest))",
-    "CREATE INDEX repair_escrow_task_attempt_idx ON repair_escrow(task_id, attempt_id, created_at)",
-    "CREATE TRIGGER repair_escrow_immutable_update BEFORE UPDATE ON repair_escrow FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'repair escrow rows are immutable'); END",
-)
-
 _REPAIR_ESCROW_SCHEMA_STATEMENTS = (
-    "CREATE TABLE repair_escrow(handle_digest TEXT PRIMARY KEY, handle_id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, dispatch_ref_digest TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind = 'report'), base_payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, allowed_paths_json TEXT NOT NULL, escrow_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, dispatch_ref_digest, escrow_digest))",
+    "CREATE TABLE repair_escrow(handle_digest TEXT PRIMARY KEY, handle_id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, dispatch_ref_digest TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind = 'report'), base_payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, patch_paths_json TEXT NOT NULL, escrow_digest TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, dispatch_ref_digest, escrow_digest))",
     "CREATE INDEX repair_escrow_task_attempt_idx ON repair_escrow(task_id, attempt_id, created_at)",
     "CREATE TRIGGER repair_escrow_immutable_update BEFORE UPDATE ON repair_escrow FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'repair escrow rows are immutable'); END",
 )
-
-# Exact pre-hard-cut v17 ledgers are authenticated by migration checksum
-# before this rebuild runs.  Their plan/outcome escrows are retired bearer
-# authorities and therefore are deliberately not copied into the current
-# report-only table.
-_REPORT_REPAIR_ESCROW_REBUILD_STATEMENTS = (
-    "DROP TRIGGER repair_escrow_immutable_update",
-    "DROP INDEX repair_escrow_task_attempt_idx",
-    "ALTER TABLE repair_escrow RENAME TO repair_escrow_pre_report_v17",
-    *_REPAIR_ESCROW_SCHEMA_STATEMENTS,
-    "DROP TABLE repair_escrow_pre_report_v17",
-)
-
-_PRIOR_CANONICAL_STATEMENTS_BY_VERSION: dict[int, tuple[str, ...]] = {
-    # Version 16 is the immediately preceding aggregate ledger.  Retain its
-    # exact checksummed statement set only so the hard cutover can quarantine
-    # it as a whole; no table or row is imported into v17.
-    16: (
-        _BASE_SCHEMA_STATEMENTS
-        + _ARTIFACT_SCHEMA_STATEMENTS
-        + _CLOSURE_SCHEMA_STATEMENTS
-        + _PROJECTION_SCHEMA_STATEMENTS
-        + _PRUNE_SCHEMA_STATEMENTS
-        + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
-        + _GOVERNANCE_SCHEMA_STATEMENTS
-        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
-        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
-        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
-        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
-    ),
-}
-
-
-def _prior_canonical_migration(version: int) -> _Migration:
-    try:
-        statements = _PRIOR_CANONICAL_STATEMENTS_BY_VERSION[version]
-    except KeyError as exc:
-        raise ValueError("unknown prior canonical ledger version") from exc
-    return _Migration(version, "canonical-current-ledger", statements)
-
-
-def _v11_forward_upgrade_from_v8_migration_v17() -> _Migration:
-    """Return the exact post-report v17 upgrade written by the prior build."""
-    return _Migration(
-        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
-        "v11-forward-upgrade-from-v8",
-        _GOVERNANCE_SCHEMA_STATEMENTS
-        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
-        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
-        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
-        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
-        + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
-    )
-
-
-def _v11_forward_upgrade_from_v8_migration() -> _Migration:
-    """Upgrade the signed v1..v8 lineage while removing retired batch tables."""
-    prior = _v11_forward_upgrade_from_v8_migration_v17()
-    return _Migration(
-        DATABASE_SCHEMA_VERSION,
-        prior.name,
-        prior.statements
-        + _DURABLE_QUESTION_SCHEMA_STATEMENTS
-        + _QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS,
-    )
-
-
-def _pre_question_batch_current_migration_histories() -> tuple[tuple[tuple[int, str, str], ...], ...]:
-    """Return exact v17 histories accepted for the atomic batch-storage cut."""
-    fresh = _Migration(
-        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
-        "canonical-current-ledger",
-        _BASE_SCHEMA_STATEMENTS
-        + _ARTIFACT_SCHEMA_STATEMENTS
-        + _CLOSURE_SCHEMA_STATEMENTS
-        + _PROJECTION_SCHEMA_STATEMENTS
-        + _PRUNE_SCHEMA_STATEMENTS
-        + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
-        + _GOVERNANCE_SCHEMA_STATEMENTS
-        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
-        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
-        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
-        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
-        + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
-    )
-    v8_upgrade = _v11_forward_upgrade_from_v8_migration_v17()
-    return (
-        ((fresh.version, fresh.name, _migration_checksum(fresh)),),
-        _SUPPORTED_PREVIOUS_V11_V8_HISTORY + (
-            (v8_upgrade.version, v8_upgrade.name, _migration_checksum(v8_upgrade)),
-        ),
-    )
-
-
-def _is_pre_question_batch_current_migration_history(
-    history: Sequence[tuple[object, ...]],
-    user_version: int,
-) -> bool:
-    return any(
-        _history_matches(history, expected, user_version)
-        for expected in _pre_question_batch_current_migration_histories()
-    ) or _is_pre_report_current_migration_history(history, user_version)
-
-
-def _question_batch_hard_cut_migration() -> _Migration:
-    return _Migration(
-        DATABASE_SCHEMA_VERSION,
-        "remove-retired-question-batches",
-        _DURABLE_QUESTION_SCHEMA_STATEMENTS
-        + _QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS,
-    )
-
-
-def _copy_retired_question_batch_text(connection: sqlite3.Connection) -> None:
-    """Copy every v17 question/answer text pair before retiring batch storage.
-
-    The old batch is no longer a public or runtime concept.  Each old item is
-    nevertheless preserved as one durable text-pair record, in its original
-    task/batch/ordinal order.  The migration deliberately never attempts to
-    reinterpret localized/options/selection data.
-    """
-    rows = connection.execute(
-        """SELECT b.batch_id, b.task_id, b.attempt_id, b.status, b.created_at,
-                  b.answered_at, i.question_key, i.canonical_question, i.ordinal,
-                  a.answer_original
-           FROM question_batches AS b
-           JOIN question_items AS i ON i.batch_id = b.batch_id
-           LEFT JOIN question_answers AS a
-             ON a.batch_id = i.batch_id AND a.question_key = i.question_key
-           ORDER BY b.task_id, b.created_at, b.batch_id, i.ordinal, i.question_key"""
-    )
-    sequence_by_task: dict[str, int] = {}
-    task_revision: dict[str, int] = {}
-    for row in rows:
-        task_id = str(row["task_id"])
-        sequence = sequence_by_task.get(task_id, 0) + 1
-        sequence_by_task[task_id] = sequence
-        revision = task_revision.get(task_id)
-        if revision is None:
-            revision_row = connection.execute(
-                "SELECT MAX(task_revision) FROM task_revisions WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            revision = max(1, int(revision_row[0] or 1))
-            task_revision[task_id] = revision
-        batch_id = str(row["batch_id"])
-        question_key = str(row["question_key"])
-        question_text = str(row["canonical_question"])
-        answer_text = None if row["answer_original"] is None else str(row["answer_original"])
-        status = str(row["status"])
-        if answer_text is not None and status == "open":
-            status = "answered"
-        legacy_suffix = hashlib.sha256(
-            f"{batch_id}\0{question_key}".encode("utf-8")
-        ).hexdigest()[:24]
-        legacy_ref = f"question-legacy-v17-{legacy_suffix}"
-        answer_ref = f"answer-legacy-v17-{legacy_suffix}" if answer_text is not None else None
-        connection.execute(
-            """INSERT INTO durable_questions(
-                   question_ref,task_id,attempt_id,dispatch_ref,profile,task_revision,
-                   attempt_generation,submission_id,question_text,status,content_digest,
-                   published_sequence,answer_text,answer_submission_id,answer_digest,
-                   answered_sequence,created_at,answered_at,superseded_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                legacy_ref, task_id, str(row["attempt_id"]), f"legacy-v17:{batch_id}",
-                "legacy-v17", revision, 1, legacy_ref, question_text, status,
-                "sha256:" + hashlib.sha256(question_text.encode("utf-8")).hexdigest(), sequence,
-                answer_text, answer_ref,
-                None if answer_text is None else "sha256:" + hashlib.sha256(answer_text.encode("utf-8")).hexdigest(),
-                sequence if answer_text is not None else None, str(row["created_at"]),
-                row["answered_at"] if answer_text is not None else None,
-                row["answered_at"] if status == "superseded" else None,
-            ),
-        )
-
-
-def _upgrade_retired_question_batch_storage(
-    connection: sqlite3.Connection,
-    migration: _Migration,
-    *,
-    preparation: tuple[str, ...] = (),
-) -> None:
-    """Atomically retain v17 text pairs, then remove batch-only objects."""
-    _execute_migration_statements(connection, preparation)
-    _execute_migration_statements(connection, _DURABLE_QUESTION_SCHEMA_STATEMENTS)
-    _copy_retired_question_batch_text(connection)
-    _execute_migration_statements(connection, _QUESTION_BATCH_HARD_CUT_SCHEMA_STATEMENTS)
-    _record_migration(connection, migration)
-    connection.execute(f"PRAGMA user_version = {migration.version}")
-    _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
-
 
 def _current_migration_histories(
     migrations: tuple[_Migration, ...],
 ) -> tuple[tuple[tuple[int, str, str], ...], ...]:
-    """Return every exact private history that is valid for this runtime."""
+    """Return exact append-only histories accepted by the current V19 runtime."""
     fresh = tuple(
         (migration.version, migration.name, _migration_checksum(migration))
         for migration in migrations
     )
-    v8_upgrade = _v11_forward_upgrade_from_v8_migration()
-    hard_cut = _question_batch_hard_cut_migration()
-    migrated_v17 = tuple(
-        history + ((hard_cut.version, hard_cut.name, _migration_checksum(hard_cut)),)
-        for history in _pre_question_batch_current_migration_histories()
+    v19_row = fresh[-1]
+    from_v17 = tuple(
+        (*history, _RELEASED_V18_HARD_CUT_ROW, v19_row)
+        for history in _SUPPORTED_PREVIOUS_V17_HISTORIES
     )
-    return (
-        fresh,
-        _SUPPORTED_PREVIOUS_V11_V8_HISTORY + (
-            (v8_upgrade.version, v8_upgrade.name, _migration_checksum(v8_upgrade)),
-        ),
-        *migrated_v17,
+    from_v18 = tuple(
+        (*history, v19_row) for history in _SUPPORTED_PREVIOUS_V18_HISTORIES
     )
-
-
-def _pre_report_current_migration_histories() -> tuple[tuple[tuple[int, str, str], ...], ...]:
-    """Return exact v17 histories emitted before report-only repair escrow."""
-    fresh = _Migration(
-        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
-        "canonical-current-ledger",
-        _BASE_SCHEMA_STATEMENTS
-        + _ARTIFACT_SCHEMA_STATEMENTS
-        + _CLOSURE_SCHEMA_STATEMENTS
-        + _PROJECTION_SCHEMA_STATEMENTS
-        + _PRUNE_SCHEMA_STATEMENTS
-        + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
-        + _GOVERNANCE_SCHEMA_STATEMENTS
-        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
-        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
-        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
-        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
-        + _PRE_REPORT_REPAIR_ESCROW_SCHEMA_STATEMENTS,
-    )
-    v8_upgrade = _Migration(
-        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
-        "v11-forward-upgrade-from-v8",
-        _GOVERNANCE_SCHEMA_STATEMENTS
-        + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
-        + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
-        + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
-        + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
-        + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
-        + _PRE_REPORT_REPAIR_ESCROW_SCHEMA_STATEMENTS,
-    )
-    return (
-        ((fresh.version, fresh.name, _migration_checksum(fresh)),),
-        _SUPPORTED_PREVIOUS_V11_V8_HISTORY + (
-            (v8_upgrade.version, v8_upgrade.name, _migration_checksum(v8_upgrade)),
-        ),
-        _EXACT_LEGACY_PRE_REPORT_V17_HISTORY,
-    )
-
-
-def _is_pre_report_current_migration_history(
-    history: Sequence[tuple[object, ...]],
-    user_version: int,
-) -> bool:
-    return any(
-        _history_matches(history, expected, user_version)
-        for expected in _pre_report_current_migration_histories()
-    )
-
-
-def _upgrade_pre_report_repair_escrow(
-    connection: sqlite3.Connection,
-    history: Sequence[tuple[object, ...]],
-) -> None:
-    """Revoke old repair handles and reseal the exact v17 migration row."""
-    _execute_migration_statements(connection, _REPORT_REPAIR_ESCROW_REBUILD_STATEMENTS)
-    migration_name = str(history[-1][1])
-    target = (
-        _Migration(
-            _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
-            "canonical-current-ledger",
-            _BASE_SCHEMA_STATEMENTS
-            + _ARTIFACT_SCHEMA_STATEMENTS
-            + _CLOSURE_SCHEMA_STATEMENTS
-            + _PROJECTION_SCHEMA_STATEMENTS
-            + _PRUNE_SCHEMA_STATEMENTS
-            + _PRE_QUESTION_BATCH_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS
-            + _GOVERNANCE_SCHEMA_STATEMENTS
-            + _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS
-            + _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS
-            + _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS
-            + _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS
-            + _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS
-            + _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS
-            + _REPAIR_ESCROW_SCHEMA_STATEMENTS,
-        )
-        if migration_name == "canonical-current-ledger"
-        else _v11_forward_upgrade_from_v8_migration_v17()
-    )
-    if target.name != migration_name:
-        raise ValueError("Cortex pre-report repair migration identity is invalid")
-    updated = connection.execute(
-        "UPDATE schema_migrations SET checksum=?, applied_at=? WHERE version=? AND name=?",
-        (_migration_checksum(target), _now(), target.version, target.name),
-    )
-    if updated.rowcount != 1:
-        raise ValueError("Cortex pre-report repair migration row is unavailable")
+    return (fresh, *from_v17, *from_v18)
 
 
 def _is_current_migration_history(
@@ -1820,65 +1384,300 @@ def _is_current_migration_history(
     user_version: int,
     migrations: tuple[_Migration, ...],
 ) -> bool:
+    try:
+        normalized = tuple((int(row[0]), str(row[1]), str(row[2])) for row in history)
+    except (IndexError, TypeError, ValueError):
+        return False
+    return (
+        user_version == DATABASE_SCHEMA_VERSION
+        and normalized in _current_migration_histories(migrations)
+    )
+
+
+def _normalized_migration_history(
+    history: Sequence[tuple[object, ...]],
+) -> tuple[tuple[int, str, str], ...] | None:
+    try:
+        return tuple((int(row[0]), str(row[1]), str(row[2])) for row in history)
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _matches_exact_history(
+    history: Sequence[tuple[object, ...]],
+    user_version: int,
+    expected: tuple[tuple[int, str, str], ...],
+) -> bool:
+    return (
+        bool(expected)
+        and user_version == expected[-1][0]
+        and _normalized_migration_history(history) == expected
+    )
+
+
+def _is_supported_previous_v18_history(
+    history: Sequence[tuple[object, ...]], user_version: int,
+) -> bool:
     return any(
-        _history_matches(history, expected, user_version)
-        for expected in _current_migration_histories(migrations)
+        _matches_exact_history(history, user_version, expected)
+        for expected in _SUPPORTED_PREVIOUS_V18_HISTORIES
     )
 
 
-def _seal_legacy_v11_operation_registry(connection: sqlite3.Connection) -> None:
-    """Preserve prior registry bytes privately and issue no legacy authority.
+def _is_supported_previous_v17_history(
+    history: Sequence[tuple[object, ...]], user_version: int,
+) -> bool:
+    return any(
+        _matches_exact_history(history, user_version, expected)
+        for expected in _SUPPORTED_PREVIOUS_V17_HISTORIES
+    )
 
-    A predecessor's registry can carry task and capability records for a
-    retired public contract.  Keep its exact JSON in an unadvertised durable
-    document for recovery/audit, then replace the live registry with an empty
-    current-v11 document.  No old capability is copied into a current public
-    route.
-    """
-    legacy_task_ids = [
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row[1])
+        for row in connection.execute("SELECT * FROM pragma_table_info(?)", (table,))
+    }
+
+
+def _copy_v17_question_text(connection: sqlite3.Connection) -> None:
+    """Preserve exact V17 question/answer text in the current durable store."""
+    tables = {
         str(row[0])
-        for row in connection.execute("SELECT task_id FROM tasks ORDER BY task_id")
-    ]
-    task_marker = _canonical_json({"task_ids": legacy_task_ids})
-    existing_task_marker = connection.execute(
-        "SELECT payload_json FROM global_documents WHERE name = ?",
-        (_PRIVATE_LEGACY_TASK_IDS_NAME,),
-    ).fetchone()
-    if existing_task_marker is None:
-        connection.execute(
-            "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
-            (_PRIVATE_LEGACY_TASK_IDS_NAME, task_marker, _now()),
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
         )
-    elif str(existing_task_marker[0]) != task_marker:
-        raise ValueError("Cortex legacy task archive is inconsistent")
-
-    legacy = connection.execute(
-        "SELECT payload_json FROM global_documents WHERE name = 'operation_registry'"
-    ).fetchone()
-    if legacy is None:
+    }
+    retired = {"question_batches", "question_items", "question_answers"}
+    if not (tables & retired):
         return
-    payload_json = str(legacy[0])
-    archived = connection.execute(
-        "SELECT payload_json FROM global_documents WHERE name = ?",
-        (_PRIVATE_LEGACY_OPERATION_REGISTRY_NAME,),
-    ).fetchone()
-    if archived is None:
+    if not retired <= tables:
+        raise ValueError("Cortex V17 durable-question storage is incomplete")
+    rows = connection.execute(
+        """SELECT b.batch_id,b.task_id,b.attempt_id,b.status,b.created_at,b.answered_at,
+                  i.question_key,i.canonical_question,i.ordinal,a.answer_original
+             FROM question_batches b
+             JOIN question_items i ON i.batch_id=b.batch_id
+             LEFT JOIN question_answers a
+               ON a.batch_id=i.batch_id AND a.question_key=i.question_key
+             ORDER BY b.task_id,b.created_at,b.batch_id,i.ordinal"""
+    ).fetchall()
+    task_revisions: dict[str, int] = {}
+    task_sequences: dict[str, int] = {}
+    for row in rows:
+        task_id = str(row["task_id"])
+        if task_id not in task_revisions:
+            revision = connection.execute(
+                "SELECT COALESCE(MAX(task_revision),1) FROM task_revisions WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0]
+            task_revisions[task_id] = max(1, int(revision or 1))
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(published_sequence),0) FROM durable_questions WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0]
+            task_sequences[task_id] = int(sequence or 0)
+        task_sequences[task_id] += 1
+        question = str(row["canonical_question"])
+        answer = None if row["answer_original"] is None else str(row["answer_original"])
+        status = str(row["status"])
+        if answer is not None and status == "open":
+            status = "answered"
+        suffix = hashlib.sha256(
+            f'{row["batch_id"]}\0{row["question_key"]}'.encode("utf-8")
+        ).hexdigest()[:24]
+        question_ref = f"question-v17-{suffix}"
+        answer_ref = f"answer-v17-{suffix}" if answer is not None else None
         connection.execute(
-            "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
-            (_PRIVATE_LEGACY_OPERATION_REGISTRY_NAME, payload_json, _now()),
+            """INSERT INTO durable_questions(
+                   question_ref,task_id,attempt_id,dispatch_ref,profile,task_revision,
+                   attempt_generation,submission_id,question_category,question_text,status,content_digest,
+                   published_sequence,answer,answer_submission_id,answer_digest,
+                   answered_sequence,created_at,answered_at,superseded_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                question_ref, task_id, str(row["attempt_id"]),
+                f'v17:{row["batch_id"]}', "general", task_revisions[task_id], 1,
+                question_ref, _MIGRATED_PRE_V19_QUESTION_CATEGORY, question, status,
+                durable_question_content_digest(_MIGRATED_PRE_V19_QUESTION_CATEGORY, question),
+                task_sequences[task_id], answer, answer_ref,
+                None if answer is None else hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+                task_sequences[task_id] if answer is not None else None,
+                str(row["created_at"]), row["answered_at"] if answer is not None else None,
+                row["answered_at"] if status == "superseded" else None,
+            ),
         )
-    elif str(archived[0]) != payload_json:
-        raise ValueError("Cortex legacy operation registry archive is inconsistent")
-    current = _canonical_json({
-        "schema": _CURRENT_OPERATION_REGISTRY_SCHEMA,
-        "starts": {},
-        "tasks": {},
-        "updated_at": _now(),
-    })
-    connection.execute(
-        "UPDATE global_documents SET payload_json = ?, updated_at = ? WHERE name = 'operation_registry'",
-        (current, _now()),
+    connection.execute("DROP TABLE question_answers")
+    connection.execute("DROP TABLE question_items")
+    connection.execute("DROP TABLE question_batches")
+
+
+def durable_question_content_digest(question_category: str, question_text: str) -> str:
+    """Bind one durable question digest to its canonical semantic category."""
+    if (
+        not isinstance(question_category, str)
+        or not question_category
+        or "\x00" in question_category
+        or not isinstance(question_text, str)
+    ):
+        raise ValueError("durable question digest input is invalid")
+    return hashlib.sha256((question_category + "\x00" + question_text).encode("utf-8")).hexdigest()
+
+
+def _migrate_pre_v19_durable_question_categories(connection: sqlite3.Connection) -> None:
+    """Classify released user-facing questions without inspecting their text.
+
+    Every row admitted by the signed V17/V18 schema was already a durable user
+    decision.  ``requirement`` is therefore the conservative current category:
+    it preserves that released meaning without guessing from language or
+    content.  This runs only inside the predecessor-to-V19 transaction.  A
+    NULL/internal row introduced after V19 never passes through this cutover
+    and remains non-authorizing at runtime.
+    """
+    rows = connection.execute(
+        "SELECT question_ref,question_category,question_text,status,answer FROM durable_questions "
+        "ORDER BY task_id,published_sequence,question_ref"
+    ).fetchall()
+    for row in rows:
+        if row["question_category"] is not None:
+            if row["question_category"] != _MIGRATED_PRE_V19_QUESTION_CATEGORY:
+                raise ValueError("Cortex predecessor durable question has unexpected category state")
+            continue
+        question_text = row["question_text"]
+        if not isinstance(question_text, str):
+            raise ValueError("Cortex predecessor durable question text is invalid")
+        answer = row["answer"]
+        if row["status"] == "answered" and (not isinstance(answer, str) or not answer):
+            raise ValueError("Cortex predecessor answered question has no exact answer")
+        if answer is not None and not isinstance(answer, str):
+            raise ValueError("Cortex predecessor durable answer text is invalid")
+        cursor = connection.execute(
+            "UPDATE durable_questions SET question_category=?,content_digest=?,answer_digest=? "
+            "WHERE question_ref=? AND question_category IS NULL",
+            (
+                _MIGRATED_PRE_V19_QUESTION_CATEGORY,
+                durable_question_content_digest(_MIGRATED_PRE_V19_QUESTION_CATEGORY, question_text),
+                None if answer is None else hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+                str(row["question_ref"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("Cortex predecessor durable question migration did not converge")
+
+
+def _upgrade_supported_previous_ledger(
+    connection: sqlite3.Connection,
+    *,
+    history: Sequence[tuple[object, ...]],
+    user_version: int,
+) -> None:
+    """Atomically append the exact V18/V19 cutover to a signed predecessor."""
+    if not (
+        _is_supported_previous_v17_history(history, user_version)
+        or _is_supported_previous_v18_history(history, user_version)
+    ):
+        raise ValueError("Cortex database history is not an authorized upgrade source")
+
+    durable_columns = _table_columns(connection, "durable_questions")
+    if durable_columns:
+        if "answer_text" in durable_columns and "answer" not in durable_columns:
+            connection.execute("ALTER TABLE durable_questions RENAME COLUMN answer_text TO answer")
+        elif "answer" not in durable_columns:
+            raise ValueError("Cortex prior durable-question schema is invalid")
+    else:
+        _execute_migration_statements(connection, _DURABLE_QUESTION_SCHEMA_STATEMENTS)
+    durable_columns = _table_columns(connection, "durable_questions")
+    if "question_category" not in durable_columns:
+        connection.execute("ALTER TABLE durable_questions ADD COLUMN question_category TEXT")
+    _copy_v17_question_text(connection)
+    _migrate_pre_v19_durable_question_categories(connection)
+
+    repair_columns = _table_columns(connection, "repair_escrow")
+    if "dispatch_ref_digest" in repair_columns and "allowed_paths_json" in repair_columns:
+        connection.execute("ALTER TABLE repair_escrow RENAME COLUMN allowed_paths_json TO patch_paths_json")
+    elif "dispatch_ref_digest" in repair_columns and "patch_paths_json" in repair_columns:
+        pass
+    elif {"task_ref_digest", "assignment_ref_digest", "allowed_paths_json"} <= repair_columns:
+        connection.execute("DROP TRIGGER repair_escrow_immutable_update")
+        connection.execute("DROP INDEX repair_escrow_task_attempt_idx")
+        connection.execute("ALTER TABLE repair_escrow RENAME TO repair_escrow_retired_v17")
+        _execute_migration_statements(connection, _REPAIR_ESCROW_SCHEMA_STATEMENTS)
+        connection.execute("DROP TABLE repair_escrow_retired_v17")
+    else:
+        raise ValueError("Cortex prior repair escrow schema is invalid")
+
+    if user_version == 17:
+        connection.execute(
+            "INSERT INTO schema_migrations(version,name,applied_at,checksum) VALUES(?,?,?,?)",
+            (
+                _RELEASED_V18_HARD_CUT_ROW[0],
+                _RELEASED_V18_HARD_CUT_ROW[1],
+                _now(),
+                _RELEASED_V18_HARD_CUT_ROW[2],
+            ),
+        )
+    migration = _migration_plan()[0]
+    _record_migration(connection, migration)
+    connection.execute(f"PRAGMA user_version = {DATABASE_SCHEMA_VERSION}")
+    _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
+
+
+def _migrate_v19_current_orchestration_data(connection: sqlite3.Connection) -> None:
+    """Apply every deterministic current-V19 orchestration data hard cut."""
+    rows = connection.execute(
+        "SELECT task_id,artifact_dir,state_json,plan_json FROM tasks "
+        "WHERE plan_json IS NOT NULL ORDER BY task_number"
+    ).fetchall()
+    if not rows:
+        return
+    try:
+        from cortex_runtime.orchestration_engine import (
+            _migrate_compiled_assignment_identity,
+            _migrate_coordinator_planning_package_identity,
+        )
+    except RuntimeError as exc:
+        if "before the composition root bound dependencies" not in str(exc):
+            raise
+        # Standalone migration/marketplace checks import the ledger directly.
+        # Loading the normal composition root supplies the same canonical
+        # compiler bindings used by the MCP server; it does not create a
+        # second storage implementation.
+        __import__("cortex")
+        from cortex_runtime.orchestration_engine import (
+            _migrate_compiled_assignment_identity,
+            _migrate_coordinator_planning_package_identity,
+        )
+    for row in rows:
+        state = _decode_json(str(row["state_json"]), "V19 task state")
+        plan = _decode_json(str(row["plan_json"]), "V19 orchestration plan")
+        if not isinstance(plan.get("waves"), list):
+            continue
+        artifact_dir = Path(str(row["artifact_dir"]))
+        if artifact_dir.is_absolute() or ".." in artifact_dir.parts:
+            raise ValueError("V19 task artifact directory is unsafe")
+        root = Path(connection.execute("PRAGMA database_list").fetchone()[2]).parent
+        _migrate_compiled_assignment_identity(root / artifact_dir, state, plan)
+        _migrate_coordinator_planning_package_identity(root / artifact_dir, state, plan)
+
+
+def _persist_v19_migrated_plan(root: Path, task_id: str, plan: Mapping[str, Any]) -> None:
+    """Replace only the same active plan row during the owning V19 transaction."""
+    connection = _active_connections().get(_root_key(root))
+    if connection is None:
+        raise ValueError("V19 plan migration requires the owning schema transaction")
+    payload = _canonical_json(dict(plan))
+    updated = connection.execute(
+        "UPDATE plan_revisions SET plan_json=? "
+        "WHERE task_id=? AND status='active'",
+        (payload, task_id),
     )
+    if updated.rowcount != 1:
+        raise ValueError("V19 plan migration requires one exact active plan revision")
+    task_updated = connection.execute(
+        "UPDATE tasks SET plan_json=? WHERE task_id=?", (payload, task_id),
+    )
+    if task_updated.rowcount != 1:
+        raise ValueError("V19 plan migration task is unavailable")
 
 
 def insert_governance_lifecycle_auth(
@@ -1919,9 +1718,9 @@ def insert_governance_lifecycle_auth(
 
 
 def _migration_plan() -> tuple[_Migration, ...]:
-    # Fresh installations have one compact current schema.  The only
-    # additional accepted storage history is the exact signed v1..v8 V11
-    # lineage, which receives its separate forward-upgrade record.
+    # Fresh installations have one compact current V19 schema. Supported
+    # predecessor ledgers retain every released migration row and append this
+    # exact row after their transactional data cutover.
     return (_Migration(
         DATABASE_SCHEMA_VERSION,
         "canonical-current-ledger",
@@ -1943,263 +1742,46 @@ def _migration_plan() -> tuple[_Migration, ...]:
     ),)
 
 
-def _assert_migration_schema(
-    connection: sqlite3.Connection,
-    version: int,
-    *,
-    pre_report_repair: bool = False,
-) -> None:
-    retired_question_batch_objects = {
-        "question_batches", "question_items", "question_answers",
-        "question_batches_status_idx",
-    }
-    required = {
-        1: {
-            "schema_migrations", "ledger_meta", "tasks", "lanes", "classifications",
-            "manifest_snapshots", "global_documents", "operations", "ledger_events",
-            "task_documents",
-        },
-        2: {"artifact_blobs", "artifact_blob_chunks", "logical_artifacts", "artifact_exports"},
-        3: {"task_findings"},
-        4: {"task_findings"},
-        5: {"projection_jobs", "projection_jobs_status_idx", "projection_jobs_task_idx"},
-        6: {"prune_tombstones", "prune_tombstones_active_task_idx", "prune_tombstones_status_idx"},
-        7: {
-            "artifact_blobs", "artifact_blob_chunks", "logical_artifacts", "artifact_exports",
-            "logical_artifacts_task_kind_created_idx", "logical_artifacts_task_created_idx",
-            "logical_artifacts_blob_idx", "artifact_exports_task_path_idx",
-        },
-        8: {
-            "task_revisions", "plan_revisions", "worker_sessions", "attempt_messages",
-            "question_batches", "question_items", "question_answers", "orchestration_trace",
-            "tool_observations", "task_revisions_created_idx", "plan_revisions_created_idx",
-            "worker_sessions_status_idx", "attempt_messages_delivery_idx", "question_batches_status_idx",
-            "orchestration_trace_task_idx", "tool_observations_attempt_idx",
-        },
-        9: {
-            "initiatives", "initiatives_parent_idx", "initiatives_status_idx",
-            "initiative_task_links", "initiative_task_links_task_idx",
-            "initiative_dependencies", "initiative_dependencies_source_idx",
-            "initiative_dependencies_target_idx", "governance_records",
-            "governance_records_scope_idx", "governance_records_active_idx",
-            "governance_links", "governance_links_record_idx",
-            "governance_links_target_idx",
-        },
-        10: {
-            "governance_records_scope_revision_unique", "governance_records_supersedes_unique",
-            "governance_submissions", "governance_submissions_record_idx",
-            "governance_records_scope_integrity_insert", "governance_records_scope_integrity_update",
-            "governance_records_immutable_update", "governance_records_task_delete_restrict",
-            "governance_records_initiative_delete_restrict",
-        },
-        11: {
-            "governance_record_lifecycle", "governance_record_lifecycle_record_idx",
-            "governance_record_lifecycle_insert_integrity",
-            "governance_records_lifecycle_authority_update",
-            "governance_record_lifecycle_immutable_update",
-            "governance_record_lifecycle_immutable_delete",
-            "initiative_task_links_governance_delete_restrict",
-            "initiative_task_links_terminal_success_insert",
-            "initiatives_terminal_linked_task_integrity_update",
-            "tasks_terminal_linked_initiative_integrity_update",
-        },
-        12: {
-            "governance_record_lifecycle_auth",
-            "governance_record_lifecycle_auth_insert_integrity",
-            "governance_record_lifecycle_auth_immutable_update",
-            "governance_record_lifecycle_auth_immutable_delete",
-        },
-        13: {
-            "attempt_results", "attempt_results_task_lifecycle_idx", "attempt_results_attempt_idx",
-            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
-        },
-        14: {
-            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
-        },
-        15: {
-            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
-        },
-        17: {
-            "repair_escrow", "repair_escrow_task_attempt_idx", "repair_escrow_immutable_update",
-        },
-        18: {
-            "durable_questions", "durable_questions_task_status_published_idx",
-        },
-    }
-    # Validate each supported predecessor as a complete aggregate schema.
-    # Version 8 is the exact prior incremental V11 store; it retained the
-    # former artifact tables in addition to the normalized catalog created at
-    # v7.  Version 16 is the immediate pre-repair aggregate ledger.  Version
-    # 17 adds repair escrow and retains the retired batch tables; v18 removes
-    # only those batch objects from the otherwise unchanged live ledger.
-    repair_escrow_required = set(required[17])
-    pre_repair_required = set().union(
-        *(objects for version, objects in required.items() if version not in {17, DATABASE_SCHEMA_VERSION})
-    )
-    required[8] = set().union(*(required[version] for version in range(1, 9))) | {
-        "artifacts", "artifact_chunks",
-    }
-    required[16] = pre_repair_required
-    required[_PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION] = pre_repair_required | repair_escrow_required
-    required[DATABASE_SCHEMA_VERSION] = (
-        pre_repair_required - retired_question_batch_objects
-    ) | repair_escrow_required | required[DATABASE_SCHEMA_VERSION]
+def _expected_schema_objects() -> set[str]:
+    """Derive final V19 object names from the one active migration plan."""
+    objects: set[str] = set()
+    for statement in _migration_plan()[0].statements:
+        sql = " ".join(str(statement).split())
+        create = re.match(r"CREATE(?: UNIQUE)? (?:TABLE|INDEX|TRIGGER) (?:IF NOT EXISTS )?([A-Za-z0-9_]+)", sql, re.IGNORECASE)
+        if create:
+            objects.add(create.group(1))
+        drop = re.match(r"DROP (?:TABLE|INDEX|TRIGGER) (?:IF EXISTS )?([A-Za-z0-9_]+)", sql, re.IGNORECASE)
+        if drop:
+            objects.discard(drop.group(1))
+        rename = re.match(r"ALTER TABLE ([A-Za-z0-9_]+) RENAME TO ([A-Za-z0-9_]+)", sql, re.IGNORECASE)
+        if rename:
+            objects.discard(rename.group(1))
+            objects.add(rename.group(2))
+    return objects
+
+
+def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> None:
+    """Validate the complete current V19 schema without issuing DDL."""
+    if version != DATABASE_SCHEMA_VERSION:
+        raise ValueError("Cortex database schema version is unsupported")
+    history = [tuple(row) for row in connection.execute(
+        "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+    )]
+    user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if not _is_current_migration_history(history, user_version, _migration_plan()):
+        raise ValueError("Cortex database requires the current migration")
     present = {
         str(row[0])
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')"
         )
     }
-    if not required.get(version, set()).issubset(present):
-        raise ValueError("Cortex database schema is inconsistent with migration history")
-    if version == DATABASE_SCHEMA_VERSION and present & retired_question_batch_objects:
-        raise ValueError("Cortex database retains retired question batch storage")
-    column_requirements: dict[int, dict[str, set[str]]] = {
-        1: {
-            "schema_migrations": {"version", "name", "applied_at", "checksum"},
-            "ledger_meta": {"key", "value"},
-            "tasks": {"task_id", "task_number", "artifact_dir", "definition_json", "state_json", "plan_json", "status", "revision", "created_at", "updated_at"},
-            "lanes": {"lane_id", "definition_json", "state_json", "status", "revision", "created_at", "updated_at"},
-            "classifications": {"classification_id", "payload_json", "consumed_by", "created_at"},
-            "manifest_snapshots": {"snapshot_ref", "digest", "payload_json", "created_at"},
-            "global_documents": {"name", "payload_json", "updated_at"},
-            "operations": {"submission_id", "task_id", "payload_json", "updated_at"},
-            "ledger_events": {"event_id", "task_id", "lane_id", "event", "detail", "revision", "created_at"},
-            "task_documents": {"task_id", "document_key", "payload_json", "updated_at"},
-        },
-        2: {
-            "artifact_blobs": {"blob_id", "digest_sha256", "mime_type", "byte_size", "chunk_count", "encoding", "created_at"},
-            "artifact_blob_chunks": {"blob_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256"},
-            "logical_artifacts": {"artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256", "byte_size", "chunk_count", "immutable", "blob_id", "export_path", "created_at"},
-            "artifact_exports": {"artifact_id", "task_id", "export_path", "created_at"},
-        },
-        3: {
-            "task_findings": {"task_id", "fingerprint", "severity", "status", "blocking", "summary", "details", "next_action_json", "source_evidence_json", "first_seen_at", "updated_at"},
-        },
-        4: {"task_findings": {"waiver_reason", "waived_by", "waived_at", "resolved_at"}},
-        5: {
-            "projection_jobs": {"projection_key", "task_id", "artifact_id", "projection_type", "export_path", "required", "status", "attempts", "expected_digest", "materialized_digest", "last_error", "lease_owner", "lease_expires_at", "created_at", "updated_at", "materialized_at"},
-        },
-        6: {
-            "prune_tombstones": {"tombstone_id", "task_id", "artifact_dir", "status", "lease_owner", "lease_expires_at", "error", "created_at", "updated_at", "filesystem_removed_at", "finalized_at"},
-        },
-        7: {
-            "artifact_blobs": {"blob_id", "digest_sha256", "mime_type", "byte_size", "chunk_count", "encoding", "created_at"},
-            "artifact_blob_chunks": {"blob_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256"},
-            "logical_artifacts": {"artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256", "byte_size", "chunk_count", "immutable", "blob_id", "export_path", "created_at"},
-            "artifact_exports": {"artifact_id", "task_id", "export_path", "created_at"},
-        },
-        8: {
-            "task_revisions": {"task_id", "task_revision", "base_revision", "source", "message_original", "message_language", "message_en", "translation_status", "created_at"},
-            "plan_revisions": {"task_id", "plan_revision", "base_plan_revision", "task_revision", "impact_json", "plan_json", "status", "created_at"},
-            "worker_sessions": {"session_id", "task_id", "attempt_id", "host_agent_id", "host_task_name", "host_tool", "generation", "status", "resumable", "started_at", "last_seen_at", "terminated_at"},
-            "attempt_messages": {"message_id", "task_id", "attempt_id", "source", "kind", "original_text", "original_language", "canonical_en", "task_revision", "created_at", "delivered_at", "acknowledged_at"},
-            "question_batches": {"batch_id", "task_id", "attempt_id", "batch_key", "status", "language", "created_at", "answered_at"},
-            "question_items": {"batch_id", "question_key", "question_type", "canonical_question", "localized_question", "options_json", "ordinal"},
-            "question_answers": {"batch_id", "question_key", "answer_original", "answer_original_language", "answer_option_ids_json", "answer_en", "translation_status", "translated_by", "translated_at"},
-            "orchestration_trace": {"trace_id", "task_id", "attempt_id", "event", "occurred_at", "metadata_json"},
-            "tool_observations": {"observation_id", "task_id", "attempt_id", "context_epoch", "fingerprint", "tool_name", "normalized_arguments", "workspace_generation", "result_digest", "coverage", "status", "first_seen_at", "last_seen_at", "repeat_count"},
-        },
-        9: {
-            "initiatives": {"initiative_ref", "parent_ref", "title", "goal", "owner", "risk", "acceptance_oracle_artifact_ref", "status", "revision", "created_at", "updated_at"},
-            "initiative_task_links": {"initiative_ref", "task_id", "relationship", "milestone", "deliverable", "corrective", "expected_revision", "created_at"},
-            "initiative_dependencies": {"dependency_ref", "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "created_at"},
-            "governance_records": {"record_ref", "initiative_ref", "task_id", "record_type", "revision", "supersedes", "status", "content_json", "content_digest", "content_artifact_ref", "approval_basis_json", "created_by", "created_at", "expires_at"},
-            "governance_links": {"link_ref", "record_ref", "initiative_ref", "task_id", "lane_id", "finding_fingerprint", "evidence_ref", "relationship", "created_at"},
-        },
-        10: {
-            "governance_records": {"scope_key"},
-            "governance_submissions": {"submission_id", "command_digest", "record_ref", "created_at"},
-        },
-        11: {
-            "governance_records": {"lifecycle_sequence", "lifecycle_binding"},
-            "governance_record_lifecycle": {"lifecycle_ref", "record_ref", "lifecycle_sequence", "previous_binding", "status", "approval_basis_json", "binding", "action", "actor_role", "created_at"},
-        },
-        12: {
-            "governance_record_lifecycle_auth": {"lifecycle_ref", "envelope_hmac"},
-        },
-        13: {
-            "attempt_results": {
-                "result_ref", "task_id", "attempt_id", "result_status", "lifecycle_status", "summary",
-                "findings_json", "decisions_needed_json", "unresolved_json", "claims_json", "metadata_json",
-                "workspace_observation_json", "changed_files_json", "changed_files_status", "content_digest",
-                "submission_id", "work_completed_at", "finalizing_at", "completed_at", "created_at", "updated_at",
-            },
-            "attempt_events": {
-                "event_ref", "task_id", "attempt_id", "event_key", "sequence", "event_type", "payload_json",
-                "actor", "occurred_at", "created_at",
-            },
-        },
-        15: {
-            "attempt_events": {
-                "event_ref", "task_id", "attempt_id", "event_key", "sequence", "event_type", "payload_json",
-                "actor", "occurred_at", "created_at",
-            },
-        },
-        17: {
-            "repair_escrow": {
-                "handle_digest", "handle_id", "task_id", "attempt_id", "dispatch_ref_digest",
-                "kind", "base_payload_digest", "payload_json",
-                "diagnostics_json", "allowed_paths_json", "escrow_digest", "created_at",
-            },
-        },
-        18: {
-            "durable_questions": {
-                "question_ref", "task_id", "attempt_id", "dispatch_ref", "profile",
-                "task_revision", "attempt_generation", "submission_id", "question_text",
-                "status", "content_digest", "published_sequence", "answer_text",
-                "answer_submission_id", "answer_digest", "answered_sequence", "created_at",
-                "answered_at", "superseded_at",
-            },
-        },
-    }
-    if pre_report_repair:
-        if version != _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION:
-            raise ValueError("legacy repair schema is valid only for the exact v17 predecessor")
-        column_requirements[17]["repair_escrow"] = {
-            "handle_digest", "handle_id", "task_id", "attempt_id",
-            "task_ref_digest", "assignment_ref_digest", "kind",
-            "base_payload_digest", "payload_json", "diagnostics_json",
-            "allowed_paths_json", "escrow_digest", "created_at",
-        }
-    pre_repair_columns: dict[str, set[str]] = {}
-    for phase_version, phase_requirements in column_requirements.items():
-        if phase_version in {17, DATABASE_SCHEMA_VERSION}:
-            continue
-        for table, expected_columns in phase_requirements.items():
-            pre_repair_columns.setdefault(table, set()).update(expected_columns)
-    legacy_v8_columns: dict[str, set[str]] = {}
-    for legacy_version in range(1, 9):
-        for table, expected_columns in column_requirements[legacy_version].items():
-            legacy_v8_columns.setdefault(table, set()).update(expected_columns)
-    legacy_v8_columns.update({
-        "artifacts": {
-            "artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256",
-            "byte_size", "chunk_count", "immutable", "export_path", "created_at",
-        },
-        "artifact_chunks": {
-            "artifact_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256",
-        },
-    })
-    column_requirements[8] = legacy_v8_columns
-    column_requirements[16] = {table: set(columns) for table, columns in pre_repair_columns.items()}
-    pre_question_batch_columns = {table: set(columns) for table, columns in pre_repair_columns.items()}
-    for table, expected_columns in column_requirements[17].items():
-        pre_question_batch_columns.setdefault(table, set()).update(expected_columns)
-    column_requirements[_PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION] = pre_question_batch_columns
-    current_columns = {table: set(columns) for table, columns in pre_repair_columns.items()}
-    for table, expected_columns in column_requirements[17].items():
-        current_columns.setdefault(table, set()).update(expected_columns)
-    for table, expected_columns in column_requirements[DATABASE_SCHEMA_VERSION].items():
-        current_columns.setdefault(table, set()).update(expected_columns)
-    for table in ("question_batches", "question_items", "question_answers"):
-        current_columns.pop(table, None)
-    column_requirements[DATABASE_SCHEMA_VERSION] = current_columns
-    for table, expected_columns in column_requirements.get(version, {}).items():
-        columns = {str(row[0]) for row in connection.execute("SELECT name FROM pragma_table_info(?)", (table,))}
-        if not expected_columns.issubset(columns):
-            raise ValueError("Cortex database schema is inconsistent with migration history")
-
+    if _expected_schema_objects() - present:
+        raise ValueError("Cortex database schema is missing required objects")
+    for table in ("schema_migrations", "tasks", "attempt_results", "attempt_events", "repair_escrow", "durable_questions"):
+        columns = {str(row[1]) for row in connection.execute("SELECT * FROM pragma_table_info(?)", (table,))}
+        if not columns:
+            raise ValueError("Cortex database schema table is unavailable")
 
 
 def _applied_migrations(connection: sqlite3.Connection) -> dict[int, tuple[str, str]]:
@@ -2352,15 +1934,60 @@ def _database_readiness_is_current(root: Path, migrations: tuple[_Migration, ...
     return False
 
 
-def ensure_database(root: Path) -> None:
-    """Open a current ledger or upgrade one exact prior V11 ledger in place.
+def _requires_v11_quarantine(root: Path) -> bool:
+    """Recognize only the complete exact signed V1..V8 storage lineage."""
+    path = database_path(root)
+    if not path.exists():
+        return False
+    _assert_private_regular(path, "Cortex database")
+    uri = f"file:{path.as_posix()}?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True, isolation_level=None)
+        has_history = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone() is not None
+        if not has_history:
+            return False
+        history = [tuple(row) for row in connection.execute(
+            "SELECT version,name,checksum FROM schema_migrations ORDER BY version"
+        )]
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    except sqlite3.Error:
+        return False
+    finally:
+        if "connection" in locals():
+            connection.close()
+    return _matches_exact_history(
+        history, user_version, _SUPPORTED_PREVIOUS_V11_V8_HISTORY,
+    )
 
-    Only the signed v1..v8 V11 storage lineage is forward-migrated.
-    Their rows remain in the database, while obsolete public registry entries
-    are retained privately and cannot authorize the current API.  Other
-    recognized historical namespaces are quarantined; unknown or tampered
-    identities remain fail-closed.
-    """
+
+def _quarantine_v11_namespace(root: Path) -> Path:
+    """Preserve an authorized V11 namespace before current-only bootstrap."""
+    archive = root / (
+        "previous-v11-ledger-"
+        + _now().replace("-", "").replace(":", "").replace(".", "")
+        + "-"
+        + secrets.token_hex(8)
+    )
+    archive.mkdir(mode=0o700)
+    children = [item for item in root.iterdir() if item != archive]
+    for item in children:
+        if item.name == ".cortex-bootstrap.lock":
+            continue
+        os.replace(item, archive / item.name)
+    lifecycle_key = _governance_lifecycle_key_path(root)
+    if lifecycle_key.exists():
+        _assert_private_regular(lifecycle_key, "Cortex governance lifecycle key")
+        os.replace(lifecycle_key, archive / "governance-lifecycle.key")
+        _fsync_directory(lifecycle_key.parent)
+    _fsync_directory(archive)
+    _fsync_directory(root)
+    return archive
+
+
+def ensure_database(root: Path) -> None:
+    """Open current V19 or atomically append-upgrade an exact predecessor."""
     if _root_key(root) in _active_connections():
         _assert_current_migration_history(_active_connections()[_root_key(root)])
         return
@@ -2368,10 +1995,11 @@ def ensure_database(root: Path) -> None:
     if _database_readiness_is_current(root, migrations):
         return
     with _database_bootstrap_lock(root):
-        if _database_requires_quarantine(root, migrations):
+        if _requires_v11_quarantine(root):
             _forget_database_readiness(root)
-            _quarantine_database(root)
-        with _connection(root, write=True) as connection:
+            _quarantine_v11_namespace(root)
+        with transaction(root):
+            connection = _active_connections()[_root_key(root)]
             user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             has_history = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
@@ -2385,49 +2013,27 @@ def ensure_database(root: Path) -> None:
                 "AND name NOT LIKE 'sqlite_%' LIMIT 1"
             ).fetchone() is not None
             if user_objects and not has_history:
-                raise ValueError("Cortex database is an unsupported pre-canonical ledger")
+                raise ValueError("Cortex database has no current migration history")
             if applied:
-                if _is_pre_question_batch_current_migration_history(history, user_version):
-                    pre_report_repair = _is_pre_report_current_migration_history(
-                        history, user_version,
+                if (
+                    _is_supported_previous_v17_history(history, user_version)
+                    or _is_supported_previous_v18_history(history, user_version)
+                ):
+                    _upgrade_supported_previous_ledger(
+                        connection, history=history, user_version=user_version,
                     )
-                    _assert_migration_schema(
-                        connection,
-                        _PRE_QUESTION_BATCH_DATABASE_SCHEMA_VERSION,
-                        pre_report_repair=pre_report_repair,
-                    )
-                    if pre_report_repair:
-                        _upgrade_pre_report_repair_escrow(connection, history)
-                    _upgrade_retired_question_batch_storage(
-                        connection,
-                        _question_batch_hard_cut_migration(),
-                    )
-                    upgrade = None
-                elif _is_supported_previous_v11_v8_history(history, user_version):
-                    _assert_migration_schema(connection, 8)
-                    _upgrade_retired_question_batch_storage(
-                        connection,
-                        _v11_forward_upgrade_from_v8_migration(),
-                        preparation=_v11_forward_upgrade_from_v8_migration_v17().statements,
-                    )
-                    _seal_legacy_v11_operation_registry(connection)
-                    upgrade = None
-                elif _is_current_migration_history(history, user_version, migrations):
-                    _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
-                    upgrade = None
+                elif not _is_current_migration_history(history, user_version, migrations):
+                    raise ValueError("Cortex database does not match the current v19 migration")
                 else:
-                    raise ValueError("Cortex database is an unsupported pre-canonical ledger")
-                if upgrade is not None:
-                    _execute_migration_statements(connection, upgrade.statements)
-                    _seal_legacy_v11_operation_registry(connection)
-                    _record_migration(connection, upgrade)
-                    connection.execute(f"PRAGMA user_version = {upgrade.version}")
                     _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
             else:
                 migration = migrations[0]
                 _execute_migration_statements(connection, migration.statements)
                 _record_migration(connection, migration)
                 connection.execute(f"PRAGMA user_version = {migration.version}")
+            _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
+            _migrate_v19_current_orchestration_data(connection)
+            _assert_migration_schema(connection, DATABASE_SCHEMA_VERSION)
     _cache_database_readiness(root, migrations)
 
 
@@ -2448,7 +2054,7 @@ def _repair_escrow_basis(
     base_payload_digest: str,
     payload: Mapping[str, Any],
     diagnostics: Sequence[Mapping[str, Any]],
-    allowed_paths: Sequence[str],
+    patch_paths: Sequence[str],
 ) -> dict[str, Any]:
     """Return the immutable content bound by one signed repair handle."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", task_id):
@@ -2461,21 +2067,20 @@ def _repair_escrow_basis(
     ):
         if re.fullmatch(r"sha256:[0-9a-f]{64}", str(value or "")) is None:
             raise ValueError(f"repair escrow {label} is invalid")
-    # The public v11 hard cut has one semantic completion payload.  Persisting
-    # a retired plan/outcome kind would make a legacy draft selectable through
-    # a newly issued repair handle, so accept only the current report target.
+    # The public v11 contract has one semantic completion payload. Persist only
+    # the current report target.
     if kind != "report":
         raise ValueError("repair escrow kind is invalid")
     if not isinstance(payload, Mapping):
         raise ValueError("repair escrow payload must be an object")
     if not isinstance(diagnostics, Sequence) or isinstance(diagnostics, (str, bytes)) or not diagnostics:
         raise ValueError("repair escrow diagnostics are invalid")
-    if not isinstance(allowed_paths, Sequence) or isinstance(allowed_paths, (str, bytes)) or not allowed_paths:
-        raise ValueError("repair escrow allowed paths are invalid")
+    if not isinstance(patch_paths, Sequence) or isinstance(patch_paths, (str, bytes)) or not patch_paths:
+        raise ValueError("repair escrow patch paths are invalid")
     normalized_diagnostics = [dict(item) for item in diagnostics if isinstance(item, Mapping)]
-    normalized_paths = [str(item) for item in allowed_paths if isinstance(item, str) and item.startswith("/")]
-    if len(normalized_diagnostics) != len(diagnostics) or len(normalized_paths) != len(allowed_paths):
-        raise ValueError("repair escrow diagnostics or allowed paths are invalid")
+    normalized_paths = [str(item) for item in patch_paths if isinstance(item, str) and item.startswith("/")]
+    if len(normalized_diagnostics) != len(diagnostics) or len(normalized_paths) != len(patch_paths):
+        raise ValueError("repair escrow diagnostics or patch paths are invalid")
     return {
         "schema": "cortex/private-repair-escrow/v1",
         "task_id": task_id,
@@ -2485,7 +2090,7 @@ def _repair_escrow_basis(
         "base_payload_digest": base_payload_digest,
         "payload": dict(payload),
         "diagnostics": normalized_diagnostics,
-        "allowed_paths": normalized_paths,
+        "patch_paths": normalized_paths,
     }
 
 
@@ -2499,7 +2104,7 @@ def store_repair_escrow(
     base_payload_digest: str,
     payload: Mapping[str, Any],
     diagnostics: Sequence[Mapping[str, Any]],
-    allowed_paths: Sequence[str],
+    patch_paths: Sequence[str],
 ) -> dict[str, Any]:
     """Create or reuse one task-lifetime private repair escrow row."""
     basis = _repair_escrow_basis(
@@ -2510,11 +2115,11 @@ def store_repair_escrow(
         base_payload_digest=base_payload_digest,
         payload=payload,
         diagnostics=diagnostics,
-        allowed_paths=allowed_paths,
+        patch_paths=patch_paths,
     )
     payload_json = _canonical_json(basis["payload"])
     diagnostics_json = _canonical_json(basis["diagnostics"])
-    allowed_paths_json = _canonical_json(basis["allowed_paths"])
+    patch_paths_json = _canonical_json(basis["patch_paths"])
     escrow_digest = hashlib.sha256(_canonical_json(basis).encode("utf-8")).hexdigest()
     ensure_database(root)
     with _connection(root, write=True) as connection:
@@ -2544,11 +2149,11 @@ def store_repair_escrow(
             handle_digest = hashlib.sha256(handle_id.encode("ascii")).hexdigest()
             created_at = _now()
             connection.execute(
-                "INSERT INTO repair_escrow(handle_digest,handle_id,task_id,attempt_id,dispatch_ref_digest,kind,base_payload_digest,payload_json,diagnostics_json,allowed_paths_json,escrow_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO repair_escrow(handle_digest,handle_id,task_id,attempt_id,dispatch_ref_digest,kind,base_payload_digest,payload_json,diagnostics_json,patch_paths_json,escrow_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     handle_digest, handle_id, task_id, attempt_id, dispatch_ref_digest,
                     kind, base_payload_digest, payload_json,
-                    diagnostics_json, allowed_paths_json, escrow_digest, created_at,
+                    diagnostics_json, patch_paths_json, escrow_digest, created_at,
                 ),
             )
             existing = connection.execute(
@@ -2576,7 +2181,7 @@ def _validated_repair_escrow_row(row: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("repair escrow integrity check failed")
     payload = _decode_json(str(value.get("payload_json") or ""), "repair escrow payload")
     diagnostics = _decode_json_list(str(value.get("diagnostics_json") or ""), "repair escrow diagnostics")
-    allowed_paths = _decode_json_list(str(value.get("allowed_paths_json") or ""), "repair escrow allowed paths")
+    patch_paths = _decode_json_list(str(value.get("patch_paths_json") or ""), "repair escrow patch paths")
     basis = _repair_escrow_basis(
         task_id=str(value.get("task_id") or ""),
         attempt_id=str(value.get("attempt_id") or ""),
@@ -2585,7 +2190,7 @@ def _validated_repair_escrow_row(row: Mapping[str, Any]) -> dict[str, Any]:
         base_payload_digest=str(value.get("base_payload_digest") or ""),
         payload=payload,
         diagnostics=diagnostics,
-        allowed_paths=allowed_paths,
+        patch_paths=patch_paths,
     )
     observed = str(value.get("escrow_digest") or "")
     expected = hashlib.sha256(_canonical_json(basis).encode("utf-8")).hexdigest()
@@ -2595,7 +2200,7 @@ def _validated_repair_escrow_row(row: Mapping[str, Any]) -> dict[str, Any]:
         **value,
         "payload": payload,
         "diagnostics": diagnostics,
-        "allowed_paths": allowed_paths,
+        "patch_paths": patch_paths,
     }
 
 
@@ -2651,9 +2256,15 @@ def _upsert_task_finding_connection(
     source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge one canonical finding using an existing transaction."""
+    finding = dict(finding)
+    finding["severity"] = normalize_finding_severity(finding.get("severity"))
+    finding["blocking"] = bool(finding.get("blocking")) or finding_severity_is_intrinsically_blocking(
+        finding["severity"]
+    )
+    if str(finding.get("status") or "") == "resolved":
+        raise ValueError("canonical findings must be resolved through exact server evidence")
     fingerprint = str(finding["fingerprint"])
     source = source or {}
-    severity_rank = {"info": 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
     row = connection.execute(
         "SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?",
         (task_id, fingerprint),
@@ -2672,7 +2283,7 @@ def _upsert_task_finding_connection(
         if str(row["status"]) == "open" and status == "open":
             severity = max(
                 (str(row["severity"]), str(finding["severity"])),
-                key=lambda value: severity_rank[value],
+                key=lambda value: CANONICAL_FINDING_SEVERITY_RANK[value],
             )
             blocking = bool(row["blocking"]) or bool(finding["blocking"])
         else:
@@ -2721,11 +2332,11 @@ def materialize_attempt_findings(
     attempt_id: str,
     result_ref: str,
     gate: str | None,
+    task_revision: int | None,
     findings: Sequence[Any],
 ) -> list[dict[str, Any]]:
     """Materialize AttemptResult findings in the completion transaction."""
     materialized: list[dict[str, Any]] = []
-    severity_rank = {"info": 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
     for index, raw in enumerate(findings):
         value = dict(raw) if isinstance(raw, Mapping) else {"details": raw}
         fingerprint = str(value.get("fingerprint") or "").strip()
@@ -2737,14 +2348,14 @@ def materialize_attempt_findings(
             fingerprint = "finding-" + hashlib.sha256(
                 _canonical_json(identity).encode("utf-8")
             ).hexdigest()[:32]
-        severity = str(value.get("severity") or "info").strip()
-        if severity not in severity_rank:
-            severity = "info"
+        severity = normalize_finding_severity(value.get("severity"), default="info")
         status = str(value.get("status") or "open").strip().lower()
         if status not in {"open", "resolved", "waived"}:
             status = "open"
         blocking_value = value.get("blocking")
-        blocking = bool(blocking_value) if blocking_value is not None else severity in {"P0", "P1"}
+        blocking = (
+            bool(blocking_value) if blocking_value is not None else False
+        ) or finding_severity_is_intrinsically_blocking(severity)
         summary = str(value.get("summary") or value.get("message") or "AttemptResult finding").strip()
         if not summary:
             summary = "AttemptResult finding"
@@ -2765,12 +2376,15 @@ def materialize_attempt_findings(
             if key in value:
                 finding[key] = value[key]
         source = {
+            "transition": "opened",
             "source_type": "attempt_result", "attempt_id": attempt_id,
             "attempt_result_ref": result_ref, "origin_result_ref": result_ref,
             "finding_index": index,
         }
         if gate:
             source["gate"] = gate
+        if isinstance(task_revision, int) and not isinstance(task_revision, bool) and task_revision >= 1:
+            source["task_revision"] = task_revision
         for key in ("evidence_ref", "evidence_refs", "source_ref", "source_evidence"):
             if key in value:
                 source[key] = value[key]
@@ -2798,17 +2412,186 @@ def list_task_findings(root: Path, task_id: str, *, include_resolved: bool = Tru
 def task_findings_blockers(root: Path, task_id: str) -> list[dict[str, Any]]:
     """Return only open findings that are authoritative transition blockers.
 
-    P0/P1 are intrinsically blocking.  P2 is advisory unless the authoritative
-    finding explicitly declares ``blocking=true``; treating every open P2 as
-    a hard rework requirement made ordinary tracked risk indistinguishable
-    from a closure blocker.
+    P0/P1/P2 are intrinsically blocking. P3 and info remain advisory unless
+    authoritative server evidence explicitly marks them blocking.
     """
     return [
         item
         for item in list_task_findings(root, task_id, include_resolved=True)
         if item.get("status") == "open"
-        and (item["severity"] in {"P0", "P1"} or item["blocking"])
+        and (finding_severity_is_intrinsically_blocking(item["severity"]) or item["blocking"])
     ]
+
+
+def require_no_task_finding_blockers(root: Path, task_id: str, *, operation: str) -> None:
+    """Reject a terminal transition while authoritative findings stay open."""
+    if operation not in {"close", "handoff"}:
+        raise ValueError("canonical finding blocker guard operation is unsupported")
+    if task_findings_blockers(root, task_id):
+        raise ValueError(f"{operation}_blocked_by_open_canonical_findings")
+
+
+def resolve_task_finding(
+    root: Path,
+    task_id: str,
+    fingerprint: str,
+    *,
+    origin_result_refs: Sequence[str],
+    resolving_attempt_result_ref: str,
+    origin_gate: str,
+    resolving_gate: str,
+    task_revision: int,
+) -> dict[str, Any] | None:
+    """Resolve one finding only from its exact corrective/verifier lineage.
+
+    The originating result(s), corrective result receipt(s), current verifier
+    result, gate, and semantic task revision must all match durable rows. A
+    verifier that repeats the same finding cannot resolve it by omission.
+    """
+    origins = tuple(dict.fromkeys(
+        str(item).strip() for item in origin_result_refs if str(item).strip()
+    ))
+    resolver_ref = str(resolving_attempt_result_ref or "").strip()
+    opened_gate = str(origin_gate or "").strip()
+    verifier_gate = str(resolving_gate or "").strip()
+    if not origins or not resolver_ref or not opened_gate or not verifier_gate or task_revision < 1:
+        return None
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        row = connection.execute(
+            "SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?",
+            (task_id, fingerprint),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            evidence = json.loads(str(row["source_evidence_json"]))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(evidence, list):
+            return None
+        if str(row["status"]) == "resolved":
+            exact_resolution = any(
+                isinstance(item, Mapping)
+                and item.get("transition") == "resolved"
+                and str(item.get("origin_gate") or "") == opened_gate
+                and str(item.get("gate") or "") == verifier_gate
+                and list(item.get("origin_result_refs") or []) == list(origins)
+                and str(item.get("attempt_result_ref") or "") == resolver_ref
+                and int(item.get("task_revision") or 0) == task_revision
+                for item in evidence
+            )
+            if not exact_resolution:
+                return None
+            return {"fingerprint": fingerprint, "status": "resolved", "idempotent": True}
+        if str(row["status"]) != "open":
+            return None
+        opened = {
+            str(item.get("origin_result_ref") or item.get("attempt_result_ref") or "")
+            for item in evidence
+            if isinstance(item, Mapping)
+            and item.get("transition") == "opened"
+            and str(item.get("gate") or "") == opened_gate
+            and int(item.get("task_revision") or 0) == task_revision
+        }
+        if opened != set(origins):
+            return None
+        corrective_evidence = [
+            item for item in evidence
+            if isinstance(item, Mapping)
+            and item.get("transition") == "corrective_reported"
+            and int(item.get("task_revision") or 0) == task_revision
+            and str(item.get("attempt_result_ref") or "")
+        ]
+        corrective_origins = {
+            str(item.get("origin_result_ref") or "") for item in corrective_evidence
+        }
+        if corrective_origins != set(origins):
+            return None
+        for origin in origins:
+            receipts = [
+                item for item in corrective_evidence
+                if str(item.get("origin_result_ref") or "") == origin
+            ]
+            receipt_verified = False
+            for receipt in receipts:
+                receipt_ref = str(receipt.get("attempt_result_ref") or "")
+                receipt_gate = str(receipt.get("gate") or "")
+                result_row = connection.execute(
+                    "SELECT result_status,lifecycle_status,metadata_json FROM attempt_results "
+                    "WHERE task_id=? AND result_ref=?",
+                    (task_id, receipt_ref),
+                ).fetchone()
+                if (
+                    result_row is None
+                    or str(result_row["result_status"]) != "completed"
+                    or str(result_row["lifecycle_status"]) != "COMPLETED"
+                ):
+                    continue
+                try:
+                    result_metadata = json.loads(str(result_row["metadata_json"]))
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(result_metadata, Mapping)
+                    and receipt_gate
+                    and str(result_metadata.get("phase") or "") == receipt_gate
+                    and int(result_metadata.get("task_revision") or 0) == task_revision
+                ):
+                    receipt_verified = True
+                    break
+            if not receipt_verified:
+                return None
+        resolver = connection.execute(
+            "SELECT result_status,lifecycle_status,metadata_json FROM attempt_results "
+            "WHERE task_id=? AND result_ref=?",
+            (task_id, resolver_ref),
+        ).fetchone()
+        if (
+            resolver is None
+            or str(resolver["result_status"]) != "completed"
+            or str(resolver["lifecycle_status"]) != "COMPLETED"
+        ):
+            return None
+        try:
+            metadata = json.loads(str(resolver["metadata_json"]))
+        except json.JSONDecodeError:
+            return None
+        if (
+            not isinstance(metadata, Mapping)
+            or str(metadata.get("phase") or "") != verifier_gate
+            or int(metadata.get("task_revision") or 0) != task_revision
+        ):
+            return None
+        if any(
+            isinstance(item, Mapping)
+            and item.get("transition") == "opened"
+            and str(item.get("attempt_result_ref") or "") == resolver_ref
+            for item in evidence
+        ):
+            return None
+        stamp = _now()
+        resolution = {
+            "transition": "resolved",
+            "source_type": "origin_verifier",
+            "origin_gate": opened_gate,
+            "gate": verifier_gate,
+            "origin_result_refs": list(origins),
+            "attempt_result_ref": resolver_ref,
+            "task_revision": task_revision,
+        }
+        if resolution not in evidence:
+            evidence.append(resolution)
+        connection.execute(
+            "UPDATE task_findings SET status='resolved',blocking=0,source_evidence_json=?,"
+            "resolved_at=?,updated_at=? WHERE task_id=? AND fingerprint=? AND status='open'",
+            (_canonical_json(evidence), stamp, stamp, task_id, fingerprint),
+        )
+    resolved = next((
+        item for item in list_task_findings(root, task_id, include_resolved=True)
+        if str(item.get("fingerprint") or "") == fingerprint
+    ), None)
+    return resolved if isinstance(resolved, dict) and resolved.get("status") == "resolved" else None
 
 
 def task_index(root: Path) -> dict[str, dict[str, Any]]:
@@ -2918,24 +2701,53 @@ def update_task_definition(root: Path, definition: dict[str, Any]) -> None:
 
 def update_task_plan(root: Path, task_id: str, plan: dict[str, Any]) -> None:
     with _connection(root, write=True) as connection:
-        cursor = connection.execute("UPDATE tasks SET plan_json = ? WHERE task_id = ?", (_canonical_json(plan), task_id))
-        if cursor.rowcount != 1:
-            raise ValueError("SQLite orchestration plan refers to an unknown task")
-        has_revisions = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_revisions'"
-        ).fetchone() is not None
-        existing = connection.execute(
-            "SELECT 1 FROM plan_revisions WHERE task_id = ? LIMIT 1", (task_id,)
-        ).fetchone() if has_revisions else None
-        if has_revisions and existing is None:
+        active = connection.execute(
+            "SELECT plan_revision,plan_json FROM plan_revisions WHERE task_id = ? AND status = 'active'",
+            (task_id,),
+        ).fetchone()
+        active_plan = (
+            _decode_json(str(active["plan_json"]), "active plan revision")
+            if active is not None and active["plan_json"] is not None else None
+        )
+        candidate = canonical_json.normalize(plan)
+        if not isinstance(candidate, dict):
+            raise ValueError("SQLite orchestration plan must be an object")
+        if active_plan != candidate:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(plan_revision), 0) AS value FROM plan_revisions WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            next_revision = int(row["value"]) + 1
+            candidate["plan_revision"] = next_revision
+            plan["plan_revision"] = next_revision
             task_revision = connection.execute(
-                "SELECT COALESCE(MAX(task_revision), 1) FROM task_revisions WHERE task_id = ?", (task_id,)
+                "SELECT COALESCE(MAX(task_revision), 1) FROM task_revisions WHERE task_id = ?",
+                (task_id,),
             ).fetchone()[0]
             connection.execute(
-                """INSERT INTO plan_revisions(task_id, plan_revision, base_plan_revision, task_revision, impact_json, plan_json, status, created_at)
-                   VALUES (?, 1, NULL, ?, ?, ?, 'active', ?)""",
-                (task_id, int(task_revision), _canonical_json({"classification": "initial"}), _canonical_json(plan), _now()),
+                "UPDATE plan_revisions SET status = 'superseded' WHERE task_id = ? AND status = 'active'",
+                (task_id,),
             )
+            connection.execute(
+                """INSERT INTO plan_revisions(task_id, plan_revision, base_plan_revision, task_revision, impact_json, plan_json, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'active', ?)""",
+                (
+                    task_id,
+                    next_revision,
+                    next_revision - 1 if next_revision > 1 else None,
+                    int(task_revision),
+                    _canonical_json({
+                        "classification": "initial" if next_revision == 1 else "runtime_plan_update"
+                    }),
+                    _canonical_json(candidate),
+                    _now(),
+                ),
+            )
+        cursor = connection.execute(
+            "UPDATE tasks SET plan_json = ? WHERE task_id = ?", (_canonical_json(candidate), task_id)
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("SQLite orchestration plan refers to an unknown task")
 
 
 def append_task_revision(
@@ -3013,6 +2825,11 @@ def append_plan_revision(
             "SELECT COALESCE(MAX(plan_revision), 0) AS value FROM plan_revisions WHERE task_id = ?", (task_id,)
         ).fetchone()
         next_revision = int(row["value"]) + 1
+        plan_snapshot = canonical_json.normalize(plan) if plan is not None else None
+        if isinstance(plan_snapshot, dict):
+            plan_snapshot["plan_revision"] = next_revision
+            plan["plan_revision"] = next_revision
+        plan_digest = canonical_json.digest(plan_snapshot) if plan_snapshot is not None else None
         connection.execute("UPDATE plan_revisions SET status = 'superseded' WHERE task_id = ? AND status = 'active'", (task_id,))
         created_at = _now()
         connection.execute(
@@ -3020,10 +2837,330 @@ def append_plan_revision(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id, next_revision, next_revision - 1 if next_revision > 1 else None, int(task_revision),
-                _canonical_json(impact), _canonical_json(plan) if plan is not None else None, status, created_at,
+                _canonical_json(impact), _canonical_json(plan_snapshot) if plan_snapshot is not None else None, status, created_at,
             ),
         )
-    return {"task_id": task_id, "plan_revision": next_revision, "task_revision": task_revision, "impact": impact, "status": status, "created_at": created_at}
+    return {
+        "task_id": task_id,
+        "plan_revision": next_revision,
+        "task_revision": task_revision,
+        "impact": impact,
+        "plan_digest": plan_digest,
+        "status": status,
+        "created_at": created_at,
+    }
+
+
+def find_plan_revision_by_impact(
+    root: Path,
+    task_id: str,
+    *,
+    classification: str,
+    selectors: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the latest immutable receipt matching exact server-owned impact facts."""
+    ensure_database(root)
+    with _connection(root, write=False) as connection:
+        rows = connection.execute(
+            "SELECT * FROM plan_revisions WHERE task_id = ? ORDER BY plan_revision DESC",
+            (task_id,),
+        ).fetchall()
+    for row in rows:
+        impact = _decode_json(str(row["impact_json"]), "plan revision impact")
+        if impact.get("classification") != classification:
+            continue
+        if any(impact.get(key) != value for key, value in selectors.items()):
+            continue
+        plan = (
+            _decode_json(str(row["plan_json"]), "plan revision plan")
+            if row["plan_json"] is not None else None
+        )
+        return {
+            "task_id": str(row["task_id"]),
+            "plan_revision": int(row["plan_revision"]),
+            "base_plan_revision": int(row["base_plan_revision"]) if row["base_plan_revision"] is not None else None,
+            "task_revision": int(row["task_revision"]),
+            "impact": impact,
+            "plan": plan,
+            "plan_digest": canonical_json.digest(plan) if plan is not None else None,
+            "status": str(row["status"]),
+            "created_at": str(row["created_at"]),
+        }
+    return None
+
+
+def get_active_plan_revision(root: Path, task_id: str) -> dict[str, Any] | None:
+    """Return the sole active immutable plan receipt and its canonical digest."""
+    ensure_database(root)
+    with _connection(root, write=False) as connection:
+        rows = connection.execute(
+            "SELECT * FROM plan_revisions WHERE task_id = ? AND status = 'active' ORDER BY plan_revision DESC LIMIT 2",
+            (task_id,),
+        ).fetchall()
+        task_row = connection.execute(
+            "SELECT plan_json FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("canonical task has multiple active plan revisions")
+    row = rows[0]
+    plan = (
+        _decode_json(str(row["plan_json"]), "active plan revision")
+        if row["plan_json"] is not None else None
+    )
+    impact = _decode_json(str(row["impact_json"]), "active plan revision impact")
+    current_plan = (
+        _decode_json(str(task_row["plan_json"]), "current orchestration plan")
+        if task_row is not None and task_row["plan_json"] is not None else None
+    )
+    return {
+        "task_id": str(row["task_id"]),
+        "plan_revision": int(row["plan_revision"]),
+        "base_plan_revision": int(row["base_plan_revision"]) if row["base_plan_revision"] is not None else None,
+        "task_revision": int(row["task_revision"]),
+        "impact": impact,
+        "plan": plan,
+        "plan_digest": canonical_json.digest(plan) if plan is not None else None,
+        "current_plan": current_plan,
+        "current_plan_digest": canonical_json.digest(current_plan) if current_plan is not None else None,
+        "current_plan_matches": current_plan == plan,
+        "status": str(row["status"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
+def get_plan_revision(root: Path, task_id: str, plan_revision: int) -> dict[str, Any] | None:
+    """Return one exact immutable plan receipt by task and revision."""
+    if isinstance(plan_revision, bool) or not isinstance(plan_revision, int) or plan_revision < 1:
+        raise ValueError("plan_revision must be a positive integer")
+    ensure_database(root)
+    with _connection(root, write=False) as connection:
+        row = connection.execute(
+            "SELECT * FROM plan_revisions WHERE task_id = ? AND plan_revision = ?",
+            (task_id, plan_revision),
+        ).fetchone()
+    if row is None:
+        return None
+    plan = (
+        _decode_json(str(row["plan_json"]), "plan revision")
+        if row["plan_json"] is not None else None
+    )
+    if not isinstance(plan, dict):
+        return None
+    return {
+        "task_id": str(row["task_id"]),
+        "plan_revision": int(row["plan_revision"]),
+        "task_revision": int(row["task_revision"]),
+        "plan": plan,
+        "plan_digest": canonical_json.digest(plan),
+        "status": str(row["status"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _close_assignment_revision_authority(
+    connection: sqlite3.Connection,
+    *,
+    task_id: str,
+    attempt: Mapping[str, Any],
+    result_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one close occurrence without trusting public task revision metadata."""
+    assignment_revision = attempt.get("assignment_task_revision")
+    plan_revision = attempt.get("plan_revision")
+    identity = result_metadata.get("identity")
+    if (
+        str(attempt.get("gate") or "") != "governance_close"
+        or str(attempt.get("operation_kind") or "") != "close"
+        or isinstance(assignment_revision, bool)
+        or not isinstance(assignment_revision, int)
+        or assignment_revision < 1
+        or isinstance(plan_revision, bool)
+        or not isinstance(plan_revision, int)
+        or plan_revision < 1
+        or "task_revision" in result_metadata
+        or not isinstance(identity, Mapping)
+        or str(identity.get("attempt_id") or "") != str(attempt.get("attempt_id") or "")
+        or str(identity.get("dispatch_ref") or "") != str(attempt.get("dispatch_ref") or "")
+        or result_metadata.get("plan_revision") != plan_revision
+    ):
+        raise ValueError("governance close revision authority is not bound to the exact private assignment occurrence")
+
+    exact_row = connection.execute(
+        "SELECT task_revision,plan_json FROM plan_revisions "
+        "WHERE task_id=? AND plan_revision=?",
+        (task_id, plan_revision),
+    ).fetchone()
+    active_rows = connection.execute(
+        "SELECT plan_json FROM plan_revisions WHERE task_id=? AND status='active' "
+        "ORDER BY plan_revision DESC LIMIT 2",
+        (task_id,),
+    ).fetchall()
+    task_row = connection.execute(
+        "SELECT plan_json FROM tasks WHERE task_id=?", (task_id,),
+    ).fetchone()
+    current_revision_row = connection.execute(
+        "SELECT task_revision FROM task_revisions WHERE task_id=? "
+        "ORDER BY task_revision DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if exact_row is None or len(active_rows) != 1 or task_row is None or current_revision_row is None:
+        raise ValueError("governance close revision authority is unavailable")
+    exact_plan = _decode_json(str(exact_row["plan_json"]), "governance close plan receipt")
+    active_plan = _decode_json(str(active_rows[0]["plan_json"]), "active governance close plan receipt")
+    current_plan = _decode_json(str(task_row["plan_json"]), "current governance close plan")
+    if not all(isinstance(item, dict) for item in (exact_plan, active_plan, current_plan)):
+        raise ValueError("governance close plan authority is invalid")
+    def digest_ref(value: object) -> str:
+        digest = str(value or "").strip().lower()
+        if digest.startswith("sha256:"):
+            digest = digest[7:]
+        return "sha256:" + digest if re.fullmatch(r"[0-9a-f]{64}", digest) else ""
+
+    exact_digest = digest_ref(canonical_json.digest(exact_plan))
+
+    if not (
+        int(exact_row["task_revision"]) == assignment_revision
+        and int(current_revision_row["task_revision"]) == assignment_revision
+        and digest_ref(attempt.get("plan_digest")) == exact_digest
+        and digest_ref(result_metadata.get("plan_digest")) == exact_digest
+        and active_plan == current_plan
+        and executable_plan_projection(exact_plan) == executable_plan_projection(current_plan)
+    ):
+        raise ValueError("governance close assignment is stale for the immutable plan or current task revision")
+    return {
+        "task_revision": assignment_revision,
+        "plan_revision": plan_revision,
+        "plan_digest": exact_digest,
+    }
+
+
+def validate_close_assignment_revision_authority_in_transaction(
+    connection: sqlite3.Connection,
+    *,
+    task_id: str,
+    attempt: Mapping[str, Any],
+    result_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate close occurrence revision authority inside an existing transaction."""
+    return _close_assignment_revision_authority(
+        connection,
+        task_id=task_id,
+        attempt=attempt,
+        result_metadata=result_metadata,
+    )
+
+
+def validate_close_assignment_revision_authority(
+    root: Path,
+    *,
+    task_id: str,
+    attempt: Mapping[str, Any],
+    result_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate close occurrence revision authority from the canonical ledger."""
+    ensure_database(root)
+    with _connection(root, write=False) as connection:
+        return _close_assignment_revision_authority(
+            connection,
+            task_id=task_id,
+            attempt=attempt,
+            result_metadata=result_metadata,
+        )
+
+
+_OPERATIONAL_PLAN_KEYS = frozenset({
+    "attempt_ids", "executable_gates", "plan_revision", "status", "updated_at",
+})
+
+
+def executable_plan_projection(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only executable plan semantics, excluding lifecycle bookkeeping."""
+    def project(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): project(item)
+                for key, item in value.items()
+                if str(key) not in _OPERATIONAL_PLAN_KEYS
+            }
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        return canonical_json.normalize(value)
+
+    projected = project(plan)
+    if not isinstance(projected, dict):
+        raise ValueError("executable orchestration plan projection must be an object")
+    return projected
+
+
+def get_executable_plan_authority(root: Path, task_id: str) -> dict[str, Any] | None:
+    """Return the latest semantic plan receipt and compare it to the live plan.
+
+    Runtime wave status, assignment ids, and timestamps intentionally create
+    operational receipts without changing this executable-plan authority.
+    """
+    ensure_database(root)
+    with _connection(root, write=False) as connection:
+        semantic_row = connection.execute(
+            "WITH latest_semantic_plan AS ("
+            " SELECT * FROM plan_revisions"
+            " WHERE task_id = ?"
+            " AND COALESCE(json_extract(impact_json, '$.classification'), '')"
+            "     <> 'runtime_plan_update'"
+            " ORDER BY plan_revision DESC LIMIT 1"
+            "), latest_task_revision AS ("
+            " SELECT task_revision FROM task_revisions"
+            " WHERE task_id = ? ORDER BY task_revision DESC LIMIT 1"
+            ")"
+            " SELECT latest_semantic_plan.*,"
+            " tasks.plan_json AS current_plan_json,"
+            " latest_task_revision.task_revision AS current_task_revision"
+            " FROM latest_semantic_plan"
+            " JOIN tasks ON tasks.task_id = latest_semantic_plan.task_id"
+            " LEFT JOIN latest_task_revision ON 1 = 1",
+            (task_id, task_id),
+        ).fetchone()
+    if semantic_row is None:
+        return None
+    semantic_impact = _decode_json(
+        str(semantic_row["impact_json"]), "semantic plan revision impact",
+    )
+    receipt_plan = (
+        _decode_json(str(semantic_row["plan_json"]), "semantic plan revision")
+        if semantic_row["plan_json"] is not None else None
+    )
+    current_plan = (
+        _decode_json(str(semantic_row["current_plan_json"]), "current orchestration plan")
+        if semantic_row["current_plan_json"] is not None else None
+    )
+    current_task_revision = (
+        int(semantic_row["current_task_revision"])
+        if semantic_row["current_task_revision"] is not None else None
+    )
+    if current_task_revision is not None and current_task_revision < 1:
+        current_task_revision = None
+    if not isinstance(receipt_plan, dict) or not isinstance(current_plan, dict):
+        return None
+    receipt_projection = executable_plan_projection(receipt_plan)
+    current_projection = executable_plan_projection(current_plan)
+    receipt_digest = canonical_json.digest(receipt_projection)
+    current_digest = canonical_json.digest(current_projection)
+    return {
+        "task_id": str(semantic_row["task_id"]),
+        "plan_revision": int(semantic_row["plan_revision"]),
+        "task_revision": int(semantic_row["task_revision"]),
+        "current_task_revision": current_task_revision,
+        "impact": semantic_impact or {},
+        "plan": receipt_plan,
+        "plan_projection": receipt_projection,
+        "plan_digest": receipt_digest,
+        "current_plan": current_plan,
+        "current_plan_projection": current_projection,
+        "current_plan_digest": current_digest,
+        "current_plan_matches": current_digest == receipt_digest,
+        "created_at": str(semantic_row["created_at"]),
+    }
 
 
 def put_worker_session(root: Path, session: dict[str, Any]) -> dict[str, Any]:
@@ -3041,7 +3178,7 @@ def put_worker_session(root: Path, session: dict[str, Any]) -> dict[str, Any]:
             """INSERT INTO worker_sessions(session_id,task_id,attempt_id,host_agent_id,host_task_name,host_tool,generation,status,resumable,started_at,last_seen_at,terminated_at)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(session_id) DO UPDATE SET host_agent_id=excluded.host_agent_id, host_task_name=excluded.host_task_name,
-                 host_tool=excluded.host_tool, status=excluded.status, resumable=excluded.resumable, last_seen_at=excluded.last_seen_at,
+                 host_tool=excluded.host_tool, generation=excluded.generation, status=excluded.status, resumable=excluded.resumable, last_seen_at=excluded.last_seen_at,
                  terminated_at=excluded.terminated_at""",
             (
                 session_id, task_id, attempt_id, session.get("host_agent_id"), str(session.get("host_task_name") or ""),
@@ -3135,6 +3272,26 @@ def list_worker_sessions(root: Path, task_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def worker_sessions_for_host_agent(
+    root: Path,
+    host_agent_id: str,
+    *,
+    limit: int = 2,
+) -> list[dict[str, Any]]:
+    """Resolve a bounded private child binding without task enumeration."""
+    if not isinstance(host_agent_id, str) or not host_agent_id or "\x00" in host_agent_id:
+        return []
+    bounded = max(1, min(int(limit), 2))
+    ensure_database(root)
+    with _connection(root) as connection:
+        rows = connection.execute(
+            "SELECT session_id,task_id,attempt_id,host_agent_id,host_task_name,host_tool,generation,status,resumable,started_at,last_seen_at,terminated_at "
+            "FROM worker_sessions WHERE host_agent_id=? ORDER BY task_id,attempt_id,generation LIMIT ?",
+            (host_agent_id, bounded),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def append_attempt_message(root: Path, message: dict[str, Any]) -> dict[str, Any]:
     ensure_database(root)
     created_at = _now()
@@ -3174,6 +3331,385 @@ def get_global(root: Path, name: str, default: dict[str, Any] | None = None) -> 
     with _connection(root) as connection:
         row = connection.execute("SELECT payload_json FROM global_documents WHERE name = ?", (name,)).fetchone()
     return dict(default or {}) if row is None else _decode_json(str(row["payload_json"]), f"global document {name}")
+
+
+def native_host_start_key(agent_id: str) -> str:
+    """Return a private non-reversible key for one exact native child thread."""
+    normalized = str(agent_id or "")
+    if not normalized or len(normalized) > 256 or "\x00" in normalized:
+        raise ValueError("native child host identity is invalid")
+    return NATIVE_HOST_START_KEY_PREFIX + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def native_host_epoch_key(session_id: str) -> str:
+    """Return the private document key for one coordinator host session."""
+    normalized = str(session_id or "")
+    if not normalized or len(normalized) > 256 or "\x00" in normalized:
+        raise ValueError("native host session identity is invalid")
+    return NATIVE_HOST_EPOCH_KEY_PREFIX + hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+
+def native_context_boundary_key(session_id: str) -> str:
+    normalized = str(session_id or "")
+    if not normalized or len(normalized) > 256 or "\x00" in normalized:
+        raise ValueError("native context session identity is invalid")
+    return NATIVE_CONTEXT_BOUNDARY_KEY_PREFIX + hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+
+def _native_context_boundary_binding(root: Path, value: Mapping[str, Any]) -> str:
+    payload = _canonical_json({
+        key: value.get(key)
+        for key in (
+            "schema", "session_digest", "epoch", "fingerprint", "source",
+            "boundary_ref", "observed_at",
+        )
+    }).encode("utf-8")
+    return "hmac-sha256:" + hmac.new(
+        _governance_lifecycle_hmac_key(root, create=False), payload, hashlib.sha256,
+    ).hexdigest()
+
+
+def hook_record_native_context_boundary(
+    root: Path,
+    session_id: str,
+    epoch: Mapping[str, Any],
+    *,
+    source: str,
+) -> bool:
+    """Record one same-incarnation compact/reset boundary without task mutation."""
+    normalized_source = str(source or "").strip().lower()
+    if normalized_source not in {"compact", "compaction", "clear", "reset"}:
+        return False
+    observed_at = _now()
+    identity = _canonical_json({
+        "session_digest": private_lifecycle_audit_digest(root, "host-session", session_id),
+        "epoch": epoch.get("epoch"),
+        "fingerprint": epoch.get("fingerprint"),
+        "source": normalized_source,
+        "observed_at": observed_at,
+    })
+    value = {
+        "schema": NATIVE_CONTEXT_BOUNDARY_SCHEMA,
+        "session_digest": private_lifecycle_audit_digest(root, "host-session", session_id),
+        "epoch": int(epoch.get("epoch") or 0),
+        "fingerprint": str(epoch.get("fingerprint") or ""),
+        "source": normalized_source,
+        "boundary_ref": "context-boundary-v1-" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+        "observed_at": observed_at,
+    }
+    if value["epoch"] < 1 or not value["fingerprint"].startswith("hmac-sha256:"):
+        return False
+    value["binding"] = _native_context_boundary_binding(root, value)
+    return hook_put_global_document(root, native_context_boundary_key(session_id), value)
+
+
+def get_native_context_boundary(root: Path, session_id: str) -> dict[str, Any] | None:
+    value = get_global(root, native_context_boundary_key(session_id), {})
+    if value.get("schema") != NATIVE_CONTEXT_BOUNDARY_SCHEMA:
+        return None
+    try:
+        expected = _native_context_boundary_binding(root, value)
+    except (OSError, TypeError, ValueError):
+        return None
+    binding = str(value.get("binding") or "")
+    return dict(value) if binding and hmac.compare_digest(binding, expected) else None
+
+
+def _native_context_boundary_ack_key(session_id: str, task_id: str) -> str:
+    joined = _canonical_json([str(session_id), str(task_id)])
+    return NATIVE_CONTEXT_BOUNDARY_ACK_KEY_PREFIX + hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def context_boundary_pending(
+    root: Path, session_id: str, task_id: str,
+) -> dict[str, Any] | None:
+    boundary = get_native_context_boundary(root, session_id)
+    if boundary is None:
+        return None
+    ack = get_global(root, _native_context_boundary_ack_key(session_id, task_id), {})
+    if (
+        ack.get("schema") == NATIVE_CONTEXT_BOUNDARY_ACK_SCHEMA
+        and str(ack.get("boundary_ref") or "") == str(boundary.get("boundary_ref") or "")
+    ):
+        return None
+    return boundary
+
+
+def acknowledge_context_boundary(
+    root: Path, session_id: str, task_id: str, boundary: Mapping[str, Any],
+) -> None:
+    current = get_native_context_boundary(root, session_id)
+    if (
+        current is None
+        or str(current.get("boundary_ref") or "") != str(boundary.get("boundary_ref") or "")
+    ):
+        raise ValueError("native context boundary changed during inspection")
+    put_global(root, _native_context_boundary_ack_key(session_id, task_id), {
+        "schema": NATIVE_CONTEXT_BOUNDARY_ACK_SCHEMA,
+        "boundary_ref": str(current["boundary_ref"]),
+        "acknowledged_at": _now(),
+    })
+
+
+def _native_host_epoch_binding(root: Path, value: Mapping[str, Any], *, create: bool) -> str:
+    payload = _canonical_json({
+        key: value.get(key)
+        for key in (
+            "schema", "session_digest", "epoch", "fingerprint", "host_uid", "host_pid",
+            "host_start_ticks", "boot_digest", "process_started_at", "source",
+            "observed_at", "transition",
+        )
+    }).encode("utf-8")
+    return "hmac-sha256:" + hmac.new(
+        _governance_lifecycle_hmac_key(root, create=create), payload, hashlib.sha256,
+    ).hexdigest()
+
+
+def get_native_host_epoch(root: Path, session_id: str) -> dict[str, Any] | None:
+    """Read and authenticate the latest private host-process incarnation."""
+    value = get_global(root, native_host_epoch_key(session_id), {})
+    if value.get("schema") != NATIVE_HOST_EPOCH_SCHEMA:
+        return None
+    try:
+        expected = _native_host_epoch_binding(root, value, create=False)
+    except (OSError, TypeError, ValueError):
+        return None
+    binding = str(value.get("binding") or "")
+    return value if binding and hmac.compare_digest(binding, expected) else None
+
+
+def hook_get_native_host_epoch(
+    root: Path, session_id: str, *, timeout_ms: int = 100,
+) -> dict[str, Any] | None:
+    """Read an authenticated epoch without bootstrapping or migrating a ledger."""
+    try:
+        key = native_host_epoch_key(session_id)
+        with hook_snapshot(root, timeout_ms=timeout_ms) as connection:
+            if connection is None:
+                return None
+            value = hook_snapshot_global(connection, key, {})
+        if value.get("schema") != NATIVE_HOST_EPOCH_SCHEMA:
+            return None
+        expected = _native_host_epoch_binding(root, value, create=False)
+        binding = str(value.get("binding") or "")
+        return value if binding and hmac.compare_digest(binding, expected) else None
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("hook_snapshot_miss")
+        return None
+
+
+def hook_advance_native_host_epoch(
+    root: Path,
+    session_id: str,
+    incarnation: Mapping[str, Any],
+    *,
+    source: str,
+    prior_fingerprint: str | None,
+    prior_provably_dead: bool,
+    hook_owned: bool = True,
+) -> dict[str, Any] | None:
+    """Atomically bind one Codex process incarnation to a coordinator session.
+
+    A changed process may advance the epoch only when the caller has proved
+    that the previously authenticated PID/start-time pair is no longer live.
+    The hook never infers liveness from model text or collaboration output.
+    """
+    try:
+        key = native_host_epoch_key(session_id)
+        fingerprint = str(incarnation.get("fingerprint") or "")
+        if not fingerprint.startswith("hmac-sha256:"):
+            raise ValueError("native host incarnation fingerprint is invalid")
+        connection_scope = (
+            _hook_write_connection(root, timeout_ms=4000)
+            if hook_owned else _connection(root, write=True)
+        )
+        with connection_scope as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM global_documents WHERE name=?", (key,),
+            ).fetchone()
+            existing = (
+                _decode_json(str(row["payload_json"]), "native host epoch")
+                if row is not None else None
+            )
+            if isinstance(existing, Mapping):
+                existing_binding = str(existing.get("binding") or "")
+                expected_binding = _native_host_epoch_binding(root, existing, create=False)
+                if (
+                    existing.get("schema") != NATIVE_HOST_EPOCH_SCHEMA
+                    or not existing_binding
+                    or not hmac.compare_digest(existing_binding, expected_binding)
+                ):
+                    return None
+                existing_fingerprint = str(existing.get("fingerprint") or "")
+                if hmac.compare_digest(existing_fingerprint, fingerprint):
+                    return dict(existing)
+                if (
+                    not prior_provably_dead
+                    or not prior_fingerprint
+                    or not hmac.compare_digest(existing_fingerprint, prior_fingerprint)
+                ):
+                    return None
+                epoch = int(existing.get("epoch") or 0) + 1
+                transition = "proven_dead_host_handoff"
+            else:
+                epoch = 1
+                transition = "initial_host_binding"
+            value = {
+                "schema": NATIVE_HOST_EPOCH_SCHEMA,
+                "session_digest": private_lifecycle_audit_digest(
+                    root, "host-session", session_id,
+                ),
+                "epoch": epoch,
+                "fingerprint": fingerprint,
+                "host_uid": int(incarnation["host_uid"]),
+                "host_pid": int(incarnation["host_pid"]),
+                "host_start_ticks": int(incarnation["host_start_ticks"]),
+                "boot_digest": str(incarnation["boot_digest"]),
+                "process_started_at": str(incarnation["process_started_at"]),
+                "source": str(source),
+                "observed_at": str(incarnation["observed_at"]),
+                "transition": transition,
+            }
+            value["binding"] = _native_host_epoch_binding(root, value, create=True)
+            payload_json = _bounded_document_json(value, label="native host epoch")
+            connection.execute(
+                "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                (key, payload_json, value["observed_at"]),
+            )
+            return value
+    except (KeyError, OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return None
+
+
+def native_host_start_boundary_key(agent_id: str, turn_id: str) -> str:
+    """Return a private immutable key for one exact child start boundary."""
+    if not str(turn_id or "") or len(str(turn_id)) > 512 or "\x00" in str(turn_id):
+        raise ValueError("native child start turn identity is invalid")
+    joined = json.dumps([str(agent_id), str(turn_id)], ensure_ascii=False, separators=(",", ":"))
+    return NATIVE_HOST_START_BOUNDARY_KEY_PREFIX + hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def native_host_stop_key(agent_id: str, session_id: str, turn_id: str) -> str:
+    """Return the immutable private inbox key for one exact native Stop."""
+    values = (str(agent_id or ""), str(session_id or ""), str(turn_id or ""))
+    if any(not value or len(value) > 512 or "\x00" in value for value in values):
+        raise ValueError("native child stop identity is invalid")
+    joined = json.dumps(list(values), ensure_ascii=False, separators=(",", ":"))
+    return NATIVE_HOST_STOP_KEY_PREFIX + hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def native_host_stop_receipt_key(stop_key: str) -> str:
+    """Return a private reconciliation key without copying host identity."""
+    normalized = str(stop_key or "")
+    if not normalized.startswith(NATIVE_HOST_STOP_KEY_PREFIX):
+        raise ValueError("native child stop inbox identity is invalid")
+    return NATIVE_HOST_STOP_RECEIPT_KEY_PREFIX + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def pending_native_host_stops(root: Path) -> list[tuple[str, dict[str, Any]]]:
+    """List captured Stops without reconciliation receipts in durable order."""
+    ensure_database(root)
+    with _connection(root) as connection:
+        rows = connection.execute(
+            "SELECT name, payload_json, updated_at FROM global_documents "
+            "WHERE name LIKE ? ORDER BY updated_at, name",
+            (NATIVE_HOST_STOP_KEY_PREFIX + "%",),
+        ).fetchall()
+        receipt_names = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM global_documents WHERE name LIKE ?",
+                (NATIVE_HOST_STOP_RECEIPT_KEY_PREFIX + "%",),
+            ).fetchall()
+        }
+    pending: list[tuple[str, dict[str, Any]]] = []
+    for row in rows:
+        stop_key = str(row["name"])
+        if native_host_stop_receipt_key(stop_key) in receipt_names:
+            continue
+        try:
+            value = _decode_json(str(row["payload_json"]), "native host stop inbox")
+        except (TypeError, ValueError):
+            continue
+        if value.get("schema") == NATIVE_HOST_STOP_SCHEMA:
+            pending.append((stop_key, value))
+    return pending
+
+
+def put_native_host_stop_receipt(root: Path, stop_key: str, value: dict[str, Any]) -> str:
+    """Insert one immutable reconciliation receipt in the caller's transaction."""
+    if value.get("schema") != NATIVE_HOST_STOP_RECEIPT_SCHEMA:
+        raise ValueError("native child stop receipt schema is invalid")
+    key = native_host_stop_receipt_key(stop_key)
+    payload_json = _bounded_document_json(value, label="native host stop receipt")
+    with _connection(root, write=True) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM global_documents WHERE name=?", (key,),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
+                (key, payload_json, str(value.get("reconciled_at") or _now())),
+            )
+            return "inserted"
+        existing = _decode_json(str(row["payload_json"]), "native host stop receipt")
+        compare_fields = ("schema", "stop_key_digest", "task_id", "attempt_id", "outcome")
+        return "same" if all(existing.get(field) == value.get(field) for field in compare_fields) else "conflict"
+
+
+def get_native_host_start(root: Path, agent_id: str) -> dict[str, Any] | None:
+    value = get_global(root, native_host_start_key(agent_id), {})
+    return value if value.get("schema") == NATIVE_HOST_START_SCHEMA else None
+
+
+def get_latest_native_host_start(root: Path, agent_id: str) -> dict[str, Any] | None:
+    """Return the latest durable Start boundary for one native child.
+
+    The primary child record returned by :func:`get_native_host_start` is
+    intentionally immutable.  A resumed question turn creates another
+    boundary record, so binding must resolve the newest exact boundary rather
+    than reusing that primary record.  ``observed_at`` and the SQLite update
+    timestamp provide the durable ordering; ``turn_id`` is a deterministic
+    final tie-breaker for equal timestamps.
+    """
+    ensure_database(root)
+    # Boundary keys are independently hashed (agent + turn); they do not
+    # share the primary key prefix.  Filter the decoded payload as well as
+    # the bounded key prefix so unrelated children cannot be selected.
+    prefix = NATIVE_HOST_START_BOUNDARY_KEY_PREFIX
+    candidates: list[tuple[tuple[str, str, str], dict[str, Any]]] = []
+    with _connection(root) as connection:
+        rows = connection.execute(
+            "SELECT payload_json, updated_at FROM global_documents "
+            "WHERE name LIKE ?",
+            (prefix + "%",),
+        ).fetchall()
+    for row in rows:
+        try:
+            value = _decode_json(str(row["payload_json"]), "native host start boundary")
+        except (TypeError, ValueError):
+            continue
+        if (
+            value.get("schema") != NATIVE_HOST_START_SCHEMA
+            or str(value.get("agent_id") or "") != str(agent_id)
+            or not str(value.get("turn_id") or "")
+        ):
+            continue
+        ordering = (
+            str(value.get("observed_at") or ""),
+            str(row["updated_at"] or ""),
+            str(value.get("turn_id") or ""),
+        )
+        candidates.append((ordering, value))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def put_global(root: Path, name: str, value: dict[str, Any]) -> None:
@@ -3220,6 +3756,211 @@ def put_task_document(root: Path, task_id: str, document_key: str, value: dict[s
         )
 
 
+def native_lifecycle_failure_key(attempt_id: str) -> str:
+    normalized = str(attempt_id or "").strip()
+    if not normalized or len(normalized) > 120 or "\x00" in normalized:
+        raise ValueError("native lifecycle failure attempt identity is invalid")
+    return NATIVE_LIFECYCLE_FAILURE_KEY_PREFIX + normalized
+
+
+def hook_put_task_document(root: Path, task_id: str, document_key: str, value: dict[str, Any]) -> bool:
+    """Attempt one bounded hook-owned task-document write without migration."""
+    try:
+        key = _bounded_document_key(document_key, label="hook task document identity")
+        payload_json = _bounded_document_json(value, label=f"hook task document {key!r}")
+        with _hook_write_connection(root) as connection:
+            connection.execute(
+                "INSERT INTO task_documents(task_id, document_key, payload_json, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(task_id, document_key) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                (task_id, key, payload_json, str(value.get("observed_at") or value.get("updated_at") or _now())),
+            )
+        return True
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return False
+
+
+def hook_put_global_document(root: Path, name: str, value: dict[str, Any]) -> bool:
+    """Attempt one bounded hook-owned project diagnostic write."""
+    try:
+        key = _bounded_document_key(name, label="hook global document identity")
+        payload_json = _bounded_document_json(value, label=f"hook global document {key!r}")
+        with _hook_write_connection(root) as connection:
+            connection.execute(
+                "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                (key, payload_json, str(value.get("observed_at") or value.get("updated_at") or _now())),
+            )
+        return True
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return False
+
+
+def hook_compare_insert_global_document(
+    root: Path,
+    name: str,
+    value: dict[str, Any],
+    *,
+    compare_fields: Sequence[str],
+) -> str:
+    """Atomically insert immutable hook evidence or compare the exact row."""
+    try:
+        key = _bounded_document_key(name, label="hook immutable document identity")
+        payload_json = _bounded_document_json(value, label=f"hook immutable document {key!r}")
+        with _hook_write_connection(root) as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM global_documents WHERE name=?", (key,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
+                    (key, payload_json, str(value.get("observed_at") or _now())),
+                )
+                return "inserted"
+            existing = _decode_json(str(row["payload_json"]), f"hook immutable document {key!r}")
+            return "same" if all(existing.get(field) == value.get(field) for field in compare_fields) else "conflict"
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return "unavailable"
+
+
+def hook_compare_insert_native_stop(root: Path, value: dict[str, Any]) -> str:
+    """Durably capture one exact Stop before the hook acknowledges delivery.
+
+    Unlike optional hook telemetry, terminal lifecycle capture gets most of
+    the host hook's bounded runtime budget.  It deliberately does not acquire
+    the task-state lock: a busy evaluator can delay reconciliation, but cannot
+    make the sole terminal host event disappear.
+    """
+    try:
+        if value.get("schema") != NATIVE_HOST_STOP_SCHEMA:
+            raise ValueError("native child stop schema is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", str(value.get("host_envelope_digest") or "")) is None:
+            raise ValueError("native child stop envelope digest is invalid")
+        key = native_host_stop_key(
+            str(value.get("agent_id") or ""),
+            str(value.get("session_id") or ""),
+            str(value.get("turn_id") or ""),
+        )
+        payload_json = _bounded_document_json(value, label="native host stop inbox")
+        with _hook_write_connection(root, timeout_ms=4000) as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM global_documents WHERE name=?", (key,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
+                    (key, payload_json, str(value.get("observed_at") or _now())),
+                )
+                return "inserted"
+            existing = _decode_json(str(row["payload_json"]), "native host stop inbox")
+            compare_fields = (
+                "schema", "agent_id", "session_id", "turn_id", "agent_type",
+                "model", "permission_mode", "stop_hook_active", "host_envelope_digest",
+                "host_epoch", "host_epoch_fingerprint",
+            )
+            return "same" if all(existing.get(field) == value.get(field) for field in compare_fields) else "conflict"
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return "unavailable"
+
+
+def hook_compare_insert_native_start(root: Path, value: dict[str, Any]) -> str:
+    """Atomically bind one child thread and insert one exact Start boundary."""
+    try:
+        agent_id = str(value.get("agent_id") or "")
+        turn_id = str(value.get("turn_id") or "")
+        primary_key = native_host_start_key(agent_id)
+        boundary_key = native_host_start_boundary_key(agent_id, turn_id)
+        payload_json = _bounded_document_json(value, label="native host start evidence")
+        with _hook_write_connection(root) as connection:
+            primary = connection.execute(
+                "SELECT payload_json FROM global_documents WHERE name=?", (primary_key,),
+            ).fetchone()
+            if primary is not None:
+                existing = _decode_json(str(primary["payload_json"]), "native host start evidence")
+                if not all(existing.get(field) == value.get(field) for field in (
+                    "schema", "agent_id", "session_id", "agent_type",
+                    "host_epoch", "host_epoch_fingerprint",
+                )):
+                    return "conflict"
+            boundary = connection.execute(
+                "SELECT payload_json FROM global_documents WHERE name=?", (boundary_key,),
+            ).fetchone()
+            if boundary is not None:
+                existing = _decode_json(str(boundary["payload_json"]), "native host start boundary")
+                return "same" if all(existing.get(field) == value.get(field) for field in (
+                    "schema", "agent_id", "session_id", "turn_id", "agent_type", "model",
+                    "host_epoch", "host_epoch_fingerprint",
+                )) else "conflict"
+            timestamp = str(value.get("observed_at") or _now())
+            if primary is None:
+                connection.execute(
+                    "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
+                    (primary_key, payload_json, timestamp),
+                )
+            connection.execute(
+                "INSERT INTO global_documents(name,payload_json,updated_at) VALUES(?,?,?)",
+                (boundary_key, payload_json, timestamp),
+            )
+            return "inserted"
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return "unavailable"
+
+
+def native_child_binding_exists(
+    root: Path,
+    child_id: str,
+    *,
+    task_id: str,
+    attempt_id: str,
+) -> bool:
+    """Check project-global child uniqueness inside the caller's transaction."""
+    if not child_id or "\x00" in child_id:
+        raise ValueError("native child identity is invalid")
+    with _connection(root) as connection:
+        row = connection.execute(
+            "SELECT 1 FROM worker_sessions WHERE host_agent_id=? "
+            "AND NOT (task_id=? AND attempt_id=?) LIMIT 1",
+            (child_id, task_id, attempt_id),
+        ).fetchone()
+    return row is not None
+
+
+def native_lifecycle_observer_health(
+    root: Path, *, task_id: str, attempt_id: str,
+) -> str:
+    """Return unavailable or healthy for the private native observer boundary."""
+    failure = get_task_document(root, task_id, native_lifecycle_failure_key(attempt_id))
+    if (
+        isinstance(failure, dict)
+        and failure.get("schema") == NATIVE_LIFECYCLE_FAILURE_SCHEMA
+        and failure.get("retryable") is True
+    ):
+        return "unavailable"
+    task_failure = get_task_document(root, task_id, NATIVE_LIFECYCLE_TASK_FAILURE_DOCUMENT)
+    if (
+        isinstance(task_failure, dict)
+        and task_failure.get("schema") == NATIVE_LIFECYCLE_FAILURE_SCHEMA
+        and task_failure.get("retryable") is True
+    ):
+        return "unavailable"
+    shape_documents = list_task_documents(root, task_id, "native-hook-shape:")
+    if any(
+        key.endswith(":" + str(attempt_id))
+        and isinstance(value, dict)
+        and value.get("schema") in {
+            "cortex/native-hook-shape-diagnostic/v1",
+            "cortex/native-hook-shape-diagnostic/v2",
+        }
+        for key, value in shape_documents
+    ):
+        return "unavailable"
+    return "healthy"
+
+
 def delete_task_document(root: Path, task_id: str, document_key: str) -> bool:
     """Delete one exact mutable task document without widening task scope."""
     if not task_id or not document_key or len(document_key) > 160:
@@ -3250,17 +3991,17 @@ def list_task_documents(root: Path, task_id: str, prefix: str = "") -> list[tupl
 
 _DURABLE_QUESTION_COLUMNS = (
     "question_ref", "task_id", "attempt_id", "dispatch_ref", "profile", "task_revision",
-    "attempt_generation", "submission_id", "question_text", "status", "content_digest",
-    "published_sequence", "answer_text", "answer_submission_id", "answer_digest",
+    "attempt_generation", "submission_id", "question_category", "question_text", "status", "content_digest",
+    "published_sequence", "answer", "answer_submission_id", "answer_digest",
     "answered_sequence", "created_at", "answered_at", "superseded_at",
 )
 _DURABLE_QUESTION_IMMUTABLE_COLUMNS = (
     "question_ref", "task_id", "attempt_id", "dispatch_ref", "profile", "task_revision",
-    "attempt_generation", "submission_id", "question_text", "content_digest",
+    "attempt_generation", "submission_id", "question_category", "question_text", "content_digest",
     "published_sequence", "created_at",
 )
 _DURABLE_QUESTION_MUTABLE_COLUMNS = (
-    "status", "answer_text", "answer_submission_id", "answer_digest", "answered_sequence",
+    "status", "answer", "answer_submission_id", "answer_digest", "answered_sequence",
     "answered_at", "superseded_at",
 )
 
@@ -3284,12 +4025,18 @@ def _durable_question_record(record: Mapping[str, Any]) -> dict[str, Any]:
     # tokens or normalizing them on the way into SQLite.
     if not isinstance(value["question_text"], str):
         raise ValueError("durable question text is invalid")
+    if value["question_category"] is not None and (
+        not isinstance(value["question_category"], str)
+        or not value["question_category"]
+        or "\x00" in value["question_category"]
+    ):
+        raise ValueError("durable question category is invalid")
     if value["status"] not in {"open", "answered", "superseded"}:
         raise ValueError("durable question status is invalid")
     for column in ("task_revision", "attempt_generation", "published_sequence"):
         if not isinstance(value[column], int) or isinstance(value[column], bool) or value[column] < 1:
             raise ValueError("durable question sequence is invalid")
-    if value["answer_text"] is not None and not isinstance(value["answer_text"], str):
+    if value["answer"] is not None and not isinstance(value["answer"], str):
         raise ValueError("durable question answer text is invalid")
     for column in ("answer_submission_id", "answer_digest", "answered_at", "superseded_at"):
         if value[column] is not None and (not isinstance(value[column], str) or "\x00" in value[column]):
@@ -3303,16 +4050,164 @@ def _durable_question_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return value
 
 
-def list_durable_questions(root: Path, task_id: str) -> list[dict[str, Any]]:
-    """Return durable question text pairs for one task in publication order."""
+def get_durable_question(root: Path, task_id: str, question_ref: str) -> dict[str, Any] | None:
+    """Read one exact durable question without scanning the task collection."""
     ensure_database(root)
+    with _connection(root) as connection:
+        row = connection.execute(
+            "SELECT " + ",".join(_DURABLE_QUESTION_COLUMNS)
+            + " FROM durable_questions WHERE task_id = ? AND question_ref = ?",
+            (str(task_id), str(question_ref)),
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
+def get_durable_question_submission(
+    root: Path, task_id: str, attempt_id: str, submission_id: str,
+) -> dict[str, Any] | None:
+    """Read one idempotent question submission through its unique index."""
+    ensure_database(root)
+    with _connection(root) as connection:
+        row = connection.execute(
+            "SELECT " + ",".join(_DURABLE_QUESTION_COLUMNS)
+            + " FROM durable_questions WHERE task_id = ? AND attempt_id = ? AND submission_id = ?",
+            (str(task_id), str(attempt_id), str(submission_id)),
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
+def durable_question_sequence(root: Path, task_id: str) -> int:
+    """Return the latest question/answer sequence without reading the collection."""
+    ensure_database(root)
+    with _connection(root) as connection:
+        row = connection.execute(
+            "SELECT MAX(MAX(published_sequence, COALESCE(answered_sequence, 0))) AS sequence "
+            "FROM durable_questions WHERE task_id = ?",
+            (str(task_id),),
+        ).fetchone()
+    return int(row["sequence"] or 0) if row is not None else 0
+
+
+def count_durable_questions(
+    root: Path, task_id: str, *, attempt_id: str = "", task_revision: int | None = None,
+    attempt_generation: int | None = None, include_superseded: bool = True,
+    categories: Sequence[str] | None = None,
+) -> int:
+    """Count questions using indexed predicates; never materialize rows."""
+    ensure_database(root)
+    where = ["task_id = ?"]
+    values: list[Any] = [str(task_id)]
+    if attempt_id:
+        where.append("attempt_id = ?")
+        values.append(str(attempt_id))
+    if task_revision is not None:
+        where.append("task_revision = ?")
+        values.append(int(task_revision))
+    if attempt_generation is not None:
+        where.append("attempt_generation = ?")
+        values.append(int(attempt_generation))
+    if not include_superseded:
+        where.append("status != 'superseded'")
+    if categories is not None:
+        category_values = tuple(categories)
+        if not category_values or any(not isinstance(item, str) or not item for item in category_values):
+            raise ValueError("question categories are invalid")
+        where.append("question_category IN (" + ",".join("?" for _ in category_values) + ")")
+        values.extend(category_values)
+    with _connection(root) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM durable_questions WHERE " + " AND ".join(where),
+            tuple(values),
+        ).fetchone()
+    return int(row["count"] or 0) if row is not None else 0
+
+
+def page_durable_questions(
+    root: Path,
+    task_id: str,
+    *,
+    offset: int = 0,
+    limit: int = 64,
+    attempt_id: str = "",
+    status: str = "",
+    categories: Sequence[str] | None = None,
+    dispatch_ref: str = "",
+    attempt_generation: int | None = None,
+    statuses: Sequence[str] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read a bounded question page directly from canonical SQLite rows."""
+    ensure_database(root)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValueError("question page offset is invalid")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 128:
+        raise ValueError("question page limit is invalid")
+    where = ["task_id = ?"]
+    values: list[Any] = [str(task_id)]
+    if attempt_id:
+        where.append("attempt_id = ?")
+        values.append(str(attempt_id))
+    if status:
+        where.append("status = ?")
+        values.append(str(status))
+    if statuses is not None:
+        if status:
+            raise ValueError("question status filters conflict")
+        status_values = tuple(str(item) for item in statuses)
+        if not status_values or any(item not in {"open", "answered", "superseded"} for item in status_values):
+            raise ValueError("question statuses are invalid")
+        where.append("status IN (" + ",".join("?" for _ in status_values) + ")")
+        values.extend(status_values)
+    if dispatch_ref:
+        where.append("dispatch_ref = ?")
+        values.append(str(dispatch_ref))
+    if attempt_generation is not None:
+        if isinstance(attempt_generation, bool) or not isinstance(attempt_generation, int) or attempt_generation < 1:
+            raise ValueError("question attempt generation is invalid")
+        where.append("attempt_generation = ?")
+        values.append(attempt_generation)
+    if categories is not None:
+        category_values = tuple(categories)
+        if not category_values or any(not isinstance(item, str) or not item for item in category_values):
+            raise ValueError("question categories are invalid")
+        where.append("question_category IN (" + ",".join("?" for _ in category_values) + ")")
+        values.extend(category_values)
+    values.extend((limit + 1, offset))
     with _connection(root) as connection:
         rows = connection.execute(
             "SELECT " + ",".join(_DURABLE_QUESTION_COLUMNS)
-            + " FROM durable_questions WHERE task_id = ? ORDER BY published_sequence",
-            (task_id,),
+            + " FROM durable_questions WHERE " + " AND ".join(where)
+            + " ORDER BY published_sequence LIMIT ? OFFSET ?",
+            tuple(values),
         ).fetchall()
-    return [dict(row) for row in rows]
+    has_more = len(rows) > limit
+    return [dict(row) for row in rows[:limit]], has_more
+
+
+def page_durable_question_updates(
+    root: Path,
+    task_id: str,
+    attempt_id: str,
+    *,
+    after_sequence: int = 0,
+    limit: int = 64,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read a bounded question update page after one sequence watermark."""
+    ensure_database(root)
+    if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
+        raise ValueError("question update sequence is invalid")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 128:
+        raise ValueError("question update limit is invalid")
+    with _connection(root) as connection:
+        rows = connection.execute(
+            "SELECT " + ",".join(_DURABLE_QUESTION_COLUMNS)
+            + " FROM durable_questions WHERE task_id = ? AND attempt_id = ?"
+            + " AND (published_sequence > ? OR COALESCE(answered_sequence, 0) > ?)"
+            + " ORDER BY MIN(published_sequence, COALESCE(answered_sequence, published_sequence)), published_sequence"
+            + " LIMIT ?",
+            (str(task_id), str(attempt_id), after_sequence, after_sequence, limit + 1),
+        ).fetchall()
+    has_more = len(rows) > limit
+    return [dict(row) for row in rows[:limit]], has_more
 
 
 def put_durable_question(root: Path, record: Mapping[str, Any]) -> None:
@@ -3366,6 +4261,59 @@ def put_artifact(
             connection, task_id=task_id, kind=kind, title=title, mime_type=mime_type,
             content=content, immutable=immutable, export_path=export_path, created_at=created_at,
         )
+
+
+def delete_planning_revision_package_artifacts(
+    root: Path, task_id: str, revision: str,
+) -> int:
+    """Remove one superseded coordinator-package projection atomically.
+
+    Coordinator planning packages are rebuildable views of the canonical plan.
+    This current-V19 data cutover removes only package artifacts for one exact
+    coordinator revision; overview and unrelated planner revisions remain.
+    """
+    if (
+        not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", str(task_id or ""))
+        or not re.fullmatch(r"plan-coordinator-[0-9a-f]{24}", str(revision or ""))
+    ):
+        raise ValueError("planning package migration identity is invalid")
+    title_prefix = f"{revision}:package:"
+    path_prefix = f"planning/revisions/{revision}/packages/"
+    with _connection(root, write=True) as connection:
+        rows = connection.execute(
+            "SELECT DISTINCT a.artifact_id,a.blob_id FROM logical_artifacts a "
+            "LEFT JOIN artifact_exports e ON e.artifact_id=a.artifact_id "
+            "WHERE a.task_id=? AND a.kind='planning_revision' "
+            "AND (a.title LIKE ? OR e.export_path LIKE ?)",
+            (task_id, title_prefix + "%", path_prefix + "%"),
+        ).fetchall()
+        artifact_ids = [str(row["artifact_id"]) for row in rows]
+        blob_ids = [str(row["blob_id"]) for row in rows]
+        connection.execute(
+            "DELETE FROM projection_jobs WHERE task_id=? AND export_path LIKE ?",
+            (task_id, path_prefix + "%"),
+        )
+        if artifact_ids:
+            placeholders = ",".join("?" for _ in artifact_ids)
+            connection.execute(
+                f"DELETE FROM projection_jobs WHERE artifact_id IN ({placeholders})",
+                tuple(artifact_ids),
+            )
+            connection.execute(
+                f"DELETE FROM artifact_exports WHERE artifact_id IN ({placeholders})",
+                tuple(artifact_ids),
+            )
+            connection.execute(
+                f"DELETE FROM logical_artifacts WHERE artifact_id IN ({placeholders})",
+                tuple(artifact_ids),
+            )
+        for blob_id in dict.fromkeys(blob_ids):
+            connection.execute(
+                "DELETE FROM artifact_blobs WHERE blob_id=? "
+                "AND NOT EXISTS(SELECT 1 FROM logical_artifacts WHERE blob_id=?)",
+                (blob_id, blob_id),
+            )
+    return len(artifact_ids)
 
 
 def _artifact_metadata_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -4167,7 +5115,7 @@ def finalize_prunes(
         task_ids = {str(row["task_id"]) for row in active}
         snapshots, classifications = _task_prune_references(connection, task_ids)
 
-        # Preserve evidence shared by any task not in this atomic batch.
+        # Preserve evidence shared by any task not in this atomic operation.
         remaining_snapshots, remaining_classifications = _task_prune_references(
             connection,
             {
@@ -4400,17 +5348,22 @@ def record_tool_observation(
 
 
 @contextlib.contextmanager
-def _hook_write_connection(root: Path) -> Iterator[sqlite3.Connection]:
-    """Open an existing ledger for at-most-100ms optional telemetry writes."""
+def _hook_write_connection(
+    root: Path, *, timeout_ms: int = 100,
+) -> Iterator[sqlite3.Connection]:
+    """Open an existing ledger for one bounded hook-owned write."""
     identity = _database_file_identity(root)
     if identity is None:
         raise FileNotFoundError("Cortex database is unavailable")
     path = database_path(root)
-    connection = sqlite3.connect(str(path), timeout=0.1, isolation_level=None)
+    bounded_timeout_ms = max(1, min(int(timeout_ms), 4000))
+    connection = sqlite3.connect(
+        str(path), timeout=bounded_timeout_ms / 1000.0, isolation_level=None,
+    )
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 100")
+        connection.execute(f"PRAGMA busy_timeout = {bounded_timeout_ms}")
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version != DATABASE_SCHEMA_VERSION:
             raise ValueError("Cortex database schema is incompatible")

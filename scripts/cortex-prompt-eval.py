@@ -15,7 +15,7 @@ from cortex_runtime.prompt_eval import run_prompt_evals  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live", action="store_true", help="require an explicit Luna-high live evaluator")
+    parser.add_argument("--live", action="store_true", help="require an explicit Luna-medium live evaluator")
     parser.add_argument("--model", default=None)
     parser.add_argument("--reasoning-effort", default=None)
     args = parser.parse_args()

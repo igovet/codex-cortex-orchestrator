@@ -7,10 +7,12 @@ active nested engine receipts live in a separate explicitly private registry.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from cortex_runtime.finding_severity import PUBLIC_FINDING_SEVERITIES
 from cortex_runtime.v11_submission import MAX_DIAGNOSTICS
 
 
@@ -18,19 +20,155 @@ TASK_REF_PATTERN = r"^task-[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 COORDINATOR_REF_PATTERN = r"^[0-9a-f]{64}$"
 ASSIGNMENT_REF_PATTERN = r"^assignment-v1-[0-9a-f]{64}$"
 DISPATCH_REF_PATTERN = r"^dispatch-[0-9a-f]{24}$"
+DISPATCH_REF_VALUE_PATTERN = r"dispatch-[0-9a-f]{24}"
+NATIVE_DISPATCH_AUTHORITY_LABEL = "CORTEX_DISPATCH_REF: "
 DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 RESULT_REF_PATTERN = r"^attempt-result-[A-Za-z0-9._:-]{1,160}$"
 REPAIR_HANDLE_PATTERN = r"^v11rh1\.[A-Za-z0-9_-]{22}\.[0-9a-f]{32}$"
 
 PUBLIC_SUCCESS_ACTIONS = (
-    "invoke_dispatches", "wait_for_bound_workers", "obtain_user_decision",
-    "obtain_plan_approval", "deliver_handoff", "continue", "terminal_continue",
-    "read_more", "use_result_as_context", "none",
+    "invoke_dispatches", "wait_for_bound_workers", "read_worker_wave", "obtain_user_decision",
+    "obtain_plan_approval", "deliver_handoff", "resume_bound_worker", "continue",
+    "resume_orchestration",
+    "inspect_orchestration",
+    "inspect_orchestration_recovery",
+    "terminal_continue", "revise_or_continue", "append_rework_wave", "read_more",
+    "use_result_as_context", "poll_worker_question", "none",
 )
 PUBLIC_FAILURE_ACTIONS = (
-    "retry_same_operation", "repair_patch_only", "inspect_or_retry", "none",
+    "retry_same_operation", "repair_patch_only", "inspect_or_retry",
+    "wait_for_bound_workers", "server_recovery",
+    "read_required_context_then_retry", "none",
 )
 PUBLIC_ACTIONS = tuple(dict.fromkeys(PUBLIC_SUCCESS_ACTIONS + PUBLIC_FAILURE_ACTIONS))
+# The sole public success actions that carry native call authority. Response
+# validation and the final privacy scrub consume this same action-to-shape
+# registry so a new dispatch-bearing lifecycle action cannot silently lose or
+# broaden authority. A question resume is exactly one already-bound follow-up;
+# it can never become a replacement spawn or a multi-child wave.
+PUBLIC_NATIVE_DISPATCH_ACTION_SHAPES = {
+    "invoke_dispatches": {
+        "minimum": 1, "maximum": 8,
+        "calls": frozenset({"spawn_agent", "followup_task"}),
+    },
+    "resume_bound_worker": {
+        "minimum": 1, "maximum": 1,
+        "calls": frozenset({"followup_task"}),
+    },
+}
+PUBLIC_NATIVE_DISPATCH_ACTIONS = frozenset(PUBLIC_NATIVE_DISPATCH_ACTION_SHAPES)
+PUBLIC_UNCHANGED_RETRY_ERROR_CODES = frozenset({
+    "ledger_busy",
+    "tool_rate_limited",
+})
+
+
+def native_dispatch_authority_message(dispatch_ref: str, message: str) -> str:
+    """Return one server-generated first-line worker authority slot.
+
+    Existing canonical slots are accepted byte-for-byte. Any preexisting
+    dispatch-like value, mismatched slot, duplicate slot, or redaction marker
+    is rejected instead of being normalized into new authority.
+    """
+    if re.fullmatch(DISPATCH_REF_PATTERN, dispatch_ref) is None:
+        raise ValueError("native dispatch authority is invalid")
+    if not isinstance(message, str) or not message or "\x00" in message:
+        raise ValueError("native dispatch message is invalid")
+    canonical = f"{NATIVE_DISPATCH_AUTHORITY_LABEL}{dispatch_ref}\n"
+    occurrences = re.findall(DISPATCH_REF_VALUE_PATTERN, message)
+    if "redacted-private" in message.casefold():
+        raise ValueError("native dispatch message contains a redacted authority placeholder")
+    if message.startswith(NATIVE_DISPATCH_AUTHORITY_LABEL):
+        if not message.startswith(canonical) or occurrences != [dispatch_ref]:
+            raise ValueError("native dispatch message authority slot conflicts with its dispatch")
+        return message
+    if occurrences or NATIVE_DISPATCH_AUTHORITY_LABEL in message:
+        raise ValueError("native dispatch authority must occupy only the canonical first line")
+    return canonical + message
+
+
+def native_dispatch_authority_message_is_valid(
+    dispatch_ref: object, message: object,
+) -> bool:
+    """Validate the exact canonical first-line authority binding."""
+    if not isinstance(dispatch_ref, str) or not isinstance(message, str):
+        return False
+    canonical = f"{NATIVE_DISPATCH_AUTHORITY_LABEL}{dispatch_ref}\n"
+    return (
+        re.fullmatch(DISPATCH_REF_PATTERN, dispatch_ref) is not None
+        and message.startswith(canonical)
+        and "redacted-private" not in message.casefold()
+        and re.findall(DISPATCH_REF_VALUE_PATTERN, message) == [dispatch_ref]
+    )
+
+WAIT_POLICY_REPEAT_UNTIL_TERMINAL = "repeat_until_all_bound_children_terminal"
+NATIVE_AGENT_TERMINAL_STATUSES = (
+    "interrupted", "completed", "errored", "shutdown", "notFound",
+)
+NATIVE_AGENT_NONTERMINAL_STATUSES = ("pendingInit", "running")
+WAIT_LOOP_INSTRUCTION = (
+    '"No agents completed yet", a timeout, an empty completion set, pendingInit, running, or any '
+    "still-working bound child is NONTERMINAL. Immediately invoke wait_agent again for the same exact "
+    "child identifiers and do not call any Cortex read or lifecycle tool, including read_worker_wave. "
+    "Repeat until every bound "
+    "child reports one native terminal host status: interrupted, completed, errored, shutdown, or notFound."
+)
+NATIVE_DISPATCH_WAIT_INSTRUCTION = (
+    "Execute every returned native dispatch exactly once with its complete arguments byte-for-byte unchanged; "
+    "the worker uses the CORTEX_DISPATCH_REF first line as its exact read_dispatch_briefing authority. "
+    "Preserve the exact child identifier "
+    "returned by each spawn_agent call. Immediately after the dispatch calls, invoke wait_agent "
+    "for those exact bound children. " + WAIT_LOOP_INSTRUCTION
+)
+SAME_CHILD_WAIT_INSTRUCTION = (
+    "Execute the returned same-child followup_task exactly once with its complete arguments byte-for-byte "
+    "unchanged; the worker uses the CORTEX_DISPATCH_REF first line as its exact Cortex authority. Then "
+    "immediately invoke wait_agent "
+    "for that exact bound child. " + WAIT_LOOP_INSTRUCTION
+)
+WAIT_BEFORE_READ_INSTRUCTION = (
+    "Invoke wait_agent now for the exact bound child or children. " + WAIT_LOOP_INSTRUCTION
+)
+READ_AFTER_WAIT_INSTRUCTION = (
+    "The server now permits read_worker_wave because every exact bound child reported a native terminal "
+    "host status after the required wait. Invoke read_worker_wave next."
+)
+
+
+def expected_native_transition(value: Mapping[str, Any]) -> tuple[str, bool] | None:
+    """Return the canonical next-native action and wave-read permission."""
+    dispatches = value.get("dispatches")
+    if isinstance(dispatches, list) and dispatches:
+        return "wait_agent", False
+    action = str(value.get("action") or "")
+    if action == "wait_for_bound_workers":
+        return "wait_agent", False
+    if value.get("ok") is True and action == "read_worker_wave":
+        return "read_worker_wave", True
+    return None
+
+
+def public_response_text(value: Mapping[str, Any]) -> str:
+    """Render the model-visible transition first, followed by canonical JSON."""
+    transition = expected_native_transition(value)
+    instruction = ""
+    dispatches = value.get("dispatches")
+    if isinstance(dispatches, list) and dispatches:
+        calls = {
+            str(item.get("call") or "") for item in dispatches
+            if isinstance(item, Mapping)
+        }
+        instruction = (
+            SAME_CHILD_WAIT_INSTRUCTION
+            if calls == {"followup_task"} else
+            NATIVE_DISPATCH_WAIT_INSTRUCTION
+        )
+    elif transition == ("wait_agent", False):
+        instruction = WAIT_BEFORE_READ_INSTRUCTION
+    elif transition == ("read_worker_wave", True):
+        instruction = READ_AFTER_WAIT_INSTRUCTION
+    encoded = json.dumps(value, ensure_ascii=False, indent=2)
+    return f"{instruction}\n\n{encoded}" if instruction else encoded
 
 
 class ResponseValidationError(ValueError):
@@ -57,28 +195,13 @@ DIGEST_SCHEMA = _string(pattern=DIGEST_PATTERN, maximum=71)
 RESULT_REF_SCHEMA = _string(pattern=RESULT_REF_PATTERN, maximum=180)
 JSON_POINTER_SCHEMA = _string(pattern=r"^(|/.*)$", minimum=0, maximum=2048)
 
-# Private lifecycle composition still validates the engine's historical
-# nested action receipt before the sole public.flat projector consumes it.
-COORDINATOR_ACTION_SEMANTICS: dict[str, dict[str, Any]] = {
-    "invoke_dispatches": {
-        "marker": "spawn_all_exact_before_wait",
-        "instruction": "Execute every exact returned native spawn_agent dispatch before any wait.",
-        "wait_permission": False,
-    },
-    "wait_for_bound_workers": {
-        "marker": "wait_existing_returned_child_ids_only",
-        "instruction": "Wait only on existing child IDs returned by successful spawn_agent calls.",
-        "requires_child_ids": True,
-    },
-}
-
 ACTION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["kind"],
     "properties": {"kind": _string(enum=[
-        "invoke_dispatches", "wait_for_bound_workers", "retry_same_operation",
+        "invoke_dispatches", "wait_for_bound_workers", "read_worker_wave", "retry_same_operation",
         "obtain_user_decision", "obtain_plan_approval", "deliver_handoff",
-        "inspect_or_retry", "continue", "terminal_continue", "read_more",
-        "use_result_as_context", "none",
+        "inspect_or_retry", "continue", "resume_orchestration", "inspect_orchestration", "inspect_orchestration_recovery", "terminal_continue", "append_rework_wave", "read_more",
+        "use_result_as_context", "server_recovery", "none",
     ], maximum=64)},
 }
 
@@ -94,13 +217,40 @@ DISPATCH_ARGUMENTS_SCHEMA: dict[str, Any] = {
     },
 }
 DISPATCH_SCHEMA: dict[str, Any] = {
-    "type": "object", "additionalProperties": False,
-    "required": ["call", "dispatch_ref", "arguments"],
-    "properties": {
-        "call": {"type": "string", "const": "spawn_agent"},
-        "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
-        "arguments": DISPATCH_ARGUMENTS_SCHEMA,
-    },
+    "oneOf": [
+        {
+            "type": "object", "additionalProperties": False,
+            "required": ["call", "dispatch_ref", "arguments"],
+            "properties": {
+                "call": {"type": "string", "const": "spawn_agent"},
+                "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
+                "arguments": DISPATCH_ARGUMENTS_SCHEMA,
+                "requested_profile": _string(maximum=160),
+                "resolved_profile": _string(maximum=160),
+                "resolution_reason": _string(maximum=160),
+            },
+        },
+        {
+            "type": "object", "additionalProperties": False,
+            "required": ["call", "dispatch_ref", "host_task_name", "arguments"],
+            "properties": {
+                "call": {"type": "string", "const": "followup_task"},
+                "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
+                "host_task_name": _string(maximum=256),
+                "arguments": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["target", "message"],
+                    "properties": {
+                        "target": _string(maximum=256),
+                        "message": _string(maximum=65536),
+                    },
+                },
+                "requested_profile": _string(maximum=160),
+                "resolved_profile": _string(maximum=160),
+                "resolution_reason": _string(maximum=160),
+            },
+        },
+    ],
 }
 
 FIELD_ENUM_VALUE_SCHEMA: dict[str, Any] = {
@@ -362,7 +512,6 @@ QUESTION_SCHEMA: dict[str, Any] = {
 # source-language answers, and the durable resume context; the coordinator
 # needs only the text it must present to the user.
 QUESTION_REF_SCHEMA = _string(pattern=r"^question-[A-Za-z0-9._:-]{1,160}$", maximum=180)
-BATCH_REF_SCHEMA = _string(pattern=r"^batch-[A-Za-z0-9._:-]{1,160}$", maximum=180)
 DISPLAY_QUESTION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     "required": ["prompt"],
@@ -373,70 +522,23 @@ DISPLAY_QUESTION_SCHEMA: dict[str, Any] = {
     },
 }
 CANONICAL_ANSWER_SCHEMA: dict[str, Any] = {
-    "oneOf": [
-        _string(maximum=8000),
-        {
-            "type": "object", "additionalProperties": False,
-            "required": ["text"],
-            "properties": {
-                "text": _string(maximum=8000),
-                "option_ids": {"type": "array", "maxItems": 16, "items": _string(maximum=256)},
-            },
-        },
-    ],
-}
-BATCH_PROGRESS_SCHEMA: dict[str, Any] = {
-    "type": "object", "additionalProperties": False,
-    "required": ["answered", "total"],
-    "properties": {
-        "answered": {"type": "integer", "minimum": 0},
-        "total": {"type": "integer", "minimum": 1},
-        "next_question_key": _string(maximum=160),
-    },
-}
-BATCH_ANSWERS_SCHEMA: dict[str, Any] = {
-    "type": "object", "minProperties": 1, "maxProperties": 32,
-    "additionalProperties": CANONICAL_ANSWER_SCHEMA,
+    "type": "string", "minLength": 1,
 }
 QUESTION_RESUME_SCHEMA: dict[str, Any] = {
-    "oneOf": [
-        {
-            "type": "object", "additionalProperties": False,
-            "required": ["kind", "question_ref"],
-            "properties": {
-                "kind": {"type": "string", "const": "poll"},
-                "question_ref": QUESTION_REF_SCHEMA,
-            },
-        },
-        {
-            "type": "object", "additionalProperties": False,
-            "required": ["kind", "batch_ref"],
-            "properties": {
-                "kind": {"type": "string", "const": "poll_batch"},
-                "batch_ref": BATCH_REF_SCHEMA,
-            },
-        },
-    ],
+    "type": "object", "additionalProperties": False,
+    "required": ["kind", "question_ref", "dispatch_ref", "task_name", "message"],
+    "properties": {
+        "kind": {"type": "string", "const": "poll"},
+        "question_ref": QUESTION_REF_SCHEMA,
+        "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
+        "task_name": _string(maximum=256),
+        "message": _string(maximum=65536),
+    },
 }
 TRANSLATION_SCHEMA: dict[str, Any] = {
-    "oneOf": [
-        {
-            "type": "object", "additionalProperties": False,
-            "required": ["question_ref", "source_text"],
-            "properties": {"question_ref": QUESTION_REF_SCHEMA, "source_text": _string(maximum=8000)},
-        },
-        {
-            "type": "object", "additionalProperties": False,
-            "required": ["batch_ref", "source_text_by_question"],
-            "properties": {
-                "batch_ref": BATCH_REF_SCHEMA,
-                "source_text_by_question": {
-                    "type": "object", "minProperties": 1, "maxProperties": 32,
-                    "additionalProperties": _string(maximum=8000),
-                },
-            },
-        },
-    ],
+    "type": "object", "additionalProperties": False,
+    "required": ["question_ref", "source_text"],
+    "properties": {"question_ref": QUESTION_REF_SCHEMA, "source_text": _string(maximum=None)},
 }
 DECISION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
@@ -468,12 +570,16 @@ _LIFECYCLE_COMMON: dict[str, Any] = {
     "properties": {
         "schema": {"type": "string", "const": "cortex/lifecycle-response/v11"},
         "ok": {"type": "boolean"},
-        "outcome": _string(enum=["ready_to_spawn", "waiting", "needs_input", "plan_approval", "completed", "failed"], maximum=32),
+        "outcome": _string(enum=["ready_to_spawn", "waiting", "completion_pending", "resume_required", "context_inspection_required", "needs_input", "plan_approval", "rework_required", "completed", "failed"], maximum=32),
         "task_ref": REF_SCHEMA, "action": ACTION_SCHEMA, "step": {"type": "integer", "minimum": 1},
         "dispatches": {"type": "array", "minItems": 1, "maxItems": 32, "items": DISPATCH_SCHEMA},
         "coordinator_ref": _string(pattern=COORDINATOR_REF_PATTERN, maximum=64),
         "question": QUESTION_SCHEMA, "decision": DECISION_SCHEMA, "handoff": HANDOFF_SCHEMA,
         "content": _string(minimum=0, maximum=65_536),
+        "compiled_plan": _string(minimum=1, maximum=65_536),
+        "rework_receipt": _string(minimum=1, maximum=4096),
+        "idempotent": {"type": "boolean"},
+        "source_result_ref": RESULT_REF_SCHEMA,
         "next_cursor": _string(pattern=r"^c11p\.[A-Za-z0-9_-]{16,512}$", maximum=517),
         "error": ERROR_SCHEMA, "recovery": RECOVERY_SCHEMA,
     },
@@ -499,31 +605,47 @@ def _variant(
 
 LIFECYCLE_RESPONSE_SCHEMA: dict[str, Any] = {
     "oneOf": [
-        _variant(["schema", "ok", "outcome", "task_ref", "action", "step", "dispatches"], properties={
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "step", "dispatches"], optional=("compiled_plan", "rework_receipt", "idempotent"), properties={
             "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "ready_to_spawn"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "invoke_dispatches"}}},
         }),
-        _variant(["schema", "ok", "outcome", "task_ref", "action", "step"], properties={
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "step"], optional=("rework_receipt", "idempotent"), properties={
             "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "waiting"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "wait_for_bound_workers"}}},
         }),
-        _variant(["schema", "ok", "outcome", "task_ref", "action", "question"], properties={
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "content"], properties={
+            "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "resume_required"},
+            "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "resume_orchestration"}}},
+        }),
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "content"], properties={
+            "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "context_inspection_required"},
+            "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "inspect_orchestration"}}},
+        }),
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "step"], optional=("rework_receipt", "idempotent"), properties={
+            "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "completion_pending"},
+            "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "read_worker_wave"}}},
+        }),
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "question"], optional=("rework_receipt", "idempotent"), properties={
             "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "needs_input"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "obtain_user_decision"}}},
         }),
-        _variant(["schema", "ok", "outcome", "task_ref", "action", "decision"], optional=("content", "next_cursor"), properties={
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "decision"], optional=("content", "next_cursor", "rework_receipt", "idempotent"), properties={
             "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "plan_approval"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "obtain_plan_approval"}}},
         }),
-        _variant(["schema", "ok", "outcome", "task_ref", "action", "handoff"], properties={
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "source_result_ref"], optional=("rework_receipt", "idempotent"), properties={
+            "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "rework_required"},
+            "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "append_rework_wave"}}},
+        }),
+        _variant(["schema", "ok", "outcome", "task_ref", "action", "handoff"], optional=("rework_receipt", "idempotent"), properties={
             "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "completed"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "deliver_handoff"}}},
         }),
-        _variant(["schema", "ok", "outcome", "action", "error", "recovery"], properties={
+        _variant(["schema", "ok", "outcome", "action", "error", "recovery"], optional=("rework_receipt", "idempotent"), properties={
             "ok": {"type": "boolean", "const": False}, "outcome": {"type": "string", "const": "failed"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "enum": ["inspect_or_retry", "none"]}}},
         }),
-        _variant(["schema", "ok", "outcome", "action", "error", "recovery"], properties={
+        _variant(["schema", "ok", "outcome", "action", "error", "recovery"], optional=("rework_receipt", "idempotent"), properties={
             "ok": {"type": "boolean", "const": False}, "outcome": {"type": "string", "const": "needs_input"},
             "action": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {"kind": {"type": "string", "const": "retry_same_operation"}}},
         }),
@@ -543,8 +665,20 @@ def _start_variant(variant: Mapping[str, Any]) -> dict[str, Any]:
 # coordinator bearer. Its failures remain bearer-free lifecycle failures.
 START_RESPONSE_SCHEMA: dict[str, Any] = {
     "oneOf": [
-        *[_start_variant(variant) for variant in LIFECYCLE_RESPONSE_SCHEMA["oneOf"][:5]],
-        *copy.deepcopy(LIFECYCLE_RESPONSE_SCHEMA["oneOf"][5:]),
+        *[
+            _start_variant(variant)
+            for variant in LIFECYCLE_RESPONSE_SCHEMA["oneOf"]
+            if str(
+                variant.get("properties", {}).get("outcome", {}).get("const") or ""
+            ) in {"ready_to_spawn", "waiting", "completion_pending", "needs_input", "plan_approval"}
+        ],
+        *[
+            copy.deepcopy(variant)
+            for variant in LIFECYCLE_RESPONSE_SCHEMA["oneOf"]
+            if str(
+                variant.get("properties", {}).get("outcome", {}).get("const") or ""
+            ) not in {"ready_to_spawn", "waiting", "completion_pending", "needs_input", "plan_approval"}
+        ],
     ]
 }
 
@@ -553,7 +687,7 @@ SEMANTIC_RESULT_SCHEMA: dict[str, Any] = {
     "required": ["status", "summary", "findings", "decisions_needed", "unresolved", "claims"],
     "properties": {
         "status": _string(enum=["completed", "blocked", "failed"], maximum=16), "summary": _string(maximum=8000),
-        **{key: {"type": "array", "maxItems": 32, "items": {"type": "object", "additionalProperties": False, "required": ["summary"], "properties": {"summary": _string(maximum=2000), "severity": _string(enum=["low", "medium", "high", "critical"], maximum=16)}}} for key in ("findings", "decisions_needed", "unresolved", "claims")},
+        **{key: {"type": "array", "maxItems": 32, "items": {"type": "object", "additionalProperties": False, "required": ["summary"], "properties": {"summary": _string(maximum=2000), "severity": _string(enum=list(PUBLIC_FINDING_SEVERITIES), maximum=16)}}} for key in ("findings", "decisions_needed", "unresolved", "claims")},
     },
 }
 CONTINUATION_SCHEMA: dict[str, Any] = {
@@ -605,20 +739,16 @@ BRIEFING_READ_SCHEMA: dict[str, Any] = {
 
 WORKER_EVENT_SCHEMA: dict[str, Any] = {
     "oneOf": [
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok"], "properties": {"schema": {"type": "string", "const": "cortex/worker-event/v11"}, "ok": {"type": "boolean", "const": True}}},
+        {"type": "object", "additionalProperties": False, "required": ["schema", "ok"], "properties": {"schema": {"type": "string", "const": "cortex/worker-event/v11"}, "ok": {"type": "boolean", "const": True}, "receipt_ref": _string(maximum=256), "digest": DIGEST_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "error", "recovery"], "properties": {"schema": {"type": "string", "const": "cortex/worker-event/v11"}, "ok": {"type": "boolean", "const": False}, "error": ERROR_SCHEMA, "recovery": RECOVERY_SCHEMA}},
     ]
 }
 WORKER_QUESTION_SCHEMA: dict[str, Any] = {
     "oneOf": [
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_recorded"}, "question_ref": QUESTION_REF_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "batch_recorded"}, "batch_ref": BATCH_REF_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "awaiting_user"}, "question_ref": QUESTION_REF_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "awaiting_user"}, "batch_ref": BATCH_REF_SCHEMA, "progress": BATCH_PROGRESS_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_superseded"}, "question_ref": QUESTION_REF_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "batch_superseded"}, "batch_ref": BATCH_REF_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref", "answer"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_answered"}, "question_ref": QUESTION_REF_SCHEMA, "answer": CANONICAL_ANSWER_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref", "answers"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "batch_answered"}, "batch_ref": BATCH_REF_SCHEMA, "progress": BATCH_PROGRESS_SCHEMA, "answers": BATCH_ANSWERS_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "error", "recovery"], "properties": {"schema": {"type": "string", "const": "cortex/worker-question/v11"}, "ok": {"type": "boolean", "const": False}, "error": ERROR_SCHEMA, "recovery": RECOVERY_SCHEMA}},
     ]
 }
@@ -626,11 +756,9 @@ WORKER_QUESTION_SCHEMA: dict[str, Any] = {
 COORDINATOR_QUESTION_MANAGEMENT_SCHEMA: dict[str, Any] = {
     "oneOf": [
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref", "question"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "awaiting_user"}, "question_ref": QUESTION_REF_SCHEMA, "question": DISPLAY_QUESTION_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref", "progress", "question"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "awaiting_user"}, "batch_ref": BATCH_REF_SCHEMA, "progress": BATCH_PROGRESS_SCHEMA, "question": DISPLAY_QUESTION_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "resume"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_answered"}, "resume": QUESTION_RESUME_SCHEMA}},
+        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref", "resume"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_answered"}, "question_ref": QUESTION_REF_SCHEMA, "resume": QUESTION_RESUME_SCHEMA}},
+        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_resume_pending"}, "question_ref": QUESTION_REF_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "question_ref"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_answered_not_resumable"}, "question_ref": QUESTION_REF_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "question_answered_not_resumable"}, "batch_ref": BATCH_REF_SCHEMA}},
-        {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "batch_ref"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": True}, "outcome": {"type": "string", "const": "batch_superseded"}, "batch_ref": BATCH_REF_SCHEMA}},
         {"type": "object", "additionalProperties": False, "required": ["schema", "ok", "outcome", "error", "recovery"], "properties": {"schema": {"type": "string", "const": "cortex/question-management/v11"}, "ok": {"type": "boolean", "const": False}, "outcome": {"type": "string", "const": "needs_correction"}, "error": ERROR_SCHEMA, "recovery": RECOVERY_SCHEMA}},
     ],
 }
@@ -654,14 +782,27 @@ FLAT_CHANGE_SCHEMA: dict[str, Any] = {
         "expected": _string(minimum=0, maximum=8192),
     },
 }
-FLAT_DISPATCH_SCHEMA: dict[str, Any] = {
+NATIVE_DISPATCH_ARGUMENTS_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
-    "required": ["dispatch_ref", "task_name", "message", "fork_turns"],
+    "required": ["message"],
+    "properties": {
+        "task_name": _string(maximum=256), "message": _string(maximum=65536),
+        "target": _string(maximum=256),
+        "fork_turns": {"type": "string", "const": "none"},
+        "model": _string(enum=["gpt-5.6-terra", "gpt-5.6-sol"], maximum=64),
+        "reasoning_effort": _string(enum=["low", "medium", "high", "xhigh", "max"], maximum=32),
+    },
+}
+NATIVE_DISPATCH_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["dispatch_ref", "call", "arguments"],
     "properties": {
         "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
-        "task_name": _string(maximum=256), "message": _string(maximum=65536),
-        "fork_turns": _string(maximum=16), "model": _string(maximum=64),
-        "reasoning_effort": _string(maximum=32),
+        "call": _string(enum=["spawn_agent", "followup_task"], maximum=32),
+        "arguments": NATIVE_DISPATCH_ARGUMENTS_SCHEMA,
+        "requested_profile": _string(maximum=160),
+        "resolved_profile": _string(maximum=160),
+        "resolution_reason": _string(maximum=160),
     },
 }
 FLAT_PUBLIC_RESPONSE_SCHEMA: dict[str, Any] = {
@@ -670,14 +811,25 @@ FLAT_PUBLIC_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "ok": {"type": "boolean"}, "action": _string(enum=list(PUBLIC_ACTIONS), maximum=64),
         "retryable": {"type": "boolean"}, "state_mutated": {"type": "boolean"},
+        "outcome": _string(enum=["waiting_workers"], maximum=32),
+        "next_native_action": _string(enum=["wait_agent", "read_worker_wave"], maximum=32),
+        "read_worker_wave_allowed": {"type": "boolean"},
+        "wait_policy": _string(enum=[WAIT_POLICY_REPEAT_UNTIL_TERMINAL], maximum=64),
         "task_ref": _string(pattern=TASK_REF_PATTERN, maximum=160),
         "coordinator_ref": _string(pattern=COORDINATOR_REF_PATTERN, maximum=64),
+        "dispatch_ref": _string(pattern=DISPATCH_REF_PATTERN, maximum=33),
+        "frontier_ref": _string(pattern=r"^frontier-v1-[0-9a-f]{64}$", maximum=76),
+        "catalog_ref": _string(pattern=r"^catalog-v1-[0-9a-f]{64}$", maximum=75),
         "step": {"type": "integer", "minimum": 1},
-        "dispatches": {"type": "array", "maxItems": 8, "items": FLAT_DISPATCH_SCHEMA},
+        "dispatches": {"type": "array", "maxItems": 8, "items": NATIVE_DISPATCH_SCHEMA},
         "content": _string(minimum=0, maximum=65_536), "report": _string(minimum=0, maximum=65_536),
+        "compiled_plan": _string(minimum=1, maximum=65_536),
         "next_cursor": _string(pattern=r"^c11p\.[A-Za-z0-9_-]{16,512}$", maximum=517),
+        "complete": {"type": "boolean"},
         "question_ref": _string(maximum=256), "request_id": _string(maximum=256),
+        "question_status": _string(enum=["open", "answered"], maximum=16),
         "choices": {"type": "array", "maxItems": 32, "items": _string(maximum=4096)},
+        "source_result_ref": _string(pattern=RESULT_REF_PATTERN, maximum=180),
         "result_refs": {"type": "array", "maxItems": 32, "items": _string(pattern=RESULT_REF_PATTERN, maximum=180)},
         "receipt_ref": _string(maximum=256), "digest": _string(maximum=256),
         "terminal": {"type": "boolean"}, "error_code": _string(maximum=160),
@@ -836,13 +988,103 @@ def validate_response(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
                 for field in ("repair_capsule", "base_payload_digest", "repair_changes"):
                     if field not in normalized:
                         diagnostics.append(_diagnostic(f"$.{field}", "is required for repair"))
-            elif normalized["action"] == "retry_same_operation" and not normalized.get("allowed_changes"):
+            elif (
+                normalized["action"] == "retry_same_operation"
+                and not normalized.get("allowed_changes")
+                and normalized.get("error_code") not in PUBLIC_UNCHANGED_RETRY_ERROR_CODES
+            ):
                 diagnostics.append(_diagnostic("$.allowed_changes", "is required for a retryable failure"))
         else:
             if normalized["action"] not in PUBLIC_SUCCESS_ACTIONS:
                 diagnostics.append(_diagnostic("$.action", "must be a canonical success action"))
             if normalized["retryable"]:
                 diagnostics.append(_diagnostic("$.retryable", "must be false on success"))
+            native_shape = PUBLIC_NATIVE_DISPATCH_ACTION_SHAPES.get(normalized["action"])
+            native_dispatches = normalized.get("dispatches") or []
+            native_dispatch_refs = [
+                str(dispatch.get("dispatch_ref") or "")
+                for dispatch in native_dispatches
+                if isinstance(dispatch, Mapping)
+            ]
+            if len(set(native_dispatch_refs)) != len(native_dispatches):
+                diagnostics.append(_diagnostic(
+                    "$.dispatches", "must contain one unique dispatch_ref per native call",
+                ))
+            if native_shape is not None and not (
+                int(native_shape["minimum"])
+                <= len(native_dispatches)
+                <= int(native_shape["maximum"])
+            ):
+                diagnostics.append(_diagnostic(
+                    "$.dispatches",
+                    "does not satisfy the native dispatch cardinality for this lifecycle action",
+                ))
+            if (
+                native_dispatches
+                and normalized["action"] not in PUBLIC_NATIVE_DISPATCH_ACTIONS
+            ):
+                diagnostics.append(_diagnostic(
+                    "$.dispatches", "is forbidden for a non-dispatch lifecycle action",
+                ))
+            for index, dispatch in enumerate(native_dispatches):
+                call = dispatch.get("call")
+                arguments = dispatch.get("arguments") or {}
+                path = f"$.dispatches[{index}].arguments"
+                if native_shape is not None and call not in native_shape["calls"]:
+                    diagnostics.append(_diagnostic(
+                        f"$.dispatches[{index}].call",
+                        "is forbidden for this lifecycle action",
+                    ))
+                if call == "spawn_agent":
+                    for field in ("task_name", "fork_turns", "reasoning_effort"):
+                        if field not in arguments:
+                            diagnostics.append(_diagnostic(f"{path}.{field}", "is required for spawn_agent"))
+                    if "target" in arguments:
+                        diagnostics.append(_diagnostic(f"{path}.target", "is forbidden for spawn_agent"))
+                elif call == "followup_task":
+                    if "target" not in arguments:
+                        diagnostics.append(_diagnostic(f"{path}.target", "is required for followup_task"))
+                    for field in ("task_name", "fork_turns", "model", "reasoning_effort"):
+                        if field in arguments:
+                            diagnostics.append(_diagnostic(f"{path}.{field}", "is forbidden for followup_task"))
+                if not native_dispatch_authority_message_is_valid(
+                    dispatch.get("dispatch_ref"), arguments.get("message"),
+                ):
+                    diagnostics.append(_diagnostic(
+                        f"{path}.message",
+                        "must begin with the sole canonical dispatch authority line bound to its sibling dispatch_ref",
+                    ))
+        expected_transition = expected_native_transition(normalized)
+        if expected_transition is None:
+            for field in ("next_native_action", "read_worker_wave_allowed", "wait_policy"):
+                if field in normalized:
+                    diagnostics.append(_diagnostic(f"$.{field}", "is forbidden without a native transition"))
+        else:
+            expected_action, expected_read_permission = expected_transition
+            if normalized.get("next_native_action") != expected_action:
+                diagnostics.append(_diagnostic(
+                    "$.next_native_action",
+                    f"must be {expected_action} for the current lifecycle transition",
+                ))
+            if normalized.get("read_worker_wave_allowed") is not expected_read_permission:
+                diagnostics.append(_diagnostic(
+                    "$.read_worker_wave_allowed",
+                    f"must be {str(expected_read_permission).lower()} for the current lifecycle transition",
+                ))
+            if expected_action == "wait_agent":
+                if normalized.get("wait_policy") != WAIT_POLICY_REPEAT_UNTIL_TERMINAL:
+                    diagnostics.append(_diagnostic(
+                        "$.wait_policy",
+                        f"must be {WAIT_POLICY_REPEAT_UNTIL_TERMINAL} while bound children are nonterminal",
+                    ))
+                if normalized.get("action") == "wait_for_bound_workers" and normalized.get("outcome") != "waiting_workers":
+                    diagnostics.append(_diagnostic(
+                        "$.outcome", "must be waiting_workers for an expected nonterminal worker wait",
+                    ))
+            elif "wait_policy" in normalized:
+                diagnostics.append(_diagnostic(
+                    "$.wait_policy", "is forbidden after every bound child is terminal",
+                ))
     if diagnostics:
         raise ResponseValidationError(diagnostics)
     return normalized
@@ -852,5 +1094,14 @@ __all__ = [
     "COORDINATOR_REF_PATTERN", "DIGEST_PATTERN", "PATCH_CONTRACT",
     "PUBLIC_RESPONSE_SCHEMA_REGISTRY", "ResponseValidationError", "TASK_REF_PATTERN", "FLAT_PUBLIC_RESPONSE_SCHEMA",
     "PUBLIC_ACTIONS", "PUBLIC_FAILURE_ACTIONS", "PUBLIC_SUCCESS_ACTIONS",
-    "response_schema", "validate_private_response", "validate_response",
+    "PUBLIC_NATIVE_DISPATCH_ACTIONS", "PUBLIC_NATIVE_DISPATCH_ACTION_SHAPES",
+    "PUBLIC_UNCHANGED_RETRY_ERROR_CODES",
+    "NATIVE_DISPATCH_WAIT_INSTRUCTION", "READ_AFTER_WAIT_INSTRUCTION",
+    "SAME_CHILD_WAIT_INSTRUCTION", "WAIT_BEFORE_READ_INSTRUCTION", "WAIT_LOOP_INSTRUCTION",
+    "WAIT_POLICY_REPEAT_UNTIL_TERMINAL", "NATIVE_AGENT_TERMINAL_STATUSES",
+    "NATIVE_AGENT_NONTERMINAL_STATUSES",
+    "NATIVE_DISPATCH_AUTHORITY_LABEL", "native_dispatch_authority_message",
+    "native_dispatch_authority_message_is_valid",
+    "expected_native_transition", "public_response_text", "response_schema",
+    "validate_private_response", "validate_response",
 ]

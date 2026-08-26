@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicitly run the real Luna-high canonical prompt evaluation."""
+"""Explicitly run the real Luna-medium canonical prompt evaluation."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +18,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="opt in to real Codex calls; disabled by default")
     parser.add_argument("--model", default="gpt-5.6-luna")
-    parser.add_argument("--reasoning-effort", default="high")
+    parser.add_argument("--reasoning-effort", default="medium")
     args = parser.parse_args()
     try:
         results = run_live_prompt_evals(

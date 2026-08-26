@@ -6,6 +6,7 @@ import argparse
 import ast
 import json
 import os
+import re
 import stat
 import sys
 import tomllib
@@ -83,6 +84,9 @@ def main() -> int:
         fail("retired nested marketplace artifacts must not ship")
     reject_symlinks(root / ".agents", "root marketplace metadata")
     reject_symlinks(plugin, "canonical plugin source")
+    support_path = str(root / "scripts")
+    if support_path not in sys.path:
+        sys.path.insert(0, support_path)
     runtime_path = str(plugin / "scripts")
     if runtime_path not in sys.path:
         sys.path.insert(0, runtime_path)
@@ -140,17 +144,42 @@ def main() -> int:
         profile_contract = json.loads((plugin / "profiles.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         fail(f"invalid profile contract: {exc}")
-    if profile_contract.get("schema") != "cortex/profile-contract/v1" or len(profile_contract.get("profiles", [])) != 21:
-        fail("profile contract must define exactly 21 Cortex profiles")
+    if profile_contract.get("schema") != "cortex/profile-contract/v1" or len(profile_contract.get("profiles", [])) != 22:
+        fail("profile contract must define exactly 22 current Cortex profiles")
+    operation_kinds = profile_contract.get("operation_kinds")
+    if (
+        not isinstance(operation_kinds, dict)
+        or list(operation_kinds) != ["inspect", "modify", "verify", "close"]
+        or not all(isinstance(value, str) and value.strip() for value in operation_kinds.values())
+    ):
+        fail("profile contract must define the canonical operation kinds once")
     profile_fields = {
-        "name", "filename", "sandbox", "route_category", "gates",
+        "name", "filename", "sandbox", "operation_kinds", "route_category", "gates",
         "description", "select_when", "avoid_when",
     }
+    reliability_fallback_owners = {operation: [] for operation in operation_kinds}
     for item in profile_contract["profiles"]:
         if not isinstance(item, dict) or not profile_fields.issubset(item):
             fail("every profile must define complete identity and routing metadata")
         if item.get("sandbox") not in {"read-only", "workspace-write"}:
             fail(f"invalid profile sandbox: {item.get('name')}")
+        profile_operations = item.get("operation_kinds")
+        if (
+            not isinstance(profile_operations, list)
+            or not profile_operations
+            or len(profile_operations) != len(set(profile_operations))
+            or not set(profile_operations).issubset(operation_kinds)
+            or "inspect" not in profile_operations
+        ):
+            fail(f"invalid profile operation kinds: {item.get('name')}")
+        if ("modify" in profile_operations) != (item.get("sandbox") == "workspace-write"):
+            fail(f"profile modify capability and sandbox disagree: {item.get('name')}")
+        capability_family = item.get("capability_family")
+        if capability_family is not None and (
+            not isinstance(capability_family, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", capability_family)
+        ):
+            fail(f"invalid profile capability family: {item.get('name')}")
         if item.get("route_category") not in {"automatic", "manual"}:
             fail(f"invalid profile route category: {item.get('name')}")
         gates = item.get("gates")
@@ -162,66 +191,79 @@ def main() -> int:
             fail(f"manual profile must be implementation-selected: {item.get('name')}")
         if not all(isinstance(item.get(field), str) and item[field].strip() for field in ("description", "select_when", "avoid_when")):
             fail(f"incomplete profile routing text: {item.get('name')}")
+        fallback_operations = item.get("reliability_fallback_for", [])
+        if (
+            not isinstance(fallback_operations, list)
+            or len(fallback_operations) != len(set(fallback_operations))
+            or not set(fallback_operations).issubset(operation_kinds)
+            or not set(fallback_operations).issubset(set(profile_operations))
+        ):
+            fail(f"invalid reliability fallback operations: {item.get('name')}")
+        for operation in fallback_operations:
+            reliability_fallback_owners[operation].append(str(item.get("name") or ""))
+    if any(len(owners) != 1 for owners in reliability_fallback_owners.values()):
+        fail("each canonical operation must have exactly one reliability fallback profile")
     profile_names = {item["name"] for item in profile_contract["profiles"]}
     model_routing = profile_contract.get("model_routing")
     if not isinstance(model_routing, dict) or model_routing.get("schema") != "cortex/model-routing/v1":
         fail("profile contract must define the Cortex model-routing policy")
     if model_routing.get("configured_default_model") != "gpt-5.6-luna":
-        fail("model routing must keep Luna as the configured hidden-agent default")
-    if model_routing.get("max_policy") != "complex_work_or_repeated_rework":
-        fail("model routing must allow automatic max for complex work and repeated unresolved rework")
-    if model_routing.get("security", {}).get("model") != "gpt-5.6-sol":
-        fail("security model routing must select Sol")
-    if model_routing.get("explorer", {}).get("model") != "gpt-5.6-luna":
-        fail("explorer model routing must select Luna")
-    profile_classes = model_routing.get("profile_classes")
-    if not isinstance(profile_classes, dict) or set(profile_classes) != {"efficient", "adaptive", "deep"}:
-        fail("model routing must define efficient, adaptive, and deep profile classes")
+        fail("model routing must retain Luna as a documented capability, not a worker default")
+    capabilities = model_routing.get("model_capabilities")
+    expected_capabilities = [
+        {"model": "gpt-5.6-luna", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+        {"model": "gpt-5.6-terra", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+        {"model": "gpt-5.6-sol", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+    ]
+    if capabilities != expected_capabilities:
+        fail("model routing must publish the exact native model/effort capability registry")
+    supported_models = [item["model"] for item in expected_capabilities]
+    selection_policy = model_routing.get("selection_policy")
+    if not isinstance(selection_policy, dict) or set(selection_policy) != {"governance_scope", "principle", "routes"}:
+        fail("model routing must define one canonical per-worker selection policy")
+    if not all(
+        isinstance(selection_policy.get(field), str) and selection_policy[field].strip()
+        for field in ("governance_scope", "principle")
+    ):
+        fail("model routing governance scope and selection principle must be explicit")
+    routes = selection_policy.get("routes")
+    if not isinstance(routes, list) or [route.get("model") for route in routes if isinstance(route, dict)] != supported_models:
+        fail("model routing routes must cover every supported model in canonical order")
     if any(
-        not isinstance(members, list)
-        or not members
-        or not all(isinstance(name, str) for name in members)
-        for members in profile_classes.values()
+        not isinstance(route, dict)
+        or set(route) != {"model", "recommended_effort", "choose_for"}
+        or not isinstance(route.get("choose_for"), str)
+        or not route["choose_for"].strip()
+        for route in routes
     ):
-        fail("model profile classes must contain non-empty profile-name lists")
-    classified_profiles = [name for members in profile_classes.values() for name in members]
-    if (
-        len(classified_profiles) != len(set(classified_profiles))
-        or set(classified_profiles) != profile_names - {"explorer", "security_auditor"}
-    ):
-        fail("model profile classes must cover every ordinary profile exactly once")
-    supported_efforts = {"low", "medium", "high", "xhigh"}
-    luna_bounded_effort = model_routing.get("luna_bounded_effort_by_complexity")
-    luna_efficient_effort = model_routing.get("luna_efficient_effort_by_complexity")
-    terra_effort = model_routing.get("terra_effort_by_complexity")
-    effort_floor_by_risk = model_routing.get("effort_floor_by_risk")
-    security_effort = model_routing.get("security", {}).get("effort_by_complexity")
-    explorer_effort = model_routing.get("explorer", {}).get("effort_by_risk")
-    if luna_bounded_effort != {"C1": "high", "C2": "xhigh", "C3": "max"}:
-        fail("bounded Luna routing must define high/xhigh/max complexity effort")
-    if not isinstance(luna_efficient_effort, dict) or set(luna_efficient_effort) != {"C1", "C2", "C3"}:
-        fail("efficient Luna routing must define every complexity effort floor")
-    if not isinstance(terra_effort, dict) or set(terra_effort) != {"C1", "C2", "C3"}:
-        fail("Terra routing must define every complexity effort floor")
-    if not isinstance(effort_floor_by_risk, dict) or set(effort_floor_by_risk) != {"low", "moderate", "high", "critical"}:
-        fail("model routing must define every risk effort floor")
-    if not isinstance(security_effort, dict) or set(security_effort) != {"C1", "C2", "C3"}:
-        fail("security routing must define every complexity effort floor")
-    if not isinstance(explorer_effort, dict) or set(explorer_effort) != {"low", "moderate", "high", "critical"}:
-        fail("explorer routing must define every risk effort default")
-    if any(
-        not set(mapping.values()).issubset(supported_efforts)
-        for mapping in (luna_efficient_effort, terra_effort, effort_floor_by_risk, security_effort, explorer_effort)
-    ):
-        fail("non-bounded automatic model-routing effort maps must not contain unsupported or max effort")
-    terra_task_kinds = model_routing.get("terra_task_kinds")
-    if (
-        not isinstance(terra_task_kinds, list)
-        or not terra_task_kinds
-        or not all(isinstance(kind, str) and kind and kind.replace("_", "").isalnum() for kind in terra_task_kinds)
-        or len(terra_task_kinds) != len(set(terra_task_kinds))
-    ):
-        fail("model routing must define unique Terra trigger task kinds")
+        fail("model routing route guidance is incomplete")
+    runtime_path = str(plugin / "scripts")
+    if runtime_path not in sys.path:
+        sys.path.insert(0, runtime_path)
+    try:
+        from cortex_runtime.model_routing import model_effort_registry
+
+        model_efforts = model_effort_registry(model_routing)
+    except (ImportError, ValueError) as exc:
+        fail(f"canonical model/effort registry is invalid: {exc}")
+    if list(model_efforts) != supported_models:
+        fail("runtime model/effort registry must preserve canonical model order")
+    if model_efforts != {
+        item["model"]: tuple(item["reasoning_efforts"])
+        for item in expected_capabilities
+    }:
+        fail("runtime model/effort registry must exactly match native capabilities")
+    if routes[0].get("model") != "gpt-5.6-luna" or "Default" not in routes[0].get("choose_for", ""):
+        fail("Luna must remain the default worker recommendation")
+    if "complex" not in routes[1].get("choose_for", "").lower() or "security" not in routes[1].get("choose_for", "").lower():
+        fail("Terra recommendation must be limited to complex non-security work")
+    if routes[2].get("model") != "gpt-5.6-sol" or "security" not in routes[2].get("choose_for", "").lower():
+        fail("Sol recommendation must be security-only")
+    non_security_recommendations = " ".join(
+        str(route.get("choose_for") or "") for route in routes[:2]
+    ).lower()
+    if "sol" in non_security_recommendations:
+        fail("non-security recommendations must not select Sol")
     expected_gates = {
         "scope", "plan", "discover", "architecture", "database_architecture", "implementation",
         "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close",
@@ -238,13 +280,15 @@ def main() -> int:
         if not all(isinstance(briefing.get(key), list) and briefing[key] for key in ("acceptance", "verification")):
             fail(f"gate briefing lacks acceptance or verification: {gate}")
     shared = profile_contract.get("shared_worker_contract", {})
-    retry_policy = shared.get("retry_policy")
-    if retry_policy != {
-        "pipeline_rework": "unbounded_while_acceptance_or_findings_require_correction",
-        "terra_after_failed_attempts": 2,
-        "effort_by_prior_failures": {"1": "high", "2": "xhigh", "3+": "max"},
-    }:
-        fail("shared worker contract must define unbounded rework with model/effort escalation")
+    if "retry_policy" in shared:
+        fail("legacy shared retry policy must be absent; exact-occurrence recovery is compiler-owned")
+    if (
+        "refresh_worker_context" not in set(shared.get("worker_operations", []))
+        or "refresh_worker_context" not in set(shared.get("recovery_operations", []))
+        or "refresh_worker_context" in set(shared.get("normal_flow", []))
+        or "refresh_worker_context" in set(shared.get("coordinator_operations", []))
+    ):
+        fail("refresh_worker_context must remain an established-worker recovery-only operation")
     prompt_compaction_guidance = shared.get("prompt_compaction_guidance")
     if prompt_compaction_guidance != {
         "bootstrap_target_bytes": 1024,
@@ -295,7 +339,20 @@ def main() -> int:
     try:
         import cortex as cortex_server
         from cortex_runtime.mcp_api import public_tools_for_audience
-        from render_cortex_tool_catalog import expected_skill_text
+        from cortex_runtime.verification_contract import WORKER_VERIFICATION_KINDS
+        from cortex_runtime.v11_responses import (
+            FLAT_PUBLIC_RESPONSE_SCHEMA,
+            NATIVE_DISPATCH_SCHEMA,
+            NATIVE_DISPATCH_WAIT_INSTRUCTION,
+            SAME_CHILD_WAIT_INSTRUCTION,
+            WAIT_LOOP_INSTRUCTION,
+            WAIT_POLICY_REPEAT_UNTIL_TERMINAL,
+        )
+        from render_cortex_tool_catalog import (
+            expected_orchestrator_skill_text,
+            expected_profile_capability_skill_text,
+            expected_skill_text,
+        )
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         fail(f"public MCP registry could not be loaded: {exc}")
     contracts = getattr(cortex_server, "PUBLIC_CONTRACTS", None)
@@ -305,33 +362,171 @@ def main() -> int:
         fail("the canonical action-specific public contract registry is missing")
     if not isinstance(schemas, dict) or not isinstance(tools, dict):
         fail("the runtime public schema/tool registries are missing")
+    native_dispatch_properties = NATIVE_DISPATCH_SCHEMA.get("properties", {})
+    native_argument_properties = (
+        native_dispatch_properties.get("arguments", {}).get("properties", {})
+        if isinstance(native_dispatch_properties, dict) else {}
+    )
+    resolution_fields = {"requested_profile", "resolved_profile", "resolution_reason"}
+    flat_response_properties = FLAT_PUBLIC_RESPONSE_SCHEMA.get("properties", {})
+    if (
+        not resolution_fields.issubset(native_dispatch_properties)
+        or resolution_fields.intersection(native_argument_properties)
+        or not isinstance(flat_response_properties.get("compiled_plan"), dict)
+        or flat_response_properties["compiled_plan"].get("type") != "string"
+        or set((flat_response_properties.get("next_native_action") or {}).get("enum", []))
+        != {"wait_agent", "read_worker_wave"}
+        or (flat_response_properties.get("read_worker_wave_allowed") or {}).get("type") != "boolean"
+        or (flat_response_properties.get("wait_policy") or {}).get("enum")
+        != [WAIT_POLICY_REPEAT_UNTIL_TERMINAL]
+    ):
+        fail("compiled plan, profile normalization, and native transition fields must remain public and flat")
+    audiences = tuple(contract.get("audience") for contract in contracts.values())
+    if (
+        any(audience not in {"coordinator", "worker"} for audience in audiences)
+        or set(audiences) != {"coordinator", "worker"}
+    ):
+        fail("the canonical inventory must contain coordinator and worker tools only")
     start_contract = contracts.get("start_orchestration")
     start_schema = start_contract.get("inputSchema") if isinstance(start_contract, dict) else None
     start_properties = start_schema.get("properties") if isinstance(start_schema, dict) else None
-    project_root_schema = start_properties.get("project_root") if isinstance(start_properties, dict) else None
     waves_schema = start_properties.get("waves") if isinstance(start_properties, dict) else None
     wave_schema = waves_schema.get("items") if isinstance(waves_schema, dict) else None
     wave_properties = wave_schema.get("properties") if isinstance(wave_schema, dict) else None
     workers_schema = wave_properties.get("workers") if isinstance(wave_properties, dict) else None
     worker_schema = workers_schema.get("items") if isinstance(workers_schema, dict) else None
     worker_properties = worker_schema.get("properties") if isinstance(worker_schema, dict) else None
-    allowed_paths_schema = worker_properties.get("allowed_paths") if isinstance(worker_properties, dict) else None
-    allowed_path_item = allowed_paths_schema.get("items") if isinstance(allowed_paths_schema, dict) else None
+    if isinstance(start_properties, dict) and "project_root" in start_properties:
+        fail("start_orchestration must not expose the host-owned project_root field")
+    if isinstance(worker_properties, dict) and "allowed_paths" in worker_properties:
+        fail("start_orchestration must not expose the removed allowed_paths worker field")
     if (
-        not isinstance(project_root_schema, dict)
-        or project_root_schema.get("description") != "An absolute path to the project root."
-        or not isinstance(allowed_paths_schema, dict)
-        or allowed_paths_schema.get("description")
-        != "Every entry is strictly project-relative to project_root, never absolute."
-        or not isinstance(allowed_path_item, dict)
-        or allowed_path_item.get("description")
-        != "A project-relative path such as desktop-v11-smoke.txt; never an absolute path."
+        not isinstance(wave_properties, dict)
+        or set(wave_properties) != {"phase_kind", "workers"}
+        or set(wave_schema.get("required", [])) != {"phase_kind", "workers"}
+        or "phase" in wave_properties
     ):
-        fail("start_orchestration path guidance must be owned by its canonical inputSchema")
+        fail("wave contract must expose only repeatable semantic phase_kind plus workers")
+    if not isinstance(worker_properties, dict) or set(worker_properties) != {
+        "objective", "profile", "operation_kind", "model", "reasoning_effort",
+    }:
+        fail("worker contract must remain flat and backend-derived outside semantic assignment fields")
+    worker_required = set(worker_schema.get("required", [])) if isinstance(worker_schema, dict) else set()
+    if worker_required != {"objective", "profile", "operation_kind", "model", "reasoning_effort"}:
+        fail("worker contract must require every coordinator-selected semantic assignment field")
+    operation_kind = worker_properties.get("operation_kind")
+    if (
+        not isinstance(operation_kind, dict)
+        or operation_kind.get("enum") != list(operation_kinds)
+    ):
+        fail("worker operation_kind must publish the canonical capability enum")
+    if any(
+        field in worker_properties
+        for field in ("depends_on", "predecessor_wave_refs", "predecessor_result_refs")
+    ):
+        fail("worker dependency and predecessor context must remain backend-derived")
+    if any(field in worker_properties for field in ("user_model", "user_effort")):
+        fail("worker contract must use the canonical model and reasoning_effort names")
+    pair_guidance = str((worker_properties.get("model") or {}).get("description") or "")
+    effort_guidance = str((worker_properties.get("reasoning_effort") or {}).get("description") or "")
+    for model, efforts in model_efforts.items():
+        expected_pair = f"{model} -> {' or '.join(efforts)}"
+        if expected_pair not in pair_guidance or expected_pair not in effort_guidance:
+            fail("worker tool schema must derive every exact model/effort pair from profiles")
+    governance_schema = start_properties.get("governance_mode") if isinstance(start_properties, dict) else None
+    if not isinstance(governance_schema, dict) or set(governance_schema.get("enum", [])) != {"auto", "required", "minimal"}:
+        fail("governance_mode must advertise the current auto/required/minimal choices")
+    continue_contract = contracts.get("continue_orchestration") or {}
+    continue_schema = continue_contract.get("inputSchema") if isinstance(continue_contract, dict) else None
+    if not isinstance(continue_schema, dict) or set(continue_schema.get("required", [])) != {"task_ref", "coordinator_ref"} or set((continue_schema.get("properties") or {})) != {"task_ref", "coordinator_ref"}:
+        fail("continue_orchestration must accept only task_ref and coordinator_ref")
+    for name in ("start_orchestration", "continue_orchestration"):
+        if NATIVE_DISPATCH_WAIT_INSTRUCTION not in str((contracts.get(name) or {}).get("description") or ""):
+            fail(f"{name} must derive its dispatch-wait-read description from the canonical registry")
+    if SAME_CHILD_WAIT_INSTRUCTION not in str((contracts.get("answer_orchestration_question") or {}).get("description") or ""):
+        fail("answer_orchestration_question must derive its same-child wait sequence from the canonical registry")
+    for marker in (
+        '"No agents completed yet"', "timeout", "empty completion set", "NONTERMINAL",
+        "pendingInit", "running", "interrupted", "completed", "errored", "shutdown", "notFound",
+    ):
+        if marker not in WAIT_LOOP_INSTRUCTION:
+            fail(f"canonical wait loop does not classify native status marker: {marker}")
+    revise_contract = contracts.get("revise_future_pipeline") or {}
+    revise_schema = revise_contract.get("inputSchema") if isinstance(revise_contract, dict) else None
+    if not isinstance(revise_schema, dict) or "current_step" in (revise_schema.get("properties") or {}):
+        fail("revise_future_pipeline must derive the current frontier")
+    if "wave:N" in str(revise_contract.get("description") or ""):
+        fail("revise_future_pipeline must not advertise model-authored wave identities")
+    rework_contract = contracts.get("append_rework_wave") or {}
+    rework_schema = rework_contract.get("inputSchema") if isinstance(rework_contract, dict) else None
+    rework_properties = rework_schema.get("properties") if isinstance(rework_schema, dict) else None
+    expected_rework = {
+        "task_ref", "coordinator_ref", "source_result_ref", "objective", "acceptance",
+        "profile", "model", "reasoning_effort",
+    }
+    if (
+        not isinstance(rework_properties, dict)
+        or set(rework_properties) != expected_rework
+        or set(rework_schema.get("required", [])) != expected_rework
+        or rework_schema.get("additionalProperties") is not False
+        or rework_contract.get("base_operation") != "manage_orchestration"
+        or (rework_contract.get("injected_arguments") or {}).get("action")
+        != "append_rework_wave"
+    ):
+        fail("append_rework_wave must expose one flat semantic rework contract")
+    event_contract = contracts.get("record_attempt_event") or {}
+    event_schema = event_contract.get("inputSchema") if isinstance(event_contract, dict) else None
+    event_properties = event_schema.get("properties") if isinstance(event_schema, dict) else None
+    event_type = event_properties.get("event_type") if isinstance(event_properties, dict) else None
+    verification_kind = (
+        event_properties.get("verification_kind") if isinstance(event_properties, dict) else None
+    )
+    text_schema = event_properties.get("text") if isinstance(event_properties, dict) else None
+    verification_guidance = str((text_schema or {}).get("description") or "")
+    if (
+        not isinstance(event_properties, dict)
+        or set(event_properties) != {"dispatch_ref", "event_type", "verification_kind", "text"}
+        or set(event_schema.get("required", [])) != {"dispatch_ref", "event_type", "text"}
+        or event_schema.get("additionalProperties") is not False
+        or not isinstance(event_type, dict)
+        or "verification_observation" not in set(event_type.get("enum", []))
+        or "verification_claimed" in set(event_type.get("enum", []))
+        or not isinstance(verification_kind, dict)
+        or set(verification_kind.get("enum", [])) != set(WORKER_VERIFICATION_KINDS)
+        or any(marker not in verification_guidance for marker in (
+            "status=passed", "passed_tests=<n>", "viewports=<n>",
+            "keyboard_checks=<n>", "console_errors=0", "external_requests=0",
+        ))
+    ):
+        fail("record_attempt_event must expose the flat canonical verification observation branch")
+    follow_up_contract = contracts.get("start_follow_up") or {}
+    follow_up_schema = follow_up_contract.get("inputSchema") if isinstance(follow_up_contract, dict) else None
+    if not isinstance(follow_up_schema, dict) or "result_refs" in (follow_up_schema.get("properties") or {}):
+        fail("start_follow_up must derive canonical source results server-side")
+    wave_contract = contracts.get("read_worker_wave") or {}
+    wave_schema = wave_contract.get("inputSchema") if isinstance(wave_contract, dict) else None
+    if not isinstance(wave_schema, dict) or "step" in (wave_schema.get("properties") or {}) or "step" in set(wave_schema.get("required", [])):
+        fail("read_worker_wave must derive the active wave server-side")
+    growing_read_names = {
+        name for name, contract in contracts.items()
+        if any(token in str(contract.get("description", "")).lower() for token in ("page", "pagination", "continuation cursor"))
+    }
+    growing_read_names.update(
+        name for name in contracts
+        if name.startswith(("read_", "list_", "inspect_", "show_", "poll_"))
+    )
+    for name in sorted(growing_read_names):
+        schema = contracts[name].get("inputSchema") if isinstance(contracts[name], dict) else None
+        if not isinstance(schema, dict) or "cursor" not in (schema.get("properties") or {}):
+            fail(f"growing public read must expose cursor pagination: {name}")
+    for name, contract in contracts.items():
+        if "_lane" in name or "_resource" in name:
+            schema = contract.get("inputSchema") if isinstance(contract, dict) else None
+            properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+            if any(isinstance(value, dict) and value.get("type") in {"object", "array"} for value in properties.values()):
+                fail(f"lane/resource public inputs must remain flat: {name}")
     path_guidance_markers = (
         "an absolute path to the project root",
-        "strictly project-relative to project_root",
-        "desktop-v11-smoke.txt",
     )
     if any(
         marker in str(start_contract.get("description") or "").lower()
@@ -349,6 +544,42 @@ def main() -> int:
         source_text = source.read_text(encoding="utf-8").lower()
         if any(marker in source_text for marker in path_guidance_markers):
             fail(f"canonical inputSchema path guidance is duplicated in model-facing source: {source.name}")
+    answer_contract = contracts.get("answer_orchestration_question")
+    answer_input = answer_contract.get("inputSchema") if isinstance(answer_contract, dict) else None
+    answer_properties = answer_input.get("properties") if isinstance(answer_input, dict) else None
+    answer_field = answer_properties.get("answer") if isinstance(answer_properties, dict) else None
+    if (
+        not isinstance(answer_field, dict)
+        or "answer" not in answer_input.get("required", [])
+        or "answer" not in answer_properties
+        or answer_field.get("description")
+        != "Exact arbitrary-Unicode response bound to the durable question."
+    ):
+        fail("answer_orchestration_question must expose only the canonical Unicode answer field")
+    retired_public_completion_tools = {
+        "completion_receipt", "acknowledge_worker_completion", "v18cr1",
+    }
+    if retired_public_completion_tools & set(contracts):
+        fail("retired public completion receipt and acknowledgement surface must be absent")
+    hook_contract = json.loads((plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
+    observer_text = (plugin / "scripts/cortex_runtime/native_lifecycle_observer.py").read_text(encoding="utf-8")
+    ledger_text = (plugin / "scripts/cortex_runtime/ledger_db.py").read_text(encoding="utf-8")
+    hook_text = (plugin / "scripts/cortex_hook.py").read_text(encoding="utf-8")
+    response_text = (plugin / "scripts/cortex_runtime/v11_responses.py").read_text(encoding="utf-8")
+    projector_text = (plugin / "scripts/cortex_runtime/mcp_api.py").read_text(encoding="utf-8")
+    if (
+        "native_lifecycle_observer import observe" not in hook_text
+        or "START_FIELDS" not in observer_text
+        or "STOP_FIELDS" not in observer_text
+        or "native_terminal_stop" not in observer_text
+        or "server_recovery" not in response_text
+        or "confirm_native_completion_wait" in response_text
+        or '"native_completion_observation_unavailable"' not in projector_text
+        or '"worker_attestation_server_state_unavailable"' not in projector_text
+        or "PRIVATE_LIFECYCLE_AUDIT_RETENTION" not in ledger_text
+        or "private_lifecycle_audit_digest" not in ledger_text
+    ):
+        fail("private native completion observer contract is incomplete")
     canonical_schemas: dict[str, object] = {}
     split_base_operations: set[str] = set()
     for name, contract in contracts.items():
@@ -390,15 +621,47 @@ def main() -> int:
         ):
             fail(f"public contract does not keep injected routing outside its closed input schema: {name}")
         if audience == "worker":
-            dispatch_schema = properties.get("dispatch_ref")
-            if (
-                "dispatch_ref" not in required
-                or not isinstance(dispatch_schema, dict)
-                or dispatch_schema.get("type") != "string"
-                or dispatch_schema.get("format") != "cortex-dispatch-ref"
-                or "dispatch_ref" in description
-            ):
-                fail(f"worker dispatch authority must live only in the required inputSchema: {name}")
+            if name == "refresh_worker_context":
+                cursor_schema = properties.get("cursor")
+                expected_cursor_schema = {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 520,
+                    "pattern": r"^c11p\.[A-Za-z0-9_-]{16,512}$",
+                    "format": "cortex-page-cursor",
+                }
+                registration = tools.get(name)
+                registered_handler = (
+                    registration.get("handler") if isinstance(registration, dict) else None
+                )
+                if (
+                    base_operation != "read_worker_context"
+                    or set(properties) != {"cursor"}
+                    or cursor_schema != expected_cursor_schema
+                    or required
+                    or injected
+                    or "no identity or routing arguments" not in description
+                    or "authenticated native worker" not in description
+                    or "read_worker_context" in contracts
+                    or "read_worker_context" in schemas
+                    or "read_worker_context" in tools
+                    or registered_handler is not getattr(cortex_server, "read_worker_context", None)
+                    or "_authorize_host_bound_worker_refresh"
+                    not in set(getattr(getattr(registered_handler, "__code__", None), "co_names", ()))
+                ):
+                    fail(
+                        "refresh_worker_context must remain a cursor-only trusted host-bound recovery read"
+                    )
+            else:
+                dispatch_schema = properties.get("dispatch_ref")
+                if (
+                    "dispatch_ref" not in required
+                    or not isinstance(dispatch_schema, dict)
+                    or dispatch_schema.get("type") != "string"
+                    or dispatch_schema.get("format") != "cortex-dispatch-ref"
+                    or "dispatch_ref" in description
+                ):
+                    fail(f"worker dispatch authority must live only in the required inputSchema: {name}")
         stack: list[object] = [schema]
         while stack:
             item = stack.pop()
@@ -451,10 +714,70 @@ def main() -> int:
         fail(f"Cortex control tool catalog is invalid: {exc}")
     if control_skill_text != expected_control_skill:
         fail("Cortex control tool catalog differs from the canonical public registry")
-    expected_hook_events = {"SessionStart", "SubagentStart", "SubagentStop", "Stop", "PostToolUse"}
+    if (
+        "read_worker_wave` is forbidden until" not in control_skill_text
+        or "exact bound child terminal" not in control_skill_text
+        or "`No agents completed yet`" not in control_skill_text
+        or not all(status in control_skill_text for status in (
+            "`interrupted`", "`completed`", "`errored`", "`shutdown`", "`notFound`",
+        ))
+    ):
+        fail("Cortex control must state the dispatch-wait-read lifecycle boundary")
+    orchestrator_skill_path = plugin / "skills/orchestrator/SKILL.md"
+    orchestrator_skill_text = orchestrator_skill_path.read_text(encoding="utf-8")
+    try:
+        expected_orchestrator_skill = expected_orchestrator_skill_text(
+            orchestrator_skill_text,
+            model_routing,
+        )
+        expected_orchestrator_skill = expected_profile_capability_skill_text(
+            expected_orchestrator_skill,
+            profile_contract,
+        )
+    except ValueError as exc:
+        fail(f"Cortex orchestrator model-routing policy is invalid: {exc}")
+    if orchestrator_skill_text != expected_orchestrator_skill:
+        fail("Cortex orchestrator model-routing guidance differs from profiles.json")
+    if (
+        "Do not call `read_worker_wave` until `wait_agent`" not in orchestrator_skill_text
+        or "`No agents completed yet`" not in orchestrator_skill_text
+        or not all(status in orchestrator_skill_text for status in (
+            "`interrupted`", "`completed`", "`errored`", "`shutdown`", "`notFound`",
+        ))
+    ):
+        fail("Cortex orchestrator must state the dispatch-wait-read lifecycle boundary")
+    expected_hook_events = {
+        "SessionStart", "SubagentStart", "SubagentStop",
+    }
     hook_registry = hooks.get("hooks", {})
     if not isinstance(hook_registry, dict) or set(hook_registry) != expected_hook_events:
-        fail("hook registry must contain only the five v11 telemetry lifecycle events")
+        fail("hook registry must contain only the three native lifecycle events")
+    hook_sync_policy = root / "scripts/sync-cortex-hook-trust.py"
+    regular_file(hook_sync_policy, "Cortex hook trust synchronizer")
+    try:
+        hook_sync_tree = ast.parse(hook_sync_policy.read_text(encoding="utf-8"))
+        hook_event_assignment = next(
+            node for node in hook_sync_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "V11_HOOK_EVENTS"
+                for target in node.targets
+            )
+        )
+        hook_event_value = hook_event_assignment.value
+        if not (
+            isinstance(hook_event_value, ast.Call)
+            and isinstance(hook_event_value.func, ast.Name)
+            and hook_event_value.func.id == "frozenset"
+            and len(hook_event_value.args) == 1
+            and not hook_event_value.keywords
+        ):
+            raise ValueError("V11_HOOK_EVENTS must be one literal frozenset")
+        sync_hook_events = set(ast.literal_eval(hook_event_value.args[0]))
+    except (OSError, StopIteration, SyntaxError, TypeError, ValueError) as exc:
+        fail(f"Cortex hook trust synchronizer inventory is invalid: {exc}")
+    if sync_hook_events != set(hook_registry) or len(sync_hook_events) != len(hook_registry):
+        fail("Cortex sync hook policy must exactly match hooks.json events and count")
     hook_commands = [
         hook.get("command")
         for registrations in hook_registry.values()
@@ -470,7 +793,7 @@ def main() -> int:
         or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
         for command in hook_commands
     ):
-        fail("all five v11 telemetry hooks must invoke the bundled Cortex launcher")
+        fail("all native lifecycle hooks must invoke the bundled Cortex launcher")
     for skill_name in EXPECTED_SKILLS:
         skill = plugin / "skills" / skill_name / "SKILL.md"
         try:
@@ -487,6 +810,10 @@ def main() -> int:
                 "<!-- END GENERATED PROFILE CATALOG -->",
                 "<!-- BEGIN GENERATED CORTEX TOOL CATALOG -->",
                 "<!-- END GENERATED CORTEX TOOL CATALOG -->",
+                "<!-- BEGIN GENERATED CORTEX MODEL ROUTING -->",
+                "<!-- END GENERATED CORTEX MODEL ROUTING -->",
+                "<!-- BEGIN GENERATED CORTEX PROFILE CAPABILITIES -->",
+                "<!-- END GENERATED CORTEX PROFILE CAPABILITIES -->",
             }
         ]
         if forbidden_comments:
@@ -590,6 +917,68 @@ def main() -> int:
         fail("host_spawn_prompt must pass the encoded assignment object to compile_v3_briefing")
     if "assignment_json_block(assignment)" not in prompt_compiler_source or "json.dumps(assignment" not in prompt_compiler_source:
         fail("worker assignment data must be rendered through the JSON encoder")
+
+    # Material active steers are occurrence compiler operations, never
+    # semantic-name resets. Keep this as a source-level release invariant so
+    # marketplace validation catches a regression without constructing or
+    # mutating a user's runtime ledger.
+    engine_path = plugin / "scripts/cortex_runtime/orchestration_engine.py"
+    facade_path = plugin / "scripts/cortex.py"
+    try:
+        engine_source = engine_path.read_text(encoding="utf-8")
+        facade_source = facade_path.read_text(encoding="utf-8")
+        engine_tree = ast.parse(engine_source, filename=str(engine_path))
+        facade_tree = ast.parse(facade_source, filename=str(facade_path))
+    except (OSError, SyntaxError) as exc:
+        fail(f"occurrence compiler source is invalid: {exc}")
+
+    def function_source(tree: ast.AST, source: str, name: str) -> str:
+        node = next(
+            (
+                item for item in ast.walk(tree)
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == name
+            ),
+            None,
+        )
+        if node is None:
+            fail(f"required occurrence compiler function is missing: {name}")
+        return ast.get_source_segment(source, node) or ""
+
+    revision_source = function_source(
+        engine_tree, engine_source, "_apply_pending_revision_impact",
+    )
+    if any(marker in revision_source for marker in (
+        "apply_pipeline_operations", "append_pipeline_change",
+        "invalidate_reworked_result_bindings",
+    )):
+        fail("material steer compiler must not reset or invalidate work by semantic phase")
+    if not all(marker in revision_source for marker in (
+        "target_occurrence", "frontier_occurrence_at_revision",
+        "next_compiled_wave_index", "_normalize_orchestrate_waves",
+        "completed_source_occurrence", "prior_attempt_audit_digest",
+        "semantic_revision_request_digest", "with db_transaction(root)",
+    )):
+        fail("material steer compiler lacks exact occurrence, audit, or atomic replay authority")
+    continue_source = function_source(
+        engine_tree, engine_source, "_orchestrate_continue",
+    )
+    completion_position = continue_source.find(
+        "orchestration_wave_occurrence_completed"
+    )
+    revision_position = continue_source.find("_apply_pending_revision_impact(")
+    if (
+        completion_position < 0
+        or revision_position < 0
+        or completion_position > revision_position
+    ):
+        fail("material steer compilation must follow durable source occurrence completion")
+    steer_source = function_source(facade_tree, facade_source, "_v11_active_steer")
+    if not all(marker in steer_source for marker in (
+        "target_occurrence", "frontier_occurrence_at_revision",
+        "frontier_position", "current_match", "future", "completed",
+    )):
+        fail("active steer must bind one exact current, future, or completed occurrence")
     for forbidden in (
         "Exact user-authored request (authoritative intent boundary):",
         "Model route and reasoning effort:",
@@ -602,7 +991,12 @@ def main() -> int:
     if not isinstance(routing, dict) or routing.get("fallback") != "general" or not isinstance(routing.get("rules"), list):
         fail("implementation routing must define a general fallback and ordered specialist rules")
     rule_profiles = [item.get("profile") for item in routing["rules"] if isinstance(item, dict)]
-    expected_writers = {"backend_dev", "data_engineer", "debugger", "devops_engineer", "frontend_dev", "fullstack_dev", "mobile_dev", "refactorer"}
+    expected_writers = {
+        item["name"]
+        for item in profile_contract["profiles"]
+        if item.get("route_category") == "manual"
+        and "modify" in item.get("operation_kinds", [])
+    }
     if set(rule_profiles) != expected_writers or len(rule_profiles) != len(set(rule_profiles)):
         fail("implementation routing must cover every specialist writer exactly once")
     if (root / "agents").exists() or (root / "skills").exists():

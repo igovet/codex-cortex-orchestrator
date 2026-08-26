@@ -19,7 +19,6 @@ bind_symbols(
         "_orchestrate_summary",
         "_v11_task_ref",
         "active_gates",
-        "db_list_worker_sessions",
         "now",
         "redact",
     ),
@@ -52,18 +51,6 @@ def _context_handoff(
     active_workers: list[dict[str, Any]] = []
     stopped_workers: list[dict[str, Any]] = []
     open_questions: list[dict[str, Any]] = []
-    # The state projection is normally sufficient. The SQLite worker session
-    # table is a task-scoped lifecycle-telemetry fallback for native
-    # spawn/wait/stop observations; it never grants worker authority.
-    session_by_attempt: dict[str, dict[str, Any]] = {}
-    try:
-        ledger_root = task_dir.parent.parent
-        for session in db_list_worker_sessions(ledger_root, str(state.get("task_id") or "")):
-            attempt_key = str(session.get("attempt_id") or "").strip()
-            if attempt_key and attempt_key not in session_by_attempt:
-                session_by_attempt[attempt_key] = session
-    except (OSError, ValueError, TypeError):
-        session_by_attempt = {}
     for attempt in state.get("attempts") or []:
         if not isinstance(attempt, dict) or attempt.get("invalidated"):
             continue
@@ -77,9 +64,9 @@ def _context_handoff(
         except (OSError, ValueError, TypeError):
             attempt_questions = []
         question_refs = [
-            redact(item.get("question_id"), 160)
+            redact(item.get("question_ref"), 160)
             for item in attempt_questions
-            if isinstance(item, dict) and str(item.get("question_id") or "").strip()
+            if isinstance(item, dict) and str(item.get("question_ref") or "").strip()
         ]
         for question in attempt_questions:
             if isinstance(question, dict):
@@ -87,8 +74,8 @@ def _context_handoff(
                     "attempt_id": attempt_id,
                     "phase": phase,
                     "dispatch_ref": redact(attempt.get("dispatch_ref", ""), 160) or None,
-                    "question_ref": redact(question.get("question_id"), 160),
-                    "question": redact(question.get("question", ""), 2000),
+                    "question_ref": redact(question.get("question_ref"), 160),
+                    "question": redact(question.get("question_text", ""), 2000),
                     "header": redact(question.get("header", ""), 300) or None,
                 })
         identity = {
@@ -110,23 +97,10 @@ def _context_handoff(
             and not attempt.get("host_stopped_at")
             and not attempt.get("worker_session_reconciled_at")
         ):
-            host_spawn = attempt.get("host_spawn") or {}
-            session = session_by_attempt.get(str(attempt.get("attempt_id") or ""), {})
-            active_workers.append({
-                **identity,
-                # Host identity is server-observed at SubagentStart and is
-                # durably stored in the immutable spawn observation, never in
-                # worker-authored attempt data.  Recovery must surface that
-                # exact native child id so a compacted coordinator can wait on
-                # the existing worker instead of dispatching a replacement.
-                "host_agent_id": redact(
-                    attempt.get("host_agent_id")
-                    or host_spawn.get("agent_id")
-                    or session.get("host_agent_id")
-                    or "",
-                    160,
-                ) or None,
-            })
+            # Native thread/session identity is server-private lifecycle
+            # binding. A compacted coordinator needs only this durable
+            # assignment identity and the server-derived lifecycle action.
+            active_workers.append(dict(identity))
         elif attempt.get("host_stopped_at") or attempt.get("worker_session_reconciled_at"):
             finalization_pending = str(attempt.get("host_stop_outcome") or "") == "work_completed_finalization_pending"
             awaiting_user = str(attempt.get("host_stop_outcome") or "") == "awaiting_user" or bool(question_refs)
@@ -150,7 +124,10 @@ def _context_handoff(
     if finalizing:
         next_action = "retry complete_attempt on that exact persisted attempt only; do not spawn or submit a replacement worker."
     elif pending_dispatches:
-        next_action = "Invoke only the returned pending dispatches, then follow the current canonical step."
+        next_action = (
+            "Invoke only the returned pending dispatches, preserve the exact host-returned child identifiers, "
+            "then wait_agent for those exact bound children. Do not read the worker wave until every child is terminal."
+        )
     else:
         next_action = "Follow the current canonical lifecycle state; use only attempt_result_ref values for completed predecessors."
     return {
@@ -177,7 +154,7 @@ def _context_handoff(
         "protocol": {
             "coordinator": "The main/root agent is the sole user-facing coordinator; project operations belong to workers.",
             "dispatch_transport": "Each pending dispatch uses one compact bootstrap plus an immutable scoped briefing path and SHA-256; the coordinator does not read the briefing.",
-            "result_transport": "Read canonical AttemptResult views with read_worker_result by exact attempt_result_ref. Generated result views are non-authoritative.",
+            "result_transport": "List the dispatch-scoped report catalog, then read required or selected optional canonical reports by exact opaque report_ref. Generated result views are non-authoritative.",
         },
         "next_action": next_action,
     }

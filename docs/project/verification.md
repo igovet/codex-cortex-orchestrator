@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 
 This page describes source-mode checks for Cortex 11.0.1 and the v11 task and
-capability contract on SQLite schema v18. A command is evidence only
+capability contract on SQLite schema v19. A command is evidence only
 when it was actually run; installation and live-model checks must be recorded
 separately.
 
@@ -20,7 +20,7 @@ git diff --check
 Run the sole release gate after the static checks:
 
 ~~~bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v tests.test_marketplace_release_gate
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q tests/test_marketplace_release_gate.py
 ~~~
 
 Record the release-gate outcome, exact command, and environment. The current
@@ -40,14 +40,25 @@ Focused protocol checks must cover:
 - server-derived changed files, checks, timestamps, identity, and observations;
 - exact task/attempt/result scope for briefing and predecessor-result reads;
 - private coordinator task authority and exact native worker dispatch authority;
-- native `spawn_agent`/exact `wait`/action-specific wave-read/continue ordering, with no
-  session/environment authorization or manually authored advance/completions;
+- native V2 `spawn_agent`/generic timeout-bounded `wait_agent`/canonical
+  terminal result/exact terminal Stop/wave-read/continue ordering, including
+  parallel workers and 300-second ordinary progress waits. Host-owned identity
+  binding joins each authorized worker call to its exact native child; no exact-child
+  wait target, no prose or wait-output parsing, unknown or disabled hooks
+  failing closed, and no model inspection of private state,
+  session/environment authorization, or manually authored advance/completions;
+- one evidence-frontier decision per completed canonical wave:
+  `revise_future_pipeline` only for unexecuted future work,
+  `append_rework_wave` only for product correction of a completed result, and
+  server-owned Luna-to-Terra-to-Sol technical replacement with capability-safe
+  profile resolution; every new worker repeats the lifecycle and required
+  governance closure precedes final handoff;
 - coordinator-model ownership of the worker waves submitted at start,
   with backend validation/dispatch but no server-selected replacement pipeline;
 - one action per MCP tool, with no multiplexed selector, branch registry,
   compatibility alias, or audience-dependent shared request shape;
-- every advertised tool owning a complete closed one-level `inputSchema` from
-  `public_contracts.py`, with runtime validation consuming that same schema;
+- every advertised tool owning a complete closed one-level contract, with
+  runtime validation consuming that same contract;
 - short semantic tool descriptions and no argument fields, constraints, or
   schema templates duplicated in skills or prompts;
 - separate `submit_attempt` and `repair_attempt` operations, with repair bound
@@ -56,16 +67,25 @@ Focused protocol checks must cover:
   recovery without private path/capability leakage or source/cache/ledger/session lookup;
 - Cortex-issued coordinator and worker authority copied byte-for-byte
   with no session/host inference or value echo on a missing-authority failure;
-- server-returned same-child recovery, complete briefing pagination, and exact
-  same-child question/answer resumption without question recreation;
-- server-fixed opaque `c11p` cursor paging for every growing read; fixed
+- bounded same-operation backoff until a finite deadline when a worker first
+  operation precedes trusted spawn observation, with zero project access and no
+  replacement and automatic transient-observer clearing after an exact
+  successful retry; complete briefing pagination; and a genuine durable
+  question pause followed by real-answer recording and exact same-worker
+  resumption in a new native turn without recreation;
+- server-fixed opaque continuation paging for every growing read; fixed
   receipts and repair cards do not paginate;
 - compact language-neutral worker text/report payloads with backend-derived
   identity and evidence, server-owned known-locale/canonical-fallback display,
   and no language blocker or `label_en`/localized alias;
-- exact signed V11 v1--v8 lineage upgrade atomically to v18, private
-  non-selectable old task authority, and fail-closed unknown history/lost
-  capability handling;
+- transactional in-place upgrade of exact signed released schema-v17/schema-v18
+  histories to v19 with append-only rows preserved, including exact Unicode
+  pending/answered question migration, conservative category assignment,
+  category/answer digest recomputation, second-open idempotence, and rollback;
+  run `python3 scripts/probe-cortex-question-migration.py` for the direct signed
+  V17/V18 database probe. Private archival and fresh v19 bootstrap remain the
+  route for the exact signed legacy V1--V8 namespace; unknown history and lost
+  capability handling fail closed;
 - ContextCompiler and target-specific HandoffCompiler projections;
 - action-specific `tools/list` inventory and fixed audiences.
 
@@ -74,14 +94,12 @@ Focused protocol checks must cover:
 ~~~bash
 ./scripts/sync-cortex.sh --dry-run
 python3 scripts/cortex-host-preflight.py --json
-python3 scripts/probe-fresh-cortex-plugin.py
 ~~~
 
 The first command is the sole supported installation/update path in no-write
-preview mode. Host preflight and the fresh
-plugin probe depend on the local Codex installation and may be unavailable in
-source-only environments. Do not substitute Marketplace or direct `codex
-plugin` commands. A skipped or blocked host check is not a pass.
+preview mode. Host preflight depends on the local Codex installation and may
+be unavailable in source-only environments. Do not substitute Marketplace or
+direct `codex plugin` commands. A skipped or blocked host check is not a pass.
 
 ## Prompt checks
 

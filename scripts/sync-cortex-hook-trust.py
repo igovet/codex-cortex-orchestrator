@@ -20,8 +20,6 @@ V11_HOOK_EVENTS = frozenset({
     "SessionStart",
     "SubagentStart",
     "SubagentStop",
-    "Stop",
-    "PostToolUse",
 })
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TABLE_HEADER_RE = re.compile(r"^\s*\[(?!\[).+\]\s*(?:#.*)?$")

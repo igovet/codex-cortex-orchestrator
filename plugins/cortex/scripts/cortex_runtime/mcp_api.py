@@ -9,11 +9,16 @@ projections.
 from __future__ import annotations
 
 import json
+import math
 import re
 import secrets
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar, Token
 from typing import Any
+
+from cortex_runtime.public_contracts import is_internal_question_category
 
 from cortex_runtime.v11_submission import (
     MAX_DIAGNOSTICS,
@@ -22,26 +27,96 @@ from cortex_runtime.v11_submission import (
 from cortex_runtime.v11_responses import (
     PUBLIC_ACTIONS,
     PUBLIC_FAILURE_ACTIONS,
+    PUBLIC_NATIVE_DISPATCH_ACTION_SHAPES,
     PUBLIC_SUCCESS_ACTIONS,
+    PUBLIC_UNCHANGED_RETRY_ERROR_CODES,
     TASK_REF_PATTERN,
     ResponseValidationError,
+    WAIT_POLICY_REPEAT_UNTIL_TERMINAL,
+    expected_native_transition,
+    native_dispatch_authority_message,
+    public_response_text,
     validate_private_response,
     validate_response,
 )
 MCP_AUDIENCES = frozenset({"default", "coordinator", "worker"})
 DEFAULT_MCP_AUDIENCE = "default"
+SUPPORTED_LEGACY_PROTOCOL_VERSIONS = ("2025-06-18",)
+DEFAULT_LEGACY_PROTOCOL_VERSION = SUPPORTED_LEGACY_PROTOCOL_VERSIONS[0]
+_LEGACY_CONNECTION_NEW = "NEW"
+_LEGACY_CONNECTION_INITIALIZE_RESPONSE_SENT = "INITIALIZE_RESPONSE_SENT"
+_LEGACY_CONNECTION_READY = "READY"
+_MAX_COMPLETE_TOOLS_PAGE = 128
+_TOOLS_CALL_RATE_CAPACITY = 600.0
+_TOOLS_CALL_RATE_REFILL_PER_SECOND = 10.0
+_LEDGER_BUSY_RETRY_DELAY_MS = 250
+
+
+class _JsonRpcProtocolError(Exception):
+    """A caller-owned JSON-RPC boundary error with one standard wire code."""
+
+    code = -32603
+    wire_message = "Internal error"
+
+
+class _JsonRpcInvalidRequest(_JsonRpcProtocolError):
+    code = -32600
+    wire_message = "Invalid Request"
+
+
+class _JsonRpcMethodNotFound(_JsonRpcProtocolError):
+    code = -32601
+    wire_message = "Method not found"
+
+
+class _JsonRpcInvalidParams(_JsonRpcProtocolError):
+    code = -32602
+    wire_message = "Invalid params"
+
+# Codex injects the addressed host thread into CallToolRequest.params._meta.
+# It is transport authority, never part of a model-facing schema or backend
+# argument object.  Context-local storage keeps concurrent/embedded transports
+# isolated and makes reset-on-every-path mechanically enforceable.
+_HOST_THREAD_ID: ContextVar[str | None] = ContextVar(
+    "cortex_transport_host_thread_id", default=None,
+)
+_HOST_THREAD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+
+
+def current_host_thread_id() -> str | None:
+    """Return the transport-private Codex thread identity for this tool call."""
+    return _HOST_THREAD_ID.get()
+
+
+def _call_host_thread_id(params: Mapping[str, Any]) -> str | None:
+    """Strictly decode the sole trusted CallToolRequest metadata location."""
+    meta = params.get("_meta")
+    if not isinstance(meta, Mapping):
+        return None
+    value = meta.get("threadId")
+    if not isinstance(value, str) or _HOST_THREAD_ID_RE.fullmatch(value) is None:
+        return None
+    return value
 
 # Raw host credentials must never cross the MCP/public response boundary.
 # Keep this projection at the last point before JSON-RPC serialization so an
 # individual lifecycle handler cannot re-introduce a bearer/proof through a
 # success, recovery, error, transcript, or briefing.
 _PUBLIC_SECRET_KEYS = frozenset({
+    "dispatch_ref",
     "assignment_ref",
     "coordinator_ref",
     "coordinator_capability",
     "coordinator_recovery_proof",
     "previous_coordinator_recovery_proof",
     "authorization_update",
+    "agent_id",
+    "session_id",
+    "turn_id",
+    "host_agent_id",
+    "coordinator_host_thread_id",
+    "worker_host_thread_id",
+    "worker_host_start_turn_id",
 })
 _ASSIGNMENT_REF_VALUE_RE = re.compile(r"assignment-v1-[0-9a-f]{64}")
 
@@ -60,9 +135,50 @@ def _scrub_public_response(
     value: object,
     *,
     allow_coordinator_ref: bool = False,
+    allow_worker_context_refs: bool = False,
     supplied_coordinator_refs: frozenset[str] = frozenset(),
 ) -> object:
-    """Remove authorization material except two exact top-level contracts."""
+    """Remove authority except canonical coordinator, dispatch, and refresh slots."""
+    protected_values: set[str] = set(supplied_coordinator_refs)
+    current_thread = current_host_thread_id()
+    if current_thread:
+        protected_values.add(current_thread)
+
+    # A native dispatch reference is model-visible authority required to run
+    # exactly the returned call and bootstrap its worker briefing. Preserve it
+    # only after the complete flat lifecycle response (including the native
+    # call-specific dispatch branch) has passed canonical validation. Merely
+    # placing a dispatch-shaped object elsewhere never creates an exception.
+    allowed_native_dispatch_paths: set[tuple[object, ...]] = set()
+    allowed_native_message_authorities: dict[tuple[object, ...], str] = {}
+    if (
+        isinstance(value, Mapping)
+        and value.get("action") in PUBLIC_NATIVE_DISPATCH_ACTION_SHAPES
+    ):
+        try:
+            validated = _validate_flat_public_response(dict(value))
+        except (ResponseValidationError, ValueError, TypeError, KeyError):
+            pass
+        else:
+            for index, item in enumerate(validated.get("dispatches") or []):
+                if isinstance(item, Mapping) and isinstance(item.get("dispatch_ref"), str):
+                    allowed_native_dispatch_paths.add(("dispatches", index, "dispatch_ref"))
+                    allowed_native_message_authorities[
+                        ("dispatches", index, "arguments", "message")
+                    ] = str(item["dispatch_ref"])
+
+    def collect(node: object) -> None:
+        if isinstance(node, Mapping):
+            for key, item in node.items():
+                if str(key) in _PUBLIC_SECRET_KEYS and isinstance(item, str) and item:
+                    protected_values.add(item)
+                collect(item)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                collect(item)
+
+    collect(value)
+
     def scrub(node: object, path: tuple[object, ...]) -> object:
         if isinstance(node, Mapping):
             result: dict[str, object] = {}
@@ -77,6 +193,19 @@ def _scrub_public_response(
                         result[normalized] = item
                     continue
                 if normalized in _PUBLIC_SECRET_KEYS:
+                    if (
+                        allow_worker_context_refs
+                        and path == ()
+                        and normalized == "dispatch_ref"
+                        and isinstance(item, str)
+                        and re.fullmatch(r"dispatch-[A-Za-z0-9._:-]{1,160}", item)
+                    ):
+                        result[normalized] = item
+                    elif (
+                        child_path in allowed_native_dispatch_paths
+                        and isinstance(item, str)
+                    ):
+                        result[normalized] = item
                     continue
                 result[normalized] = scrub(item, child_path)
             return result
@@ -86,8 +215,11 @@ def _scrub_public_response(
             return [scrub(item, (*path, index)) for index, item in enumerate(node)]
         if isinstance(node, str):
             scrubbed = _ASSIGNMENT_REF_VALUE_RE.sub("<redacted-assignment-ref>", node)
-            for coordinator_ref in supplied_coordinator_refs:
-                scrubbed = scrubbed.replace(coordinator_ref, "<redacted-coordinator-ref>")
+            allowed_message_authority = allowed_native_message_authorities.get(path)
+            for protected in protected_values:
+                if protected == allowed_message_authority:
+                    continue
+                scrubbed = scrubbed.replace(protected, "<redacted-private-host-value>")
             return scrubbed
         return node
 
@@ -95,21 +227,25 @@ def _scrub_public_response(
 
 
 def _canonical_jsonrpc_request_id(value: object) -> str:
-    """Encode a JSON-RPC id with its JSON type before lifecycle composition."""
-    if value is None:
-        return "null:null"
-    if isinstance(value, bool):
-        return "boolean:" + ("true" if value else "false")
-    if isinstance(value, int):
-        return f"number:integer:{value}"
-    if isinstance(value, float):
-        return "number:float:" + json.dumps(value, allow_nan=False, separators=(",", ":"))
+    """Encode one already-validated JSON-RPC id for lifecycle composition."""
     if isinstance(value, str):
         return "string:" + json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    # JSON-RPC ids should be string or number, but preserve a typed, stable
-    # encoding for malformed/forward-compatible JSON values rather than
-    # allowing their string representations to collide.
-    return "json:" + json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"integer:{value}"
+    raise TypeError("JSON-RPC request id must be a string or signed i64 integer")
+
+
+_JSONRPC_I64_MIN = -(2**63)
+_JSONRPC_I64_MAX = 2**63 - 1
+_LEGACY_METHODS = frozenset({
+    "initialize",
+    "notifications/initialized",
+    "tools/list",
+    "resources/list",
+    "resources/templates/list",
+    "tools/call",
+    "ping",
+})
 
 
 # These operations are implementation ports used by the orchestration engine,
@@ -120,8 +256,7 @@ def _canonical_jsonrpc_request_id(value: object) -> str:
 # are deliberately not operation contracts and must never be projected to a
 # model-facing MCP channel.
 SERVER_ONLY_TOOL_NAMES = frozenset({
-    "init_task", "get_task_status", "record_delegation", "prepare_delegation",
-    "prepare_delegations", "finalize_attempt",
+    "init_task", "get_task_status", "finalize_attempt",
     "record_evidence", "execute_verification_command", "cortex.question",
     "publish_worker_question", "list_worker_questions", "answer_worker_question",
     "get_worker_question_updates", "commit_gate", "update_pipeline",
@@ -431,6 +566,33 @@ def _completed_handoff(source: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _profile_resolution_projection(source: Mapping[str, Any]) -> dict[str, str]:
+    """Expose a capability normalization without changing native arguments."""
+    requested = str(source.get("requested_profile") or "").strip()
+    resolved = str(source.get("resolved_profile") or "").strip()
+    reason = str(source.get("resolution_reason") or "").strip()
+    if not requested or not resolved or requested == resolved or not reason:
+        return {}
+    return {
+        "requested_profile": requested,
+        "resolved_profile": resolved,
+        "resolution_reason": reason,
+    }
+
+
+def _compiled_plan_projection(source: Mapping[str, Any]) -> str | None:
+    """Return the bounded authoritative compiled plan as one flat text value."""
+    pipeline = source.get("pipeline")
+    if not isinstance(pipeline, Mapping):
+        return None
+    rendered = json.dumps(
+        pipeline, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    if not rendered or len(rendered) > 65_536:
+        raise ValueError("compiled plan projection exceeds the public lifecycle bound")
+    return rendered
+
+
 def private_lifecycle_response(
     old: dict[str, Any],
     task_ref: str,
@@ -448,6 +610,11 @@ def private_lifecycle_response(
         "schema": "cortex/lifecycle-response/v11",
         "task_ref": str(task_ref or ""),
     }
+    rework_receipt = source.get("rework_receipt")
+    if isinstance(rework_receipt, str) and rework_receipt:
+        base["rework_receipt"] = rework_receipt
+    if isinstance(source.get("idempotent"), bool):
+        base["idempotent"] = bool(source["idempotent"])
     if start_replayed is True:
         response = {
             "schema": "cortex/lifecycle-response/v11",
@@ -471,7 +638,7 @@ def private_lifecycle_response(
         )
         recovery_kind = str(failure_card["recovery"]["kind"])
         response = {
-            "schema": "cortex/lifecycle-response/v11",
+            **base,
             "ok": False,
             "outcome": "needs_input" if recovery_kind == "same_operation" else "failed",
             "action": {"kind": (
@@ -484,15 +651,27 @@ def private_lifecycle_response(
         return validate_private_response("private.coordinator.lifecycle", response)
 
     requests = source.get("spawn_requests") if isinstance(source.get("spawn_requests"), list) else []
-    dispatches = [
-        {
-            "call": "spawn_agent",
-            "dispatch_ref": str(request.get("dispatch_ref") or ""),
-            "arguments": native_arguments(request),
-        }
-        for request in requests
-        if isinstance(request, dict)
-    ]
+    dispatches: list[dict[str, Any]] = []
+    for request in requests:
+        if not isinstance(request, dict):
+            continue
+        if str(request.get("native_call") or "") == "followup_task":
+            target = str(request.get("followup_target") or "")
+            message = str(request.get("message") or "")
+            dispatches.append({
+                "call": "followup_task",
+                "dispatch_ref": str(request.get("dispatch_ref") or ""),
+                "host_task_name": target,
+                "arguments": {"target": target, "message": message},
+                **_profile_resolution_projection(request),
+            })
+        else:
+            dispatches.append({
+                "call": "spawn_agent",
+                "dispatch_ref": str(request.get("dispatch_ref") or ""),
+                "arguments": native_arguments(request),
+                **_profile_resolution_projection(request),
+            })
     step = _lifecycle_step(source)
     if dispatches:
         response = {
@@ -503,10 +682,58 @@ def private_lifecycle_response(
             "step": step,
             "dispatches": dispatches,
         }
+        compiled_plan = _compiled_plan_projection(source)
+        if compiled_plan is not None:
+            response["compiled_plan"] = compiled_plan
         return validate_private_response("private.coordinator.lifecycle", response)
 
     state = str(source.get("state") or "").strip()
-    if state in {"waiting_workers", "waiting", "completion_pending"}:
+    if state == "completion_pending":
+        response = {
+            **base,
+            "ok": True,
+            "outcome": "completion_pending",
+            "action": {"kind": "read_worker_wave"},
+            "step": step,
+        }
+        return validate_private_response("private.coordinator.lifecycle", response)
+
+    if state == "host_epoch_resume_required":
+        response = {
+            **base,
+            "ok": True,
+            "outcome": "resume_required",
+            "action": {"kind": "resume_orchestration"},
+            "content": str(source.get("content") or ""),
+        }
+        return validate_private_response("private.coordinator.lifecycle", response)
+
+    if state == "context_inspection_required":
+        response = {
+            **base,
+            "ok": True,
+            "outcome": "context_inspection_required",
+            "action": {"kind": "inspect_orchestration"},
+            "content": str(source.get("content") or ""),
+        }
+        return validate_private_response("private.coordinator.lifecycle", response)
+
+    if state == "rework_preflight_required":
+        result = source.get("result") if isinstance(source.get("result"), Mapping) else {}
+        receipt = result.get("product_rework") if isinstance(result.get("product_rework"), Mapping) else {}
+        source_result_ref = str(receipt.get("source_result_ref") or "").strip()
+        if not source_result_ref:
+            raise ValueError("product rework lifecycle is missing its canonical source result")
+        response = {
+            **base,
+            "ok": True,
+            "outcome": "rework_required",
+            "action": {"kind": "append_rework_wave"},
+            "source_result_ref": source_result_ref,
+        }
+        return validate_private_response("private.coordinator.lifecycle", response)
+
+    if state in {"waiting_workers", "waiting"}:
         response = {
             **base,
             "ok": True,
@@ -605,8 +832,10 @@ _PUBLIC_RESPONSE_FAMILIES = {
     "manage_orchestration": "public.flat",
     "manage_governance": "public.flat",
     "read_worker_result": "public.flat",
+    "refresh_worker_context": "public.flat",
     "read_dispatch_briefing": "public.flat",
     "record_attempt_event": "public.flat",
+    "record_worker_finding": "public.flat",
     "worker_question": "public.flat",
     "complete_attempt": "public.flat",
 }
@@ -648,6 +877,36 @@ def _public_argument_shape_failure(tool: str) -> dict[str, Any]:
             "op": "replace",
             "expected": "a closed JSON object",
         }],
+    })
+
+
+def _public_host_identity_failure() -> dict[str, Any]:
+    """Return a closed receipt when trusted host call identity is unavailable."""
+    return _validate_flat_public_response({
+        "ok": False,
+        "action": "none",
+        "retryable": False,
+        "state_mutated": False,
+        "error_code": "host_thread_identity_required",
+        "error": "This lifecycle call requires valid host thread metadata.",
+    })
+
+
+def _public_transient_retry_failure(
+    *,
+    error_code: str,
+    error: str,
+    retry_after_ms: int,
+) -> dict[str, Any]:
+    """Return an unchanged, bounded retry without inventing field repairs."""
+    bounded_delay = max(1, min(int(retry_after_ms), 60_000))
+    return _validate_flat_public_response({
+        "ok": False,
+        "action": "retry_same_operation",
+        "retryable": True,
+        "state_mutated": False,
+        "error_code": str(error_code)[:160],
+        "error": f"{str(error)[:1_900]} Retry the identical call after at least {bounded_delay} ms.",
     })
 
 
@@ -752,17 +1011,35 @@ def _public_schema_failure(
     })
 
 
+def _public_internal_question_failure() -> dict[str, Any]:
+    """Reject known technical categories before generic enum repair can misroute them."""
+    return _validate_flat_public_response({
+        "ok": False,
+        "action": "server_recovery",
+        "retryable": False,
+        "state_mutated": False,
+        "error_code": "internal_worker_question_forbidden",
+        "error": (
+            "Internal technical conditions cannot be recorded as user questions. End this native turn "
+            "without a question; use the server-owned compiler/reconciler recovery path."
+        ),
+    })
+
+
 _FLAT_PUBLIC_COMMON_FIELDS = {
     "ok", "action", "retryable", "state_mutated",
 }
 _FLAT_PUBLIC_SUCCESS_FIELDS = {
-    "task_ref", "coordinator_ref", "step", "dispatches", "content", "report",
-    "next_cursor", "question_ref", "request_id", "choices",
-    "result_refs", "receipt_ref", "digest", "terminal",
+    "task_ref", "coordinator_ref", "step", "dispatches", "content", "report", "outcome",
+    "next_cursor", "complete", "question_ref", "request_id", "choices",
+    "source_result_ref", "result_refs", "receipt_ref", "digest", "compiled_plan", "terminal",
+    "next_native_action", "read_worker_wave_allowed", "wait_policy",
+    "dispatch_ref", "frontier_ref", "catalog_ref", "question_status",
 }
 _FLAT_PUBLIC_FAILURE_FIELDS = {
     "error_code", "error", "allowed_changes", "repair_capsule",
     "base_payload_digest", "repair_changes",
+    "next_native_action", "read_worker_wave_allowed", "wait_policy",
 }
 
 
@@ -773,6 +1050,19 @@ def _flat_response_base(action: str, *, state_mutated: bool = False) -> dict[str
         "retryable": False,
         "state_mutated": bool(state_mutated),
     }
+
+
+def _attach_native_transition(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Attach the one canonical post-dispatch/wait transition contract."""
+    response = dict(value)
+    transition = expected_native_transition(response)
+    if transition is not None:
+        response["next_native_action"], response["read_worker_wave_allowed"] = transition
+        if transition == ("wait_agent", False):
+            response["wait_policy"] = WAIT_POLICY_REPEAT_UNTIL_TERMINAL
+            if response.get("action") == "wait_for_bound_workers":
+                response["outcome"] = "waiting_workers"
+    return response
 
 
 def _flat_change(raw: object, *, repair: bool = False) -> dict[str, Any] | None:
@@ -846,6 +1136,25 @@ def _flat_failure(tool: str, source: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "ok": False,
         "action": (
+            "server_recovery"
+            if code in {
+                "internal_worker_question_forbidden",
+                "native_completion_observation_unavailable",
+                "worker_attestation_server_state_unavailable",
+            } else
+            "read_required_context_then_retry"
+            if code == "attempt_read_receipts_incomplete" else
+            # A native model mismatch cannot be repaired in the same child:
+            # followup_task starts another turn in that already-created child
+            # and therefore preserves the wrong native model.  This response
+            # contains no server-issued replacement dispatch, so fail closed.
+            "none"
+            if code.startswith("native_subagent_model_") else
+            "wait_for_bound_workers"
+            if code == "native_completion_observation_required" else
+            "retry_same_operation"
+            if code in PUBLIC_UNCHANGED_RETRY_ERROR_CODES
+            and retryable and not state_mutated else
             "retry_same_operation" if retryable and not state_mutated and changes else
             "inspect_or_retry" if retryable and not state_mutated else "none"
         ),
@@ -857,21 +1166,83 @@ def _flat_failure(tool: str, source: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _flat_dispatches(value: object) -> list[dict[str, Any]]:
+def _native_dispatches(value: object) -> list[dict[str, Any]]:
+    """Project exact native calls instead of an ambiguous flat field bag.
+
+    Spawn and same-child follow-up are distinct closed call shapes.  A
+    follow-up target is accepted only when it equals the server-issued native
+    task name stored beside the private host binding; a raw host thread/session
+    identifier can therefore never become model-visible dispatch authority.
+    """
     rows: list[dict[str, Any]] = []
+    seen_dispatch_refs: set[str] = set()
     for raw in value if isinstance(value, list) else []:
         if not isinstance(raw, Mapping):
-            continue
-        arguments = raw.get("arguments") if isinstance(raw.get("arguments"), Mapping) else raw
+            raise ResponseValidationError([{
+                "code": "native_dispatch_invalid", "message": "native dispatch must be an object",
+            }])
+        call = str(raw.get("call") or "")
+        arguments = raw.get("arguments")
+        if call not in {"spawn_agent", "followup_task"} or not isinstance(arguments, Mapping):
+            raise ResponseValidationError([{
+                "code": "native_dispatch_invalid", "message": "native dispatch call or arguments are invalid",
+            }])
+        if call == "spawn_agent":
+            if set(arguments) - {"task_name", "message", "fork_turns", "reasoning_effort", "model"}:
+                raise ResponseValidationError([{
+                    "code": "native_dispatch_invalid", "message": "spawn_agent contains unsupported arguments",
+                }])
+            native_arguments = {
+                "task_name": str(arguments.get("task_name") or ""),
+                "message": str(arguments.get("message") or ""),
+                "fork_turns": str(arguments.get("fork_turns") or ""),
+                "reasoning_effort": str(arguments.get("reasoning_effort") or ""),
+            }
+            if not all(native_arguments.values()) or native_arguments["fork_turns"] != "none":
+                raise ResponseValidationError([{
+                    "code": "native_dispatch_invalid", "message": "spawn_agent arguments are incomplete",
+                }])
+            if arguments.get("model") not in {None, ""}:
+                native_arguments["model"] = str(arguments["model"])
+        else:
+            if set(arguments) != {"target", "message"}:
+                raise ResponseValidationError([{
+                    "code": "native_dispatch_invalid", "message": "followup_task requires only target and message",
+                }])
+            target = str(arguments.get("target") or "")
+            task_name = str(raw.get("host_task_name") or "")
+            message = str(arguments.get("message") or "")
+            if not task_name or target != task_name or not message:
+                raise ResponseValidationError([{
+                    "code": "native_dispatch_invalid",
+                    "message": "followup_task target must equal the server-issued native task name",
+                }])
+            native_arguments = {"target": task_name, "message": message}
+        dispatch_ref = str(raw.get("dispatch_ref") or "")
+        if not dispatch_ref:
+            raise ResponseValidationError([{
+                "code": "native_dispatch_invalid", "message": "native dispatch_ref is required",
+            }])
+        if dispatch_ref in seen_dispatch_refs:
+            raise ResponseValidationError([{
+                "code": "native_dispatch_invalid",
+                "message": "native dispatch_ref must be unique within one dispatch response",
+            }])
+        seen_dispatch_refs.add(dispatch_ref)
+        try:
+            native_arguments["message"] = native_dispatch_authority_message(
+                dispatch_ref, str(native_arguments.get("message") or ""),
+            )
+        except ValueError as exc:
+            raise ResponseValidationError([{
+                "code": "native_dispatch_invalid", "message": str(exc),
+            }]) from exc
         row = {
-            "dispatch_ref": str(raw.get("dispatch_ref") or ""),
-            "task_name": str(arguments.get("task_name") or ""),
-            "message": str(arguments.get("message") or ""),
-            "fork_turns": str(arguments.get("fork_turns") or "none"),
+            "dispatch_ref": dispatch_ref,
+            "call": call,
+            "arguments": native_arguments,
+            **_profile_resolution_projection(raw),
         }
-        for source, target in (("model", "model"), ("reasoning_effort", "reasoning_effort")):
-            if arguments.get(source) not in {None, ""}:
-                row[target] = str(arguments[source])
         rows.append(row)
     if len(rows) > 8:
         raise ResponseValidationError([{
@@ -980,7 +1351,25 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
     task_ref = _public_task_ref(source, arguments)
     requested_action = str(arguments.get("action") or "")
     if tool in {"start_orchestration", "continue_orchestration", "manage_orchestration"}:
-        dispatches = _flat_dispatches(source.get("dispatches"))
+        raw_dispatches = source.get("dispatches")
+        if requested_action == "question_answer" and isinstance(source.get("resume"), Mapping):
+            if raw_dispatches not in (None, (), []):
+                raise ResponseValidationError([{
+                    "code": "native_dispatch_invalid",
+                    "message": "question resume cannot carry two dispatch sources",
+                }])
+            resume = source["resume"]
+            task_name = str(resume.get("task_name") or "")
+            raw_dispatches = [{
+                "dispatch_ref": str(resume.get("dispatch_ref") or ""),
+                "call": "followup_task",
+                "host_task_name": task_name,
+                "arguments": {
+                    "target": task_name,
+                    "message": str(resume.get("message") or ""),
+                },
+            }]
+        dispatches = _native_dispatches(raw_dispatches)
         nested_action = source.get("action") if isinstance(source.get("action"), Mapping) else {}
         kind = str(nested_action.get("kind") or source.get("action") or "")
         outcome = str(source.get("outcome") or source.get("state") or "")
@@ -988,10 +1377,22 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
             "inspect", "recover_inspect", "read_lifecycle_page", "question_show", "plan_prompt",
             "artifact_list", "artifact_metadata", "artifact_read", "lane_inspect", "lane_reconcile",
         }
-        if dispatches:
+        if requested_action == "question_answer" and outcome == "question_answered":
+            action = "resume_bound_worker" if dispatches else "none"
+        elif dispatches:
             action = "invoke_dispatches"
-        elif kind in {"wait_for_bound_workers", "wait"} or outcome in {"waiting", "waiting_workers"}:
+        elif kind == "read_worker_wave" or outcome == "completion_pending":
+            action = "read_worker_wave"
+        elif kind == "wait_for_bound_workers" or outcome == "waiting":
             action = "wait_for_bound_workers"
+        elif kind == "resume_orchestration" or outcome == "resume_required":
+            action = "resume_orchestration"
+        elif kind == "inspect_orchestration" or outcome == "context_inspection_required":
+            action = "inspect_orchestration"
+        elif kind == "inspect_orchestration_recovery":
+            action = "inspect_orchestration_recovery"
+        elif kind == "terminal_continue":
+            action = "terminal_continue"
         elif kind == "obtain_user_decision" or outcome == "awaiting_user":
             action = "obtain_user_decision"
         elif kind == "obtain_plan_approval" or outcome in {"plan_approval", "awaiting_plan_approval"}:
@@ -1004,15 +1405,38 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
         elif kind == "deliver_handoff":
             action = "deliver_handoff" if _durable_handoff_report(source, kind) is not None else "none"
         elif requested_action in {"inspect", "recover_inspect", "read_lifecycle_page", "question_show", "plan_prompt", "artifact_list", "artifact_metadata", "artifact_read", "lane_inspect", "lane_reconcile"}:
-            action = "read_more" if source.get("next_cursor") else "none"
+            action = (
+                "read_more" if source.get("next_cursor") else
+                "continue" if kind == "continue" else
+                "resume_orchestration" if kind == "resume_orchestration" else
+                "inspect_orchestration" if kind == "inspect_orchestration" else
+                "none"
+            )
         elif requested_action == "question_answer":
-            action = "continue"
+            # Recording an answer does not complete the paused native worker.
+            # Expose the required host transition directly so the coordinator
+            # cannot mistake a durable answer receipt for wave completion.
+            action = (
+                "wait_for_bound_workers"
+                if outcome == "question_resume_pending"
+                else "none"
+            )
         else:
             action = "none"
+        default_state_mutated = (
+            outcome != "question_resume_pending"
+            and (
+                tool in {"start_orchestration", "continue_orchestration"}
+                or requested_action not in {"inspect", "recover_inspect", "question_show", "plan_prompt", "artifact_list", "artifact_metadata", "artifact_read", "lane_inspect", "lane_reconcile"}
+            )
+        )
         response = _flat_response_base(
             action,
-            state_mutated=tool in {"start_orchestration", "continue_orchestration"}
-            or requested_action not in {"inspect", "recover_inspect", "question_show", "plan_prompt", "artifact_list", "artifact_metadata", "artifact_read", "lane_inspect", "lane_reconcile"},
+            state_mutated=(
+                bool(source.get("state_mutated"))
+                if isinstance(source.get("state_mutated"), bool)
+                else default_state_mutated
+            ),
         )
         if task_ref:
             response["task_ref"] = task_ref
@@ -1024,6 +1448,8 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
             response["step"] = step
         if dispatches:
             response["dispatches"] = dispatches
+        if source.get("compiled_plan") not in {None, ""}:
+            response["compiled_plan"] = str(source["compiled_plan"])
         question = source.get("question")
         if isinstance(question, Mapping):
             if question.get("question_ref"):
@@ -1043,6 +1469,23 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
                     response[field] = _flat_report(source[field], _PUBLIC_INSPECTION_FIELDS)
                 else:
                     response[field] = str(source[field])
+        if isinstance(source.get("complete"), bool):
+            response["complete"] = source["complete"]
+        if requested_action == "question_answer" and action == "resume_bound_worker":
+            question_ref = str(source.get("question_ref") or "")
+            response["content"] = (
+                "Call the returned followup_task exactly once for the same server-bound native child for durable "
+                f"question {question_ref}. Then invoke wait_agent for that exact bound child and call "
+                "read_worker_wave only after wait_agent reports it terminal. Cortex retains authorization "
+                "server-side; do not call continue_orchestration first "
+                "and do not spawn a replacement."
+            )
+        elif requested_action == "question_answer" and action == "wait_for_bound_workers":
+            response["content"] = (
+                "The same-child durable-answer follow-up instruction was already issued. Invoke wait_agent for "
+                "that exact bound child; do not send another followup_task. Call read_worker_wave only after "
+                "wait_agent reports it terminal. Cortex retains authorization server-side."
+            )
         if requested_action == "artifact_list" and isinstance(source.get("artifacts"), list):
             response["report"] = _flat_report(source["artifacts"], _PUBLIC_INSPECTION_FIELDS)
         if requested_action == "artifact_read":
@@ -1075,13 +1518,45 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
             response["next_cursor"] = str(source["next_cursor"])
         return response
     if tool == "read_dispatch_briefing":
+        if not isinstance(source.get("complete"), bool):
+            raise ValueError("dispatch briefing reads require an explicit boolean complete marker")
         response = _flat_response_base("read_more" if source.get("next_cursor") else "none")
         response["content"] = str(source.get("content") or "")
+        response["complete"] = source["complete"]
         if source.get("next_cursor"):
             response["next_cursor"] = str(source["next_cursor"])
         return response
-    if tool == "record_attempt_event":
-        return _flat_response_base("none", state_mutated=True)
+    if tool == "refresh_worker_context":
+        if not isinstance(source.get("complete"), bool):
+            raise ValueError("worker context reads require an explicit boolean complete marker")
+        response = _flat_response_base(str(source.get("action") or (
+            "read_more" if source.get("next_cursor") else "use_result_as_context"
+        )))
+        for field in ("dispatch_ref", "frontier_ref", "catalog_ref"):
+            value = source.get(field)
+            if isinstance(value, str) and value:
+                response[field] = value
+        context = source.get("content") if source.get("content") is not None else source.get("report")
+        if context not in (None, "", {}, []):
+            response["content"] = _flat_report(context, _PUBLIC_RESULT_FIELDS)
+        response["complete"] = source["complete"]
+        if source.get("question_ref"):
+            response["question_ref"] = str(source["question_ref"])
+        if source.get("question_status") in {"open", "answered"}:
+            response["question_status"] = str(source["question_status"])
+        if source.get("next_cursor"):
+            response["next_cursor"] = str(source["next_cursor"])
+        return response
+    if tool in {"record_attempt_event", "record_worker_finding"}:
+        response = _flat_response_base(
+            "none",
+            state_mutated=not bool(source.get("idempotent")),
+        )
+        if source.get("receipt_ref") not in {None, ""}:
+            response["receipt_ref"] = str(source["receipt_ref"])
+        if source.get("digest") not in {None, ""}:
+            response["digest"] = str(source["digest"])
+        return response
     if tool == "complete_attempt":
         return {**_flat_response_base("none", state_mutated=True), "terminal": True}
     if tool == "worker_question":
@@ -1108,14 +1583,39 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
     source_action = str(source.get("action") or "")
     response = _flat_response_base(
         source_action if source_action in {
-            "read_more", "continue", "terminal_continue", "use_result_as_context",
-        } else ("read_more" if source.get("next_cursor") else "none")
+            "read_more", "continue", "resume_orchestration", "inspect_orchestration", "terminal_continue", "revise_or_continue", "append_rework_wave",
+            "use_result_as_context",
+            "resume_bound_worker", "obtain_user_decision", "invoke_dispatches", "wait_for_bound_workers",
+        } else ("read_more" if source.get("next_cursor") else "none"),
+        state_mutated=bool(source.get("state_mutated")),
     )
     if task_ref:
         response["task_ref"] = task_ref
+    dispatches = _native_dispatches(source.get("dispatches"))
+    if dispatches:
+        response["dispatches"] = dispatches
+    if source_action in {
+        "resume_bound_worker", "obtain_user_decision", "invoke_dispatches", "revise_or_continue",
+        "append_rework_wave", "continue", "resume_orchestration",
+        "wait_for_bound_workers",
+    }:
+        content = source.get("content")
+        if content not in {None, ""}:
+            response["content"] = str(content)
+        if source.get("question_ref") not in {None, ""}:
+            response["question_ref"] = str(source["question_ref"])
+    requested_action = str(arguments.get("action") or "")
+    if requested_action in {"list_reports", "read_predecessor"}:
+        if not isinstance(source.get("complete"), bool):
+            raise ValueError("worker report reads require an explicit boolean complete marker")
+        response["content"] = str(source.get("content") or "")
+        response["complete"] = source["complete"]
+        if source.get("next_cursor"):
+            response["next_cursor"] = str(source["next_cursor"])
+        return response
     report = source.get("report")
     if report is None:
-        report = source.get("content")
+        report = None if "content" in response else source.get("content")
     if report is None:
         report = source.get("result_view")
     if report is None and isinstance(source.get("results"), list):
@@ -1126,9 +1626,14 @@ def _flat_success(tool: str, source: Mapping[str, Any], arguments: Mapping[str, 
         response["report"] = _flat_report(report, _PUBLIC_RESULT_FIELDS)
     if source.get("next_cursor"):
         response["next_cursor"] = str(source["next_cursor"])
+    if isinstance(source.get("complete"), bool):
+        response["complete"] = source["complete"]
     result_refs = source.get("result_refs")
     if isinstance(result_refs, list):
         response["result_refs"] = [str(item) for item in result_refs]
+    source_result_ref = source.get("source_result_ref")
+    if source_result_ref not in {None, ""}:
+        response["source_result_ref"] = str(source_result_ref)
     step = source.get("step")
     if isinstance(step, int) and not isinstance(step, bool) and step >= 1:
         response["step"] = step
@@ -1144,6 +1649,8 @@ def _validate_flat_public_response(value: Mapping[str, Any]) -> dict[str, Any]:
     for field, expected in (("ok", bool), ("action", str), ("retryable", bool), ("state_mutated", bool)):
         if not isinstance(value.get(field), expected):
             diagnostics.append({"code": "response_schema_invalid", "message": f"{field} has an invalid type"})
+    if "complete" in value and not isinstance(value.get("complete"), bool):
+        diagnostics.append({"code": "response_schema_invalid", "message": "complete has an invalid type"})
     if isinstance(value.get("action"), str) and value["action"] not in PUBLIC_ACTIONS:
         diagnostics.append({"code": "response_schema_invalid", "message": "action is outside the canonical public action enum"})
     if value.get("ok") is False:
@@ -1175,12 +1682,15 @@ def project_public_response(
             "code": "response_schema_invalid",
             "message": "public handler returned an unsupported response",
         }])
-    if _FLAT_PUBLIC_COMMON_FIELDS.issubset(value):
-        return _validate_flat_public_response(value)
+    allowed_flat_fields = (
+        _FLAT_PUBLIC_COMMON_FIELDS | _FLAT_PUBLIC_SUCCESS_FIELDS | _FLAT_PUBLIC_FAILURE_FIELDS
+    )
+    if _FLAT_PUBLIC_COMMON_FIELDS.issubset(value) and set(value).issubset(allowed_flat_fields):
+        return _validate_flat_public_response(_attach_native_transition(value))
     source = dict(value)
     if not source.get("ok"):
-        return _validate_flat_public_response(_flat_failure(tool, source))
-    return _validate_flat_public_response(_flat_success(tool, source, arguments))
+        return _validate_flat_public_response(_attach_native_transition(_flat_failure(tool, source)))
+    return _validate_flat_public_response(_attach_native_transition(_flat_success(tool, source, arguments)))
 
 
 def _safe_public_response(
@@ -1198,6 +1708,7 @@ def _safe_public_response(
     scrubbed = _scrub_public_response(
         projected,
         allow_coordinator_ref=tool == "start_orchestration",
+        allow_worker_context_refs=tool == "refresh_worker_context",
         supplied_coordinator_refs=supplied_coordinator_refs,
     )
     try:
@@ -1207,6 +1718,7 @@ def _safe_public_response(
         scrubbed_fallback = _scrub_public_response(
             fallback,
             allow_coordinator_ref=False,
+            allow_worker_context_refs=False,
             supplied_coordinator_refs=supplied_coordinator_refs,
         )
         return _validate_flat_public_response(
@@ -1216,16 +1728,8 @@ def _safe_public_response(
 
 def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[str, Any]]]) -> set[str]:
     """Apply authorization requirements to internal handlers before projection."""
-    tools["record_delegation"][1]["properties"]["dispatch_mode"].update({
-        "enum": ["hidden_subagent"],
-        "description": "Native hidden spawn_agent dispatch; no alternate worker transport is supported.",
-    })
-    tools["record_delegation"][1]["properties"]["luna_fallback"]["description"] = (
-        "An unavailable hidden Luna dispatch falls back to an explicit hidden Terra spawn_agent request."
-    )
-    tools["record_delegation"][1]["properties"]["luna_fallback"]["default"] = "terra"
     authorized = {
-        "init_task", "get_task_status", "record_delegation", "prepare_delegation", "prepare_delegations", "finalize_attempt", "record_evidence", "execute_verification_command",
+        "init_task", "get_task_status", "finalize_attempt", "record_evidence", "execute_verification_command",
         "cortex.question", "publish_worker_question", "list_worker_questions", "answer_worker_question", "get_worker_question_updates",
         "commit_gate", "update_pipeline", "reassess_pipeline", "acquire_lock", "release_lock",
         "create_handoff", "claim_resource", "release_resource",
@@ -1237,23 +1741,9 @@ def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[s
         schema.setdefault("properties", {}).setdefault("principal", {"type": "string", "minLength": 1})
         if "principal" not in schema.setdefault("required", []):
             schema["required"].append("principal")
-    # These task-scoped coordinator/worker forms are server-bound by opaque
-    # task/dispatch identity.  Do not inject the historical project_root
-    # convenience field while decorating internal schemas: the public and
-    # internal registries intentionally share schema objects.
-    server_bound_without_root = {
-        "continue_orchestration", "manage_orchestration", "read_worker_result",
-    }
-    for name, (_, schema) in tools.items():
-        if name in server_bound_without_root:
-            continue
-        schema.setdefault("properties", {}).setdefault("project_root", {
-            "type": "string",
-            "minLength": 1,
-            "description": "Absolute project workspace path. Cortex derives an opaque host-private control ledger from this path; callers cannot choose its storage location.",
-        })
-    if "project_root" not in tools["activate_orchestration"][1].setdefault("required", []):
-        tools["activate_orchestration"][1]["required"].append("project_root")
+    # Workspace selection is host-owned: MCP tools resolve the current
+    # thread through the validated SessionStart binding. Never add the
+    # historical project_root field to model-facing or internal schemas.
     for name, fields in {
         "claim_resource": ["expires_at"], "claim_lane": ["expires_at"], "claim_lane_resource": ["expires_at"],
         "create_handoff": ["completed", "next_action"], "retire_lane": ["confirm"],
@@ -1262,12 +1752,6 @@ def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[s
             if field not in tools[name][1]["required"]:
                 tools[name][1]["required"].append(field)
     tools["retire_lane"][1]["properties"]["confirm"] = {"type": "boolean"}
-    tools["record_delegation"][1]["required"] = [
-        field for field in tools["record_delegation"][1]["required"]
-        if field not in {"expected_revision", "status_receipt", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"}
-    ]
-    for field in ("allowed_paths", "acceptance_criteria", "verification"):
-        tools["record_delegation"][1]["properties"][field].pop("minItems", None)
     return authorized
 
 
@@ -1277,10 +1761,12 @@ def public_tools(
     contracts: Mapping[str, Mapping[str, Any]],
     worker_question: Callable[..., Any],
     record_attempt_event: Callable[..., Any],
+    record_worker_finding: Callable[..., Any],
     complete_attempt: Callable[..., Any],
     read_dispatch_briefing: Callable[..., Any],
     read_worker_result: Callable[..., Any],
     manage_governance: Callable[..., Any],
+    read_worker_context: Callable[..., Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Bind each canonical model contract to its private backend operation."""
     operations: dict[str, Callable[..., Any]] = {
@@ -1290,9 +1776,11 @@ def public_tools(
         "manage_governance": manage_governance,
         "worker_question": worker_question,
         "record_attempt_event": record_attempt_event,
+        "record_worker_finding": record_worker_finding,
         "complete_attempt": complete_attempt,
         "read_dispatch_briefing": read_dispatch_briefing,
         "read_worker_result": read_worker_result,
+        "read_worker_context": read_worker_context,
     }
     bound: dict[str, dict[str, Any]] = {}
     for name, contract in contracts.items():
@@ -1336,6 +1824,7 @@ def serve_stdio(
     server_version: str,
     instructions: str,
     log_tool_error: Callable[[object, object, str, Exception], None],
+    transport_metadata_audit: Callable[[str, Mapping[str, Any], str | None, bool], None] | None = None,
     audience: str = DEFAULT_MCP_AUDIENCE,
 ) -> None:
     """Run the narrow JSON-RPC transport without importing orchestration internals.
@@ -1362,34 +1851,169 @@ def serve_stdio(
         """Build one MCP result from the already-validated flat contract."""
         del name
         failed = value.get("ok") is False
-        text_value = json.dumps(value, ensure_ascii=False, indent=2)
+        text_value = public_response_text(value)
         return {
             "content": [{"type": "text", "text": text_value}],
             "structuredContent": dict(value),
             "isError": failed,
         }
 
+    def write_message(value: Mapping[str, Any]) -> None:
+        sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+    def write_error(request_id: object, code: int, message: str) -> None:
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": message},
+        })
+
+    def request_params(request: Mapping[str, Any], *, required: bool = False) -> dict[str, Any]:
+        if "params" not in request:
+            if required:
+                raise _JsonRpcInvalidParams
+            return {}
+        params = request["params"]
+        if not isinstance(params, dict):
+            raise _JsonRpcInvalidParams
+        return params
+
+    def complete_tools_page_params(request: Mapping[str, Any]) -> None:
+        params = request_params(request)
+        if set(params) - {"cursor", "_meta"}:
+            raise _JsonRpcInvalidParams
+        if "_meta" in params and not isinstance(params["_meta"], Mapping):
+            raise _JsonRpcInvalidParams
+        cursor = params.get("cursor")
+        if cursor is not None and cursor != "":
+            raise _JsonRpcInvalidParams
+
+    connection_state = _LEGACY_CONNECTION_NEW
+    rate_tokens = _TOOLS_CALL_RATE_CAPACITY
+    rate_updated_at = time.monotonic()
+
+    def consume_tools_call() -> int | None:
+        """Consume one private connection token or return a bounded delay."""
+        nonlocal rate_tokens, rate_updated_at
+        now = time.monotonic()
+        elapsed = max(0.0, now - rate_updated_at)
+        rate_tokens = min(
+            _TOOLS_CALL_RATE_CAPACITY,
+            rate_tokens + elapsed * _TOOLS_CALL_RATE_REFILL_PER_SECOND,
+        )
+        rate_updated_at = now
+        if rate_tokens >= 1.0:
+            rate_tokens -= 1.0
+            return None
+        missing = 1.0 - rate_tokens
+        return max(1, min(math.ceil(1_000 * missing / _TOOLS_CALL_RATE_REFILL_PER_SECOND), 60_000))
+
     while True:
         line = sys.stdin.readline()
         if not line:
             return
-        request_id: object = None
         request: object = None
+        request_id: object = None
+        has_request_id = False
+        request_id_established = False
         try:
-            request = json.loads(line)
+            try:
+                request = json.loads(
+                    line,
+                    parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("invalid JSON number")),
+                )
+            except (json.JSONDecodeError, ValueError):
+                write_error(None, -32700, "Parse error")
+                continue
+
             if not isinstance(request, dict):
-                raise ValueError("JSON-RPC request must be an object")
-            method, request_id = request.get("method"), request.get("id")
+                raise _JsonRpcInvalidRequest
+            has_request_id = "id" in request
+            request_id = request.get("id")
+            if has_request_id:
+                if not (
+                    isinstance(request_id, str)
+                    or (
+                        isinstance(request_id, int)
+                        and not isinstance(request_id, bool)
+                        and _JSONRPC_I64_MIN <= request_id <= _JSONRPC_I64_MAX
+                    )
+                ):
+                    raise _JsonRpcInvalidRequest
+                request_id_established = True
+            if request.get("jsonrpc") != "2.0":
+                raise _JsonRpcInvalidRequest
+            method = request.get("method")
+            if not isinstance(method, str) or not method:
+                raise _JsonRpcInvalidRequest
+
+            # Resolve method support before applying the connection state
+            # machine.  An unknown method is always -32601; lifecycle-order
+            # errors apply only to methods this transport actually knows.
+            if method not in _LEGACY_METHODS:
+                raise _JsonRpcMethodNotFound
+
+            # MCP 2025-06-18 is connection-oriented. Ping is the sole method
+            # allowed without advancing this initialization state machine.
+            if method != "ping":
+                if connection_state == _LEGACY_CONNECTION_NEW and method != "initialize":
+                    if not has_request_id:
+                        continue
+                    raise _JsonRpcInvalidRequest
+                if (
+                    connection_state == _LEGACY_CONNECTION_INITIALIZE_RESPONSE_SENT
+                    and method != "notifications/initialized"
+                ):
+                    if not has_request_id:
+                        continue
+                    raise _JsonRpcInvalidRequest
+                if (
+                    connection_state == _LEGACY_CONNECTION_READY
+                    and method in {"initialize", "notifications/initialized"}
+                ):
+                    if not has_request_id:
+                        continue
+                    raise _JsonRpcInvalidRequest
+
             if method == "initialize":
+                if not has_request_id:
+                    continue
+                params = request_params(request, required=True)
+                requested_version = params.get("protocolVersion")
+                if not isinstance(requested_version, str) or not requested_version.strip():
+                    raise _JsonRpcInvalidParams
+                capabilities = params.get("capabilities")
+                client_info = params.get("clientInfo")
+                if not isinstance(capabilities, dict) or not isinstance(client_info, dict):
+                    raise _JsonRpcInvalidParams
+                for key in ("name", "version"):
+                    value = client_info.get(key)
+                    if not isinstance(value, str) or not value.strip():
+                        raise _JsonRpcInvalidParams
+                if "title" in client_info and not isinstance(client_info["title"], str):
+                    raise _JsonRpcInvalidParams
+                if requested_version not in SUPPORTED_LEGACY_PROTOCOL_VERSIONS:
+                    raise _JsonRpcInvalidParams
+                selected_version = DEFAULT_LEGACY_PROTOCOL_VERSION
                 result: dict[str, Any] = {
-                    "protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"),
+                    "protocolVersion": selected_version,
                     "capabilities": {"tools": {}, "resources": {"subscribe": False, "listChanged": False}},
                     "serverInfo": {"name": "cortex", "version": server_version},
                     "instructions": instructions,
                 }
             elif method == "notifications/initialized":
+                if has_request_id:
+                    raise _JsonRpcMethodNotFound
+                request_params(request)
+                connection_state = _LEGACY_CONNECTION_READY
                 continue
             elif method == "tools/list":
+                if not has_request_id:
+                    continue
+                complete_tools_page_params(request)
+                if len(public_tools) > _MAX_COMPLETE_TOOLS_PAGE:
+                    raise RuntimeError("public tool catalog exceeds its bounded complete page")
                 result = {"tools": [
                     {
                         "name": name,
@@ -1399,25 +2023,29 @@ def serve_stdio(
                     for name, contract in public_tools.items()
                 ]}
             elif method == "resources/list":
+                if not has_request_id:
+                    continue
+                request_params(request)
                 result = {"resources": []}
             elif method == "resources/templates/list":
+                if not has_request_id:
+                    continue
+                request_params(request)
                 result = {"resourceTemplates": []}
             elif method == "tools/call":
-                params = request.get("params", {})
-                if not isinstance(params, dict):
-                    # MCP CallToolRequest.params is an object.  Without that
-                    # envelope the server cannot safely select a known tool or
-                    # its public response family, so this remains a protocol
-                    # invalid-params error rather than a tool execution error.
-                    raise ValueError("tools/call params must be an object")
+                if not has_request_id:
+                    continue
+                params = request_params(request, required=True)
                 name = params.get("name")
+                if not isinstance(name, str) or not name:
+                    raise _JsonRpcInvalidParams
                 coordinator_refs = _supplied_coordinator_refs(request)
                 arguments = params.get("arguments", {})
                 if name not in public_tools:
                     if name in all_public_names:
                         value = _scrub_public_response(
                             _public_internal_failure(
-                                str(name), arguments if isinstance(arguments, dict) else {},
+                                name, arguments if isinstance(arguments, dict) else {},
                             ),
                             supplied_coordinator_refs=coordinator_refs,
                         )
@@ -1426,83 +2054,138 @@ def serve_stdio(
                         # unhandled tool exception.  Do not log the request:
                         # the receipt contains all actionable advice and the
                         # transport must not retain caller payloads here.
-                        if request_id is not None:
-                            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
-                            sys.stdout.flush()
+                        write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
                         continue
                     if name in internal_handlers:
-                        raise ValueError("tool_is_internal_and_not_model_callable")
-                    raise ValueError(f"unknown tool '{name}'")
+                        raise _JsonRpcInvalidParams
+                    raise _JsonRpcInvalidParams
                 if not isinstance(arguments, dict):
                     value = _scrub_public_response(
-                        _public_argument_shape_failure(str(name)),
+                        _public_argument_shape_failure(name),
                         supplied_coordinator_refs=coordinator_refs,
                     )
                     result = tool_result(name, value)
-                    if request_id is not None:
-                        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
-                        sys.stdout.flush()
+                    write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
                     continue
                 contract = public_tools[name]
                 base_operation = str(contract["base_operation"])
                 schema = contract["inputSchema"]
-                if base_operation == "start_orchestration" and ("id" not in request or request_id is None):
-                    raise ValueError("start_orchestration requires a non-null JSON-RPC id for a mutating transport request")
+                if base_operation == "start_orchestration" and request_id is None:
+                    raise _JsonRpcInvalidParams
+                if (
+                    name == "ask_worker_question"
+                    and is_internal_question_category(arguments.get("question_category"))
+                ):
+                    result = tool_result(name, _scrub_public_response(
+                        _public_internal_question_failure(),
+                        supplied_coordinator_refs=coordinator_refs,
+                    ))
+                    write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
+                    continue
                 schema_failure = _public_schema_failure(schema, arguments)
                 if schema_failure is not None:
                     result = tool_result(name, _scrub_public_response(
                         schema_failure, supplied_coordinator_refs=coordinator_refs,
                     ))
-                    if request_id is not None:
-                        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
-                        sys.stdout.flush()
+                    write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
+                    continue
+                host_thread_id = _call_host_thread_id(params)
+                if transport_metadata_audit is not None:
+                    try:
+                        transport_metadata_audit(str(name), arguments, host_thread_id, host_thread_id is not None)
+                    except (OSError, RuntimeError, TypeError, ValueError):
+                        pass
+                if host_thread_id is None:
+                    result = tool_result(name, _scrub_public_response(
+                        _public_host_identity_failure(),
+                        supplied_coordinator_refs=coordinator_refs,
+                    ))
+                    write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
+                    continue
+                retry_after_ms = consume_tools_call()
+                if retry_after_ms is not None:
+                    value = _scrub_public_response(
+                        _public_transient_retry_failure(
+                            error_code="tool_rate_limited",
+                            error="This connection exceeded the bounded Cortex tool-call burst.",
+                            retry_after_ms=retry_after_ms,
+                        ),
+                        supplied_coordinator_refs=coordinator_refs,
+                    )
+                    result = tool_result(name, value)
+                    write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
                     continue
                 backend_arguments = {
                     **arguments,
                     **dict(contract.get("injected_arguments") or {}),
                 }
-                if base_operation == "start_orchestration" and request_id is not None:
+                if base_operation == "start_orchestration":
                     backend_arguments["_transport_request_id"] = (
                         f"{transport_connection_nonce}:{_canonical_jsonrpc_request_id(request_id)}"
                     )
-                value = _safe_public_response(
-                    base_operation,
-                    contract["handler"](backend_arguments),
-                    arguments=backend_arguments,
-                    supplied_coordinator_refs=coordinator_refs,
-                )
+                host_thread_token: Token[str | None] = _HOST_THREAD_ID.set(host_thread_id)
+                try:
+                    try:
+                        backend_value = contract["handler"](backend_arguments)
+                    except Exception as exc:
+                        if exc.__class__.__name__ != "LedgerBusyError":
+                            raise
+                        value = _scrub_public_response(
+                            _public_transient_retry_failure(
+                                error_code="ledger_busy",
+                                error="Cortex storage is temporarily busy and the operation did not mutate state.",
+                                retry_after_ms=_LEDGER_BUSY_RETRY_DELAY_MS,
+                            ),
+                            supplied_coordinator_refs=coordinator_refs,
+                        )
+                    else:
+                        value = _safe_public_response(
+                            name if name == "refresh_worker_context" else base_operation,
+                            backend_value,
+                            arguments=backend_arguments,
+                            supplied_coordinator_refs=coordinator_refs,
+                        )
+                finally:
+                    _HOST_THREAD_ID.reset(host_thread_token)
                 result = tool_result(name, value)
             elif method == "ping":
+                if not has_request_id:
+                    continue
+                request_params(request)
                 result = {}
             else:
-                raise ValueError(f"unsupported method '{method}'")
-            if request_id is not None:
-                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
-                sys.stdout.flush()
+                raise _JsonRpcMethodNotFound
+            write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
+            if method == "initialize":
+                connection_state = _LEGACY_CONNECTION_INITIALIZE_RESPONSE_SENT
+        except _JsonRpcProtocolError as exc:
+            if isinstance(exc, _JsonRpcInvalidRequest):
+                write_error(
+                    request_id if request_id_established else None,
+                    exc.code,
+                    exc.wire_message,
+                )
+            elif has_request_id:
+                write_error(request_id, exc.code, exc.wire_message)
         except Exception as exc:
             is_ledger_busy = exc.__class__.__name__ == "LedgerBusyError"
             if not is_ledger_busy:
+                # The configured logger records only bounded input shape and
+                # redacted exception text; the wire response never reflects
+                # private arguments, capabilities, or backend exception data.
                 log_tool_error(request, request_id, line.rstrip("\n"), exc)
-            if request_id is not None:
+            if has_request_id:
                 if is_ledger_busy:
-                    data = {
-                        "schema": "cortex/ledger-busy/v1",
-                        "code": "ledger_busy",
-                        "retryable": True,
-                        "retry_after_ms": 250,
-                    }
                     error = {
                         "code": -32009,
                         "message": "Cortex is busy; retry the same operation without changing its input.",
-                        "data": data,
+                        "data": {
+                            "schema": "cortex/ledger-busy/v1",
+                            "code": "ledger_busy",
+                            "retryable": True,
+                            "retry_after_ms": 250,
+                        },
                     }
+                    write_message({"jsonrpc": "2.0", "id": request_id, "error": error})
                 else:
-                    error_message = _ASSIGNMENT_REF_VALUE_RE.sub("<redacted-assignment-ref>", str(exc))
-                    for coordinator_ref in _supplied_coordinator_refs(request):
-                        error_message = error_message.replace(coordinator_ref, "<redacted-coordinator-ref>")
-                    error = {
-                        "code": -32602,
-                        "message": error_message,
-                    }
-                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": error}, ensure_ascii=False) + "\n")
-                sys.stdout.flush()
+                    write_error(request_id, -32603, "Internal error")

@@ -154,9 +154,9 @@ def _domain_decisions(value: object) -> tuple[Decision, ...]:
         if not isinstance(raw, Mapping):
             raise ValueError("canonical decision must be an object")
         question_value = raw.get("question_text")
-        answer_value = raw.get("answer_text")
+        answer_value = raw.get("answer")
         question = _durable_question_text(question_value, label="decision question_text")
-        answer = _durable_question_text(answer_value, label="decision answer_text")
+        answer = _durable_question_text(answer_value, label="decision answer")
         decisions.append(Decision(question=question, answer=answer))
     return tuple(decisions)
 
@@ -178,7 +178,7 @@ def _compiler_visible_events(canonical: Mapping[str, Any]) -> list[dict[str, str
             "event_type": _text(event.get("event_type"), 64),
             "question_ref": _text(payload.get("question_ref"), 128),
             "question_text": payload.get("question_text") if isinstance(payload.get("question_text"), str) else "",
-            "answer_text": payload.get("answer_text") if isinstance(payload.get("answer_text"), str) else "",
+            "answer": payload.get("answer") if isinstance(payload.get("answer"), str) else "",
         }
         compact = {key: value for key, value in item.items() if value}
         if compact:
@@ -224,7 +224,7 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
             continue
         decisions.append(Decision(
             question=_durable_question_text(event.get("question_text"), label="decision question_text"),
-            answer=_durable_question_text(event.get("answer_text"), label="decision answer_text"),
+            answer=_durable_question_text(event.get("answer"), label="decision answer"),
         ))
     finding_texts: list[str] = []
     for predecessor in _sequence(canonical.get("predecessor_results")):
@@ -422,7 +422,6 @@ class ContextCompiler:
                 "phase": gate or None,
                 "profile": profile or None,
                 "scope": _strings(attempt.get("scope") or task.get("scope"), limit=MAX_ITEMS, item_limit=500),
-                "allowed_paths": _strings(attempt.get("allowed_paths") or task.get("allowed_paths"), limit=MAX_PATHS, item_limit=300),
             },
             "decisions": rendered_decisions,
             "event_transitions": _compiler_visible_events(canonical),
@@ -455,7 +454,6 @@ def dispatch_canonical_state(package: Mapping[str, Any], profile: str) -> dict[s
         "acceptance_criteria": package.get("acceptance_criteria"),
         "verification": package.get("verification"),
         "scope": package.get("scope"),
-        "allowed_paths": package.get("allowed_paths"),
         # This descriptor is deliberately metadata only.  The complete task
         # contract is an immutable artifact; compilers must never recover it
         # by reading a ledger row or treating a compact prompt as canonical.
@@ -465,7 +463,6 @@ def dispatch_canonical_state(package: Mapping[str, Any], profile: str) -> dict[s
         "attempt_id": package.get("attempt_id"),
         "gate": package.get("gate"),
         "profile": profile,
-        "allowed_paths": package.get("allowed_paths"),
         "scope": package.get("scope"),
     }
     return {

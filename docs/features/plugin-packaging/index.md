@@ -14,6 +14,8 @@ describe the same v11 task and capability contract.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) is the repository marketplace entry.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates package structure.
+- [cortex_release_candidate.py](../../../scripts/cortex_release_candidate.py) builds the exact allowlisted working-tree package and its import/document closure.
+- [verify-cortex-release.py](../../../scripts/verify-cortex-release.py) validates either that source candidate or an unchanged committed HEAD candidate.
 - [sync-cortex.sh](../../../scripts/sync-cortex.sh) provides check and dry-run validation.
 - [cortex-host-preflight.py](../../../scripts/cortex-host-preflight.py) performs read-only host diagnostics.
 - [profiles.json](../../../plugins/cortex/profiles.json) is the canonical profile and routing source.
@@ -27,19 +29,22 @@ with no multiplexed selector or aliases. `tools/list` is the authoritative
 operation inventory.
 
 `public_contracts.py` supplies every tool's complete closed one-level
-`inputSchema`; the runtime validator consumes that same schema. Descriptions
+public tool contract; the runtime validator consumes that same contract. Descriptions
 remain short and semantic. Skills and prompts contain no copied argument names,
 field constraints, or schema templates.
 
 Workers send complete semantic events and one `AttemptResult`. The server owns
 identity, timestamps, dispatch/profile/phase, task revision, changed files,
-checks, verification observations, and result links. `ContextCompiler` and
+server manifest observations, worker-attested verification claims, exact
+native Stop, and result links. `ContextCompiler` and
 `HandoffCompiler` expose complete, target-specific context. Result views
 are rebuildable and cannot authorize lifecycle transitions.
 
-The validator checks the v11 action-specific catalog, schema v18, strict coordinator and
-worker projections, profile TOML parity, Prompt Contract v3, the five hooks,
-launcher paths, and the knowledge-route inventory. The prompt contract has one
+The validator checks the v11 action-specific catalog, schema v19, strict coordinator and
+worker projections, profile TOML parity, Prompt Contract v3, the registered
+native lifecycle hooks,
+launcher paths, the coordinator-only native completion barrier, and the
+knowledge-route inventory. The prompt contract has one
 stable v3 renderer and no alternate prompt format or comparison runner.
 
 All package commands are source-mode checks unless explicitly documented as
@@ -49,10 +54,21 @@ updated or trusted.
 The v11 release label is 11.0.1. The package must not expose `create_thread`,
 session/environment authorization, server-owned CLI or executor launches,
 `repair_planning`, or manually authored `advance`/`completions`. The only
-worker lifecycle is the exact server-issued `spawn_agent` target, exact `wait`,
-an action-specific canonical wave read, and server-derived continuation. Only
-the exact signed V11 v1--v8 lineage upgrades atomically to schema v18; unknown
-histories fail closed. The SQLite schema history and independent Prompt
+worker lifecycle is native V2 `spawn_agent`, generic timeout-bounded
+`wait_agent` cycles, canonical terminal results plus exact matching terminal Stops, an
+action-specific canonical wave read, and server-derived continuation in both
+Codex CLI and Desktop. Host-owned identity binding joins the authorized worker
+call to its exact native child; unknown or disabled hook
+state fails closed. After a completed wave is read, use
+`revise_future_pipeline` only for unexecuted future work and
+`append_rework_wave` only for product correction of a completed canonical
+result. Technical failure uses server-owned Luna-to-Terra-to-Sol replacement
+with capability-safe profile resolution. Each returned worker repeats the
+native lifecycle and required governance closure executes before final handoff. Exact
+signed released schema-v17/schema-v18 histories upgrade transactionally in place to
+schema v19 and retain their append-only migration rows. The exact signed legacy V1--V8
+namespace is archived privately before a fresh schema-v19 ledger is created; unknown
+histories fail closed and are not automatically quarantined. The SQLite schema history and independent Prompt
 Contract/question schema histories remain storage/documentation history, not
 alternate public task protocols.
 

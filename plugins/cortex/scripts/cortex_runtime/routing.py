@@ -15,10 +15,14 @@ def profiles_for_gate(profiles: Mapping[str, Mapping[str, Any]], gate: str) -> l
 
 
 def profile_can_own_gate(profiles: Mapping[str, Mapping[str, Any]], profile_name: str, gate: str) -> bool:
-    profile = profiles.get(profile_name)
-    if profile is None:
-        return False
-    return gate in profile.get("gates", []) or (profile.get("route_category") == "manual" and gate == "implementation")
+    """Return whether a declared profile/phase pair is structurally valid.
+
+    Phase ownership is an orchestrator decision, not a backend routing matrix.
+    Profile metadata may describe preferred/automatic ownership for discovery,
+    but it must not reject an explicit worker selection.  The backend still
+    validates that both identifiers are known and that the phase is non-empty.
+    """
+    return bool(profile_name in profiles and isinstance(gate, str) and gate.strip())
 
 
 def resolve_dispatch_route(
@@ -44,9 +48,6 @@ def resolve_dispatch_route(
     if complexity not in {"C1", "C2", "C3"}:
         raise ValueError("complexity must be C1, C2, or C3")
     read_only = profile.get("sandbox") == "read-only"
-    security_context = task_kind == "security" or profile_name == "security_auditor" or params.get("_security_gate") is True
-    if security_context:
-        task_kind = "security"
     lightweight_dispatch = (
         task_kind in policy["lightweight_task_kinds"]
         or task_kind.startswith("read_only")
@@ -58,115 +59,55 @@ def resolve_dispatch_route(
     )
     read_only = read_only or analysis_dispatch
 
-    profile_classes = policy["profile_classes"]
-    def profile_class(name: str) -> str:
-        for class_name, names in profile_classes.items():
-            if name in names:
-                return class_name
-        raise RuntimeError(f"Cortex model routing has no class for profile {name}")
-
-    if security_context:
-        policy_model, policy_reason = policy["security_model"], "security_profile_or_gate"
-    elif profile_name == "explorer":
-        policy_model, policy_reason = policy["explorer_model"], "explorer_always_luna"
-    else:
-        selected_class = profile_class(profile_name)
-        if selected_class == "deep":
-            policy_model, policy_reason = "gpt-5.6-terra", "deep_profile"
-        elif profile_name == "planner" and complexity in {"C2", "C3"}:
-            policy_model, policy_reason = "gpt-5.6-terra", "complex_planning"
-        elif task_kind in policy["terra_task_kinds"]:
-            policy_model, policy_reason = "gpt-5.6-terra", "terra_task_kind"
-        elif risk in {"high", "critical"}:
-            policy_model, policy_reason = "gpt-5.6-terra", "high_failure_cost"
-        elif selected_class == "efficient":
-            policy_model, policy_reason = policy["configured_default_model"], "efficient_profile"
-        else:
-            policy_model, policy_reason = policy["configured_default_model"], "bounded_adaptive_work"
-    raw_requested_model = str(params.get("requested_model") or "").strip()
-    raw_user_requested_model = str(params.get("user_requested_model") or "").strip()
+    # The coordinator owns routing.  The policy document remains a capability
+    # registry, but profile classes, task kind, risk, and complexity must not
+    # override an explicit model/effort choice.
+    raw_model = str(params.get("model") or "").strip()
+    if not raw_model:
+        raise ValueError("model is required; the orchestrator must select the worker model")
     configured_default_model = str(
         params.get("configured_default_model")
         or (policy["configured_default_model"] if params.get("configured_default") is True else "")
     ).strip()
     configured_default_available = configured_default_model == policy["configured_default_model"]
-    requested_model = raw_requested_model or raw_user_requested_model or policy_model
-    if requested_model not in policy["requestable_models"]:
-        raise ValueError("requested_model is not supported by Cortex routing policy")
-    if raw_user_requested_model and raw_user_requested_model not in policy["requestable_models"]:
-        raise ValueError("user_requested_model is not supported by Cortex routing policy")
-    if raw_user_requested_model and raw_user_requested_model != requested_model:
-        raise ValueError("user_requested_model must match requested_model")
+    # Public worker specs are authoritative.  Policy may reject an unsafe or
+    # unavailable choice, but it must never manufacture or replace one.
+    chosen_model = raw_model
+    if chosen_model not in policy["requestable_models"]:
+        raise ValueError("model is not supported by Cortex routing policy")
 
-    if profile_name == "explorer":
-        if requested_model != policy["configured_default_model"]:
-            raise ValueError("explorer always uses gpt-5.6-luna; Terra is reserved for host fallback")
-        selected_model = policy["configured_default_model"]
-        model_choice_reason = "explorer_policy"
-    elif security_context:
-        if requested_model != policy["security_model"]:
-            raise ValueError("security work always uses gpt-5.6-sol")
-        selected_model = policy["security_model"]
-        model_choice_reason = "security_policy"
-    elif requested_model == "gpt-5.6-sol":
-        if raw_user_requested_model != "gpt-5.6-sol":
-            raise ValueError("non-security gpt-5.6-sol requires user_requested_model=gpt-5.6-sol")
-        selected_model = requested_model
-        model_choice_reason = "explicit_user_request"
-    else:
-        selected_model = requested_model
-        if raw_user_requested_model:
-            model_choice_reason = "explicit_user_request"
-        elif raw_requested_model:
-            model_choice_reason = "coordinator_selected_terra" if selected_model == "gpt-5.6-terra" else "coordinator_selected_luna"
-        else:
-            model_choice_reason = policy_reason
-
-    effort_order = policy["reasoning_effort_order"]
-    def higher_effort(*efforts: str) -> str:
-        return max(efforts, key=effort_order.__getitem__)
-
-    if profile_name == "explorer":
-        default_effort = policy["explorer_effort_by_risk"][risk]
-    elif security_context:
-        default_effort = policy["security_effort_by_complexity"][complexity]
-    else:
-        if selected_model != "gpt-5.6-luna":
-            model_effort = policy["terra_effort_by_complexity"][complexity]
-        elif profile_class(profile_name) == "efficient":
-            model_effort = policy["luna_efficient_effort_by_complexity"][complexity]
-        else:
-            model_effort = policy["luna_bounded_effort_by_complexity"][complexity]
-        default_effort = higher_effort(model_effort, policy["model_effort_floor_by_risk"][risk])
-    requested_effort = str(params.get("requested_reasoning_effort") or "").strip().lower() or default_effort
-    selected_effort = "low" if requested_effort == "none" else requested_effort
+    selected_model = chosen_model
+    model_choice_reason = "explicit_coordinator_request"
+    supplied_effort = str(params.get("reasoning_effort") or "").strip().lower()
+    if not supplied_effort:
+        raise ValueError("reasoning_effort is required; the orchestrator must select worker effort")
+    requested_effort = supplied_effort
+    selected_effort = requested_effort
     if selected_effort not in policy["supported_efforts"]:
-        raise ValueError("requested_reasoning_effort cannot be resolved to a supported effort")
-    minimum_effort = None
-    if security_context:
-        minimum_effort = policy["security_effort_by_complexity"][complexity]
-    elif profile_name != "explorer":
-        minimum_effort = default_effort
-    if minimum_effort and effort_order[selected_effort] < effort_order[minimum_effort]:
-        selected_effort = minimum_effort
+        raise ValueError("reasoning_effort cannot be resolved to a supported effort")
     if selected_model not in policy["supported_models"]:
         raise ValueError("dispatch route cannot be resolved to a Cortex policy model")
-    model_resolution = "configured_default" if selected_model == policy["configured_default_model"] and configured_default_available else "explicit_override"
+    allowed_efforts = policy["model_efforts"].get(selected_model, ())
+    if selected_effort not in allowed_efforts:
+        raise ValueError(
+            f"reasoning_effort for {selected_model} must be one of: "
+            + ", ".join(allowed_efforts)
+        )
+    model_resolution = "explicit_override"
     return {
-        "requested_model": requested_model,
+        "model": chosen_model,
         "configured_default_model": configured_default_model or None,
         "selected_model": selected_model,
         "expected_model": selected_model,
         "model_resolution": model_resolution,
-        "requested_reasoning_effort": requested_effort,
+        "reasoning_effort": requested_effort,
         "selected_reasoning_effort": selected_effort,
         "task_kind": task_kind,
         "risk": risk,
         "complexity": complexity,
         "read_only": read_only,
         "capability_source": policy["capability_source"],
-        "policy_model": policy_model,
-        "policy_reason": policy_reason,
+        "policy_model": selected_model,
+        "policy_reason": "explicit_coordinator_request",
         "model_choice_reason": model_choice_reason,
-        "user_requested_model": raw_user_requested_model or None,
     }

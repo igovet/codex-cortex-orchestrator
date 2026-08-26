@@ -14,7 +14,7 @@ from cortex_runtime.prompt_eval import FIXTURES_PATH, assert_live_prompt_eval_co
 
 def run_live_prompt_evals(
     *, enabled: bool = False, fixtures_path: Path = FIXTURES_PATH,
-    model: str = "gpt-5.6-luna", reasoning_effort: str = "high",
+    model: str = "gpt-5.6-luna", reasoning_effort: str = "medium",
 ) -> list[dict[str, Any]]:
     """Return a safe reminder that live verification is an interactive check."""
     del fixtures_path

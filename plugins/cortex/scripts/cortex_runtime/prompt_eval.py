@@ -88,12 +88,12 @@ def prompt_eval_metrics(prompt: str, *, assignment_markers: list[str]) -> dict[s
 def assert_live_prompt_eval_configuration(
     *, model: str | None, reasoning_effort: str | None, allow_model_fallback: bool = False,
 ) -> None:
-    """Permit a live evaluator only for the explicit Luna-high route."""
+    """Permit a live evaluator only for the explicit Luna-medium route."""
     expected = PROMPT_CONTRACT["prompt_eval"]
     if allow_model_fallback or expected.get("allow_model_fallback") is not False:
         raise ValueError("live prompt eval fallback is forbidden")
     if model != expected["model"] or reasoning_effort != expected["reasoning_effort"]:
-        raise ValueError("live prompt eval requires model=gpt-5.6-luna and reasoning_effort=high")
+        raise ValueError("live prompt eval requires model=gpt-5.6-luna and reasoning_effort=medium")
 
 
 def _fixture_prompt(case: Mapping[str, Any]) -> str:
@@ -150,6 +150,18 @@ def run_prompt_evals(
         for required in case.get("must_contain", []):
             if str(required) not in prompt:
                 raise AssertionError("prompt-eval required marker missing: " + case["id"])
+        ordered_markers = case.get("must_contain_in_order", [])
+        if (
+            not isinstance(ordered_markers, list)
+            or not all(isinstance(marker, str) and marker for marker in ordered_markers)
+        ):
+            raise RuntimeError("prompt-eval case has invalid ordered markers")
+        ordered_positions = [prompt.find(marker) for marker in ordered_markers]
+        if (
+            any(position < 0 for position in ordered_positions)
+            or ordered_positions != sorted(ordered_positions)
+        ):
+            raise AssertionError("prompt-eval required marker order failed: " + case["id"])
         for forbidden in case.get("must_not_contain", []):
             if str(forbidden) in prompt:
                 raise AssertionError("prompt-eval forbidden marker present: " + case["id"])
@@ -168,7 +180,7 @@ def run_prompt_evals(
     if live:
         assert_live_prompt_eval_configuration(model=model, reasoning_effort=reasoning_effort)
         if executor is None:
-            raise RuntimeError("live prompt eval requires an explicit Luna-high executor; no local fallback exists")
+            raise RuntimeError("live prompt eval requires an explicit Luna-medium executor; no local fallback exists")
         for case in fixtures["cases"]:
             verdict = executor(_fixture_prompt(case), str(model), str(reasoning_effort))
             if not isinstance(verdict, Mapping) or verdict.get("pass") is not True:

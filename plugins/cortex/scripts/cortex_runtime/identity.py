@@ -19,7 +19,7 @@ def safe_id(value: str) -> str:
     return candidate
 
 
-def worker_module_label(objective: object, allowed_paths: object, gate: object) -> str:
+def worker_module_label(objective: object, gate: object) -> str:
     """Return a concise, non-sensitive module label for host-visible workers."""
     del gate  # A lifecycle gate is not a project module.
     ignored = {
@@ -38,11 +38,6 @@ def worker_module_label(objective: object, allowed_paths: object, gate: object) 
         "canonical", "phase", "phases", "through", "independent", "close",
     }
     candidates: list[str] = []
-    if isinstance(allowed_paths, list):
-        for raw_path in allowed_paths:
-            path = str(raw_path or "").strip().replace("\\", "/")
-            if path and path != ".":
-                candidates.extend(re.findall(r"[A-Za-z][A-Za-z0-9]*", path))
     objective_text = str(objective or "")
     if not candidates:
         domain_candidates = [

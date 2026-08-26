@@ -16,11 +16,25 @@ evidence-backed change to future semantic waves.
    no-op/transport-only change; Cortex must not infer materiality from result
    prose.
 4. Preserve completed evidence; do not repeat a completed check without a reason.
+5. After reading the completed wave, make one evidence-frontier decision when
+   a material change is required. Use `revise_future_pipeline` only for
+   unexecuted future waves. If a completed canonical result itself needs
+   product correction, use `append_rework_wave` so rework and independent
+   verification are appended after the completed history. Exact replay is
+   idempotent; a conflicting or stale decision is rejected. Never rewrite an
+   executing or completed wave.
+6. Dispatch every newly returned worker through native V2 `spawn_agent`. Use
+   300-second generic `wait_agent` cycles for ordinary progress; wait output is
+   not lifecycle evidence. After the matching terminal `SubagentStop` and
+   canonical result are durable, read the canonical wave, then execute required
+   governance closure before final handoff.
 
 Typical adaptations:
 
 - New schema or data migration: add `database_architect` before a writer.
-- Discovered UI surface: add `ux_designer` or `accessibility_engineer` before review.
+- Discovered UI surface: use `ux_designer` for interaction design,
+  `accessibility_auditor` for independent inspection or verification, or
+  `accessibility_fixer` for accepted remediation.
 - High-risk auth, payments, or sensitive-data change: add `security_auditor` and require explicit verification.
 - QA proves the plan wrong: preserve the existing plan in history and let the
   orchestrator choose whether to re-plan, add a specialist, or correct the
@@ -34,13 +48,15 @@ future-pipeline digest. A replacement may use a Planner wave or another
 coordinator-chosen owner after the available evidence; no-op and transport-only
 replacements retain the existing approval.
 
-Pipeline rework is unbounded while acceptance criteria, required verification,
-or canonical findings remain unresolved. Failure counts are durable audit and
-routing evidence, not a retry budget. Cortex raises reasoning effort after
-each unresolved cycle (`high`, then `xhigh`, then `max`) and routes eligible
-ordinary work to Terra after two failures unless the user explicitly selected
-a model. Use a materially different `next_strategy` or replan when evidence
-supports it, but never require either merely to authorize another recovery.
+Product rework is distinct from technical recovery. A completed
+`needs_rework` result uses `append_rework_wave`; a material change to untouched
+future work uses `revise_future_pipeline`. Transport, host-observation, model,
+and other technical failures use only the server-owned bounded
+Luna-to-Terra-to-Sol replacement ladder for the exact assignment occurrence.
+Cortex keeps the selected profile when its capability matches the operation and
+otherwise resolves an operation-capable profile from the canonical registry.
+The coordinator never turns that technical replacement into product rework or
+a future-pipeline revision.
 
 Question Firewall: a user question may cover only task requirements, scope,
 acceptance/product behavior, or explicit external/destructive authorization.

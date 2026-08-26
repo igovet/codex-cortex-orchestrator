@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import stat
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,10 @@ from cortex_runtime.delegation import (
     spawn_request as build_spawn_request,
     task_kind_and_risk,
 )
+from cortex_runtime.assignment_compiler import (
+    acceptance_contract_digest,
+    effective_result_contract,
+)
 
 
 bind_symbols(
@@ -26,12 +32,13 @@ bind_symbols(
         "AWAITING_HOST_SPAWN",
         "DOCUMENTATION_EVIDENCE_KINDS",
         "PROFILES",
+        "PLAN_TRACKER_SCHEMA",
         "QUESTION_SCHEMA",
-        "REWORK_EFFORT_BY_PRIOR_FAILURES",
-        "REWORK_TERRA_AFTER_FAILURES",
         "SCHEMA",
         "_contained_path",
+        "_governance_lifecycle_hmac_key",
         "_is_knowledge_harvest_task",
+        "_open_blocking_questions",
         "_project_knowledge_context",
         "_resolved_user_decisions",
         "_write_delegation_package",
@@ -67,8 +74,19 @@ bind_symbols(
     ),
 )
 from cortex_runtime.projection_service import enqueue as enqueue_projection, materialize_job
-from cortex_runtime.ledger_db import fail_projection_job, list_projection_jobs, get_task_document as db_get_task_document
+from cortex_runtime.ledger_db import (
+    fail_projection_job,
+    get_active_plan_revision,
+    get_plan_revision,
+    get_task_document as db_get_task_document,
+    load_task as db_load_task,
+    list_projection_jobs,
+)
 from cortex_runtime import attempt_protocol, canonical_json
+from cortex_runtime.verification_contract import (
+    required_verification_kinds,
+    validated_bound_evidence,
+)
 
 
 def _canonical_text_items(
@@ -83,6 +101,19 @@ def _canonical_text_items(
         raise ValueError(f"{field} must be a current canonical text array")
     del field
     return list(value)
+
+
+def _without_task_revision(value: Any) -> Any:
+    """Remove model-visible task_revision keys from governance-close context."""
+    if isinstance(value, dict):
+        return {
+            str(key): _without_task_revision(item)
+            for key, item in value.items()
+            if str(key) != "task_revision"
+        }
+    if isinstance(value, list):
+        return [_without_task_revision(item) for item in value]
+    return value
 
 
 def _governance_dispatch_projection(
@@ -146,6 +177,367 @@ def _governance_dispatch_projection(
     }
 
 
+def _sha256_ref(value: object) -> str:
+    digest = str(value or "").strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest[7:]
+    return f"sha256:{digest}" if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest) else ""
+
+
+def governance_closure_frontier_projection(
+    root: Path,
+    state: dict[str, Any],
+    predecessor_result_refs: list[str],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Recompute the exact pre-closure result and negative-execution frontier."""
+    issues: list[str] = []
+    task_id = str(state.get("task_id") or "")
+    loaded_task = db_load_task(root, task_id)
+    task_definition = loaded_task[0] if loaded_task is not None else None
+    acceptance_digest = ""
+    if isinstance(task_definition, dict):
+        try:
+            acceptance_digest = acceptance_contract_digest(
+                task_definition.get("acceptance_criteria") or [],
+                task_definition.get("verification") or [],
+                server_acceptance_obligations=(
+                    task_definition.get("server_acceptance_obligations") or []
+                ),
+                server_verification_obligations=(
+                    task_definition.get("server_verification_obligations") or []
+                ),
+            )
+        except (TypeError, ValueError):
+            acceptance_digest = ""
+    if not acceptance_digest or not (
+        str(task_definition.get("acceptance_contract_digest") or "") == acceptance_digest
+        if isinstance(task_definition, dict) else False
+    ) or str(state.get("acceptance_contract_digest") or "") != acceptance_digest:
+        issues.append("acceptance_contract_binding_incomplete")
+    frontier_results: list[dict[str, str]] = []
+    for result_ref in predecessor_result_refs:
+        matches = [
+            attempt for attempt in state.get("attempts") or []
+            if isinstance(attempt, dict)
+            and not attempt.get("invalidated")
+            and str(attempt.get("attempt_result_ref") or "").strip()
+            and str(attempt.get("attempt_result_ref") or "").strip() == result_ref
+        ]
+        if len(matches) != 1:
+            issues.append("current_frontier_result_identity_invalid")
+            continue
+        canonical = attempt_protocol.get_attempt_result(
+            root,
+            task_id=task_id,
+            attempt_id=safe_id(str(matches[0].get("attempt_id") or "")),
+        )
+        if (
+            not isinstance(canonical, dict)
+            or str(canonical.get("result_ref") or "").strip() != result_ref
+            or canonical.get("lifecycle_status") != attempt_protocol.LIFECYCLE_COMPLETED
+        ):
+            issues.append("current_frontier_result_not_completed")
+            continue
+        metadata = canonical.get("metadata")
+        if not (
+            str(matches[0].get("acceptance_contract_digest") or "")
+            == acceptance_digest
+            and isinstance(metadata, dict)
+            and str(metadata.get("acceptance_contract_digest") or "")
+            == acceptance_digest
+        ):
+            issues.append("acceptance_contract_binding_incomplete")
+            continue
+        digest = _sha256_ref(canonical.get("content_digest"))
+        if not digest:
+            issues.append("current_frontier_result_digest_unavailable")
+            continue
+        frontier_results.append({"attempt_result_ref": result_ref, "digest": digest})
+    if len(frontier_results) != len(predecessor_result_refs):
+        issues.append("current_frontier_incomplete")
+
+    negative_execution_facts: list[dict[str, Any]] = []
+    negative_total = 0
+    for revision in plan.get("future_pipeline_revisions") or []:
+        if not isinstance(revision, dict):
+            continue
+        for fact in revision.get("retired_unexecuted_routes") or []:
+            if not isinstance(fact, dict):
+                continue
+            negative_total += 1
+            if len(negative_execution_facts) < 128:
+                negative_execution_facts.append(json.loads(json.dumps(fact, ensure_ascii=False, sort_keys=True)))
+        declared_total = revision.get("retired_unexecuted_route_count")
+        if isinstance(declared_total, int):
+            negative_total += max(0, declared_total - len(revision.get("retired_unexecuted_routes") or []))
+    if negative_total > len(negative_execution_facts):
+        issues.append("negative_execution_facts_projection_truncated")
+
+    payload = {
+        "current_frontier_results": frontier_results,
+        "negative_execution_facts": negative_execution_facts,
+        "negative_execution_fact_count": negative_total,
+    }
+    return {
+        **payload,
+        "frontier_digest": _sha256_ref(canonical_json.digest(payload)),
+        "issues": list(dict.fromkeys(issues)),
+        "execution_verified": (
+            bool(frontier_results)
+            and len(frontier_results) == len(predecessor_result_refs)
+            and not issues
+        ),
+    }
+
+
+def _governance_closure_basis(
+    root: Path,
+    state: dict[str, Any],
+    governance_context: dict[str, Any] | None,
+    predecessor_result_refs: list[str],
+) -> dict[str, Any]:
+    """Build one bounded, server-attested governance-close evidence frontier."""
+    issues: list[str] = []
+    task_id = str(state.get("task_id") or "")
+    loaded_task = db_load_task(root, task_id)
+    task_definition = loaded_task[0] if loaded_task is not None else None
+    acceptance_digest = ""
+    if isinstance(task_definition, dict):
+        try:
+            acceptance_digest = acceptance_contract_digest(
+                task_definition.get("acceptance_criteria") or [],
+                task_definition.get("verification") or [],
+                server_acceptance_obligations=(
+                    task_definition.get("server_acceptance_obligations") or []
+                ),
+                server_verification_obligations=(
+                    task_definition.get("server_verification_obligations") or []
+                ),
+            )
+        except (TypeError, ValueError):
+            acceptance_digest = ""
+    if not acceptance_digest or not (
+        str(task_definition.get("acceptance_contract_digest") or "") == acceptance_digest
+        if isinstance(task_definition, dict) else False
+    ) or str(state.get("acceptance_contract_digest") or "") != acceptance_digest:
+        issues.append("acceptance_contract_binding_incomplete")
+    plan_authority = get_active_plan_revision(root, task_id)
+    if plan_authority is None:
+        issues.append("executable_plan_authority_unavailable")
+    plan = plan_authority.get("plan") if isinstance(plan_authority, dict) else None
+    if not isinstance(plan, dict):
+        plan = {}
+    plan_digest = _sha256_ref(plan_authority.get("plan_digest") if plan_authority else "")
+    if not plan_digest:
+        issues.append("plan_digest_unavailable")
+    if plan_authority is not None and plan_authority.get("current_plan_matches") is not True:
+        issues.append("executable_plan_authority_mismatch")
+
+    policy_snapshot = (
+        governance_context.get("policy_snapshot")
+        if isinstance(governance_context, dict) and isinstance(governance_context.get("policy_snapshot"), dict)
+        else None
+    )
+    policy_digest = _sha256_ref(
+        governance_context.get("policy_snapshot_digest") if isinstance(governance_context, dict) else ""
+    )
+    if policy_snapshot is None:
+        issues.append("policy_snapshot_unavailable")
+    elif not policy_digest:
+        policy_digest = _sha256_ref(canonical_json.digest(policy_snapshot))
+    manifest_digest = _sha256_ref(
+        governance_context.get("manifest_digest") if isinstance(governance_context, dict) else ""
+    )
+    if not manifest_digest:
+        issues.append("manifest_digest_unavailable")
+
+    attempts_by_result = {
+        safe_id(str(attempt.get("attempt_result_ref") or "")): attempt
+        for attempt in state.get("attempts") or []
+        if isinstance(attempt, dict) and str(attempt.get("attempt_result_ref") or "").strip()
+    }
+    executed_results: list[dict[str, str]] = []
+    canonical_by_ref: dict[str, dict[str, Any]] = {}
+    executed_total = 0
+    for attempt in state.get("attempts") or []:
+        if not isinstance(attempt, dict) or attempt.get("invalidated"):
+            continue
+        result_ref = str(attempt.get("attempt_result_ref") or "").strip()
+        attempt_id = str(attempt.get("attempt_id") or "").strip()
+        if not result_ref or not attempt_id:
+            continue
+        canonical = attempt_protocol.get_attempt_result(root, task_id=task_id, attempt_id=attempt_id)
+        if not isinstance(canonical, dict) or str(canonical.get("result_ref") or "").strip() != result_ref:
+            issues.append("executed_result_not_canonical")
+            continue
+        canonical_by_ref[result_ref] = canonical
+        metadata = canonical.get("metadata")
+        if not (
+            str(attempt.get("acceptance_contract_digest") or "") == acceptance_digest
+            and isinstance(metadata, dict)
+            and str(metadata.get("acceptance_contract_digest") or "") == acceptance_digest
+        ):
+            issues.append("acceptance_contract_binding_incomplete")
+        executed_total += 1
+        if len(executed_results) < 128:
+            executed_results.append({
+                "attempt_result_ref": result_ref,
+                "digest": _sha256_ref(canonical.get("content_digest")),
+            })
+    if executed_total > len(executed_results):
+        issues.append("executed_results_projection_truncated")
+
+    required_observation_kinds: set[str] = set()
+    server_observed_kinds: set[str] = set()
+    worker_attested_kinds: set[str] = set()
+    verification_evidence_receipts: list[dict[str, Any]] = []
+    for verification_attempt in state.get("attempts") or []:
+        if (
+            not isinstance(verification_attempt, dict)
+            or verification_attempt.get("invalidated")
+            or str(verification_attempt.get("operation_kind") or "") != "verify"
+            or str(verification_attempt.get("acceptance_status") or "") != "passed"
+        ):
+            continue
+        expected_kinds = set(required_verification_kinds(
+            verification_attempt.get("phase_kind"),
+            verification_attempt.get("operation_kind"),
+        ))
+        if set(verification_attempt.get("required_verification_kinds") or []) != expected_kinds:
+            issues.append("verification_obligation_contract_mismatch")
+            continue
+        predecessor_ref = str(verification_attempt.get("attempt_result_ref") or "")
+        predecessor_result = canonical_by_ref.get(predecessor_ref)
+        if not isinstance(predecessor_result, dict):
+            issues.append("verification_obligation_result_unavailable")
+            continue
+        native_stop = verification_attempt.get("native_terminal_stop")
+        if (
+            not isinstance(native_stop, dict)
+            or native_stop.get("observed") is not True
+            or str(native_stop.get("result_digest") or "")
+            != hashlib.sha256(predecessor_ref.encode("utf-8")).hexdigest()
+        ):
+            issues.append("verification_exact_native_stop_unavailable")
+            continue
+        evidence = validated_bound_evidence(
+            attempt_protocol.list_attempt_events(
+                root,
+                task_id=task_id,
+                attempt_id=str(verification_attempt.get("attempt_id") or ""),
+            ),
+            task_id=task_id,
+            attempt=verification_attempt,
+            result=predecessor_result,
+        )
+        required_observation_kinds.update(expected_kinds)
+        server_observed_kinds.update(
+            item["verification_kind"] for item in evidence
+            if item.get("evidence_class") == "server_observed"
+        )
+        worker_attested_kinds.update(
+            item["verification_kind"] for item in evidence
+            if item.get("evidence_class") == "worker_attested"
+        )
+        verification_evidence_receipts.extend(evidence)
+    missing_observation_kinds = {
+        kind for kind in required_observation_kinds
+        if (
+            kind == "manifest_reconciliation" and kind not in server_observed_kinds
+        ) or (
+            kind != "manifest_reconciliation" and kind not in worker_attested_kinds
+        )
+    }
+    if missing_observation_kinds:
+        issues.append("verification_obligation_set_incomplete")
+
+    frontier_results: list[dict[str, str]] = []
+    for result_ref in predecessor_result_refs:
+        attempt = attempts_by_result.get(result_ref)
+        canonical = canonical_by_ref.get(result_ref)
+        if canonical is None and isinstance(attempt, dict):
+            canonical = attempt_protocol.get_attempt_result(
+                root, task_id=task_id, attempt_id=safe_id(str(attempt.get("attempt_id") or "")),
+            )
+        if (
+            not isinstance(canonical, dict)
+            or safe_id(str(canonical.get("result_ref") or "")) != result_ref
+            or canonical.get("lifecycle_status") != attempt_protocol.LIFECYCLE_COMPLETED
+        ):
+            issues.append("current_frontier_result_not_completed")
+            continue
+        digest = _sha256_ref(canonical.get("content_digest"))
+        if not digest:
+            issues.append("current_frontier_result_digest_unavailable")
+            continue
+        frontier_results.append({"attempt_result_ref": result_ref, "digest": digest})
+    if len(frontier_results) != len(predecessor_result_refs):
+        issues.append("current_frontier_incomplete")
+
+    negative_execution_facts: list[dict[str, Any]] = []
+    negative_total = 0
+    for revision in plan.get("future_pipeline_revisions") or []:
+        if not isinstance(revision, dict):
+            continue
+        for fact in revision.get("retired_unexecuted_routes") or []:
+            if not isinstance(fact, dict):
+                continue
+            negative_total += 1
+            if len(negative_execution_facts) < 128:
+                negative_execution_facts.append(json.loads(json.dumps(fact, ensure_ascii=False, sort_keys=True)))
+        declared_total = revision.get("retired_unexecuted_route_count")
+        if isinstance(declared_total, int):
+            negative_total += max(0, declared_total - len(revision.get("retired_unexecuted_routes") or []))
+    if negative_total > len(negative_execution_facts):
+        issues.append("negative_execution_facts_projection_truncated")
+
+    frontier_projection = governance_closure_frontier_projection(
+        root, state, predecessor_result_refs, plan,
+    )
+    frontier_results = list(frontier_projection["current_frontier_results"])
+    negative_execution_facts = list(frontier_projection["negative_execution_facts"])
+    negative_total = int(frontier_projection["negative_execution_fact_count"])
+    issues.extend(frontier_projection["issues"])
+    frontier_digest = str(frontier_projection["frontier_digest"])
+    execution_verified = bool(frontier_projection["execution_verified"]) and not any(
+        issue.startswith("executed_result_") for issue in issues
+    )
+    basis = {
+        "schema": "cortex/governance-closure-basis/v3",
+        "effective_mode": (
+            governance_context.get("effective_mode")
+            if isinstance(governance_context, dict) else None
+        ),
+        "complete": False,
+        "plan_revision": plan_authority.get("plan_revision") if plan_authority else None,
+        "plan_digest": plan_digest,
+        "frontier_digest": frontier_digest,
+        "policy_digest": policy_digest,
+        "manifest_digest": manifest_digest,
+        "acceptance_contract_digest": acceptance_digest,
+        "execution_verified": execution_verified,
+        "issues": list(dict.fromkeys(issues)),
+        "executed_results": executed_results,
+        "executed_result_count": executed_total,
+        "current_frontier_results": frontier_results,
+        "negative_execution_facts": negative_execution_facts,
+        "negative_execution_fact_count": negative_total,
+        "required_verification_kinds": sorted(required_observation_kinds),
+        "server_observed_verification_kinds": sorted(server_observed_kinds),
+        "worker_attested_verification_kinds": sorted(worker_attested_kinds),
+        "missing_verification_kinds": sorted(missing_observation_kinds),
+        "verification_evidence_receipts": verification_evidence_receipts,
+    }
+    basis["complete"] = basis["execution_verified"] and not basis["issues"] and all(
+        basis[key] for key in (
+            "plan_revision", "plan_digest", "frontier_digest", "policy_digest",
+            "manifest_digest", "acceptance_contract_digest",
+        )
+    )
+    return basis
+
+
 def _semantic_finding_text(value: object) -> str:
     """Select the short semantic fact from a canonical result/event value."""
     if isinstance(value, dict):
@@ -159,36 +551,32 @@ def _semantic_finding_text(value: object) -> str:
     return redact(value, 500)
 
 
-def _canonical_verification_checks(root: Path, task_id: str, attempt_id: str) -> list[str]:
-    """Project only command/exit facts from AttemptEvent verification rows."""
-    checks: list[str] = []
-    for event in attempt_protocol.list_attempt_events(
-        root, task_id=task_id, attempt_id=attempt_id,
-    ):
-        if event.get("event_type") != "verification_observed" or event.get("actor") != "cortex":
-            continue
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        candidates = payload.get("tests") if isinstance(payload.get("tests"), list) else [payload]
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            command = redact(candidate.get("command") or candidate.get("check") or "", 420)
-            if not command:
-                continue
-            exit_code = candidate.get("exit_code")
-            rendered = f"{command} (exit {exit_code})" if isinstance(exit_code, int) and not isinstance(exit_code, bool) else command
-            if rendered not in checks:
-                checks.append(rendered)
-    return checks
+def _canonical_verification_evidence_labels(
+    root: Path,
+    task_id: str,
+    attempt: dict[str, Any],
+    result: dict[str, Any],
+) -> list[str]:
+    """Project compact verification kinds with their immutable provenance."""
+    evidence = validated_bound_evidence(
+        attempt_protocol.list_attempt_events(
+            root, task_id=task_id, attempt_id=str(attempt.get("attempt_id") or ""),
+        ),
+        task_id=task_id,
+        attempt=attempt,
+        result=result,
+    )
+    return list(dict.fromkeys(
+        f"{item['evidence_class']}:{item['verification_kind']}"
+        for item in evidence
+    ))
 
 
 def _bounded_predecessor_results(
     root: Path,
     task_id: str,
     attempts: object,
-    context_result_refs: list[str],
+    predecessor_result_refs: list[str],
 ) -> list[dict[str, Any]]:
     """Build the dispatch's semantic predecessor basis from canonical facts.
 
@@ -207,10 +595,10 @@ def _bounded_predecessor_results(
                 continue
             result_attempts[safe_id(raw_result_ref)] = item
     results: list[dict[str, Any]] = []
-    for result_ref in context_result_refs:
+    for result_ref in predecessor_result_refs:
         attempt = result_attempts.get(result_ref)
         if not isinstance(attempt, dict):
-            raise ValueError("context_result_refs must name completed canonical AttemptResults from this task")
+            raise ValueError("predecessor_result_refs must name completed canonical AttemptResults from this task")
         attempt_id = safe_id(str(attempt.get("attempt_id") or ""))
         canonical = attempt_protocol.get_attempt_result(
             root, task_id=task_id, attempt_id=attempt_id,
@@ -220,7 +608,7 @@ def _bounded_predecessor_results(
             or safe_id(str(canonical.get("result_ref") or "")) != result_ref
             or str(canonical.get("lifecycle_status") or "") != attempt_protocol.LIFECYCLE_COMPLETED
         ):
-            raise ValueError("context_result_refs must name finalized canonical AttemptResults from this task")
+            raise ValueError("predecessor_result_refs must name finalized canonical AttemptResults from this task")
         result_metadata = canonical.get("metadata") if isinstance(canonical.get("metadata"), dict) else {}
         identity = result_metadata.get("identity") if isinstance(result_metadata.get("identity"), dict) else {}
         findings = [
@@ -250,7 +638,9 @@ def _bounded_predecessor_results(
             "changed_files": _canonical_text_items(
             canonical.get("changed_files"), field="AttemptResult changed_files",
             ),
-            "checks": _canonical_verification_checks(root, task_id, attempt_id),
+            "checks": _canonical_verification_evidence_labels(
+                root, task_id, attempt, canonical,
+            ),
             "unresolved_findings": [item for item in findings if item],
             "semantic_events": semantic_events,
             "semantic_source": "attempt_result",
@@ -428,13 +818,24 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             profiles_for_gate=profiles_for_gate,
         )
         agent_correction = ({"requested": requested_agent or None, "used": agent} if requested_agent != agent else None)
-        if state["status"] != "active":
+        pending_question_auxiliary = (
+            state.get("status") == "needs_input"
+            and params.get("_pending_question_auxiliary") is True
+            and bool(_open_blocking_questions(task_dir, state))
+            and any(
+                isinstance(item, dict)
+                and not item.get("invalidated")
+                and item.get("gate") in wave
+                and (
+                    item.get("status") == "waiting_question"
+                    or item.get("lifecycle_status") == "paused_awaiting_user"
+                    or item.get("host_stop_outcome") == "awaiting_user"
+                )
+                for item in state.get("attempts", [])
+            )
+        )
+        if state["status"] != "active" and not pending_question_auxiliary:
             raise ValueError(f"cannot delegate while task status is '{state['status']}'")
-        if gate == "documentation" and agent != "technical_writer":
-            raise ValueError("documentation gate must be delegated to technical_writer")
-        retry = int(params.get("retry", 0))
-        if retry < 0:
-            raise ValueError("retry must be non-negative")
         if gate == "documentation":
             # A facade documentation wave may intentionally contain several
             # parallel writers.  Their orchestration keys are the identity of
@@ -477,79 +878,27 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
                     "recoverable": True,
                     "state": state,
                 }
-        prior_failed_attempts = [
-            attempt for attempt in state["attempts"]
-            if attempt["gate"] == gate and attempt["status"] == "failed"
-        ]
+        facade_managed = bool(params.get("facade_managed", False))
         requested_strategy = redact(params.get("strategy", ""), 1000) or "default"
-        recorded_failures = int((state.get("orchestrate_gate_failure_counts") or {}).get(gate, 0))
-        active_rework_iterations = [
-            max(0, int(item.get("iteration") or 1) - 1)
-            for item in (state.get("closure_rework") or {}).values()
-            if isinstance(item, dict)
-            and item.get("status") == "rework_required"
-            and item.get("target_gate") == gate
-        ]
-        prior_failure_count = max(
-            len(prior_failed_attempts),
-            recorded_failures,
-            max(active_rework_iterations, default=0),
-        )
         briefing = render_gate_briefing(gate, task_definition.get("user_request", ""), agent)
         ownership = str(params.get("ownership", "")).strip() or briefing["ownership"]
         objective = str(params.get("objective", "")).strip() or briefing["objective"]
         requested_task_kind = str(params.get("task_kind") or "").strip()
         requested_risk = str(params.get("risk") or "").strip().lower()
         task_kind, risk = task_kind_and_risk(params, gate)
-        route_params = dict(params)
-        effort_order = {name: index for index, name in enumerate(("low", "medium", "high", "xhigh", "max"))}
-        automatic_model_escalated = False
-        if prior_failure_count:
-            effort_floor = (
-                REWORK_EFFORT_BY_PRIOR_FAILURES["1"]
-                if prior_failure_count == 1 else
-                REWORK_EFFORT_BY_PRIOR_FAILURES["2"]
-                if prior_failure_count == 2 else
-                REWORK_EFFORT_BY_PRIOR_FAILURES["3+"]
-            )
-            requested_effort = str(route_params.get("requested_reasoning_effort") or "").strip().lower()
-            route_params["requested_reasoning_effort"] = max(
-                (requested_effort, effort_floor) if requested_effort in effort_order else (effort_floor,),
-                key=effort_order.__getitem__,
-            )
-            explicit_user_model = str(route_params.get("user_requested_model") or "").strip()
-            if (
-                prior_failure_count >= REWORK_TERRA_AFTER_FAILURES
-                and agent not in {"explorer", "security_auditor"}
-                and gate != "security"
-                and not explicit_user_model
-            ):
-                route_params["requested_model"] = "gpt-5.6-terra"
-                automatic_model_escalated = True
-            selection_reason += (
-                f" Rework escalation after {prior_failure_count} unresolved attempt(s): "
-                f"minimum effort {route_params['requested_reasoning_effort']}"
-                + (" with Terra." if route_params.get("requested_model") == "gpt-5.6-terra" else ".")
-            )
-        dispatch_mode, luna_fallback, route, thread_environment = dispatch_context(
-            route_params,
+        # Every dispatch preserves the exact coordinator/compiler route. The
+        # server-owned exact-occurrence recovery compiler is the sole authority
+        # that may create a different model, effort, or compatible profile.
+        dispatch_mode, route, thread_environment = dispatch_context(
+            params,
             gate=gate,
             agent=agent,
             task_kind=task_kind,
             complexity=str(state.get("complexity", "C1")),
             resolve_dispatch_route=resolve_dispatch_route,
         )
-        route["rework_escalation"] = {
-            "prior_failure_count": prior_failure_count,
-            "unbounded_rework": True,
-            "effort_floor": route.get("selected_reasoning_effort"),
-            "model_escalated": bool(
-                automatic_model_escalated
-                and route.get("selected_model") == "gpt-5.6-terra"
-            ),
-        }
         required_lists = delegation_lists(params, task_definition, briefing)
-        context_result_refs = [safe_id(str(item)) for item in params.get("context_result_refs", [])]
+        predecessor_result_refs = [safe_id(str(item)) for item in params.get("predecessor_result_refs", [])]
         available_results: set[str] = set()
         for item in state.get("attempts", []):
             if not isinstance(item, dict):
@@ -558,16 +907,118 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             if raw_result_ref:
                 available_results.add(safe_id(raw_result_ref))
         if (
-            len(context_result_refs) != len(set(context_result_refs))
-            or not set(context_result_refs).issubset(available_results)
+            len(predecessor_result_refs) != len(set(predecessor_result_refs))
+            or not set(predecessor_result_refs).issubset(available_results)
         ):
-            raise ValueError("context_result_refs must be unique finalized AttemptResults from this task")
+            raise ValueError("predecessor_result_refs must be unique finalized AttemptResults from this task")
+        optional_report_result_refs = [
+            safe_id(str(item)) for item in params.get("optional_report_result_refs", [])
+        ]
+        report_catalog_digest = str(params.get("report_catalog_digest") or "").strip()
+        expected_catalog_digest = "sha256:" + digest_text(canonical_json.dumps({
+            "required": predecessor_result_refs,
+            "optional": optional_report_result_refs,
+        }))
+        if (
+            len(optional_report_result_refs) != len(set(optional_report_result_refs))
+            or set(optional_report_result_refs).intersection(predecessor_result_refs)
+            or not set(optional_report_result_refs).issubset(available_results)
+            or report_catalog_digest != expected_catalog_digest
+        ):
+            raise ValueError("dispatch report catalog authority is invalid")
         predecessor_results = _bounded_predecessor_results(
             root,
             state["task_id"],
             state.get("attempts"),
-            context_result_refs,
+            predecessor_result_refs,
         )
+        recovery_context = params.get("recovery_context")
+        recovery_context = dict(recovery_context) if isinstance(recovery_context, Mapping) else None
+        recovery_context_digest = str(params.get("recovery_context_digest") or "").strip()
+        recovery_source_result_ref = str(params.get("recovery_source_result_ref") or "").strip()
+        recovery_source_result_digest = str(params.get("recovery_source_result_digest") or "").strip()
+        recovery_chain_result_refs = [
+            str(item).strip() for item in params.get("recovery_chain_result_refs") or []
+            if str(item).strip()
+        ]
+        recovery_chain_result_digests = params.get("recovery_chain_result_digests")
+        recovery_chain_result_digests = (
+            dict(recovery_chain_result_digests)
+            if isinstance(recovery_chain_result_digests, Mapping) else {}
+        )
+        recovery_question_fields = {
+            key: str(params.get(key) or "").strip()
+            for key in (
+                "recovery_question_ref",
+                "recovery_question_source_attempt_id",
+                "recovery_question_source_dispatch_ref",
+            )
+        }
+        if any(recovery_question_fields.values()) and not all(recovery_question_fields.values()):
+            raise ValueError("durable recovery question binding is incomplete")
+        if recovery_context is not None:
+            expected_context_digest = "sha256:" + digest_text(canonical_json.dumps(recovery_context))
+            if (
+                recovery_context.get("schema") != "cortex/technical-recovery-context/v1"
+                or recovery_context_digest != expected_context_digest
+                or recovery_source_result_ref
+                != str(params.get("recovery_source_result_ref") or "").strip()
+            ):
+                raise ValueError("technical recovery context digest is invalid")
+            source_status = str(recovery_context.get("source_result_status") or "")
+            if source_status == "available":
+                if (
+                    not recovery_source_result_ref
+                    or recovery_source_result_ref not in predecessor_result_refs
+                    or not _sha256_ref(recovery_source_result_digest)
+                ):
+                    raise ValueError("technical recovery source result binding is incomplete")
+                source_attempt = next((
+                    item for item in state.get("attempts") or []
+                    if isinstance(item, dict)
+                    and str(item.get("attempt_result_ref") or "") == recovery_source_result_ref
+                ), None)
+                canonical_source = attempt_protocol.get_attempt_result(
+                    root,
+                    task_id=str(state["task_id"]),
+                    attempt_id=str((source_attempt or {}).get("attempt_id") or ""),
+                ) if isinstance(source_attempt, dict) else None
+                expected_source_digest = (
+                    "sha256:" + digest_text(canonical_json.dumps(canonical_source))
+                    if isinstance(canonical_source, Mapping) else ""
+                )
+                if expected_source_digest != recovery_source_result_digest:
+                    raise ValueError("technical recovery source result digest is invalid")
+            elif source_status == "absent":
+                if recovery_source_result_ref or recovery_source_result_digest:
+                    raise ValueError("result-less technical recovery cannot carry a source result")
+            else:
+                raise ValueError("technical recovery source result status is invalid")
+            if (
+                len(recovery_chain_result_refs) != len(set(recovery_chain_result_refs))
+                or set(recovery_chain_result_digests) != set(recovery_chain_result_refs)
+                or not set(recovery_chain_result_refs).issubset(predecessor_result_refs)
+            ):
+                raise ValueError("technical recovery result chain binding is invalid")
+            for chain_ref in recovery_chain_result_refs:
+                chain_attempt = next((
+                    item for item in state.get("attempts") or []
+                    if isinstance(item, dict)
+                    and str(item.get("attempt_result_ref") or "") == chain_ref
+                ), None)
+                canonical_chain = attempt_protocol.get_attempt_result(
+                    root,
+                    task_id=str(state["task_id"]),
+                    attempt_id=str((chain_attempt or {}).get("attempt_id") or ""),
+                ) if isinstance(chain_attempt, dict) else None
+                expected_chain_digest = (
+                    "sha256:" + digest_text(canonical_json.dumps(canonical_chain))
+                    if isinstance(canonical_chain, Mapping) else ""
+                )
+                if str(recovery_chain_result_digests.get(chain_ref) or "") != expected_chain_digest:
+                    raise ValueError("technical recovery result chain digest is invalid")
+        elif any((recovery_context_digest, recovery_source_result_ref, recovery_source_result_digest)):
+            raise ValueError("technical recovery bindings require canonical context")
         all_resolved_user_decisions = _resolved_user_decisions(task_dir, state)
         resolved_user_decisions_digest = digest_text(canonical_json.dumps(all_resolved_user_decisions))
         # Preserve every resolved user decision in the immutable briefing.
@@ -579,7 +1030,6 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         # mistake a fresh dispatch for a continuation of an older child.
         module = worker_module_label(
             task_definition.get("user_request") or objective,
-            required_lists["allowed_paths"],
             gate,
         )
         display_name = worker_display_name(agent, module)
@@ -598,7 +1048,33 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             route=route,
             thread_environment=thread_environment,
         )
-        facade_managed = bool(params.get("facade_managed", False))
+        if recovery_context is not None:
+            spawn_request.update({
+                "recovery_source_result_ref": recovery_source_result_ref,
+                "recovery_source_result_digest": recovery_source_result_digest,
+                "recovery_context_digest": recovery_context_digest,
+                "recovery_chain_result_refs": recovery_chain_result_refs,
+                "recovery_chain_result_digests": recovery_chain_result_digests,
+            })
+        compiled_requested_profile = str(
+            params.get("requested_profile") or requested_agent or agent
+        ).strip()
+        compiled_resolved_profile = str(
+            params.get("resolved_profile") or agent
+        ).strip()
+        if compiled_requested_profile != compiled_resolved_profile:
+            compiled_operation_kind = str(params.get("operation_kind") or "").strip()
+            resolution_reason = str(params.get("resolution_reason") or "").strip()
+            if resolution_reason not in {
+                f"required_{compiled_operation_kind}_capability",
+                "reliability_recovery_universal_fallback",
+            }:
+                raise ValueError("compiled profile normalization reason is invalid")
+            spawn_request.update({
+                "requested_profile": compiled_requested_profile,
+                "resolved_profile": compiled_resolved_profile,
+                "resolution_reason": resolution_reason,
+            })
         question_route = (
             {"mode": "native_parent", "answer_location": "main_chat"}
             if facade_managed else
@@ -615,7 +1091,65 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             }
         )
         orchestration_wave_id = str(params.get("orchestration_wave_id", "")).strip() or None
+        phase_kind = str(params.get("phase_kind") or "").strip()
+        phase_ref = str(params.get("phase_ref") or "").strip()
+        wave_ref = str(params.get("wave_ref") or "").strip()
+        wave_index = params.get("wave_index")
+        operation_kind = str(params.get("operation_kind") or "").strip()
+        read_only = params.get("read_only")
+        can_write = params.get("can_write")
+        predecessor_wave_refs = list(params.get("predecessor_wave_refs") or [])
+        required_verification_kinds = list(params.get("required_verification_kinds") or [])
+        plan_revision = params.get("plan_revision")
+        plan_digest = str(params.get("plan_digest") or "").strip()
+        plan_authority = (
+            get_plan_revision(root, str(state["task_id"]), plan_revision)
+            if facade_managed
+            and isinstance(plan_revision, int)
+            and not isinstance(plan_revision, bool)
+            and plan_revision >= 1
+            else None
+        )
+        if facade_managed and (
+            not isinstance(plan_authority, dict)
+            or _sha256_ref(plan_authority.get("plan_digest")) != _sha256_ref(plan_digest)
+        ):
+            raise ValueError("delegation requires the exact immutable plan receipt")
+        assignment_task_revision = (
+            plan_authority.get("task_revision")
+            if isinstance(plan_authority, dict)
+            else task_definition.get("task_revision")
+        )
+        if (
+            isinstance(assignment_task_revision, bool)
+            or not isinstance(assignment_task_revision, int)
+            or assignment_task_revision < 1
+        ):
+            raise ValueError("delegation requires an immutable assignment task revision")
+        if facade_managed and (
+            not phase_kind or not phase_ref or not wave_ref
+            or isinstance(wave_index, bool) or not isinstance(wave_index, int) or wave_index < 1
+            or operation_kind not in {"inspect", "modify", "verify", "close"}
+            or not isinstance(read_only, bool) or not isinstance(can_write, bool)
+            or can_write != (operation_kind == "modify")
+            or read_only == can_write
+            or orchestration_wave_id != wave_ref
+            or not all(isinstance(item, str) and item for item in required_verification_kinds)
+            or len(required_verification_kinds) != len(set(required_verification_kinds))
+            or isinstance(plan_revision, bool) or not isinstance(plan_revision, int) or plan_revision < 1
+            or not _sha256_ref(plan_digest)
+        ):
+            raise ValueError("orchestrated delegation requires one exact compiled assignment capability")
         orchestration_delegation_key = str(params.get("orchestration_delegation_key", "")).strip() or None
+        logical_delegation_key = str(params.get("logical_delegation_key", "")).strip() or None
+        assignment_lineage_digest = str(params.get("assignment_lineage_digest", "")).strip() or None
+        plan_assignment_lineage_digest = str(params.get("plan_assignment_lineage_digest", "")).strip() or None
+        if facade_managed and (
+            not logical_delegation_key
+            or not assignment_lineage_digest
+            or not plan_assignment_lineage_digest
+        ):
+            raise ValueError("orchestrated delegation requires server-derived logical assignment lineage")
         project_root = select_project_root(params)
         context_files, knowledge_index_files = _project_knowledge_context(project_root, params.get("context_files"))
         result_baseline = capture_project_manifest(project_root)
@@ -626,9 +1160,27 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             manifest_ref=result_baseline_ref,
             manifest_digest=str(result_baseline.get("digest") or ""),
         )
+        if gate in {"governance_activation", "governance_close"} and governance_context is None:
+            raise ValueError("governance gate requires a canonical effective_mode policy projection")
+        governance_closure_basis = (
+            _governance_closure_basis(root, state, governance_context, predecessor_result_refs)
+            if gate == "governance_close" else None
+        )
         dispatch_ref = "dispatch-" + digest_text(
             "\0".join((state["task_id"], attempt_id, agent, task_name))
         )[:24]
+        report_secret = _governance_lifecycle_hmac_key(root, create=False)
+        report_ref_for = lambda result_ref: "report-v1-" + hmac.new(
+            report_secret,
+            f"{dispatch_ref}\0{result_ref}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        required_report_refs = [
+            report_ref_for(result_ref) for result_ref in predecessor_result_refs
+        ]
+        optional_report_refs = [
+            report_ref_for(result_ref) for result_ref in optional_report_result_refs
+        ]
         worker_authority = issue_worker_dispatch_authority(
             project_root,
             task_id=state["task_id"],
@@ -636,10 +1188,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             dispatch_ref=dispatch_ref,
             profile=agent,
             sandbox=str(spawn_request.get("sandbox") or ""),
-            access={
-                "allowed_paths": required_lists["allowed_paths"],
-                "route_category": spawn_request.get("route_category"),
-            },
+            access={"route_category": spawn_request.get("route_category")},
         )
         briefing_file = f"delegations/{attempt_id}.{dispatch_ref}.briefing.md"
         briefing_path = _contained_path(task_dir, task_dir / briefing_file, "dispatch briefing")
@@ -654,29 +1203,116 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         requirements = _canonical_text_items(task_definition.get("requirements"), field="requirements")
         constraints = _canonical_text_items(task_definition.get("constraints"), field="constraints")
         scope = _canonical_text_items(task_definition.get("scope"), field="scope")
-        acceptance_criteria = _canonical_text_items(task_definition.get("acceptance_criteria"), field="acceptance_criteria")
-        verification = _canonical_text_items(task_definition.get("verification"), field="verification")
+        task_acceptance_criteria = _canonical_text_items(
+            task_definition.get("acceptance_criteria"), field="acceptance_criteria",
+        )
+        task_verification = _canonical_text_items(
+            task_definition.get("verification"), field="verification",
+        )
+        server_acceptance_obligations = _canonical_text_items(
+            task_definition.get("server_acceptance_obligations"),
+            field="server_acceptance_obligations",
+        )
+        server_verification_obligations = _canonical_text_items(
+            task_definition.get("server_verification_obligations"),
+            field="server_verification_obligations",
+        )
+        effective_acceptance, effective_verification = effective_result_contract(
+            task_acceptance_criteria, task_verification,
+            server_acceptance_obligations=server_acceptance_obligations,
+            server_verification_obligations=server_verification_obligations,
+        )
+        contract_digest = acceptance_contract_digest(
+            task_acceptance_criteria, task_verification,
+            server_acceptance_obligations=server_acceptance_obligations,
+            server_verification_obligations=server_verification_obligations,
+        )
+        if str(task_definition.get("acceptance_contract_digest") or "") != contract_digest:
+            raise ValueError("task acceptance contract digest is missing or inconsistent")
+        if facade_managed and (
+            list(params.get("task_acceptance_criteria") or []) != task_acceptance_criteria
+            or list(params.get("task_verification") or []) != task_verification
+            or list(params.get("server_acceptance_obligations") or [])
+            != server_acceptance_obligations
+            or list(params.get("server_verification_obligations") or [])
+            != server_verification_obligations
+            or str(params.get("acceptance_contract_digest") or "") != contract_digest
+        ):
+            raise ValueError("compiled assignment lost the immutable task acceptance contract")
+        assignment_acceptance = _canonical_text_items(
+            params.get("acceptance_criteria"), field="assignment acceptance_criteria",
+        )
+        assignment_verification = _canonical_text_items(
+            params.get("verification"), field="assignment verification",
+        )
+        acceptance_criteria = list(dict.fromkeys([
+            *effective_acceptance, *assignment_acceptance,
+        ]))
+        verification = list(dict.fromkeys([
+            *effective_verification, *assignment_verification,
+        ]))
         pause_conditions = _canonical_text_items(task_definition.get("pause_conditions"), field="pause_conditions")
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "requirements": requirements, "constraints": constraints, "scope": scope, "acceptance_criteria": acceptance_criteria, "verification": verification, "user_request": redact(task_definition.get("user_request", ""), 4000), "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs)}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": False, "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]], "governance_context": governance_context, "project_root": str(project_root), "internal_language": "en", "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "requirements": requirements, "constraints": constraints, "scope": scope, "acceptance_criteria": acceptance_criteria, "verification": verification, "user_request": redact(task_definition.get("user_request", ""), 4000), "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "predecessor_result_refs": predecessor_result_refs, "required_report_refs": required_report_refs, "optional_report_result_refs": optional_report_result_refs, "optional_report_refs": optional_report_refs, "report_catalog_digest": report_catalog_digest, "predecessor_results": predecessor_results, "predecessor_selection": {"required": len(predecessor_result_refs), "optional": len(optional_report_result_refs)}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": False, "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "governance_context": governance_context, "project_root": str(project_root), "internal_language": "en", "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package.update({
+            "task_acceptance_criteria": task_acceptance_criteria,
+            "task_verification": task_verification,
+            "server_acceptance_obligations": server_acceptance_obligations,
+            "server_verification_obligations": server_verification_obligations,
+            "acceptance_contract_digest": contract_digest,
+            "phase_kind": phase_kind,
+            "phase_ref": phase_ref,
+            "wave_ref": wave_ref,
+            "wave_index": wave_index,
+            "operation_kind": operation_kind,
+            "read_only": read_only,
+            "can_write": can_write,
+            "predecessor_wave_refs": predecessor_wave_refs,
+            "required_verification_kinds": required_verification_kinds,
+            "plan_revision": plan_revision,
+            "plan_digest": plan_digest,
+        })
+        if recovery_context is not None:
+            package.update({
+                "recovery_source_result_ref": recovery_source_result_ref,
+                "recovery_source_result_digest": recovery_source_result_digest,
+                "recovery_context": recovery_context,
+                "recovery_context_digest": recovery_context_digest,
+                "recovery_chain_result_refs": recovery_chain_result_refs,
+                "recovery_chain_result_digests": recovery_chain_result_digests,
+                "recovery_stage": str(params.get("recovery_stage") or ""),
+                "same_child_deficit_repair_consumed": bool(
+                    params.get("same_child_deficit_repair_consumed", False)
+                ),
+            })
+            package.update({
+                key: value for key, value in recovery_question_fields.items() if value
+            })
+        if governance_closure_basis is not None:
+            package["governance_closure_basis"] = governance_closure_basis
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = pause_conditions
         tracker = db_get_task_document(root, state["task_id"], "plan_tracker_current")
-        if isinstance(tracker, dict) and tracker.get("schema") == "cortex/plan-tracker/v1":
+        if isinstance(tracker, dict) and tracker.get("schema") == PLAN_TRACKER_SCHEMA:
             package["plan_tracker"] = {
                 "schema": tracker.get("schema"),
                 "revision": tracker.get("revision"),
-                "task_revision": tracker.get("task_revision"),
                 "items": [
                     {
                         "id": item.get("id"), "kind": item.get("kind"),
                         "status": item.get("status"), "order": item.get("order"),
                         "gates": list(item.get("gates") or []),
                         "depends_on": list(item.get("depends_on") or []),
+                        "phase_ref": item.get("phase_ref"),
+                        "wave_ref": item.get("wave_ref"),
+                        "wave_index": item.get("wave_index"),
+                        "attempt_id": item.get("attempt_id"),
                     }
                     for item in tracker.get("items", []) if isinstance(item, dict)
                 ],
             }
+            if gate != "governance_close":
+                package["plan_tracker"]["task_revision"] = tracker.get("task_revision")
         if isinstance(task_definition.get("follow_up"), dict):
             package["follow_up"] = sanitize_structured(task_definition["follow_up"])
         package["user_intent"] = {
@@ -704,15 +1340,18 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         task_contract = {
             "schema": "cortex/task-contract/v1",
             "task_id": state["task_id"],
-            "task_revision": state.get("task_revision") or state.get("revision"),
             "user_request": task_definition.get("user_request"),
             "current_user_intent": task_definition.get("current_user_intent"),
             "requirements": task_definition.get("requirements"),
             "constraints": task_definition.get("constraints"),
             "scope": task_definition.get("scope"),
-            "allowed_paths": task_definition.get("allowed_paths"),
             "acceptance_criteria": task_definition.get("acceptance_criteria"),
             "verification": task_definition.get("verification"),
+            "server_acceptance_obligations": task_definition.get("server_acceptance_obligations"),
+            "server_verification_obligations": task_definition.get("server_verification_obligations"),
+            "acceptance_contract_digest": contract_digest,
+            "result_contract_artifact_ref": task_definition.get("result_contract_artifact_ref"),
+            "result_contract_artifact_digest": task_definition.get("result_contract_artifact_digest"),
             "pause_conditions": task_definition.get("pause_conditions"),
             "resolved_user_decisions": all_resolved_user_decisions,
             # Governance is part of the immutable task contract for every
@@ -720,7 +1359,12 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             # dispatch assignment may compact this projection, but the full
             # policy/pipeline/manifest basis remains digest-bound here.
             "governance_context": governance_context,
+            "governance_closure_basis": governance_closure_basis,
         }
+        if gate != "governance_close":
+            task_contract["task_revision"] = state.get("task_revision") or state.get("revision")
+        else:
+            task_contract = _without_task_revision(task_contract)
         task_contract_artifact = store_immutable_artifact(
             task_dir, state["task_id"], kind="task_contract",
             title=task_contract_relative, mime_type="application/json",
@@ -812,6 +1456,8 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         package["intent_clarification_reason"] = redact(
             task_definition.get("intent_clarification_reason", ""), 500
         ) or None
+        if gate == "governance_close":
+            package = _without_task_revision(package)
         full_briefing = host_spawn_prompt(agent, package)
         briefing_bytes = len(full_briefing.encode("utf-8"))
         package["briefing_bytes"] = briefing_bytes
@@ -860,7 +1506,46 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         # host prompt are recreated after a restart/host-store relocation.
         package["spawn_request"] = _durable_spawn_request(spawn_request)
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "worker_authority": worker_authority, "dispatch_delivery_status": "pending", "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "plan_unit_file": compiled_relative, "plan_unit_digest": compiled_plan_digest, "spawn_request": _durable_spawn_request(spawn_request), **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "worker_authority": worker_authority, "dispatch_delivery_status": "pending", "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "plan_unit_file": compiled_relative, "plan_unit_digest": compiled_plan_digest, "spawn_request": _durable_spawn_request(spawn_request), **route, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "predecessor_result_refs": predecessor_result_refs, "required_report_refs": required_report_refs, "optional_report_result_refs": optional_report_result_refs, "optional_report_refs": optional_report_refs, "report_catalog_digest": report_catalog_digest, "visibility": "hidden", "user_facing": False, "user_owned_thread": False, "thread_environment": "local", "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "logical_delegation_key": logical_delegation_key, "assignment_lineage_digest": assignment_lineage_digest, "plan_assignment_lineage_digest": plan_assignment_lineage_digest, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "created_at": now()})
+        state["attempts"][-1].update({
+            "task_acceptance_criteria": task_acceptance_criteria,
+            "task_verification": task_verification,
+            "server_acceptance_obligations": server_acceptance_obligations,
+            "server_verification_obligations": server_verification_obligations,
+            "acceptance_contract_digest": contract_digest,
+            "phase_kind": phase_kind,
+            "phase_ref": phase_ref,
+            "wave_ref": wave_ref,
+            "wave_index": wave_index,
+            "operation_kind": operation_kind,
+            "read_only": read_only,
+            "can_write": can_write,
+            "predecessor_wave_refs": predecessor_wave_refs,
+            "required_verification_kinds": required_verification_kinds,
+            "plan_revision": plan_revision,
+            "plan_digest": plan_digest,
+            # Private occurrence authority captured before any dispatch,
+            # worker, result, or Stop projection can advance task state.
+            "assignment_task_revision": assignment_task_revision,
+        })
+        if recovery_context is not None:
+            state["attempts"][-1].update({
+                "recovery_source_result_ref": recovery_source_result_ref,
+                "recovery_source_result_digest": recovery_source_result_digest,
+                "recovery_context": recovery_context,
+                "recovery_context_digest": recovery_context_digest,
+                "recovery_chain_result_refs": recovery_chain_result_refs,
+                "recovery_chain_result_digests": recovery_chain_result_digests,
+                "recovery_stage": str(params.get("recovery_stage") or ""),
+                "same_child_deficit_repair_consumed": bool(
+                    params.get("same_child_deficit_repair_consumed", False)
+                ),
+            })
+            state["attempts"][-1].update({
+                key: value for key, value in recovery_question_fields.items() if value
+            })
+        if governance_closure_basis is not None:
+            state["attempts"][-1]["governance_closure_basis"] = governance_closure_basis
         db_put_worker_session(ledger_root(params), {
             "task_id": state["task_id"],
             "attempt_id": attempt_id,

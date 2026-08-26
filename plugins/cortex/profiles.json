@@ -1,6 +1,12 @@
 {
   "schema": "cortex/profile-contract/v1",
   "orchestration_protocol": "cortex/orchestration/v11",
+  "operation_kinds": {
+    "inspect": "Read and analyze bounded project evidence without changing project files.",
+    "modify": "Change bounded project artifacts and verify the scoped mutation.",
+    "verify": "Independently evaluate acceptance or findings without changing project files.",
+    "close": "Perform terminal non-mutating closure against complete predecessor evidence."
+  },
   "communication": {
     "default": "natural",
     "profiles": ["natural", "compact", "technical"],
@@ -31,77 +37,81 @@
     "user_facing": false,
     "return_route": "main_chat",
     "subdelegation": "forbidden_unless_explicitly_authorized",
-    "scope": "operate_only_within_delegated_ownership_and_allowed_paths",
+    "scope": "operate_only_within_delegated_ownership_and_delegated_workspace_scope",
     "external_side_effects": "require_explicit_main_agent_authorization_and_applicable_approval",
     "sensitive_data": "never_expose_or_persist_secrets_credentials_personal_data_or_secret_canaries",
     "question_route": "worker_publish_main_chat_ui_worker_poll",
-    "question_resume_contract": "One arbitrary-length Unicode question and one arbitrary-length Unicode user answer are bound to the same paused child. The coordinator presents the complete question and records the complete answer; the worker model decides whether that answer addresses the question. Never remove or recreate the exchange, infer authority, or replace the worker. Resume and complete the same attempt.",
-    "worker_question_pause_contract": "After durably publishing a required question, end the current native turn with an unambiguous durable-question marker. Do not begin project work, poll, or submit before same-child follow-up after the real user answer.",
+    "question_resume_contract": "One arbitrary-length Unicode question and one arbitrary-length Unicode user answer are bound to the same genuinely paused child. Publishing the question ends that native turn. The coordinator presents the complete question and records the real complete answer, then resumes the same child in a new native turn before it polls and interprets the answer. Never remove or recreate the exchange, infer authority, or replace the worker. Resume and complete the same attempt.",
+    "worker_question_pause_contract": "Only a genuine user decision classified by the active tool schema may become a durable user question. Internal technical conditions use server-owned recovery and never pause the user. After durably publishing one complete Unicode question, end the current native turn. Do not begin project work, poll, or submit until the real user answer is recorded and the same child is resumed in a new native turn. Native child prose is never parsed as question authority.",
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
-    "coordinator_operations": ["start_orchestration", "show_orchestration_question", "answer_orchestration_question", "read_worker_wave", "continue_orchestration", "inspect_orchestration", "inspect_orchestration_recovery", "recover_blocked_orchestration", "resume_orchestration", "stop_orchestration"],
-    "worker_operations": ["read_dispatch_briefing", "read_predecessor_result", "ask_worker_question", "poll_worker_question", "record_attempt_event", "submit_attempt", "repair_attempt"],
-    "normal_flow": ["start_orchestration", "read_dispatch_briefing", "ask_worker_question", "show_orchestration_question", "answer_orchestration_question", "poll_worker_question", "record_attempt_event", "submit_attempt", "read_worker_wave", "continue_orchestration"],
-    "recovery_operations": ["inspect_orchestration_recovery", "recover_blocked_orchestration", "resume_orchestration", "finalize_bootstrap_failure", "finalize_worker_failure", "repair_attempt"],
+    "coordinator_operations": ["start_orchestration", "show_orchestration_question", "answer_orchestration_question", "read_worker_wave", "revise_future_pipeline", "append_rework_wave", "continue_orchestration", "inspect_orchestration", "inspect_orchestration_recovery", "recover_blocked_orchestration", "resume_orchestration", "stop_orchestration"],
+    "worker_operations": ["read_dispatch_briefing", "refresh_worker_context", "list_worker_reports", "read_predecessor_result", "ask_worker_question", "poll_worker_question", "record_attempt_event", "record_worker_finding", "submit_attempt", "submit_governance_closure", "repair_attempt"],
+    "normal_flow": ["start_orchestration", "read_dispatch_briefing", "ask_worker_question", "show_orchestration_question", "answer_orchestration_question", "poll_worker_question", "record_attempt_event", "record_worker_finding", "submit_attempt", "submit_governance_closure", "read_worker_wave", "continue_orchestration"],
+    "recovery_operations": ["refresh_worker_context", "inspect_orchestration_recovery", "recover_blocked_orchestration", "resume_orchestration", "finalize_bootstrap_failure", "finalize_worker_failure", "repair_attempt"],
     "coordinator_action_semantics": {
       "invoke_dispatches": {
         "marker": "spawn_all_exact_before_wait",
-        "instruction": "Execute every exact returned native spawn_agent dispatch before any wait.",
+        "instruction": "Execute every exact returned native spawn_agent dispatch once, preserve each exact host-returned child identifier, then immediately wait_agent for those exact bound children. Do not read the worker wave before every child is terminal.",
         "wait_permission": false
       },
-      "wait_for_bound_workers": {
-        "marker": "wait_existing_returned_child_ids_only",
-        "instruction": "Request one explicit 300-second native wait on the exact existing child and never use the native default wait duration. If no marker returns, request another explicit 300-second native wait on that exact child. A timeout or no child message leaves it live and authorizes no canonical result read.",
-        "requires_child_ids": true,
+      "wait_for_wave": {
+        "marker": "wait_exact_returned_bound_children_before_read",
+        "instruction": "Use wait_agent with an explicit 300-second timeout and match its report to the exact child identifiers returned by the preceding native dispatches. No agents completed yet, timeout, an empty completion set, pendingInit, running, or any still-working child is nonterminal and requires another wait for the same exact child identifiers with no Cortex call. Terminal means only interrupted, completed, errored, shutdown, or notFound.",
         "per_wait_timeout_seconds": 300,
         "minimum_overall_wait_seconds": 300,
         "native_default_wait_allowed": false,
-        "repeat_after_no_marker": true,
+        "repeat_after_early_wakeup": true,
         "timeout_authorizes_result_read": false
       }
     },
-    "coordinator_wait_contract": "Request one explicit 300-second native wait on the exact child and never use the native default wait duration. On no marker, request another explicit 300-second native wait on that exact same child. A timeout, no child message, partial output, or unrelated event leaves the child live. Only a durable-question marker authorizes the exact-question user pause; only a terminal-completion marker authorizes a canonical wave or result read.",
+    "coordinator_wait_contract": "Use wait_agent cycles with an explicit 300-second timeout and match the report to every exact child identifier returned by the preceding native dispatches. No agents completed yet, timeout, an empty completion set, pendingInit, running, or any still-working child is nonterminal: immediately wait again for the same exact child identifiers and call no Cortex read or lifecycle tool. Terminal means only interrupted, completed, errored, shutdown, or notFound. Call read_worker_wave only after every exact bound child reports a terminal status; the backend independently verifies trusted terminal observation.",
+    "native_completion_observation_contract": "Native V2 spawn_agent starts every wave member and permits parallel workers. The host binds the first authorized worker call to its exact native child within the root session. SubagentStop is the exact terminal host authority. Ordinary timeout-bounded waits are progress control only, not completion evidence. Unknown, disabled, untrusted, or unverifiable hook state fails closed; this same-user local observation is not cryptographic proof or server attestation.",
+    "future_wave_adaptation_contract": "After reading a completed wave, make at most one evidence-frontier decision. Use revise_future_pipeline only for a material change to unexecuted future waves. Use append_rework_wave when a completed canonical result itself needs product correction; it appends mutating rework plus independent verification and never rewrites completed history. Technical transport, host-observation, model, or lifecycle recovery is server-owned replacement through Luna, Terra, then Sol for the exact assignment occurrence; Cortex retains the selected profile when compatible and otherwise resolves an operation-capable profile from the canonical registry. Exact replay is idempotent and stale or conflicting decisions are rejected. Dispatch every newly returned worker through native V2 spawn_agent, use ordinary generic waits, wait for matching terminal SubagentStop, read the canonical wave, then execute required governance closure before final handoff.",
     "capability_handoff": "Cortex issues separate opaque coordinator and worker authority. Preserve each byte-for-byte within its lifecycle and never expose, infer, reconstruct, or exchange it.",
-    "worker_bootstrap_recovery": "A worker requires the exact opaque authority supplied by its native dispatch before any Cortex call or project access. Recovery is only the server-returned same-child route; replacement and ambient reconstruction are forbidden.",
+    "worker_bootstrap_recovery": "A worker requires the exact opaque authority supplied by its native dispatch before any Cortex call or project access. Resolve the first callable from ALL_TOOLS by the unique bare semantic name or host-namespaced suffix `__read_dispatch_briefing`, using its Cortex briefing description only to disambiguate, then invoke the resolved callable exactly as its active public MCP declaration specifies, using the byte-for-byte server-issued authority wherever that declaration requires it. The active declaration is the sole source of call fields. ALL_TOOLS supplies name and description only; never require a local input schema or parameters object, and never assume the bare semantic name is directly callable. If its first operation arrives while trusted native spawn observation is still pending, retry only that same operation with bounded backoff until a finite deadline. A successful exact retry automatically clears the transient observer failure. Never access the project, switch operations, reconstruct authority, or spawn a replacement. At the deadline, follow only public fail-closed recovery.",
+    "briefing_terminal_authority": "Worker briefings state that SubagentStop is the exact terminal host authority. Host MCP thread metadata only binds the authorized worker call to its native child.",
     "worker_nonretryable_terminal": "A nonretryable child final is informational only. Follow the server-derived terminal route for the original assignment; never infer authority, read a result, continue, or replace the worker from child prose.",
     "dispatch_transport": "minimal_native_authority_to_one_scoped_immutable_briefing",
     "dispatch_briefing_scope": "assignment_scoped_api_read_only; never list or read other Cortex ledger paths",
     "dispatch_briefing_integrity": "server receipt and complete read are authoritative; no shell reread or local hash after success",
     "dispatch_briefing_evidence": "a successful full dispatch-briefing read creates a server-owned receipt",
     "predecessor_read_evidence": "a successful scoped predecessor-result read creates a server-owned receipt",
-    "worker_final_response": "After successful submission, end with the advertised terminal marker and make no further task-scoped Cortex calls. A nonretryable response also stops the affected route.",
-    "worker_lifecycle": "Read the dispatch briefing before project work, checkpoint material semantic evidence when useful, ask only material user questions, and submit once. After publishing a required question, end the native turn with its durable-question marker and wait for same-child follow-up before polling the real answer or continuing project work. Missing read evidence prevents completion; retry finalization only through server-directed same-child recovery.",
+    "worker_final_response": "After successful submission, end the native turn and make no further task-scoped Cortex calls. Native prose is not completion evidence. A nonretryable response also stops the affected route.",
+    "worker_lifecycle": "Read the dispatch briefing before project work, checkpoint material semantic evidence when useful, ask only material user questions, and submit once. Submit completed whenever the assignment protocol finished, including a negative product conclusion or unmet acceptance after recording its findings; reserve failed or blocked for a technical, infrastructure, environment, dependency, policy, or authorization condition that prevented completion. Publishing a required Unicode question ends the native turn and genuinely pauses the child. Only after the real answer is recorded does the same child resume in a new native turn to poll it or continue project work. Missing read evidence prevents completion; retry finalization only through server-directed same-worker recovery.",
     "result_projection": "the coordinator receives server-derived semantic result projections and renders any human-facing content from them",
     "worker_result_authority": "workers_publish_semantic_facts_only; Cortex derives lifecycle identity, provenance, workspace observations, and durable evidence",
     "semantic_only_rule": "Workers preserve issued opaque authority exactly where the current tool contract requires it. Cortex derives lifecycle and verification facts; host runtime identity is telemetry only.",
-    "worker_response_contract": "Follow only the lifecycle direction returned by the current tool. Retry the same operation once only when the response explicitly makes that safe, preserve opaque repair material unchanged, follow server-issued pagination until complete, and otherwise fail closed without private-state inspection.",
-    "operation_guidance": "Start creates one explicitly activated task and returns native dispatches. Workers read their immutable assignment, may checkpoint evidence, may ask one complete material question, and submit their semantic conclusion. A question pauses the native child turn until a real answer is recorded and the same child resumes to poll it. Coordinators request explicit 300-second native waits, repeat the same duration after no marker, present the complete question, record the complete user answer, and read the current worker wave only after terminal child completion. The active tool registry exclusively defines every call shape.",
+    "mutating_patch_safety": "Never split one file replacement into a destructive delete now and an add later. Use one atomic update or a non-destructive replacement. After any project-file edit or project-file patch tool failure, re-read the exact affected project files and their current state before any corrective mutation.",
+    "same_operation_request_recovery": "For same_operation recovery, preserve the complete prior request byte-for-byte except for the returned allowed_changes, then retry that complete request. Never send only the corrected value.",
+    "worker_response_contract": "Follow only the lifecycle direction returned by the current tool. Make only a deterministic same-operation correction explicitly made safe by public recovery. For a first operation pending trusted spawn observation, retry only that operation with bounded backoff until a finite deadline; never spawn a replacement. Preserve opaque repair material unchanged, follow server-issued pagination until complete, and otherwise fail closed without private-state inspection.",
+    "operation_guidance": "Start creates one explicitly activated task and returns native V2 dispatches; parallel wave members may run concurrently. Workers read their immutable assignment, may checkpoint evidence, may ask one complete Unicode question, and submit their semantic conclusion. Publishing a question ends the native turn; only after the real answer is recorded does the same child resume in a new turn to poll it. After every spawn_agent or followup_task, coordinators preserve the exact host-returned child identifiers and immediately use 300-second wait_agent cycles for those bound children. They call read_worker_wave only after every exact child is terminal. The host binds each authorized worker call to its exact native child; SubagentStop is terminal host authority. After reading completed-wave evidence, use revise_future_pipeline only for untouched future work and append_rework_wave only for product correction of a completed canonical result. Technical recovery remains server-owned Luna-to-Terra-to-Sol replacement with capability-safe profile resolution and is never expressed through either product operation. Every newly returned worker repeats native dispatch, exact-child wait, matching terminal Stop, and canonical wave read; execute required governance closure before final handoff. The active tool registry exclusively defines every call shape; trusted local hook observation is never inspected by the model.",
     "attachment_preflight": "Before starting, materialize referenced attachments or pasted text through the host input surface; preserve their material content rather than passing a path placeholder or paraphrasing it.",
     "activation_context": "Activation is host-owned context. The model selects the Cortex route but does not copy activation markers or skill links into worker calls; inactive launches fail closed.",
-    "caller_correctable_tool_errors": "retry_the_same_operation_once_only_when_the_public_response_explicitly_authorizes_a_deterministic_correction_otherwise_stop",
+    "caller_correctable_tool_errors": "deterministic_same_operation_correction_only; first_operation_pending_spawn_observation_uses_bounded_backoff_until_a_finite_deadline; otherwise_stop",
     "read_only_workspace_delta": "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified",
     "repository_intelligence": "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
     "codebase_memory_project_resolution": "derive_canonical_path_key_then_single_exact_root_list_fallback",
     "codebase_memory_project_key_algorithm": "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200",
     "codebase_memory_refresh_profiles": ["planner", "explorer", "architect", "database_architect"],
     "codebase_memory_fallback": "one_bounded_attempt_then_repository_native_tools_without_looping",
-    "retry_policy": {
-      "pipeline_rework": "unbounded_while_acceptance_or_findings_require_correction",
-      "terra_after_failed_attempts": 2,
-      "effort_by_prior_failures": {"1":"high","2":"xhigh","3+":"max"}
-    },
     "prompt_compaction_guidance": {
       "bootstrap_target_bytes": 1024,
       "ordinary_briefing_target_bytes": 12288,
       "harvest_briefing_target_bytes": 18432,
       "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule"
     },
-    "worker_completion": "Every profile publishes one semantic conclusion through submit_attempt; the active tool contract alone defines its arguments."
+    "worker_completion": "Every ordinary profile records each independently actionable review or verification finding before publishing one semantic conclusion through submit_attempt. A completed protocol submission does not override blocking acceptance findings. Before governance_close uses submit_governance_closure, it lists every authorized predecessor report, reads each report through read_predecessor_result, and consumes every page; embedded projections do not create server read receipts. The active tool contract alone defines every argument."
   },
   "profile_execution_contracts": {
-    "accessibility_engineer": {
+    "accessibility_auditor": {
       "inputs": "Read the delegated UI source, rendered states, semantics, interaction paths, accessibility configuration, and relevant tests.",
-      "project_artifacts": "Result-only by default: do not change project files unless the dispatch explicitly grants a writable accessibility fix.",
+      "project_artifacts": "Result-only: inspect and verify accessibility behavior without changing project files.",
       "completion": "Produce criterion-mapped findings with user impact, reproduction, evidence type, tested combinations, remediation, and residual risk."
+    },
+    "accessibility_fixer": {
+      "inputs": "Read the delegated accessibility findings, affected UI source, rendered states, semantics, interaction paths, design constraints, and relevant tests.",
+      "project_artifacts": "Create or update only delegated UI source, styles, and accessibility tests needed to remediate the accepted findings within the mission scope.",
+      "completion": "Deliver the scoped remediation with criterion-mapped changes, browser or assistive-technology evidence, focused tests, and residual risk."
     },
     "architect": {
       "inputs": "Read current code boundaries, interfaces, data flow, deployment configuration, tests, integrations, and existing decisions relevant to the mission.",
@@ -110,7 +120,7 @@
     },
     "backend_dev": {
       "inputs": "Read the delegated server entry points, domain logic, authorization, persistence, integration boundaries, and focused tests before editing.",
-      "project_artifacts": "Create or update only delegated backend source and test files inside allowed paths; generated clients, schemas, and migrations require explicit ownership.",
+      "project_artifacts": "Create or update only delegated backend source and test files within the mission scope; generated clients, schemas, and migrations require explicit ownership.",
       "completion": "Deliver the complete scoped behavior with focused positive, negative, boundary, authorization, persistence, and failure-path evidence."
     },
     "build_verification": {
@@ -125,7 +135,7 @@
     },
     "data_engineer": {
       "inputs": "Read delegated schemas, pipeline definitions, fixtures or safe metadata, delivery semantics, privacy constraints, and operational checks.",
-      "project_artifacts": "Create or update only delegated pipeline, migration, fixture, and test artifacts inside allowed paths; never access or mutate production data without authority.",
+      "project_artifacts": "Create or update only delegated pipeline, migration, fixture, and test artifacts within the mission scope; never access or mutate production data without authority.",
       "completion": "Deliver rerunnable data behavior with reconciliation, rejects and duplicates handling, quality checks, rollback or quarantine, and privacy-safe evidence."
     },
     "database_architect": {
@@ -135,12 +145,12 @@
     },
     "debugger": {
       "inputs": "Read and reproduce the exact symptom through the owning control and data path, logs, state, tests, and recent relevant changes.",
-      "project_artifacts": "Create or update only the smallest delegated root-cause fix and regression tests inside allowed paths; remove diagnostic residue.",
+      "project_artifacts": "Create or update only the smallest delegated root-cause fix and regression tests within the mission scope; remove diagnostic residue.",
       "completion": "Deliver reproduction, causal proof, rejected hypotheses, focused fix, failure-before or equivalent control, success-after evidence, and remaining uncertainty."
     },
     "devops_engineer": {
       "inputs": "Read delegated desired-state files, pipelines, modules, policies, secret boundaries, health checks, rollout, and rollback definitions.",
-      "project_artifacts": "Create or update only delegated infrastructure and delivery files inside allowed paths; never apply production, network, billing, or credentialed changes without authority.",
+      "project_artifacts": "Create or update only delegated infrastructure and delivery files within the mission scope; never apply production, network, billing, or credentialed changes without authority.",
       "completion": "Deliver declarative changes with lint, render, dry-run, plan, or local simulation evidence plus blast radius, rollout, rollback, and environment limits."
     },
     "explorer": {
@@ -150,22 +160,22 @@
     },
     "frontend_dev": {
       "inputs": "Read delegated components, routes, state and data flow, API contracts, design tokens, accessibility patterns, localization, and UI tests.",
-      "project_artifacts": "Create or update only delegated frontend source, styles, assets, and tests inside allowed paths; do not invent material backend or product contracts; record concrete open handoff items explicitly.",
+      "project_artifacts": "Create or update only delegated frontend source, styles, assets, and tests within the mission scope; do not invent material backend or product contracts; record concrete open handoff items explicitly.",
       "completion": "Deliver complete affected UI states with rendered or browser evidence, accessibility behavior, responsive coverage, tests, and compatibility gaps."
     },
     "fullstack_dev": {
       "inputs": "Read the complete delegated user path across client, transport, authorization, domain logic, persistence, response mapping, telemetry, and tests.",
-      "project_artifacts": "Create or update only the delegated cross-layer source and tests inside allowed paths; schema, security, and infrastructure expansion require explicit ownership.",
+      "project_artifacts": "Create or update only the delegated cross-layer source and tests within the mission scope; schema, security, and infrastructure expansion require explicit ownership.",
       "completion": "Deliver the coherent vertical slice with contract, partial-deployment, error, state, integration, and end-to-end verification evidence."
     },
     "general": {
       "inputs": "Read the owning code path, local contracts, repository instructions, conventions, and tests for the bounded non-specialist mission.",
-      "project_artifacts": "Create or update only delegated files inside allowed paths; stop when a narrower specialist or broader ownership is required.",
+      "project_artifacts": "Create or update only delegated files within the mission scope; stop when a narrower specialist or broader ownership is required.",
       "completion": "Deliver the complete bounded outcome with behavior, decisions, exact checks, uncertainty, residual risk, and the justified next owner."
     },
     "mobile_dev": {
       "inputs": "Read delegated platform architecture, lifecycle, navigation, state, threading, persistence, networking, permissions, accessibility, build configuration, and tests.",
-      "project_artifacts": "Create or update only delegated mobile source, resources, configuration, and tests inside allowed paths; signing and store operations require explicit authority.",
+      "project_artifacts": "Create or update only delegated mobile source, resources, configuration, and tests within the mission scope; signing and store operations require explicit authority.",
       "completion": "Deliver platform-idiomatic behavior across lifecycle and failure states with build or test evidence, permission and data effects, and device-matrix gaps."
     },
     "performance_engineer": {
@@ -180,12 +190,12 @@
     },
     "qa_engineer": {
       "inputs": "Read every delegated acceptance criterion, changed contract, implementation path, existing test layer, fixtures, and predecessor evidence.",
-      "project_artifacts": "Create or update only delegated test and fixture files inside allowed paths; do not weaken assertions or change product behavior unless explicitly owned.",
+      "project_artifacts": "Create or update only delegated test and fixture files within the mission scope; do not weaken assertions or change product behavior unless explicitly owned.",
       "completion": "Deliver a criteria-to-scenario matrix, deterministic tests, controls or failure reproduction, exact outcomes, coverage gaps, flakes, and residual quality risk."
     },
     "refactorer": {
       "inputs": "Read delegated callers, extension points, serialization, side effects, ordering, errors, performance-sensitive paths, and characterization tests.",
-      "project_artifacts": "Create or update only delegated source and characterization or regression tests inside allowed paths while preserving observable contracts.",
+      "project_artifacts": "Create or update only delegated source and characterization or regression tests within the mission scope while preserving observable contracts.",
       "completion": "Deliver the named structural improvement with preserved-contract evidence, exact checks, final-diff inspection, and remaining equivalence risk."
     },
     "security_auditor": {
@@ -195,7 +205,7 @@
     },
     "technical_writer": {
       "inputs": "Read delegated authoritative source, tests, configuration, existing durable docs, protected-text boundaries, and explicitly supplied predecessor result projections.",
-      "project_artifacts": "Create or update only delegated durable documentation inside allowed paths; never edit Cortex ledger artifacts or document unverified planned behavior as shipped.",
+      "project_artifacts": "Create or update only delegated durable documentation within the mission scope; never edit Cortex ledger artifacts or document unverified planned behavior as shipped.",
       "completion": "Deliver evidence-backed canonical docs with validated paths, anchors, commands, links, preserved manual text, resolved contradictions, and declared gaps."
     },
     "ux_designer": {
@@ -281,7 +291,7 @@
     },
     "implementation": {
       "objective": "Implement the smallest coherent, production-quality change that completes: {task_user_request}",
-      "ownership": "Own only the delegated implementation and its focused tests inside the allowed paths.",
+      "ownership": "Own only the delegated implementation and its focused tests within the mission scope.",
       "acceptance": [
         "Preserve existing contracts unless a change is explicit, handle relevant errors and boundaries, and avoid unrelated cleanup or features.",
         "Complete the requested behavior end to end within delegated ownership and publish any required cross-owner follow-up."
@@ -377,7 +387,7 @@
     },
     "close": {
       "objective": "Independently verify release readiness and completion evidence for: {task_user_request}",
-      "ownership": "Own final non-mutating build, test, packaging, installation, and completion proof; do not repair failures.",
+      "ownership": "Own final non-mutating build, test, packaging, installation, and completion evidence; do not repair failures.",
       "acceptance": [
         "Run authoritative checks for the affected surface and distinguish product failures from environment limitations.",
         "Confirm that claimed changes, tests, documentation, and handoff evidence are mutually consistent."
@@ -403,25 +413,32 @@
   "model_routing": {
     "schema": "cortex/model-routing/v1",
     "configured_default_model": "gpt-5.6-luna",
-    "security": {
-      "model": "gpt-5.6-sol",
-      "effort_by_complexity": {"C1":"medium","C2":"high","C3":"xhigh"}
-    },
-    "explorer": {
-      "model": "gpt-5.6-luna",
-      "effort_by_risk": {"low":"medium","moderate":"medium","high":"high","critical":"xhigh"}
-    },
-    "profile_classes": {
-      "efficient": ["build_verification","technical_writer"],
-      "adaptive": ["accessibility_engineer","backend_dev","data_engineer","debugger","devops_engineer","frontend_dev","fullstack_dev","general","mobile_dev","planner","qa_engineer","refactorer","ux_designer"],
-      "deep": ["architect","code_reviewer","database_architect","performance_engineer"]
-    },
-    "terra_task_kinds": ["architecture","code_review","concurrency","context_reconstruction","cross_layer_integration","database_architecture","debugging","diagnosis","integration_conflict","long_context","migration","performance","research","research_debugging","root_cause_analysis","runtime_investigation"],
-    "luna_bounded_effort_by_complexity": {"C1":"high","C2":"xhigh","C3":"max"},
-    "luna_efficient_effort_by_complexity": {"C1":"high","C2":"high","C3":"xhigh"},
-    "terra_effort_by_complexity": {"C1":"high","C2":"high","C3":"xhigh"},
-    "effort_floor_by_risk": {"low":"medium","moderate":"medium","high":"high","critical":"xhigh"},
-    "max_policy": "complex_work_or_repeated_rework"
+    "model_capabilities": [
+      {"model": "gpt-5.6-luna", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+      {"model": "gpt-5.6-terra", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+      {"model": "gpt-5.6-sol", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]}
+    ],
+    "selection_policy": {
+      "governance_scope": "C1, C2, and C3 select the task governance baseline only; they do not select one model or effort for every worker.",
+      "principle": "The coordinator chooses model and reasoning effort independently for every worker. Prefer Luna by default, Terra only for genuinely complex non-security work, and recommend Sol only for security work; explicit supported coordinator choices remain authoritative.",
+      "routes": [
+        {
+          "model": "gpt-5.6-luna",
+          "recommended_effort": "high",
+          "choose_for": "Default bounded work, including discovery, ordinary implementation, QA, and deterministic rechecks."
+        },
+        {
+          "model": "gpt-5.6-terra",
+          "recommended_effort": "high",
+          "choose_for": "Genuinely complex non-security implementation, cross-cutting analysis, or demanding review."
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "recommended_effort": "high",
+          "choose_for": "Security profiles and security work only."
+        }
+      ]
+    }
   },
   "implementation_routing": {
     "fallback": "general",
@@ -460,6 +477,14 @@
         "any": ["refactor", "behavior-preserving", "preserve behavior", "no behavior change", "without changing behavior", "рефактор", "без изменения поведения", "не меняя поведение"]
       },
       {
+        "profile": "accessibility_fixer",
+        "reason": "The task explicitly requires source remediation of an accepted accessibility finding.",
+        "all": [
+          ["accessibility", "a11y", "wcag", "screen reader", "keyboard", "focus", "contrast", "доступност"],
+          ["fix", "repair", "remediate", "correct", "исправ", "почин"]
+        ]
+      },
+      {
         "profile": "frontend_dev",
         "reason": "The task explicitly concerns browser UI implementation without a server-side ownership signal.",
         "any": ["frontend", "front-end", "browser", "web ui", "client-side", "react", "vue", "svelte", "css", "component", "фронтенд", "браузер", "верстк", "интерфейс", "компонент"]
@@ -472,26 +497,27 @@
     ]
   },
   "profiles": [
-    {"name":"accessibility_engineer","filename":"accessibility-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["accessibility"],"description":"Read-only accessibility specialist for WCAG audits, keyboard navigation, and screen-reader risks.","select_when":"Accessibility conformance or assistive-technology behavior needs independent analysis.","avoid_when":"General visual design or production UI implementation is the primary task."},
-    {"name":"architect","filename":"architect.toml","sandbox":"read-only","route_category":"automatic","gates":["architecture"],"description":"Read-only system architect for component boundaries, data flow, API contracts, and architecture decisions.","select_when":"System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided.","avoid_when":"The design is already settled and the remaining work is bounded implementation."},
-    {"name":"backend_dev","filename":"backend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Backend implementation specialist for APIs, business logic, persistence, and server-side tests.","select_when":"A bounded server, API, service, business-logic, or persistence change must be implemented.","avoid_when":"The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery."},
-    {"name":"build_verification","filename":"build-verification.toml","sandbox":"read-only","route_category":"automatic","gates":["qa","close"],"description":"Read-only build and test verifier that records exact command outcomes without changing source files.","select_when":"Independent non-mutating build, test, packaging, installation, or release-readiness proof is required.","avoid_when":"A failing check must be diagnosed or repaired."},
-    {"name":"code_reviewer","filename":"code-reviewer.toml","sandbox":"read-only","route_category":"automatic","gates":["review","governance_activation","governance_close"],"description":"Read-only code reviewer for correctness, regressions, security, performance, and missing tests.","select_when":"A completed or proposed change needs independent defect-focused review.","avoid_when":"The primary need is implementation, planning, or broad repository discovery."},
-    {"name":"data_engineer","filename":"data-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Data engineering specialist for ETL, migrations, validation, rollbacks, and data-integrity checks.","select_when":"Data movement, transformation, backfill, migration execution, or integrity validation must be implemented.","avoid_when":"Only database schema design is needed, with no data-operation implementation."},
-    {"name":"database_architect","filename":"database-architect.toml","sandbox":"read-only","route_category":"automatic","gates":["database_architecture"],"description":"Read-only database architect for schemas, indexes, migrations, query plans, and compatibility risks.","select_when":"Schema, index, query-plan, migration, locking, or rollback design needs specialist review.","avoid_when":"The approved design only needs migration or data-pipeline implementation."},
-    {"name":"debugger","filename":"debugger.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Debugging specialist that reproduces failures, proves root cause, implements focused fixes, and verifies regressions.","select_when":"A failure must be reproduced and its root cause proven before a focused repair.","avoid_when":"The desired behavior and implementation path are already known."},
-    {"name":"devops_engineer","filename":"devops-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Infrastructure specialist for Docker, CI/CD, Kubernetes, Terraform, deployment safety, and operational diagnostics.","select_when":"Infrastructure, delivery, deployment, runtime configuration, or operational automation must change.","avoid_when":"The task is application implementation without delivery or runtime ownership."},
-    {"name":"explorer","filename":"explorer.toml","sandbox":"read-only","route_category":"automatic","gates":["discover"],"description":"Read-only codebase investigator that maps execution paths, ownership, dependencies, and relevant files.","select_when":"Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.","avoid_when":"The task requires design decisions or source changes."},
-    {"name":"frontend_dev","filename":"frontend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.","select_when":"A browser UI, component, client state, styling, or frontend test change must be implemented.","avoid_when":"The task spans material server ownership or is only interaction design."},
-    {"name":"fullstack_dev","filename":"fullstack-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.","select_when":"One coherent change spans both browser-facing and server-facing contracts.","avoid_when":"The work can be cleanly owned by one narrower frontend or backend specialist."},
-    {"name":"general","filename":"general.toml","sandbox":"workspace-write","route_category":"automatic","gates":["implementation"],"description":"General-purpose agent for bounded research, analysis, or implementation when no specialty fits.","select_when":"The work is bounded but no specialist profile has a justified capability match.","avoid_when":"A narrower supported specialist clearly owns the task."},
-    {"name":"mobile_dev","filename":"mobile-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.","select_when":"An iOS, Android, React Native, Flutter, or native mobile change must be implemented.","avoid_when":"The task is browser web UI or a platform-neutral backend."},
-    {"name":"performance_engineer","filename":"performance-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["performance"],"description":"Read-only performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.","select_when":"Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis.","avoid_when":"The bottleneck is already proven and only an approved implementation remains."},
-    {"name":"planner","filename":"planner.toml","sandbox":"read-only","route_category":"automatic","gates":["scope","plan"],"description":"Read-only scope and final-plan specialist for discovery partitioning, evidence synthesis, implementation decomposition, requirement coverage, dependencies, risks, and delegation.","select_when":"Early discovery domains or a decision-complete final plan, dependency order, ownership map, or acceptance matrix is needed.","avoid_when":"The task is a simple bounded execution step or requires editing project files."},
-    {"name":"qa_engineer","filename":"qa-engineer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["qa"],"description":"QA specialist for acceptance-criteria coverage, automated tests, reproduction, and quality-risk evidence.","select_when":"Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created.","avoid_when":"Only a non-mutating final command run or source-code review is needed."},
-    {"name":"refactorer","filename":"refactorer.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Refactoring specialist for safe structural improvements that preserve public behavior and contracts.","select_when":"The explicit goal is behavior-preserving structural improvement with regression proof.","avoid_when":"New behavior, unresolved defects, or architecture decisions dominate the task."},
-    {"name":"security_auditor","filename":"security-auditor.toml","sandbox":"read-only","route_category":"automatic","gates":["security"],"description":"Read-only security auditor for authentication, authorization, secrets, crypto, dependency, and data-protection risks.","select_when":"Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review.","avoid_when":"The task is to implement a known security fix rather than audit it."},
-    {"name":"technical_writer","filename":"technical-writer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["documentation"],"description":"Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.","select_when":"Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs.","avoid_when":"Facts are unverified or production code changes are still required."},
-    {"name":"ux_designer","filename":"ux-designer.toml","sandbox":"read-only","route_category":"automatic","gates":["ux"],"description":"Read-only UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.","select_when":"User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed.","avoid_when":"The design is settled and production frontend code must be written."}
+    {"name":"accessibility_auditor","filename":"accessibility-auditor.toml","sandbox":"read-only","operation_kinds":["inspect","verify"],"capability_family":"accessibility","route_category":"automatic","gates":["accessibility"],"description":"Read-only accessibility auditor for WCAG conformance, keyboard navigation, and assistive-technology risks.","select_when":"Accessibility conformance or assistive-technology behavior needs independent inspection or verification.","avoid_when":"Known accessibility defects need source remediation."},
+    {"name":"accessibility_fixer","filename":"accessibility-fixer.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"capability_family":"accessibility","route_category":"manual","gates":[],"description":"Accessibility remediation specialist for semantic UI, keyboard, focus, contrast, responsive, and assistive-technology fixes.","select_when":"Accepted accessibility findings require bounded production UI and test changes.","avoid_when":"The task is an independent accessibility audit with no source changes."},
+    {"name":"architect","filename":"architect.toml","sandbox":"read-only","operation_kinds":["inspect"],"route_category":"automatic","gates":["architecture"],"description":"Read-only system architect for component boundaries, data flow, API contracts, and architecture decisions.","select_when":"System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided.","avoid_when":"The design is already settled and the remaining work is bounded implementation."},
+    {"name":"backend_dev","filename":"backend-dev.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Backend implementation specialist for APIs, business logic, persistence, and server-side tests.","select_when":"A bounded server, API, service, business-logic, or persistence change must be implemented.","avoid_when":"The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery."},
+    {"name":"build_verification","filename":"build-verification.toml","sandbox":"read-only","operation_kinds":["inspect","verify","close"],"reliability_fallback_for":["verify"],"route_category":"automatic","gates":["qa","close"],"description":"Read-only build and test verifier that records exact command outcomes without changing source files.","select_when":"Independent non-mutating build, test, packaging, installation, or release-readiness proof is required.","avoid_when":"A failing check must be diagnosed or repaired."},
+    {"name":"code_reviewer","filename":"code-reviewer.toml","sandbox":"read-only","operation_kinds":["inspect","verify","close"],"reliability_fallback_for":["close"],"route_category":"automatic","gates":["review","governance_activation","governance_close"],"description":"Read-only code reviewer for correctness, regressions, security, performance, and missing tests.","select_when":"A completed or proposed change needs independent defect-focused review.","avoid_when":"The primary need is implementation, planning, or broad repository discovery."},
+    {"name":"data_engineer","filename":"data-engineer.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Data engineering specialist for ETL, migrations, validation, rollbacks, and data-integrity checks.","select_when":"Data movement, transformation, backfill, migration execution, or integrity validation must be implemented.","avoid_when":"Only database schema design is needed, with no data-operation implementation."},
+    {"name":"database_architect","filename":"database-architect.toml","sandbox":"read-only","operation_kinds":["inspect","verify"],"route_category":"automatic","gates":["database_architecture"],"description":"Read-only database architect for schemas, indexes, migrations, query plans, and compatibility risks.","select_when":"Schema, index, query-plan, migration, locking, or rollback design needs specialist review.","avoid_when":"The approved design only needs migration or data-pipeline implementation."},
+    {"name":"debugger","filename":"debugger.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Debugging specialist that reproduces failures, proves root cause, implements focused fixes, and verifies regressions.","select_when":"A failure must be reproduced and its root cause proven before a focused repair.","avoid_when":"The desired behavior and implementation path are already known."},
+    {"name":"devops_engineer","filename":"devops-engineer.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Infrastructure specialist for Docker, CI/CD, Kubernetes, Terraform, deployment safety, and operational diagnostics.","select_when":"Infrastructure, delivery, deployment, runtime configuration, or operational automation must change.","avoid_when":"The task is application implementation without delivery or runtime ownership."},
+    {"name":"explorer","filename":"explorer.toml","sandbox":"read-only","operation_kinds":["inspect"],"reliability_fallback_for":["inspect"],"route_category":"automatic","gates":["discover"],"description":"Read-only codebase investigator that maps execution paths, ownership, dependencies, and relevant files.","select_when":"Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.","avoid_when":"The task requires design decisions or source changes."},
+    {"name":"frontend_dev","filename":"frontend-dev.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.","select_when":"A browser UI, component, client state, styling, or frontend test change must be implemented.","avoid_when":"The task spans material server ownership or is only interaction design."},
+    {"name":"fullstack_dev","filename":"fullstack-dev.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.","select_when":"One coherent change spans both browser-facing and server-facing contracts.","avoid_when":"The work can be cleanly owned by one narrower frontend or backend specialist."},
+    {"name":"general","filename":"general.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"reliability_fallback_for":["modify"],"route_category":"automatic","gates":["implementation"],"description":"General-purpose agent for bounded research, analysis, or implementation when no specialty fits.","select_when":"The work is bounded but no specialist profile has a justified capability match.","avoid_when":"A narrower supported specialist clearly owns the task."},
+    {"name":"mobile_dev","filename":"mobile-dev.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.","select_when":"An iOS, Android, React Native, Flutter, or native mobile change must be implemented.","avoid_when":"The task is browser web UI or a platform-neutral backend."},
+    {"name":"performance_engineer","filename":"performance-engineer.toml","sandbox":"read-only","operation_kinds":["inspect","verify"],"route_category":"automatic","gates":["performance"],"description":"Read-only performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.","select_when":"Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis.","avoid_when":"The bottleneck is already proven and only an approved implementation remains."},
+    {"name":"planner","filename":"planner.toml","sandbox":"read-only","operation_kinds":["inspect"],"route_category":"automatic","gates":["scope","plan"],"description":"Read-only scope and final-plan specialist for discovery partitioning, evidence synthesis, implementation decomposition, requirement coverage, dependencies, risks, and delegation.","select_when":"Early discovery domains or a decision-complete final plan, dependency order, ownership map, or acceptance matrix is needed.","avoid_when":"The task is a simple bounded execution step or requires editing project files."},
+    {"name":"qa_engineer","filename":"qa-engineer.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"automatic","gates":["qa"],"description":"QA specialist for acceptance-criteria coverage, automated tests, reproduction, and quality-risk evidence.","select_when":"Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created.","avoid_when":"Only a non-mutating final command run or source-code review is needed."},
+    {"name":"refactorer","filename":"refactorer.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"manual","gates":[],"description":"Refactoring specialist for safe structural improvements that preserve public behavior and contracts.","select_when":"The explicit goal is behavior-preserving structural improvement with regression proof.","avoid_when":"New behavior, unresolved defects, or architecture decisions dominate the task."},
+    {"name":"security_auditor","filename":"security-auditor.toml","sandbox":"read-only","operation_kinds":["inspect","verify"],"route_category":"automatic","gates":["security"],"description":"Read-only security auditor for authentication, authorization, secrets, crypto, dependency, and data-protection risks.","select_when":"Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review.","avoid_when":"The task is to implement a known security fix rather than audit it."},
+    {"name":"technical_writer","filename":"technical-writer.toml","sandbox":"workspace-write","operation_kinds":["inspect","modify","verify"],"route_category":"automatic","gates":["documentation"],"description":"Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.","select_when":"Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs.","avoid_when":"Facts are unverified or production code changes are still required."},
+    {"name":"ux_designer","filename":"ux-designer.toml","sandbox":"read-only","operation_kinds":["inspect"],"route_category":"automatic","gates":["ux"],"description":"Read-only UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.","select_when":"User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed.","avoid_when":"The design is settled and production frontend code must be written."}
   ]
 }

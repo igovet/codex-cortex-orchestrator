@@ -265,10 +265,26 @@ def validate_submission(
     _validate_schema(payload, schema, "$", diagnostics)
     action = payload.get("action")
     submit = action == "submit"
+    governance_closure = action == "governance_closure"
     repair_action = action == "repair"
-    if submit:
+    if submit or governance_closure:
         if not isinstance(payload.get("report"), str) or not payload["report"].strip():
-            _issue(diagnostics, "$.report", "submit requires a non-empty report", "validation_required")
+            _issue(diagnostics, "$.report", "submission requires a non-empty report", "validation_required")
+        if governance_closure:
+            outcome = payload.get("closure_outcome")
+            gaps = payload.get("blocking_gaps_text")
+            if outcome == "verified" and isinstance(gaps, str) and gaps != "":
+                _issue(
+                    diagnostics,
+                    "$.blocking_gaps_text",
+                    "verified closure requires blocking_gaps_text to be exactly the empty string",
+                )
+            elif outcome == "blocked" and isinstance(gaps, str) and gaps == "":
+                _issue(
+                    diagnostics,
+                    "$.blocking_gaps_text",
+                    "blocked closure requires non-empty blocking_gaps_text",
+                )
     elif repair_action:
         _validate_patch_integrity(payload, diagnostics)
     else:
@@ -279,6 +295,8 @@ def validate_submission(
     result["mode"] = "repair" if repair_action else "full"
     if submit:
         result["kind"] = "report"
+    elif governance_closure:
+        result["kind"] = "governance_closure"
     return result
 
 

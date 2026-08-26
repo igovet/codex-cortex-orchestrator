@@ -101,7 +101,7 @@ class AttemptContract:
             "briefing_digest": briefing_digest,
             "result_baseline_ref": None,
             "result_baseline_digest": None,
-            "context_result_refs": refs,
+            "predecessor_result_refs": refs,
             "status": "running",
         })
         attempt_protocol.ledger_db.update_task_state(self.root, state, event="attempt_contract_started", detail=attempt_id)
@@ -174,7 +174,7 @@ class AttemptContract:
         )
         if attempt is None:
             raise ValueError("attempt contract attempt is unavailable")
-        required_predecessors = set(str(item) for item in attempt.get("context_result_refs") or [])
+        required_predecessors = set(str(item) for item in attempt.get("predecessor_result_refs") or [])
         received_predecessors = set((receipts.get("predecessor_receipts") or {}).keys())
         prior_finalization_failure = any(
             event.get("kind") == "finalization_failed" for event in self.events(attempt_id)

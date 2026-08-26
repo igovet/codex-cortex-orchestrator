@@ -8,7 +8,6 @@ the stdio entrypoint remains the single composition root.
 """
 from __future__ import annotations
 
-import posixpath
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ bind_symbols(
         "_active_facade_attempts_missing_finalized_results",
         "_attempts_missing_result_validation",
         "_attempts_with_unresolved_canonical_results",
+        "_governance_obligations_for_gate",
         "_validated_evidence_records",
         "active_gates",
         "append_pipeline_change",
@@ -122,7 +122,51 @@ def _resolve_active_gate(
     # The caller turns the empty resolution into a non-mutating,
     # self-correcting ``gate_mismatch`` response below.
     gate = requested_gate if requested_gate in current_wave else ""
+    occurrence = _active_occurrence_identity(state, gate) if gate else None
+    if occurrence is not None:
+        for field in (
+            "occurrence_key", "wave_ref", "phase_ref", "assignment_lineage_digest",
+        ):
+            supplied = str(params.get(field) or "").strip()
+            if supplied and supplied != str(occurrence.get(field) or ""):
+                raise ValueError("gate transition identity does not match the active occurrence")
     return requested_gate, gate, revision_correction
+
+
+def _active_occurrence_identity(state: dict[str, Any], gate: str) -> dict[str, Any] | None:
+    """Return the exact current compiled occurrence for a semantic gate."""
+    completed = set(state.get("completed_orchestration_wave_ids") or [])
+    skipped = set(state.get("skipped_orchestration_wave_ids") or [])
+    for occurrence in state.get("orchestration_wave_occurrences") or []:
+        if not isinstance(occurrence, dict):
+            continue
+        wave_ref = str(occurrence.get("wave_ref") or occurrence.get("wave_id") or "")
+        phase_ref = str(occurrence.get("phase_ref") or "")
+        phase_kind = str(occurrence.get("phase_kind") or "")
+        gates = [str(item) for item in occurrence.get("gates") or []]
+        if wave_ref in completed or wave_ref in skipped:
+            continue
+        if gate in gates and wave_ref and phase_ref:
+            occurrence_key = str(occurrence.get("occurrence_key") or "").strip()
+            lineage_digest = str(occurrence.get("assignment_lineage_digest") or "").strip()
+            lineages = occurrence.get("assignment_lineages")
+            if (
+                not occurrence_key
+                or not lineage_digest
+                or not isinstance(lineages, list)
+                or not lineages
+            ):
+                raise ValueError("active occurrence lacks compiled assignment authority")
+            return {
+                **occurrence,
+                "wave_ref": wave_ref,
+                "phase_ref": phase_ref,
+                "phase_kind": phase_kind,
+                "occurrence_key": occurrence_key,
+                "assignment_lineage_digest": lineage_digest,
+            }
+        break
+    return None
 
 
 def _gate_mismatch(
@@ -164,7 +208,7 @@ def _validate_skip(
             revision_correction,
             reason="governance_skip_recommended",
             gate=gate,
-            recommended_next="record_delegation",
+            recommended_next="continue_orchestration",
             warning="The selected gate is conventionally recommended by governance, but the coordinator chose to skip it.",
         )
     if state.get("require_delegation") and not str(params.get("skip_reason", "")).strip():
@@ -173,7 +217,7 @@ def _validate_skip(
             revision_correction,
             reason="skip_reason_missing",
             gate=gate,
-            recommended_next="record_delegation_if_needed",
+            recommended_next="continue_orchestration",
             warning="C2/C3 normally records a reason for a skipped gate; the transition remains executable.",
         )
     return None
@@ -182,13 +226,44 @@ def _validate_skip(
 def _gate_inputs(
     task_dir: Path, state: dict[str, Any], gate: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    occurrence = _active_occurrence_identity(state, gate)
+    occurrence_slots = {
+        (
+            str(item.get("logical_delegation_key") or ""),
+            str(item.get("plan_assignment_lineage_digest") or ""),
+        )
+        for item in (occurrence or {}).get("assignment_lineages") or []
+        if isinstance(item, dict)
+    }
+
+    def current_attempt(item: dict[str, Any]) -> bool:
+        if item.get("gate") != gate or item.get("invalidated"):
+            return False
+        if occurrence is None:
+            return not state.get("orchestration_wave_occurrences")
+        return (
+            str(item.get("wave_ref") or "") == occurrence["wave_ref"]
+            and str(item.get("orchestration_wave_id") or "") == occurrence["wave_ref"]
+            and str(item.get("phase_ref") or "") == occurrence["phase_ref"]
+            and str(item.get("phase_kind") or "") == occurrence["phase_kind"]
+            and (
+                str(item.get("logical_delegation_key") or ""),
+                str(item.get("plan_assignment_lineage_digest") or ""),
+            ) in occurrence_slots
+        )
+
     gate_evidence = [
         item for item in _validated_evidence_records(task_dir, state)
         if item.get("gate") == gate and not item.get("invalidated")
+        and any(
+            current_attempt(attempt)
+            and str(attempt.get("attempt_id") or "") == str(item.get("attempt_id") or "")
+            for attempt in state.get("attempts") or [] if isinstance(attempt, dict)
+        )
     ]
     gate_attempts = [
         item for item in state.get("attempts", [])
-        if item.get("gate") == gate and not item.get("invalidated")
+        if isinstance(item, dict) and current_attempt(item)
     ]
     non_terminal_attempts = [
         item for item in gate_attempts
@@ -248,7 +323,7 @@ def _validate_pass_evidence(
             revision_correction,
             reason="evidence_recommended",
             gate=gate,
-            recommended_next="record_delegation" if not gate_attempts else "record_evidence",
+            recommended_next="continue_orchestration",
             warning="The gate has no positive evidence; the coordinator may continue, and the omission is recorded as a risk.",
             gate_correction=(
                 {"requested": requested_gate, "used": gate}
@@ -260,17 +335,17 @@ def _validate_pass_evidence(
         )
     if any(
         item.get("kind") == "command"
-        and (item.get("exit_code") != 0 or not item.get("verified_execution"))
+        and item.get("exit_code") not in (0, None)
         for item in gate_evidence
     ):
-        raise ValueError("cannot pass a gate with failed or self-attested command evidence; use execute_verification_command")
+        raise ValueError("cannot pass a gate with a worker-attested failed command")
     pending_attempt_ids = _active_facade_attempts_missing_finalized_results(
         task_dir, gate_attempts
     )
     if pending_attempt_ids:
         # Evidence can be recorded while a worker is running (for example a
         # server-observed verification command), but it cannot turn that live
-        # worker into a pass. The exact child must publish and finalize its
+        # worker into a pass. The native child must publish and finalize its
         # AttemptResult first; otherwise `_apply_transition` would coerce the
         # mutable attempt projection to `passed` without canonical proof.
         return [], _recoverable(
@@ -293,13 +368,12 @@ def _validate_pass_evidence(
     if gate in _CLOSURE_VERIFIER_GATES:
         unresolved = _attempts_with_unresolved_canonical_results(task_dir, passed_attempts)
         if unresolved:
-            return gate_evidence, _policy_advisory(
+            return gate_evidence, _recoverable(
                 state,
                 revision_correction,
                 reason="closure_attempt_unresolved",
                 gate=gate,
-                recommended_next="rework_current_gate",
-                warning="A closure result still reports unresolved work; the coordinator may continue, but should schedule corrective work.",
+                next_action="rework_current_gate",
                 candidate_attempt_ids=unresolved,
             )
     if not state.get("require_delegation"):
@@ -311,7 +385,7 @@ def _validate_pass_evidence(
                 revision_correction,
                 reason="documentation_attempt_required",
                 gate=gate,
-                recommended_next="record_delegation",
+                recommended_next="continue_orchestration",
                 warning="Documentation evidence is recommended for this governance level.",
             )
         return gate_evidence, _policy_advisory(
@@ -319,7 +393,7 @@ def _validate_pass_evidence(
             revision_correction,
             reason="delegation_recommended",
             gate=gate,
-            recommended_next="record_delegation",
+            recommended_next="continue_orchestration",
             warning="Delegation is recommended for C2/C3, but it is not a backend authorization requirement.",
         )
     missing = [
@@ -453,11 +527,11 @@ def _validate_handoff_and_close(
     if not state.get("reassessment_receipts"):
         advisories.append({"reason": "reassessment_recommended", "warning": "A reassessment receipt is recommended before close.", "recommended_next": "record_reassessment"})
     if not any(
-        item.get("kind") == "command" and item.get("verified_execution")
-        and item.get("exit_code") == 0
+        item.get("evidence_class") == "worker_attested"
+        and str(item.get("attempt_result_ref") or "")
         for item in current_attempt_evidence
     ):
-        advisories.append({"reason": "verification_recommended", "warning": "Server-observed verification evidence is recommended before close.", "recommended_next": "record_evidence"})
+        advisories.append({"reason": "verification_recommended", "warning": "A canonical-result-bound worker verification attestation is recommended before close.", "recommended_next": "record_evidence"})
     manifest = state.get("final_manifest_receipt")
     if not manifest or not manifest.get("complete"):
         advisories.append({"reason": "manifest_capture_incomplete", "warning": "The handoff manifest is partial or incomplete; dispatch a corrective manifest recapture.", "recommended_next": "dispatch_manifest_recapture"})
@@ -495,19 +569,69 @@ def _apply_transition(
     gate: str,
     outcome: str,
     gate_evidence: list[dict[str, Any]],
+    gate_attempts: list[dict[str, Any]],
 ) -> tuple[bool, list[dict[str, Any]]]:
-    state["gates"][gate] = {
+    occurrence = _active_occurrence_identity(state, gate)
+    receipt = {
         "outcome": outcome,
         "at": now(),
         "summary": redact(params.get("summary", ""), 2000),
         "skip_reason": redact(params.get("skip_reason", ""), 2000),
         "evidence_ids": [item["evidence_id"] for item in gate_evidence],
     }
+    state["gates"][gate] = receipt
+    if occurrence is not None:
+        occurrence_gate_key = f"{occurrence['occurrence_key']}:{gate}"
+        state.setdefault("gate_occurrences", {})[occurrence_gate_key] = {
+            **receipt,
+            "gate": gate,
+            "phase_kind": occurrence["phase_kind"],
+            "phase_ref": occurrence["phase_ref"],
+            "wave_ref": occurrence["wave_ref"],
+            "occurrence_key": occurrence["occurrence_key"],
+            "assignment_lineage_digest": occurrence["assignment_lineage_digest"],
+            "assignments": sorted(
+                [
+                    {
+                        "attempt_id": str(item.get("attempt_id") or ""),
+                        "attempt_result_ref": str(item.get("attempt_result_ref") or ""),
+                        "logical_delegation_key": str(item.get("logical_delegation_key") or ""),
+                        "plan_assignment_lineage_digest": str(item.get("plan_assignment_lineage_digest") or ""),
+                        "protocol_status": str(item.get("protocol_status") or ""),
+                        "acceptance_status": str(item.get("acceptance_status") or ""),
+                    }
+                    for item in gate_attempts
+                ],
+                key=lambda item: (
+                    item["logical_delegation_key"],
+                    item["plan_assignment_lineage_digest"],
+                    item["attempt_id"],
+                ),
+            ),
+        }
+
+    def current_attempt(attempt: dict[str, Any]) -> bool:
+        if attempt.get("gate") != gate or attempt.get("invalidated"):
+            return False
+        if occurrence is None:
+            return not state.get("orchestration_wave_occurrences")
+        return (
+            str(attempt.get("wave_ref") or "") == occurrence["wave_ref"]
+            and str(attempt.get("phase_ref") or "") == occurrence["phase_ref"]
+            and any(
+                str(attempt.get("logical_delegation_key") or "")
+                == str(item.get("logical_delegation_key") or "")
+                and str(attempt.get("plan_assignment_lineage_digest") or "")
+                == str(item.get("plan_assignment_lineage_digest") or "")
+                for item in occurrence["assignment_lineages"]
+                if isinstance(item, dict)
+            )
+        )
     if outcome == "passed":
         if gate not in state["completed_gates"]:
             state["completed_gates"].append(gate)
         for attempt in state["attempts"]:
-            if attempt["gate"] == gate and attempt["status"] == "running":
+            if current_attempt(attempt) and attempt["status"] == "running":
                 attempt["status"] = "passed"
     elif outcome == "skipped":
         if gate not in state["skipped_gates"]:
@@ -522,15 +646,26 @@ def _apply_transition(
             "message": f"Worker reported gate {gate} as blocked; dispatch corrective work or resolve the task question.",
             "recommended_next": "dispatch_corrective_worker",
         })
+        state["completed_gates"] = [
+            item for item in state.get("completed_gates") or [] if item != gate
+        ]
+        state["skipped_gates"] = [
+            item for item in state.get("skipped_gates") or [] if item != gate
+        ]
     else:
+        state["completed_gates"] = [
+            item for item in state.get("completed_gates") or [] if item != gate
+        ]
+        state["skipped_gates"] = [
+            item for item in state.get("skipped_gates") or [] if item != gate
+        ]
         for attempt in state["attempts"]:
             # A gate can fail after a worker submitted a syntactically valid
             # canonical result: for example, when its inherited corrective
             # finding remains open. Retire that result with the failed gate so
             # the next bounded attempt is a new worker, never the same stale pass.
             if (
-                attempt["gate"] == gate
-                and not attempt.get("invalidated")
+                current_attempt(attempt)
                 and attempt["status"] in {"running", AWAITING_HOST_SPAWN, "passed"}
             ):
                 attempt["status"] = "failed"
@@ -600,181 +735,6 @@ def _persist_transition(
     remove_active_mapping(root, state["task_id"])
 
 
-def _closure_rework_target(
-    state: dict[str, Any],
-    gate: str,
-    findings: list[dict[str, Any]],
-) -> str:
-    """Choose the corrective gate from canonical state and observed impact.
-
-    Worker AttemptResults carry findings, not instructions. The control plane owns
-    wave selection: environment/policy conditions block upstream, documented
-    impact returns to documentation, and product/review debt fails back to
-    implementation when that gate exists.
-    """
-    pipeline = list(state.get("current_pipeline", []))
-    gate_index = pipeline.index(gate) if gate in pipeline else len(pipeline) - 1
-    obligations = {
-        str(item) for item in state.get("pipeline_obligations", []) if str(item)
-    }
-    for change in state.get("pipeline_changes", []):
-        if isinstance(change, dict):
-            obligations.update(str(item) for item in change.get("from", []) if str(item))
-    implementation_passed = any(
-        attempt.get("gate") == "implementation"
-        and attempt.get("status") == "passed"
-        and not attempt.get("invalidated")
-        for attempt in state.get("attempts", [])
-    )
-    approval_status = str((state.get("plan_approval") or {}).get("status") or "")
-    if (
-        gate in {"review", "governance_activation", "governance_close", "close"}
-        and approval_status in {"approved", "not_required"}
-        and "implementation" in obligations
-        and not implementation_passed
-    ):
-        return "plan" if "plan" in pipeline else "implementation"
-    affected_paths: list[str] = []
-    for finding in findings:
-        details = finding.get("details")
-        if isinstance(details, dict) and isinstance(details.get("affected_paths"), list):
-            affected_paths.extend(str(path).replace("\\", "/") for path in details["affected_paths"])
-    def is_documentation_path(raw_path: str) -> bool:
-        """Return true only for a normalized, relative docs path.
-
-        Findings are untrusted input.  Normalize separators and dot segments
-        before classification so ``docs/../src/file.py`` cannot be routed to
-        the documentation wave.  Absolute paths and paths escaping through a
-        parent segment are never documentation-only paths.
-        """
-        normalized_input = str(raw_path).replace("\\", "/")
-        if normalized_input.startswith("/"):
-            return False
-        normalized = posixpath.normpath(normalized_input)
-        return normalized == "docs" or normalized.startswith("docs/")
-
-    if (
-        affected_paths
-        and all(is_documentation_path(path) for path in affected_paths)
-        and "documentation" in pipeline
-        and pipeline.index("documentation") <= gate_index
-    ):
-        return "documentation"
-    # A generic governance review finding is not evidence that the completed
-    # documentation decision is wrong.  Retrying it through the historical
-    # fallback below would invalidate an otherwise-passed documentation
-    # attempt and send the state machine back through an unrelated writer.
-    # Keep the originating governance verifier active unless the canonical
-    # finding explicitly scopes every affected path to documentation.
-    if gate in {"governance_activation", "governance_close"}:
-        return gate
-    if gate == "documentation" and "documentation" in pipeline:
-        return "documentation"
-    if gate == "qa" and "implementation" in pipeline:
-        return "implementation"
-    if gate in {"review", "close", "security", "performance"} and "implementation" in pipeline:
-        return "implementation"
-    if "documentation" in pipeline:
-        return "documentation"
-    return gate
-
-
-def _activate_closure_rework(
-    state: dict[str, Any],
-    *,
-    gate: str,
-    findings: list[dict[str, Any]],
-    source_result_refs: list[str],
-) -> str:
-    """Make canonical closure debt an executable non-terminal rework chain.
-
-    The current review/close attempt is deliberately not allowed to complete.
-    The selected pipeline remains unchanged; ``rework`` invalidates stale
-    evidence and attempts from the corrective target onward.  The
-    orchestration engine subsequently sees the target as the first incomplete
-    wave and reuses its canonical wave contract to prepare a new delegation.
-    """
-    target_gate = _closure_rework_target(state, gate, findings)
-    pipeline = list(state.get("current_pipeline", []))
-    if target_gate not in pipeline:
-        recovery_order = [
-            "plan", "implementation", "qa", "security", "performance",
-            "review", "documentation", "close",
-        ]
-        target_index = recovery_order.index(target_gate) if target_gate in recovery_order else -1
-        later = next(
-            (
-                candidate for candidate in recovery_order[target_index + 1:]
-                if candidate in pipeline
-            ),
-            None,
-        )
-        pipeline.insert(pipeline.index(later) if later else len(pipeline), target_gate)
-    # Rework resets evidence while preserving the orchestrator-selected route.
-    # The backend must not reorder closure or governance phases as a side
-    # effect of recording corrective work; active_gates will select the first
-    # incomplete gate in this unchanged route.
-    closure_gates = {"review", "governance_activation", "governance_close", "close"}
-    origin_index = pipeline.index(gate) if gate in pipeline else len(pipeline)
-    rerun_gates = [
-        item for index, item in enumerate(pipeline)
-        if index >= origin_index and item in closure_gates
-    ]
-    reordered = pipeline
-    change = apply_pipeline_operations(
-        state,
-        pipeline=reordered,
-        operations=[{"op": "rework", "gate": target_gate}],
-        allow_rework=True,
-        parallel_groups=[[item] for item in reordered],
-    )
-    append_pipeline_change(
-        state,
-        change,
-        "Canonical closure finding requires corrective work followed by fresh review and close.",
-        [f"closure finding blocked {gate}"],
-    )
-    state["status"] = "active"
-    fingerprints = sorted({str(item["fingerprint"]) for item in findings})
-    result_refs = list(dict.fromkeys(
-        str(item).strip() for item in source_result_refs if str(item).strip()
-    ))
-    rework = state.setdefault("closure_rework", {})
-    prior = rework.get(gate)
-    iteration = int(prior.get("iteration") or 0) + 1 if isinstance(prior, dict) else 1
-    if (
-        not isinstance(prior, dict)
-        or prior.get("finding_fingerprints") != fingerprints
-        or prior.get("source_result_refs") != result_refs
-    ):
-        rework[gate] = {
-            "status": "rework_required",
-            "target_gate": target_gate,
-            "rerun_gates": rerun_gates,
-            "finding_fingerprints": fingerprints,
-            # Rework invalidates the review/close result that raised the
-            # finding. Keep its immutable AttemptResult reference in durable
-            # state as historical provenance, rather than as current gate evidence,
-            # so the corrective worker receives the exact defect rather than
-            # a generic implementation assignment.  The semantic revision
-            # binds this exceptional handoff to the task meaning it reviewed.
-            "source_result_refs": result_refs,
-            "task_revision": int(state.get("task_revision") or 1),
-            "iteration": iteration,
-            "at": now(),
-        }
-    elif isinstance(prior, dict):
-        prior.update({
-            "status": "rework_required",
-            "target_gate": target_gate,
-            "task_revision": int(state.get("task_revision") or 1),
-            "iteration": iteration,
-            "at": now(),
-        })
-    sync_current_wave(state)
-    return target_gate
-
-
 def record_gate(params: dict[str, Any]) -> dict[str, Any]:
     """Validate and commit one gate outcome through focused policy phases."""
     root = ledger_root(params)
@@ -791,6 +751,8 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
         outcome = str(params["outcome"])
         if outcome not in _OUTCOMES:
             raise ValueError("outcome must be passed, failed, blocked, or skipped")
+        if gate in {"governance_activation", "governance_close", "close"}:
+            _governance_obligations_for_gate(state, gate)
         advisories: list[dict[str, Any]] = []
         skipped = _validate_skip(state, params, gate, outcome, revision_correction)
         if skipped is not None:
@@ -842,6 +804,10 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             outcome=outcome,
             current_attempt_evidence=current_attempt_evidence,
         ))
+        if outcome == "passed" and gate in {"governance_close", "close"}:
+            blockers = db_task_findings_blockers(root, state["task_id"])
+            if blockers:
+                raise ValueError("close_blocked_by_open_canonical_findings")
         if outcome in {"passed", "failed"} and (
             gate in {"review", "governance_activation", "governance_close", "close"}
             or bool(params.get("enforce_canonical_findings"))
@@ -862,6 +828,7 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             gate=gate,
             outcome=outcome,
             gate_evidence=inputs[0],
+            gate_attempts=inputs[1],
         )
         _persist_transition(
             root,

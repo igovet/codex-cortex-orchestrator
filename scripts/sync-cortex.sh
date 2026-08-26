@@ -12,12 +12,13 @@ marketplace_manifest="${marketplace_root}/.agents/plugins/marketplace.json"
 home_root="${HOME:?HOME is required}"
 codex_home="${CODEX_HOME:-${home_root}/.codex}"
 mode="install"
-# Preserve explicit user configuration, and install the Luna default when the
-# global subagent setting is absent. The native spawn_agent request can then
-# omit `model` and let Codex resolve this configured default.
+# Preserve unrelated user configuration while enforcing Cortex's two native
+# runtime prerequisites. A pre-existing non-Luna default is backed up before it
+# is replaced; the native spawn_agent request can then omit `model` for Luna.
 cortex_mcp_approval_override=""
 global_subagent_model=""
 global_subagent_model_state="missing"
+multi_agent_v2_state="missing"
 global_config_mode=""
 global_config_backup_created="false"
 original_global_subagent_model_state=""
@@ -275,6 +276,33 @@ PY
   fi
 }
 
+capture_multi_agent_v2() {
+  local config_path="${codex_home}/config.toml"
+  multi_agent_v2_state="missing"
+  validate_global_config_path || return 1
+  [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
+  multi_agent_v2_state="$("${cortex_python}" - "${config_path}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = tomllib.loads(path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit(f"error: cannot parse Codex config for features.multi_agent_v2: {exc}")
+try:
+    value = payload["features"]["multi_agent_v2"]
+except (KeyError, TypeError):
+    print("missing")
+    raise SystemExit(0)
+if not isinstance(value, bool):
+    raise SystemExit("error: features.multi_agent_v2 must be a boolean")
+print("true" if value else "false")
+PY
+)" || return 1
+}
+
 backup_global_config_for_update() {
   local config_path="${codex_home}/config.toml" backup_dir backup_slot
   [[ -f "${config_path}" && ! -L "${config_path}" ]] || return 0
@@ -296,7 +324,7 @@ sync_cortex_hook_trust() {
   config_path="${codex_home}/config.toml"
   codex_binary="$(command -v codex)"
   if [[ "${mode}" == "dry-run" ]]; then
-    echo "would trust the five exact installed Cortex lifecycle hook content hashes"
+    echo "would trust the exact installed Cortex lifecycle hook content hashes declared by hooks/hooks.json"
     return 0
   fi
   if [[ "${mode}" == "check" ]]; then
@@ -317,6 +345,109 @@ check_global_subagent_model() {
     return 1
   fi
   echo "ok      agents.default_subagent_model=${global_subagent_model_state}"
+}
+
+check_multi_agent_v2() {
+  capture_multi_agent_v2 || return 1
+  if [[ "${multi_agent_v2_state}" != "true" ]]; then
+    echo "outdated Codex global config: features.multi_agent_v2 must be true (found ${multi_agent_v2_state})" >&2
+    return 1
+  fi
+  echo "ok      features.multi_agent_v2=true"
+}
+
+ensure_multi_agent_v2() {
+  local config_path="${codex_home}/config.toml"
+  capture_multi_agent_v2 || return 1
+  if [[ "${multi_agent_v2_state}" == "true" ]]; then
+    echo "ok      features.multi_agent_v2=true"
+    return 0
+  fi
+  if [[ "${mode}" == "check" ]]; then
+    echo "outdated Codex global config: features.multi_agent_v2 must be true (found ${multi_agent_v2_state})" >&2
+    return 1
+  fi
+  if [[ "${mode}" == "dry-run" ]]; then
+    echo "would set features.multi_agent_v2=true"
+    return 0
+  fi
+  "${cortex_python}" - "${config_path}" <<'PY'
+import os
+import re
+import stat
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.is_symlink() or (path.exists() and not path.is_file()):
+    raise SystemExit(f"error: refusing to update non-regular Codex config: {path}")
+original = path.read_text(encoding="utf-8") if path.exists() else ""
+lines = original.splitlines(keepends=True)
+header = "[features]"
+headers = [index for index, line in enumerate(lines) if line.strip() == header]
+if len(headers) > 1:
+    raise SystemExit("error: Codex config contains duplicate [features] tables")
+if not headers:
+    text = original
+    if text and not text.endswith(("\n", "\r")):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"
+    text += f"{header}\nmulti_agent_v2 = true\n"
+else:
+    start = headers[0] + 1
+    end = start
+    table_header = re.compile(r"^\s*\[(?!\[).+\]\s*(?:#.*)?$")
+    while end < len(lines) and not table_header.match(lines[end]):
+        end += 1
+    key_indexes = [
+        index for index in range(start, end)
+        if re.match(r"^\s*multi_agent_v2\s*=", lines[index])
+    ]
+    if len(key_indexes) > 1:
+        raise SystemExit("error: Codex config contains duplicate features.multi_agent_v2 keys")
+    if not key_indexes:
+        lines.insert(start, "multi_agent_v2 = true\n")
+    else:
+        index = key_indexes[0]
+        line = lines[index]
+        newline = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        body = line[:-len(newline)] if newline else line
+        prefix = re.match(r"^(\s*multi_agent_v2\s*=\s*)", body)
+        if prefix is None:
+            raise SystemExit("error: unable to locate features.multi_agent_v2 key")
+        comment = ""
+        if "#" in body[prefix.end():]:
+            comment = " #" + body[prefix.end():].split("#", 1)[1].lstrip()
+        lines[index] = f"{prefix.group(1)}true{comment}{newline}"
+    text = "".join(lines)
+try:
+    parsed = tomllib.loads(text)
+    observed = parsed["features"]["multi_agent_v2"]
+except (KeyError, TypeError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit(f"error: updated Codex config is invalid: {exc}")
+if observed is not True:
+    raise SystemExit("error: updated features.multi_agent_v2 was not retained")
+path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+  echo "configured features.multi_agent_v2=true"
 }
 
 ensure_global_subagent_model() {
@@ -573,6 +704,7 @@ install_or_check() {
     [[ "${version}" == "${expected_version}" ]] || { echo "outdated ${plugin_name}@${marketplace_name}: expected ${expected_version}, found ${version:-missing}" >&2; return 1; }
     content_matches || { echo "outdated ${plugin_name}@${marketplace_name}: same-version content drift"; return 1; }
     check_cortex_mcp_approval_mode || return 1
+    check_multi_agent_v2 || return 1
     check_global_subagent_model || return 1
     sync_cortex_hook_trust || return 1
     echo "ok      ${plugin_name}@${marketplace_name} (${expected_version}, content verified)"; return 0
@@ -595,6 +727,7 @@ install_or_check() {
     return 1
   fi
   ensure_global_subagent_model || return 1
+  ensure_multi_agent_v2 || return 1
   ensure_cortex_mcp_approval_mode || return 1
   [[ "${mode}" == "dry-run" ]] || content_matches || { echo "error: installed plugin content differs from source" >&2; return 1; }
   sync_cortex_hook_trust || return 1

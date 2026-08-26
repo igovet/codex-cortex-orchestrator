@@ -23,17 +23,6 @@ MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-EXPECTED_HOOK_KEYS = {
-    f"{CORTEX_PLUGIN_ID}:hooks/hooks.json:{name}:0:0"
-    for name in (
-        "pre_tool_use",
-        "post_tool_use",
-        "session_start",
-        "subagent_start",
-        "subagent_stop",
-        "stop",
-    )
-}
 HOOK_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 PYTHON_PROBE = """
 import json
@@ -593,7 +582,7 @@ def inspect_registration(codex_path: Path | None, version: str | None) -> dict[s
 
 
 def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, Any]:
-    """Require the same user's regular Codex config to permit Cortex MCP UI."""
+    """Require the same user's Codex config to permit Cortex and native V2."""
     symlink = symlink_ancestor(codex_home)
     if symlink:
         return check(
@@ -652,10 +641,28 @@ def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, 
             f"Cortex MCP default_tools_approval_mode must be approve (found {observed})",
             "Run the approved Cortex installer to set Cortex MCP approval to approve, then rerun the preflight.",
         )
+    features = payload.get("features")
+    if not isinstance(features, dict) or features.get("multi_agent_v2") is not True:
+        return check(
+            "cortex_mcp_config",
+            False,
+            "features.multi_agent_v2 must be true for native Cortex dispatch",
+            "Run the approved Cortex installer to enable multi_agent_v2, then start a new thread.",
+        )
+    agents = payload.get("agents")
+    default_model = agents.get("default_subagent_model") if isinstance(agents, dict) else None
+    if default_model != "gpt-5.6-luna":
+        observed = default_model if isinstance(default_model, str) and len(default_model) <= 64 else "missing"
+        return check(
+            "cortex_mcp_config",
+            False,
+            f"agents.default_subagent_model must be gpt-5.6-luna (found {observed})",
+            "Run the approved Cortex installer to back up and replace the default, then start a new thread.",
+        )
     return check(
         "cortex_mcp_config",
         True,
-        "same-user Cortex MCP configuration enables approval mode approve; Cortex questions use ordinary chat",
+        "same-user Cortex MCP approval, multi_agent_v2, and Luna default configuration are valid",
     )
 
 
@@ -757,7 +764,7 @@ def inspect_hook_trust(
     codex_home: Path,
     interpreter: Path | None,
 ) -> dict[str, Any]:
-    """Require all six enabled, trusted Cortex hooks and persisted hashes."""
+    """Require exactly the enabled hooks declared by the installed manifest."""
     if codex_path is None or not regular_executable(codex_path):
         return check(
             "cortex_hook_trust",
@@ -783,13 +790,24 @@ def inspect_hook_trust(
             "cached Cortex lifecycle hook files are missing, symlinked, or not executable",
             "Reinstall or update cortex@cortex for this same Codex user, then rerun the preflight.",
         )
+    try:
+        manifest = json.loads(hooks_path.read_text(encoding="utf-8"))
+        manifest_hooks = manifest.get("hooks") if isinstance(manifest, dict) else None
+        if not isinstance(manifest_hooks, dict) or not manifest_hooks:
+            raise ValueError("hooks manifest has no hook registrations")
+        expected_hook_keys = {
+            f"{CORTEX_PLUGIN_ID}:hooks/hooks.json:{re.sub(r'(?<!^)(?=[A-Z])', '_', event).lower()}:0:0"
+            for event in manifest_hooks
+        }
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return check("cortex_hook_trust", False, f"installed Cortex hook manifest is invalid: {exc}", "Run the approved Cortex installer, then rerun the preflight.")
     hooks, failure = codex_hooks_list(codex_path, ROOT)
     if failure or hooks is None:
         return check("cortex_hook_trust", False, f"Cortex hook trust evidence is unavailable: {failure or 'unknown failure'}", "Run the approved Cortex installer and rerun the preflight.")
     cortex_hooks = [row for row in hooks if row.get("pluginId") == CORTEX_PLUGIN_ID]
     keys = [str(row.get("key") or "") for row in cortex_hooks]
-    if len(cortex_hooks) != len(set(keys)) or set(keys) != EXPECTED_HOOK_KEYS:
-        return check("cortex_hook_trust", False, "same-user Cortex lifecycle hook registration is incomplete or duplicated", "Run the approved Cortex installer to refresh all six Cortex hooks, then rerun the preflight.")
+    if len(cortex_hooks) != len(set(keys)) or set(keys) != expected_hook_keys:
+        return check("cortex_hook_trust", False, "same-user Cortex lifecycle hook registration is incomplete or duplicated", "Run the approved Cortex installer to refresh the hooks declared by the installed manifest, then rerun the preflight.")
     expected_source = str(hooks_path.absolute())
     expected_launcher = str(launcher.absolute())
     expected_script = str(hook_script.absolute())
@@ -818,7 +836,7 @@ def inspect_hook_trust(
         record = state.get(key)
         if not isinstance(record, dict) or record.get("trusted_hash") != digest:
             return check("cortex_hook_trust", False, f"same-user Cortex hook trust hash is missing or stale for {key}", "Run the approved Cortex installer to refresh hook trust, then rerun the preflight.")
-    return check("cortex_hook_trust", True, "all six same-user Cortex lifecycle hooks are enabled, trusted, and hash-matched")
+    return check("cortex_hook_trust", True, "all declared same-user Cortex lifecycle hooks are enabled, trusted, and hash-matched")
 
 
 def summarize_mcp(checks: list[dict[str, Any]]) -> dict[str, Any]:

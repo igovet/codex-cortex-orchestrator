@@ -21,7 +21,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from cortex_runtime import canonical_json, ledger_db
+from cortex_runtime.finding_severity import (
+    CANONICAL_FINDING_SEVERITY_RANK,
+    finding_severity_is_intrinsically_blocking,
+)
 from cortex_runtime.validation import ValidationFailure
+from cortex_runtime.verification_contract import (
+    bind_verification_evidence_payload,
+    pending_verification_evidence_payload,
+)
 
 
 ATTEMPT_RESULT_SCHEMA = "cortex/attempt-result/v1"
@@ -37,7 +45,7 @@ LIFECYCLE_FAILED = "FAILED"
 TERMINAL_LIFECYCLES = frozenset({LIFECYCLE_COMPLETED, LIFECYCLE_BLOCKED, LIFECYCLE_FAILED})
 
 WORKER_EVENT_TYPES = frozenset({
-    "finding_added", "decision_evidence", "blocker", "verification_claimed", "progress", "note",
+    "finding_recorded", "decision_evidence", "verification_claimed", "progress", "note",
 })
 SYSTEM_EVENT_TYPES = frozenset({
     "briefing_acknowledged", "predecessor_read", "verification_observed", "question_created", "question_answered", "decision_resolved", "work_completed", "finalizing", "finalization_failed", "completed",
@@ -248,7 +256,14 @@ def _attempt_metadata(definition: Mapping[str, Any], state: Mapping[str, Any], a
     """Return only objective metadata derived from the canonical task state."""
     selected_model = attempt.get("selected_model") or attempt.get("model")
     selected_effort = attempt.get("selected_reasoning_effort") or attempt.get("reasoning_effort")
-    return {
+    assignment_task_revision = attempt.get("assignment_task_revision")
+    if (
+        isinstance(assignment_task_revision, bool)
+        or not isinstance(assignment_task_revision, int)
+        or assignment_task_revision < 1
+    ):
+        raise ValueError("attempt metadata requires immutable assignment task revision")
+    metadata = {
         "schema": "cortex/attempt-metadata/v1",
         "identity": {
             "attempt_id": str(attempt.get("attempt_id") or ""),
@@ -259,19 +274,32 @@ def _attempt_metadata(definition: Mapping[str, Any], state: Mapping[str, Any], a
             "selected_reasoning_effort": str(selected_effort) if selected_effort else None,
         },
         "phase": str(attempt.get("gate") or "") or None,
-        "task_revision": int(state.get("task_revision") or state.get("revision") or 0),
+        "phase_ref": str(attempt.get("phase_ref") or "") or None,
+        "wave_ref": str(attempt.get("wave_ref") or "") or None,
+        "operation_kind": str(attempt.get("operation_kind") or "") or None,
+        "acceptance_contract_digest": str(
+            attempt.get("acceptance_contract_digest") or ""
+        ) or None,
+        "plan_revision": attempt.get("plan_revision"),
+        "plan_digest": str(attempt.get("plan_digest") or "") or None,
         "project_root": str(definition.get("project_root") or "") or None,
         "briefing": {
             "artifact_ref": str(attempt.get("briefing_artifact_ref") or "") or None,
             "digest_sha256": str(attempt.get("briefing_digest") or "") or None,
             "dispatch_ref": str(attempt.get("dispatch_ref") or "") or None,
         },
-        "predecessor_result_refs": _safe_list(attempt.get("context_result_refs")),
+        "predecessor_result_refs": _safe_list(attempt.get("predecessor_result_refs")),
         "result_baseline": {
             "snapshot_ref": str(attempt.get("result_baseline_ref") or "") or None,
             "digest_sha256": str(attempt.get("result_baseline_digest") or "") or None,
         },
     }
+    # Governance-close authority is carried by its exact active-plan receipt
+    # and private attempt occurrence.  Task revisions must not cross that
+    # dedicated closure boundary into worker-visible or canonical metadata.
+    if str(attempt.get("operation_kind") or "") != "close":
+        metadata["task_revision"] = assignment_task_revision
+    return metadata
 
 
 def _safe_project_relative_path(value: object) -> str | None:
@@ -478,7 +506,7 @@ def record_attempt_event(
     that a projection or downstream consumer has completed.
     """
     if event_type not in WORKER_EVENT_TYPES:
-        raise ValueError("workers may record only finding, decision, blocker, verification-claimed, progress, or note events")
+        raise ValueError("workers may record only finding-recorded, decision, verification-claimed, progress, or note events")
     ledger_root = _root(root)
     ledger_db.ensure_database(ledger_root)
     with ledger_db.connection(ledger_root, write=True) as connection:
@@ -502,41 +530,140 @@ def record_attempt_event(
     return {"ok": True, "event": event, "idempotent": idempotent}
 
 
-def record_verification_observation(
-    root: Any,
+def _pending_worker_findings_connection(
+    connection: Any,
     *,
     task_id: str,
     attempt_id: str,
-    payload: Any,
-    event_key: str | None = None,
-) -> dict[str, Any]:
-    """Persist a verification fact observed by a trusted Cortex-side runner.
+    attempt: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Read and validate worker findings inside the caller's transaction."""
+    rows = connection.execute(
+        "SELECT payload_json FROM attempt_events WHERE task_id=? AND attempt_id=? "
+        "AND event_type='finding_recorded' AND actor='worker' ORDER BY sequence",
+        (task_id, attempt_id),
+    ).fetchall()
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        payload = _decode_json(row["payload_json"], "worker finding", expected=dict)
+        finding = payload.get("finding")
+        binding = payload.get("binding")
+        if not isinstance(finding, Mapping) or not isinstance(binding, Mapping):
+            raise ValueError("worker finding evidence is malformed")
+        fingerprint = str(finding.get("fingerprint") or "")
+        severity = str(finding.get("severity") or "")
+        summary = str(finding.get("summary") or "")
+        expected_binding = {
+            "schema": "cortex/worker-finding-binding/v1",
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "dispatch_digest": hashlib.sha256(
+                str(attempt.get("dispatch_ref") or "").encode("utf-8")
+            ).hexdigest(),
+            "assignment_lineage_digest": str(attempt.get("assignment_lineage_digest") or ""),
+            "wave_ref": str(attempt.get("wave_ref") or attempt.get("orchestration_wave_id") or ""),
+            "phase_ref": str(attempt.get("phase_ref") or ""),
+            "phase_kind": str(attempt.get("phase_kind") or attempt.get("gate") or ""),
+            "plan_revision": int(attempt.get("plan_revision") or 0),
+            "plan_digest": str(attempt.get("plan_digest") or ""),
+            "workspace_baseline_ref": str(attempt.get("result_baseline_ref") or ""),
+        }
+        if (
+            re.fullmatch(r"finding-[0-9a-f]{32}", fingerprint) is None
+            or severity not in CANONICAL_FINDING_SEVERITY_RANK
+            or str(finding.get("status") or "") != "open"
+            or bool(finding.get("blocking"))
+            is not finding_severity_is_intrinsically_blocking(severity)
+            or not summary.strip()
+            or set(finding) != {"fingerprint", "severity", "status", "blocking", "summary"}
+            or dict(binding) != expected_binding
+        ):
+            raise ValueError("worker finding evidence binding is invalid")
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        findings.append(dict(finding))
+    return findings
 
-    This is intentionally not part of the worker MCP surface.  Hooks and
-    server execution adapters may call it after they own the actual command
-    invocation or tool observation; a worker's claimed event is never
-    upgraded by this helper.
+
+def pending_worker_findings(root: Any, *, task_id: str, attempt_id: str) -> list[dict[str, Any]]:
+    """Return a non-authoritative inspection view of recorded worker findings.
+
+    Canonical completion never uses this separate read.  It reloads and
+    validates the same rows inside its own ``BEGIN IMMEDIATE`` transaction, so
+    a concurrent finding cannot be stranded after the result closes the event
+    stream.
     """
     ledger_root = _root(root)
     ledger_db.ensure_database(ledger_root)
-    with ledger_db.connection(ledger_root, write=True) as connection:
-        _load_task_and_attempt(connection, task_id=task_id, attempt_id=attempt_id)
-        result = connection.execute(
-            "SELECT lifecycle_status FROM attempt_results WHERE task_id=? AND attempt_id=?",
-            (task_id, attempt_id),
-        ).fetchone()
-        if result is not None:
-            raise ValueError("attempt result already exists; verification observation stream is closed")
-        event, idempotent = _append_event(
-            connection,
-            task_id=task_id,
-            attempt_id=attempt_id,
-            event_type="verification_observed",
-            payload=payload,
-            actor="cortex",
-            event_key=event_key,
+    with ledger_db.connection(ledger_root) as connection:
+        _definition, _state, attempt = _load_task_and_attempt(
+            connection, task_id=task_id, attempt_id=attempt_id,
         )
-    return {"ok": True, "event": event, "idempotent": idempotent}
+        return _pending_worker_findings_connection(
+            connection, task_id=task_id, attempt_id=attempt_id, attempt=attempt,
+        )
+
+
+def _merge_recorded_findings(
+    normalized: AttemptResult,
+    recorded: Sequence[Mapping[str, Any]],
+) -> AttemptResult:
+    """Merge exact server-recorded findings into one semantic result."""
+    merged = list(normalized.findings)
+    by_fingerprint = {
+        str(item.get("fingerprint") or ""): item
+        for item in merged if isinstance(item, Mapping) and item.get("fingerprint")
+    }
+    for finding in recorded:
+        fingerprint = str(finding.get("fingerprint") or "")
+        prior = by_fingerprint.get(fingerprint)
+        if prior is not None:
+            if _canonical_json(prior) != _canonical_json(finding):
+                raise ValueError("attempt result finding conflicts with its recorded server evidence")
+            continue
+        exact = dict(finding)
+        merged.append(exact)
+        by_fingerprint[fingerprint] = exact
+    return AttemptResult(
+        status=normalized.status,
+        summary=normalized.summary,
+        findings=tuple(merged),
+        decisions_needed=normalized.decisions_needed,
+        unresolved=normalized.unresolved,
+        claims=normalized.claims,
+    )
+
+
+def worker_finding_fingerprint(
+    binding: Mapping[str, Any], *, severity: str, summary: str,
+) -> str:
+    """Issue one exact origin-occurrence finding fingerprint server-side."""
+    origin = {
+        "task_id": str(binding.get("task_id") or ""),
+        "attempt_id": str(binding.get("attempt_id") or ""),
+        "assignment_lineage_digest": str(binding.get("assignment_lineage_digest") or ""),
+        "wave_ref": str(binding.get("wave_ref") or ""),
+        "phase_ref": str(binding.get("phase_ref") or ""),
+        "plan_revision": binding.get("plan_revision"),
+        "severity": str(severity or ""),
+        "summary": str(summary or ""),
+    }
+    if (
+        not all(origin[key] for key in (
+            "task_id", "attempt_id", "assignment_lineage_digest", "wave_ref", "phase_ref",
+        ))
+        or isinstance(origin["plan_revision"], bool)
+        or not isinstance(origin["plan_revision"], int)
+        or origin["plan_revision"] < 1
+        or origin["severity"] not in CANONICAL_FINDING_SEVERITY_RANK
+        or not origin["summary"].strip()
+    ):
+        raise ValueError("worker finding origin identity is incomplete")
+    return "finding-" + hashlib.sha256(
+        _canonical_json(origin).encode("utf-8")
+    ).hexdigest()[:32]
 
 
 def record_system_event(
@@ -631,7 +758,7 @@ def record_predecessor_read(
         _definition, _state, attempt = _load_task_and_attempt(
             connection, task_id=task_id, attempt_id=attempt_id,
         )
-        if reference not in _safe_list(attempt.get("context_result_refs")):
+        if reference not in _safe_list(attempt.get("predecessor_result_refs")):
             raise ValueError("predecessor receipt is not authorized for this attempt")
         event, idempotent = _append_event(
             connection,
@@ -641,6 +768,37 @@ def record_predecessor_read(
             payload={"predecessor_result_ref": reference},
             actor="cortex",
             event_key=f"predecessor_read:{reference}",
+        )
+    return {"ok": True, "receipt": event, "idempotent": idempotent}
+
+
+def record_optional_report_read(
+    root: Any,
+    *,
+    task_id: str,
+    attempt_id: str,
+    result_ref: str,
+) -> dict[str, Any]:
+    """Record one non-blocking complete optional-report read."""
+    reference = str(result_ref or "")
+    if not reference:
+        raise ValueError("optional report receipt requires result_ref")
+    ledger_root = _root(root)
+    ledger_db.ensure_database(ledger_root)
+    with ledger_db.connection(ledger_root, write=True) as connection:
+        _definition, _state, attempt = _load_task_and_attempt(
+            connection, task_id=task_id, attempt_id=attempt_id,
+        )
+        if reference not in _safe_list(attempt.get("optional_report_result_refs")):
+            raise ValueError("optional report receipt is not authorized for this attempt")
+        event, idempotent = _append_event(
+            connection,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            event_type="note",
+            payload={"receipt_kind": "optional_report_read", "result_ref": reference},
+            actor="cortex",
+            event_key=f"optional_report_read:{reference}",
         )
     return {"ok": True, "receipt": event, "idempotent": idempotent}
 
@@ -674,6 +832,7 @@ def complete_attempt(
     claims: Any = None,
     submission_id: str | None = None,
     workspace_observation: Mapping[str, Any] | None = None,
+    metadata_overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist one canonical worker result and close its event stream.
 
@@ -702,6 +861,19 @@ def complete_attempt(
             connection, task_id=task_id, attempt_id=attempt_id,
         )
         _require_briefing_receipt(connection, task_id=task_id, attempt_id=attempt_id)
+        # ``BEGIN IMMEDIATE`` is already held. A finding transaction that won
+        # serialization committed before this snapshot and is included; one
+        # that loses serialization resumes only after the result exists and is
+        # rejected by the closed event-stream guard.
+        normalized = _merge_recorded_findings(
+            normalized,
+            _pending_worker_findings_connection(
+                connection,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                attempt=attempt,
+            ),
+        )
         existing = connection.execute(
             "SELECT * FROM attempt_results WHERE task_id=? AND attempt_id=?", (task_id, attempt_id)
         ).fetchone()
@@ -736,7 +908,65 @@ def complete_attempt(
                 raise ValueError("attempt completion retry must reuse its original submission_id")
             return {"ok": True, "result": stored, "idempotent": True, "finalization_required": stored["lifecycle_status"] == LIFECYCLE_WORK_COMPLETED}
         metadata = _attempt_metadata(definition, state, attempt)
+        assignment_task_revision = int(attempt["assignment_task_revision"])
+        if metadata_overrides is not None:
+            # Only the trusted runtime calls this protocol seam. Public worker
+            # fields never reach metadata_overrides.
+            overrides = _bounded_json(dict(metadata_overrides), label="attempt metadata overrides")
+            if set(overrides) - {"governance_closure"}:
+                raise ValueError("attempt metadata overrides contain unsupported fields")
+            metadata.update(overrides)
         workspace, changed_files, changed_files_status = _workspace_metadata(attempt, workspace_observation)
+        # Manifest reconciliation is the one verification fact Cortex can
+        # observe directly.  Materialize its pending receipt in this same
+        # transaction from the complete server workspace observation; no
+        # worker-authored event or /usr/bin/true command participates.
+        current_workspace_digest = str(workspace.get("current_digest_sha256") or "")
+        if (
+            str(attempt.get("operation_kind") or "") in {"verify", "close"}
+            and "manifest_reconciliation" in set(attempt.get("required_verification_kinds") or [])
+            and workspace.get("complete") is True
+            and current_workspace_digest
+        ):
+            manifest_payload = pending_verification_evidence_payload(
+                task_id=task_id,
+                attempt=attempt,
+                verification_kind="manifest_reconciliation",
+                verification_id="server_manifest_reconciliation",
+                task_revision=assignment_task_revision,
+                workspace_digest=current_workspace_digest,
+                server_receipt={
+                    "schema": "cortex/server-observation-receipt/v1",
+                    "source": "server_manifest",
+                    "receipt_scope": "manifest_reconciliation",
+                    "evidence_digest": current_workspace_digest,
+                    "status": "recorded",
+                },
+                tests=[{"kind": "manifest_reconciliation", "status": "passed"}],
+            )
+            _append_event(
+                connection,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                event_type="verification_observed",
+                payload=manifest_payload,
+                actor="cortex",
+                event_key="server_manifest:" + hashlib.sha256(
+                    f"{attempt_id}\0{current_workspace_digest}".encode("utf-8")
+                ).hexdigest(),
+            )
+        pending_rows = connection.execute(
+            "SELECT * FROM attempt_events WHERE task_id=? AND attempt_id=? "
+            "AND event_type IN ('verification_claimed','verification_observed') "
+            "AND actor IN ('worker','cortex') ORDER BY sequence",
+            (task_id, attempt_id),
+        ).fetchall()
+        pending_refs: list[str] = []
+        for row in pending_rows:
+            decoded = _decode_json(row["payload_json"], "verification observation")
+            if isinstance(decoded, Mapping) and decoded.get("binding_status") == "pending_result":
+                pending_refs.append(str(row["event_ref"]))
+        metadata["verification_evidence_refs"] = pending_refs
         semantic = normalized.as_dict()
         digest_payload = {
             "result": semantic,
@@ -778,8 +1008,42 @@ def complete_attempt(
             attempt_id=attempt_id,
             result_ref=result_ref,
             gate=str(attempt.get("gate") or "") or None,
+            task_revision=assignment_task_revision,
             findings=normalized.findings,
         )
+        result_binding = {
+            "result_ref": result_ref,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "content_digest": content_digest,
+            "workspace_observation": workspace,
+            "metadata": metadata,
+        }
+        for pending_row in pending_rows:
+            pending_event = _event_row(pending_row)
+            payload = pending_event.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            bound_payload = bind_verification_evidence_payload(
+                source_event_ref=str(pending_event.get("event_ref") or ""),
+                pending=payload,
+                task_id=task_id,
+                attempt=attempt,
+                result=result_binding,
+            )
+            if bound_payload is None:
+                continue
+            _append_event(
+                connection,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                event_type=str(pending_event.get("event_type") or ""),
+                payload=bound_payload,
+                actor=str(pending_event.get("actor") or ""),
+                event_key="verification_bound:" + hashlib.sha256(
+                    f"{pending_event['event_ref']}\0{result_ref}".encode("utf-8")
+                ).hexdigest(),
+            )
         event, _ = _append_event(
             connection,
             task_id=task_id,

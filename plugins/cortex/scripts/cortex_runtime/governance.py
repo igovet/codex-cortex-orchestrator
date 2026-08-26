@@ -21,10 +21,16 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from cortex_runtime import canonical_json, ledger_db
+from cortex_runtime.assignment_compiler import state_occurrence_execution_ranks
+from cortex_runtime.public_contracts import CANONICAL_COMPLEXITIES
+from cortex_runtime.verification_contract import (
+    required_verification_kinds,
+    validated_bound_evidence,
+)
 
 
 GOVERNANCE_SCHEMA = "cortex/governance/v1"
-GOVERNANCE_MODES = {"auto", "required", "off"}
+GOVERNANCE_MODES = {"auto", "required", "minimal"}
 EFFECTIVE_MODES = {"minimal", "light", "full"}
 RECORD_TYPES = {
     "policy", "decision", "ruling", "preference", "assumption", "risk",
@@ -40,11 +46,6 @@ HARD_TRIGGER_KEYS = {
     "migration", "external_action", "public_contract", "authorization",
     "artifact_integrity", "result_integrity", "verification_integrity",
 }
-OFF_ASSESSMENT_KEYS = HARD_TRIGGER_KEYS | {
-    "multiple_repositories", "related_tasks", "long_lived_lanes",
-    "conflicting_resources", "multi_session_handoff",
-}
-
 _CLOSE_EVIDENCE_TYPES = {
     "oracle_evidence": {"oracle_evidence", "acceptance_oracle", "acceptance_oracle_evidence"},
     "risk_disposition": {"risk_disposition", "risk_register", "risk_evidence"},
@@ -615,7 +616,6 @@ def classify_governance(
     objective: Any = "",
     requirements: Iterable[Any] | None = None,
     scope: Iterable[Any] | None = None,
-    allowed_paths: Iterable[Any] | None = None,
     task: dict[str, Any] | None = None,
     initiative_ref: str | None = None,
     policy: dict[str, Any] | None = None,
@@ -627,14 +627,14 @@ def classify_governance(
     domain classification, but never invents a numeric scope threshold.
     """
     complexity_value = str(complexity or "C2").strip().upper()
-    if complexity_value not in {"C1", "C2", "C3"}:
+    if complexity_value not in CANONICAL_COMPLEXITIES:
         raise GovernanceError("complexity must be C1, C2, or C3", code="invalid_complexity")
     mode = str(requested_mode or "auto").strip().lower().replace("-", "_")
     if mode not in GOVERNANCE_MODES:
-        raise GovernanceError("governance_mode must be auto, required, or off", code="invalid_governance_mode")
+        raise GovernanceError("governance_mode must be auto, required, or minimal", code="invalid_governance_mode")
 
     task_values = task if isinstance(task, dict) else {}
-    text_values: list[Any] = [objective, *(requirements or []), *(scope or []), *(allowed_paths or [])]
+    text_values: list[Any] = [objective, *(requirements or []), *(scope or [])]
     hits = _text_trigger_hits(text_values)
     structured = (
         task_values.get("risk_triggers")
@@ -675,34 +675,11 @@ def classify_governance(
         reasons.extend(f"trigger:{key}" for key in sorted(hits))
     policy_warnings: list[str] = []
     safety_hits = sorted(set(hits) & HARD_TRIGGER_KEYS)
-    if mode == "off" and safety_hits:
+    if mode == "minimal" and (complexity_value != "C1" or hits):
+        why = "C2/C3 baseline" if complexity_value != "C1" else "risk triggers"
         policy_warnings.append(
-            "governance_mode=off was promoted to the server safety minimum for: "
-            + ", ".join(safety_hits)
+            f"governance_mode=minimal was promoted to the server safety baseline ({why})"
         )
-    if mode == "off" and (complexity_value != "C1" or hits):
-        why = "C2/C3 is conventionally governed" if complexity_value != "C1" else "risk triggers conventionally raise governance depth"
-        policy_warnings.append(f"governance_mode=off selected despite recommendation: {why}")
-    if mode == "off":
-        if not isinstance(structured, dict):
-            normalized_assessment = {}
-            policy_warnings.append("governance_mode=off has no complete risk_triggers assessment")
-        else:
-            normalized_assessment = {_normalise_trigger_key(key): value for key, value in structured.items()}
-            missing_assessment = sorted(OFF_ASSESSMENT_KEYS - set(normalized_assessment))
-            invalid_assessment = sorted(
-                key for key in OFF_ASSESSMENT_KEYS
-                if key in normalized_assessment and type(normalized_assessment[key]) is not bool
-            )
-            if missing_assessment or invalid_assessment:
-                detail = []
-                if missing_assessment:
-                    detail.append("missing " + ", ".join(missing_assessment))
-                if invalid_assessment:
-                    detail.append("non-boolean " + ", ".join(invalid_assessment))
-                policy_warnings.append(
-                    "governance_mode=off risk_triggers assessment is incomplete: " + "; ".join(detail)
-                )
 
     if mode == "required" or complexity_value == "C3" or hits:
         effective = "full"
@@ -711,12 +688,8 @@ def classify_governance(
     else:
         effective = "minimal"
     assessment_mode = effective
-    if mode == "off":
-        reasons.append("requested:off")
-        if effective != "minimal" and not safety_hits:
-            policy_warnings.append(
-                f"governance_mode=off was promoted to the server safety minimum: {effective}"
-            )
+    if mode == "minimal":
+        reasons.append("requested:minimal")
     if not reasons:
         reasons.append(f"baseline:{complexity_value}")
 
@@ -730,11 +703,6 @@ def classify_governance(
         "promotion_window_days": 90,
         "promotion_threshold_scopes": 3,
     }
-    if mode == "off":
-        snapshot["off_assessment"] = {
-            key: normalized_assessment[key] for key in sorted(OFF_ASSESSMENT_KEYS)
-            if key in normalized_assessment
-        }
     close_obligations = {
         "minimal": ["verification_evidence", "audit_receipt"],
         "light": ["policy_snapshot", "decision_assumption_risk_evidence", "process_reflection", "verification_evidence"],
@@ -745,7 +713,7 @@ def classify_governance(
         "schema": GOVERNANCE_SCHEMA,
         "requested_mode": mode,
         "recommended_mode": recommended_mode,
-        "chosen_mode": effective,
+        "effective_mode": effective,
         "policy_warnings": policy_warnings,
         "policy_advisory": bool(policy_warnings),
         "recommended_next": "run_governance_review" if recommended_mode != effective else "continue_selected_pipeline",
@@ -1111,13 +1079,12 @@ def _validate_independent_review_attestation(
     if (
         not isinstance(attempt, dict)
         or str(attempt.get("gate") or "") != "governance_close"
-        or str(attempt.get("agent") or "") != "code_reviewer"
         or str(attempt.get("status") or "") != "passed"
         or result_ref != str(attempt.get("attempt_result_ref") or "")
     ):
-        raise GovernanceError("independent review is not backed by a passed governance_close reviewer attempt", code="review_attestation_invalid")
+        raise GovernanceError("independent review is not backed by the passed server-issued governance_close assignment", code="review_attestation_invalid")
     canonical_result = connection.execute(
-        "SELECT result_ref,result_status,lifecycle_status,workspace_observation_json,changed_files_status,metadata_json "
+        "SELECT result_ref,task_id,attempt_id,result_status,lifecycle_status,workspace_observation_json,changed_files_status,metadata_json,content_digest "
         "FROM attempt_results WHERE result_ref=? AND task_id=? AND attempt_id=?",
         (result_ref, task_id, attempt_id),
     ).fetchone()
@@ -1136,13 +1103,148 @@ def _validate_independent_review_attestation(
         and workspace_observation.get("safe_to_attribute") is True
     ):
         raise GovernanceError("independent review requires a complete server workspace observation", code="review_attestation_invalid")
-    observed_verification = connection.execute(
-        "SELECT 1 FROM attempt_events WHERE task_id=? AND attempt_id=? "
-        "AND event_type='verification_observed' AND actor='cortex' LIMIT 1",
-        (task_id, attempt_id),
-    ).fetchone()
-    if observed_verification is None:
-        raise GovernanceError("independent review requires a server verification observation", code="review_attestation_invalid")
+    def exact_events(bound_attempt_id: str) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            "SELECT event_ref,event_type,payload_json,actor FROM attempt_events "
+            "WHERE task_id=? AND attempt_id=? ORDER BY sequence",
+            (task_id, bound_attempt_id),
+        ).fetchall()
+        return [{
+            "event_ref": str(row["event_ref"]),
+            "event_type": str(row["event_type"]),
+            "payload": _strict_json_loads(str(row["payload_json"]), "verification observation"),
+            "actor": str(row["actor"]),
+        } for row in rows]
+
+    def exact_result(bound_attempt: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        row = connection.execute(
+            "SELECT result_ref,task_id,attempt_id,result_status,lifecycle_status,"
+            "workspace_observation_json,metadata_json,content_digest FROM attempt_results "
+            "WHERE task_id=? AND attempt_id=? AND result_ref=?",
+            (
+                task_id, str(bound_attempt.get("attempt_id") or ""),
+                str(bound_attempt.get("attempt_result_ref") or ""),
+            ),
+        ).fetchone()
+        if row is None or str(row["lifecycle_status"]) != "COMPLETED":
+            raise GovernanceError("mandatory verification result is unavailable", code="review_attestation_invalid")
+        return ({
+            "result_ref": str(row["result_ref"]),
+            "task_id": str(row["task_id"]),
+            "attempt_id": str(row["attempt_id"]),
+            "content_digest": str(row["content_digest"]),
+            "metadata": _strict_json_loads(
+                str(row["metadata_json"]), "attempt result metadata",
+            ),
+            "workspace_observation": _strict_json_loads(
+                str(row["workspace_observation_json"]), "attempt workspace observation",
+            ),
+        }, row)
+
+    close_result = {
+        "result_ref": str(canonical_result["result_ref"]),
+        "task_id": str(canonical_result["task_id"]),
+        "attempt_id": str(canonical_result["attempt_id"]),
+        "content_digest": str(canonical_result["content_digest"]),
+        "workspace_observation": workspace_observation,
+        "metadata": _strict_json_loads(
+            str(canonical_result["metadata_json"]), "attempt result metadata",
+        ),
+    }
+    required_kinds = set(required_verification_kinds(
+        attempt.get("phase_kind"), attempt.get("operation_kind"),
+    ))
+    if set(attempt.get("required_verification_kinds") or []) != required_kinds:
+        raise GovernanceError("independent review assignment obligations are invalid", code="review_attestation_invalid")
+    close_evidence = validated_bound_evidence(
+        exact_events(attempt_id), task_id=task_id, attempt=attempt, result=close_result,
+    )
+    server_observed_kinds = {
+        item["verification_kind"] for item in close_evidence
+        if item.get("evidence_class") == "server_observed"
+    }
+    worker_attested_kinds = {
+        item["verification_kind"] for item in close_evidence
+        if item.get("evidence_class") == "worker_attested"
+    }
+    expected_stop_digest = hashlib.sha256(result_ref.encode("utf-8")).hexdigest()
+    native_stop = attempt.get("native_terminal_stop")
+    if (
+        not isinstance(native_stop, dict)
+        or native_stop.get("observed") is not True
+        or str(native_stop.get("result_digest") or "") != expected_stop_digest
+    ):
+        raise GovernanceError(
+            "independent review requires its exact native terminal Stop",
+            code="review_attestation_invalid",
+        )
+    execution_ranks = state_occurrence_execution_ranks(state)
+    close_rank = execution_ranks.get(str(attempt.get("wave_ref") or ""))
+    if close_rank is None:
+        raise GovernanceError(
+            "independent review is outside canonical occurrence execution order",
+            code="review_attestation_invalid",
+        )
+    for predecessor in state.get("attempts") or []:
+        predecessor_rank = (
+            execution_ranks.get(str(predecessor.get("wave_ref") or ""))
+            if isinstance(predecessor, dict) else None
+        )
+        if (
+            not isinstance(predecessor, dict)
+            or predecessor.get("invalidated")
+            or str(predecessor.get("operation_kind") or "") != "verify"
+            or predecessor_rank is None
+            or predecessor_rank >= close_rank
+            or str(predecessor.get("acceptance_status") or "") != "passed"
+        ):
+            continue
+        expected = set(required_verification_kinds(
+            predecessor.get("phase_kind"), predecessor.get("operation_kind"),
+        ))
+        if set(predecessor.get("required_verification_kinds") or []) != expected:
+            raise GovernanceError("predecessor verification obligations are invalid", code="review_attestation_invalid")
+        predecessor_result, _row = exact_result(predecessor)
+        predecessor_ref = str(predecessor.get("attempt_result_ref") or "")
+        predecessor_stop = predecessor.get("native_terminal_stop")
+        if (
+            not isinstance(predecessor_stop, dict)
+            or predecessor_stop.get("observed") is not True
+            or str(predecessor_stop.get("result_digest") or "")
+            != hashlib.sha256(predecessor_ref.encode("utf-8")).hexdigest()
+        ):
+            raise GovernanceError(
+                "mandatory verifier lacks its exact native terminal Stop",
+                code="review_attestation_invalid",
+            )
+        required_kinds.update(expected)
+        predecessor_evidence = validated_bound_evidence(
+            exact_events(str(predecessor.get("attempt_id") or "")),
+            task_id=task_id,
+            attempt=predecessor,
+            result=predecessor_result,
+        )
+        server_observed_kinds.update(
+            item["verification_kind"] for item in predecessor_evidence
+            if item.get("evidence_class") == "server_observed"
+        )
+        worker_attested_kinds.update(
+            item["verification_kind"] for item in predecessor_evidence
+            if item.get("evidence_class") == "worker_attested"
+        )
+    missing_kinds = {
+        kind for kind in required_kinds
+        if (
+            kind == "manifest_reconciliation" and kind not in server_observed_kinds
+        ) or (
+            kind != "manifest_reconciliation" and kind not in worker_attested_kinds
+        )
+    }
+    if missing_kinds:
+        raise GovernanceError(
+            "independent review lacks the complete provenance-preserving verification obligation set",
+            code="review_attestation_invalid",
+        )
     result_metadata = _strict_json_loads(
         str(canonical_result["metadata_json"]), "attempt result metadata",
     )
@@ -1154,18 +1256,31 @@ def _validate_independent_review_attestation(
         str(result_metadata.get("phase") or "") == "governance_close"
         and str(result_identity.get("attempt_id") or "") == attempt_id
         and str(result_identity.get("dispatch_ref") or "") == reviewer_dispatch_ref
-        and str(result_identity.get("profile") or "") == reviewer_profile == "code_reviewer"
-        and str(result_identity.get("agent") or "") == reviewer_agent == "code_reviewer"
+        and reviewer_profile
+        and str(result_identity.get("profile") or "") == reviewer_profile
+        and reviewer_agent
+        and str(result_identity.get("agent") or "") == reviewer_agent
         and reviewer_dispatch_ref
     ):
         raise GovernanceError(
             "independent review is not bound to the canonical governance_close assignment",
             code="review_attestation_invalid",
         )
-    # Dispatch and attempt identities are server-issued assignment facts. They
-    # are the separation boundary for approval; native child/session telemetry
-    # is deliberately irrelevant and may be missing. Caller-authored reviewer
-    # labels never grant or strengthen this authority.
+    try:
+        ledger_db.validate_close_assignment_revision_authority_in_transaction(
+            connection,
+            task_id=task_id,
+            attempt=attempt,
+            result_metadata=result_metadata,
+        )
+    except (TypeError, ValueError) as exc:
+        raise GovernanceError(
+            "independent review is stale for the immutable task or plan revision",
+            code="review_attestation_invalid",
+        ) from exc
+    # Dispatch, revision, manifest, canonical result, and exact native Stop are
+    # server-observed separation facts. Worker semantic checks remain explicit
+    # attestations and never gain server provenance from their storage receipt.
     semantic_reviewer_identities = {
         attempt_id,
         reviewer_dispatch_ref,
@@ -2271,7 +2386,7 @@ def request_exception(root: Path, *, trigger: str, reason: str, actor_role: str 
         raise GovernanceError("exception trigger is required", code="exception_trigger_required")
     if key in HARD_TRIGGER_KEYS or key in {
         "hard_invariant", "runtime_invariant", "security_invariant", "c3_downgrade",
-        "governance_off", "required_governance", "full_governance",
+        "minimal_governance", "required_governance", "full_governance",
     }:
         raise GovernanceError("governance exceptions cannot disable hard security/runtime invariants", code="hard_invariant_exception_rejected")
     if str(actor_role or "").lower() != "coordinator":

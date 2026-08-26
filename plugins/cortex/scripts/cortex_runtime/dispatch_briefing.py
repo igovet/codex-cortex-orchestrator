@@ -142,10 +142,29 @@ def _dispatch_briefing_failure(
     """Return safe retryable argument diagnostics or an integrity blocker."""
     message = redact(str(exc), 1000)
     if isinstance(exc, _runtime.WorkerAssignmentError):
+        pending_identity = exc.code in {
+            "native_subagent_start_required",
+        }
+        model_attestation_failure = exc.code.startswith("native_subagent_model_")
         return {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "dispatch_unavailable",
-            "code": "worker_dispatch_unavailable",
-            "retryable": False,
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False,
+            "outcome": (
+                "native_identity_pending" if pending_identity else
+                "native_model_attestation_failed" if model_attestation_failure else
+                "dispatch_unavailable"
+            ),
+            "code": exc.code if pending_identity or model_attestation_failure else "worker_dispatch_unavailable",
+            **({
+                "message": (
+                    "Native model attestation failed. Stop this child: a same-child follow-up cannot change its native model. "
+                    "Only a new server-issued replacement dispatch may recover this route; none is issued by this response."
+                ),
+            } if model_attestation_failure else {}),
+            "retryable": pending_identity,
+            "state_mutated": False,
+            **({"next_action": "Retry this exact operation unchanged after a bounded delay."} if pending_identity else {
+                "next_action": "Stop this worker; the coordinator must recover the failed native model route."
+            }),
         }
     lowered = message.lower()
     collected = getattr(exc, "diagnostics", None)

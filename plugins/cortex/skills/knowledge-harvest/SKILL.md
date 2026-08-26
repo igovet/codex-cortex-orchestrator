@@ -144,7 +144,8 @@ discovery brief, context paths, and domain boundaries as semantic evidence.
 Repair material is opaque. Copy it directly from structured tool output; never
 decode, reconstruct, or manually transcribe it. A successful terminal response
 from `submit_attempt` ends every worker Cortex call and requires the advertised
-terminal final message, with no later event or result read. A nonretryable
+terminal final message, with no later worker event or result read. A
+nonretryable
 response likewise ends all task-scoped calls and is reported neutrally without
 capability values.
 
@@ -170,11 +171,15 @@ The worker first reads its dispatch briefing and follows only the returned
 server continuation until completion. A success exposes only the briefing content and its
 server-issued continuation; server receipt recording remains internal. After
 success, do not reconstruct its path, shell-read the briefing again, or locally
-hash it. If dispatch authority is missing or rejected, fail closed and return
-only the neutral limitation to the coordinator; do not inspect a ledger, ask a
-hook, query an environment, or substitute an artifact. Same-child recovery is
-allowed only when the server returns it; a failure never authorizes a
-replacement.
+hash it. If a first operation reports that trusted native spawn observation is
+still pending, retry only that same operation with bounded backoff until a
+finite deadline. Make no project access, switch no operation, and never spawn a
+replacement. An exact successful retry automatically clears the transient
+observer failure. At the deadline, or for any other missing or rejected authority,
+follow only public fail-closed recovery and return the neutral limitation to the
+coordinator; do not inspect a ledger, ask a hook, query an environment, or
+substitute an artifact. Same-worker recovery is allowed only when the server
+returns it.
 
 A successor reads only each explicitly granted predecessor. Workers do not
 emit lifecycle identity, workspace observations, receipts, or evidence markers

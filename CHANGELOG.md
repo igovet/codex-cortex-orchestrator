@@ -5,10 +5,12 @@
 ### Fixed
 
 - Harden the v11 worker boundary with a fixed-size opaque repair handle backed
-  by immutable, task-cascaded schema-v18 escrow. Only the exact signed V11
-  v1--v8 database lineage upgrades atomically to v18; its old task authority
-  remains private and non-selectable, while every unknown history fails
-  closed.
+  by immutable, task-cascaded schema-v19 escrow. Exact signed released
+  schema-v17/schema-v18 histories upgrade transactionally in place to v19 and
+  retain their append-only migration rows. The exact signed legacy V1--V8
+  namespace is archived privately before a fresh schema-v19 ledger is created;
+  its task authority is not migrated or selectable, while every unknown history
+  fails closed and is not automatically quarantined.
 - Shorten the signed repair handle, retry malformed model copies against the
   same immutable escrow, and expose self-contained per-path patch diagnostics;
   correctly shaped handles that fail integrity remain terminal.
@@ -509,9 +511,8 @@ remote, and installed-plugin parity remain separate release gates.
 - Store only a digest of the coordinator governance capability, issue the raw
   bearer once, refuse replay reissuance, and scrub/invalidate legacy plaintext
   capability fields on first registry access.
-- Make `governance_mode=off` fail closed unless C1 supplies an exhaustive
-  boolean assessment of every hard and topology trigger; persist that
-  assessment in the policy snapshot and keep text detection promotion-only.
+- Make `governance_mode=minimal` request the lowest governed baseline while
+  promoting it to the server-required depth for complexity and risk triggers.
 - Bind independent initiative-close review to a passed `code_reviewer`
   `governance_close` attempt, its report reference, and a completed native
   worker session instead of caller-authored reviewer fields.

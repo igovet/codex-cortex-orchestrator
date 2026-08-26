@@ -9,7 +9,7 @@ DEFAULT_GATE_PROFILES = {
     "scope": "planner", "plan": "planner", "discover": "explorer", "architecture": "architect",
     "database_architecture": "database_architect", "implementation": "general",
     "qa": "qa_engineer", "security": "security_auditor",
-    "performance": "performance_engineer", "accessibility": "accessibility_engineer",
+    "performance": "performance_engineer", "accessibility": "accessibility_auditor",
     "ux": "ux_designer", "review": "code_reviewer",
     "documentation": "technical_writer", "close": "build_verification",
 }
@@ -71,14 +71,11 @@ def dispatch_context(
     task_kind: str,
     complexity: str,
     resolve_dispatch_route: Callable[[dict[str, Any]], dict[str, Any]],
-) -> tuple[str, str, dict[str, Any], str | None]:
+) -> tuple[str, dict[str, Any], str | None]:
     """Resolve the native V2 hidden-subagent transport."""
     dispatch_mode = str(params.get("dispatch_mode", "hidden_subagent")).strip() or "hidden_subagent"
     if dispatch_mode != "hidden_subagent":
         raise ValueError("native spawn_agent dispatch is the only supported worker transport")
-    luna_fallback = str(params.get("luna_fallback", "terra")).strip() or "terra"
-    if luna_fallback != "terra":
-        raise ValueError("luna_fallback must be terra")
     route_params = {
         **params,
         "agent": agent,
@@ -91,7 +88,7 @@ def dispatch_context(
     raw_thread_environment = str(params.get("thread_environment") or "").strip().lower()
     if raw_thread_environment not in {"", "local"}:
         raise ValueError("native hidden subagents use the current workspace")
-    return dispatch_mode, luna_fallback, route, "local"
+    return dispatch_mode, route, "local"
 
 
 def delegation_lists(
@@ -121,7 +118,6 @@ def delegation_lists(
         return fallback
 
     return {
-        "allowed_paths": choose("allowed_paths", ["."], inherit_task=True),
         "acceptance_criteria": choose("acceptance_criteria", list(briefing["acceptance_criteria"])),
         "verification": choose("verification", list(briefing["verification"])),
     }
@@ -152,12 +148,18 @@ def spawn_request(
         "sandbox": profiles[agent]["sandbox"],
         "route_category": profiles[agent]["route_category"],
         "selection_reason": selection_reason,
-        "expected_model": route.get("expected_model") or route["selected_model"],
+        "expected_model": route["selected_model"],
+        # Keep the host route confirmation with the private dispatch template.
+        # Luna is selected by the coordinator but must be inherited from the
+        # host default at native serialization time; Terra/Sol remain explicit.
+        "configured_default_model": route.get("configured_default_model"),
         "model_resolution": route.get("model_resolution", "policy"),
         "reasoning_effort": route["selected_reasoning_effort"],
         "fork_turns": "none",
     }
-    if route.get("model_resolution") != "configured_default":
-        result["model"] = route["selected_model"]
+    # The coordinator owns the canonical selection.  The native Codex
+    # transport has one special case: Luna is only selectable through the
+    # configured default route, so serialization omits model after the host
+    # default has been confirmed.  Other models remain explicit.
     del thread_environment
     return result

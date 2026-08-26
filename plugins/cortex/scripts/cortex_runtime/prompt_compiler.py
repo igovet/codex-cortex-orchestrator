@@ -112,8 +112,10 @@ def _validate_contract(payload: object) -> dict[str, Any]:
     if (
         not isinstance(worker_completion_contract, dict)
         or set(worker_completion_contract) != {
-            "worker_authority", "worker_question_pause", "coordinator_waiting",
-            "coordinator_completion",
+            "worker_authority", "worker_bootstrap_observation",
+            "worker_question_pause", "coordinator_waiting",
+            "briefing_terminal_authority", "coordinator_completion",
+            "future_wave_adaptation",
         }
         or not all(isinstance(value, str) and value.strip() for value in worker_completion_contract.values())
     ):
@@ -124,8 +126,8 @@ def _validate_contract(payload: object) -> dict[str, Any]:
     prompt_eval = payload.get("prompt_eval")
     if not isinstance(prompt_eval, dict):
         raise RuntimeError("bundled Cortex prompt-eval contract is invalid")
-    if prompt_eval.get("model") != "gpt-5.6-luna" or prompt_eval.get("reasoning_effort") != "high":
-        raise RuntimeError("prompt evals must be pinned to Luna high")
+    if prompt_eval.get("model") != "gpt-5.6-luna" or prompt_eval.get("reasoning_effort") != "medium":
+        raise RuntimeError("prompt evals must be pinned to Luna medium")
     if prompt_eval.get("allow_model_fallback") is not False or prompt_eval.get("offline_default") is not True:
         raise RuntimeError("prompt evals must be offline by default and fail closed without fallback")
     live_verification = prompt_eval.get("live_verification")
@@ -409,55 +411,80 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
     shared_contract = profile_contract.get("shared_worker_contract")
     if not isinstance(shared_contract, dict):
         return ["profiles.json shared worker contract is unreadable"]
-    coordinator_wait = str(shared_contract.get("coordinator_wait_contract") or "").lower()
+    coordinator_wait = " ".join(
+        str(shared_contract.get("coordinator_wait_contract") or "").lower().split()
+    )
     wait_action = (shared_contract.get("coordinator_action_semantics") or {}).get(
-        "wait_for_bound_workers",
+        "wait_for_wave",
     )
     if (
         not all(marker in coordinator_wait for marker in (
-            "explicit 300-second native wait", "same child", "never use the native default",
-            "another explicit 300-second native wait",
-            "durable-question marker", "terminal-completion marker",
+            "wait_agent cycles", "explicit 300-second timeout",
+            "exact child identifier", "nonterminal",
+            "call no cortex read or lifecycle tool", "read_worker_wave only after",
+        ))
+        or not all(status in coordinator_wait for status in (
+            "interrupted", "completed", "errored", "shutdown", "notfound",
         ))
         or not isinstance(wait_action, dict)
         or wait_action.get("per_wait_timeout_seconds") != 300
         or wait_action.get("minimum_overall_wait_seconds") != 300
         or wait_action.get("native_default_wait_allowed") is not False
-        or wait_action.get("repeat_after_no_marker") is not True
+        or wait_action.get("repeat_after_early_wakeup") is not True
         or wait_action.get("timeout_authorizes_result_read") is not False
     ):
         issues.append("profiles.json coordinator native-wait contract is incomplete")
     worker_question_pause = str(shared_contract.get("worker_question_pause_contract") or "").lower()
     if not all(marker in worker_question_pause for marker in (
-        "durably publishing", "durable-question marker", "same-child follow-up",
-        "real user answer",
+        "durably publishing", "complete unicode question", "same child is resumed",
+        "new native turn", "real user answer",
     )):
         issues.append("profiles.json worker durable-question pause contract is incomplete")
     completion_contract = contract.get("worker_completion_contract")
     completion_policy = "\n".join(_all_strings(completion_contract)).lower()
-    if not all(marker in completion_policy for marker in (
-        "explicit 300-second native wait", "never use the native default",
-        "another explicit 300-second native wait", "durable-question marker",
-        "terminal-completion marker",
-        "same-child follow-up", "real user answer",
-    )):
-        issues.append("prompt contract lacks native wait and durable-question pause semantics")
+    # Keep this a semantic contract check instead of requiring one exact prose
+    # spelling.  The prompt must describe the host lifecycle boundary, but it
+    # must not duplicate the MCP schema or request field names.  In particular,
+    # equivalent wording such as "trusted observation of its native spawn" is
+    # valid when it carries the same meaning as an explicit SubagentStart term.
+    semantic_requirements = (
+        ("native wait control", ("wait_agent cycles", "exact-child wait", "exact bound child")),
+        ("bounded wait duration", ("explicit 300-second timeout",)),
+        (
+            "native child start observation",
+            ("subagentstart", "trusted observation of its native spawn", "host binds the first authorized worker call"),
+        ),
+        ("native terminal observation", ("subagentstop", "terminal host authority")),
+        (
+            "canonical result and terminal stop gate",
+            ("all canonical results and terminal stops", "canonical results and matching terminal stops"),
+        ),
+        ("same-child question resume", ("same child resumes",)),
+        ("new native question turn", ("new native turn",)),
+        ("real user answer", ("real user answer",)),
+    )
+    if any(not any(marker in completion_policy for marker in markers) for _, markers in semantic_requirements):
+        issues.append("prompt contract lacks native wait, question pause, or host observation semantics")
     try:
         from cortex_runtime.public_contracts import build_public_contracts
 
-        public_contracts = build_public_contracts(agents=profiles_by_name)
+        public_contracts = build_public_contracts(
+            agents=profiles_by_name,
+            operation_kinds=profile_contract.get("operation_kinds", {}),
+            model_routing=profile_contract.get("model_routing", {}),
+        )
     except (ImportError, TypeError, ValueError) as exc:
         return [f"canonical public tool registry is unreadable: {type(exc).__name__}"]
     answer_contract = public_contracts.get("answer_orchestration_question")
     answer_schema = (
-        ((answer_contract or {}).get("inputSchema") or {}).get("properties", {}).get("answer_text")
+        ((answer_contract or {}).get("inputSchema") or {}).get("properties", {}).get("answer")
     )
     answer_guidance = str((answer_schema or {}).get("description") or "").lower()
     if not all(marker in answer_guidance for marker in (
-        "exact arbitrary-unicode", "answer text", "durable question",
+        "exact arbitrary-unicode", "response", "durable question",
     )):
         issues.append("canonical answer guidance is missing from the answer input schema")
-    if _contains_schema_identifier(str((answer_contract or {}).get("description") or ""), "answer_text"):
+    if _contains_schema_identifier(str((answer_contract or {}).get("description") or ""), "answer"):
         issues.append("canonical answer argument guidance leaked into the tool description")
     public_operations = tuple(public_contracts)
     public_argument_names: set[str] = set()
@@ -541,14 +568,59 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
         for required_heading in section_requirements.get(skill, []):
             if required_heading not in headings:
                 issues.append(f"{skill}: missing required section {required_heading}")
-        if skill in {"orchestrator", "cortex-control"}:
-            lifecycle_text = text.lower()
-            if not all(marker in lifecycle_text for marker in (
-                "explicit 300-second native wait", "never use the native default",
-                "another explicit 300-second native wait", "durable-question marker",
-                "terminal-completion marker", "`read_worker_wave`", "does not authorize",
-            )):
-                issues.append(f"{skill}: native wait-timeout routing is incomplete")
+        lifecycle_text = " ".join(text.lower().split())
+        if skill == "cortex-control":
+            skill_semantics = (
+                ("bounded native wait", ("300-second timeout",)),
+                ("exact-child wait routing", ("exact child identifier returned by the host", "exact child identifiers returned by the preceding")),
+                ("wave-read precondition", ("`read_worker_wave` is forbidden until",)),
+                ("repeat wait control", ("require another wait", "immediately wait again")),
+                ("arbitrary unicode question", ("arbitrary-unicode question",)),
+                ("complete question presentation", ("present it completely",)),
+                ("terminal completion gate", ("`subagentstop` plus a canonical terminal result is the completion gate",)),
+                ("trusted native lifecycle observation", ("trusted same-user local observation",)),
+                ("fail closed", ("fails closed",)),
+            )
+            if any(
+                not any(marker in lifecycle_text for marker in markers)
+                for _, markers in skill_semantics
+            ):
+                issues.append(f"{skill}: native wait or host-observation routing is incomplete")
+        elif skill == "orchestrator":
+            routing_requirements = (
+                (
+                    "authoritative lifecycle cross-reference",
+                    ("the complete lifecycle is defined once in `../cortex-control/skill.md`",),
+                ),
+                (
+                    "coordinator-only routing boundary",
+                    ("this skill supplies only coordinator routing",),
+                ),
+                (
+                    "active-registry routing",
+                    ("start through the active registry", "follow the control skill's"),
+                ),
+                (
+                    "schema and lifecycle non-duplication boundary",
+                    ("do not reproduce call shapes, response fields, repair payloads, or alternate lifecycle prose here",),
+                ),
+            )
+            if any(
+                not all(marker in lifecycle_text for marker in markers)
+                for _, markers in routing_requirements
+            ):
+                issues.append("orchestrator: cortex-control routing boundary is incomplete")
+            duplicated_lifecycle_details = (
+                "explicit 300-second timeout",
+                "another generic wait",
+                "request another generic wait",
+                "complete unicode question",
+                "terminal subagentstop",
+                "`subagentstop` is the exact terminal host authority",
+                "trusted local `subagentstart`/`subagentstop` events",
+            )
+            if any(marker in lifecycle_text for marker in duplicated_lifecycle_details):
+                issues.append("orchestrator: duplicates lifecycle details owned by cortex-control")
         if skill == "cortex-control":
             catalog = _tool_catalog_by_audience(text)
             expected_catalog = {
@@ -587,9 +659,10 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
             policy_lower = policy.lower()
             if not all(marker in policy_lower for marker in (
                 "durably publishing", "durable-question marker", "same-child follow-up",
-                "real user answer",
+                "real user answer", "terminal native marker",
+                "no later task-scoped call",
             )):
-                issues.append("v3 briefing lacks durable-question native-pause semantics")
+                issues.append("v3 briefing lacks question-pause or terminal marker semantics")
             api_template = _api_template_operation(policy, public_operations)
             if api_template is not None:
                 issues.append(
