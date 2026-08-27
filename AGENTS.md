@@ -54,6 +54,8 @@ runtime guarantees from those bundled sources without depending on this file.
   against current source and tests; documentation drift is a release defect.
 - Treat source code, tests, schemas, and executable configuration as
   authoritative when they conflict with generated documentation.
+- Legacy compatibility must never be added or retained unless the user
+  explicitly directs it.
 
 ## Local diagnostics and project knowledge
 

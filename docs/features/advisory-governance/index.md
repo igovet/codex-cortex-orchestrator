@@ -126,14 +126,17 @@ risk decision is needed. It never changes public-tool availability.
 
 `record_user_decision` appends `user_via_coordinator` evidence for an exact
 task, plan, initiative, delegation, or report through one closed canonical
-request containing task and subject refs/digest, decision type, English prompt,
+request containing the task and subject refs, decision type, English prompt,
 exact original response, English response normalization, and asserted user
-language. Decision types are `approve`, `reject`, `request_revision`,
+language; include `subject_digest` only for plan and report subjects. Decision
+types are `approve`, `reject`, `request_revision`,
 `clarification`, `cancel`, `accept_risk`, and `override`. Plan/report decisions
 require the canonical `sha256:<64-lowercase-hex>` subject digest; a plan must
 already be finalized and completed. Only plan `approve` additionally requires a
 current ready `approval_view` with its exact opaque handle, view digest, and
-source sequence. Plan `request_revision` and `cancel` preserve the exact
+source sequence. A ready plan read also returns `handles.decision_binding` with
+the existing decision-input names for direct field-for-field composition. Plan
+`request_revision` and `cancel` preserve the exact
 finalized plan digest and response without volatile view binding, so
 intervening non-plan events cannot block feedback. Missing or cross-mixed fields
 fail before mutation.

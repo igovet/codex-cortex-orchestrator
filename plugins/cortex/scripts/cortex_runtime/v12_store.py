@@ -2215,7 +2215,7 @@ class V12Store:
         This is intentionally data-only: an assembling/aborted/failed report
         is visible evidence, not a backend reason to stop unrelated work.
         """
-        mode_value = "single" if mode is None else _required_text(mode, label="mode", maximum=16).lower()
+        mode_value = _required_text(mode, label="mode", maximum=16).lower()
         if mode_value not in REPORT_MODES:
             raise V12StoreError("report operation is invalid", code="invalid_report_operation")
         anchor, delegation = self._task_for_delegation(delegation_id, task_id)

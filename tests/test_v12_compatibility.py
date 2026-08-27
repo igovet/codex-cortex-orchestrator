@@ -21,7 +21,7 @@ from cortex_runtime.mcp_api import _SchemaError, _validate_schema, serve_stdio  
 from cortex_runtime.public_contracts import build_public_contracts  # noqa: E402
 from cortex_runtime.v12_contract import record_ref, task_ref  # noqa: E402
 from cortex_runtime.v12_service import V12ServiceError, read_reports, record_user_decision  # noqa: E402
-from cortex_runtime.v12_store import V12Store  # noqa: E402
+from cortex_runtime.v12_store import V12Store, V12StoreError  # noqa: E402
 
 
 class V12CompatibilityTests(unittest.TestCase):
@@ -66,6 +66,7 @@ class V12CompatibilityTests(unittest.TestCase):
         report = store.submit_report(
             task_id=task,
             delegation_id=delegation,
+            mode="single",
             report_type="plan",
             status="completed",
             content={"steps": ["Preserve immutable plan digest."]},
@@ -121,6 +122,43 @@ class V12CompatibilityTests(unittest.TestCase):
         self.assertIsNone(retired_table)
         self.assertIsNone(retired_index)
 
+    def test_store_submit_report_requires_explicit_mode(self) -> None:
+        store = V12Store(self.project)
+        task = store.create_task(
+            objective="Require an explicit report operation.",
+            user_request_original="Require an explicit report operation.",
+            user_language="en",
+            task_contract_version="cortex/task-contract/v1",
+            requirements=["Use the explicit report operation."],
+            constraints=["Do not retain mode-less compatibility."],
+            acceptance_criteria=["Omitted mode is rejected before mutation."],
+            verification_plan=["Run the focused negative test."],
+            context={},
+        )[0]["task"]["task_id"]
+        delegation = store.create_delegation(
+            task_id=task,
+            objective="Produce one report.",
+            role="writer",
+            profile_name="general",
+            scope="Own one bounded report.",
+            instructions="Submit one explicit report operation.",
+            model="gpt-5.6-luna",
+            reasoning_effort="high",
+        )[0]["delegation"]["delegation_id"]
+        before = store.inspect_task(task_id=task, after_sequence=0)["timeline"]
+        with self.assertRaises(V12StoreError) as rejected:
+            store.submit_report(
+                task_id=task,
+                delegation_id=delegation,
+                report_type="result",
+                status="completed",
+                content={"result": "must not be stored"},
+            )
+        self.assertEqual(rejected.exception.code, "invalid_argument")
+        self.assertEqual(rejected.exception.details.get("field"), "mode")
+        after = store.inspect_task(task_id=task, after_sequence=0)["timeline"]
+        self.assertEqual(after, before)
+
     def test_advisory_closure_contract_does_not_require_initiative_order(self) -> None:
         contracts = build_public_contracts()
         closure_description = contracts["submit_governance_closure"]["description"]
@@ -153,7 +191,7 @@ class V12CompatibilityTests(unittest.TestCase):
         })
         gate_text = rejected_gate["content"][0]["text"]
         self.assertIn("governance_gate is a removed workflow projection", gate_text)
-        self.assertIn("Location: $.", gate_text)
+        self.assertIn("Field: governance_gate.", gate_text)
         after_rejection = self._successful_tool("inspect_task", {"task_ref": task_ref})
         self.assertEqual(after_rejection["timeline"], before["timeline"])
 
@@ -217,8 +255,16 @@ class V12CompatibilityTests(unittest.TestCase):
         self.assertNotIn("worker_brief", delegation)
         self.assertNotIn("worker_message", delegation)
         self.assertNotIn("native_dispatch", delegation["delegation"])
+        omitted_mode = self._rejected_tool("submit_report", {
+            "delegation_ref": delegation_ref,
+            "report_type": "plan",
+            "status": "completed",
+            "content": {"steps": ["Mode is required."]},
+        })
+        self.assertIn("mode", omitted_mode["content"][0]["text"])
         plan = self._successful_tool("submit_report", {
             "delegation_ref": delegation_ref,
+            "mode": "single",
             "report_type": "plan",
             "status": "completed",
             "content": {"steps": ["Use only canonical public fields."]},
@@ -232,20 +278,34 @@ class V12CompatibilityTests(unittest.TestCase):
         approval_view = recovered.get("approval_view")
         self.assertIsInstance(approval_view, dict)
         self.assertEqual(approval_view.get("status"), "ready")
-        valid = {
-            "task_ref": task_ref,
-            "subject_type": "plan",
-            "subject_ref": approval_view["report_ref"],
-            "subject_digest": approval_view["report_content_digest"],
+        binding = recovered["handles"].get("decision_binding")
+        self.assertIsInstance(binding, dict)
+        non_approval = {
+            key: value for key, value in binding.items()
+            if key not in {"approval_handle", "approval_view_content_digest", "approval_view_source_sequence"}
+        }
+        for decision_type, original, normalized in (
+            ("request_revision", "Please revise stage two.", "Please revise stage two."),
+            ("cancel", "Cancel this plan.", "Cancel this plan."),
+        ):
+            first_attempt = dict(non_approval)
+            first_attempt.update({
+                "decision_type": decision_type,
+                "prompt_en": "Record the user decision.",
+                "response_original": original,
+                "response_en": normalized,
+                "user_language": "en",
+            })
+            persisted = self._successful_tool("record_user_decision", first_attempt)
+            self.assertEqual(persisted["decision"]["subject_digest"], first_attempt["subject_digest"])
+        valid = dict(binding)
+        valid.update({
             "decision_type": "approve",
             "prompt_en": "Approve this canonical plan?",
             "response_original": "Одобряю план.",
             "response_en": "I approve the plan.",
             "user_language": "ru",
-            "approval_handle": approval_view["approval_handle"],
-            "approval_view_content_digest": approval_view["content_digest"],
-            "approval_view_source_sequence": approval_view["source_sequence"],
-        }
+        })
         accepted = self._successful_tool("record_user_decision", valid)
         self.assertEqual(accepted["decision"]["subject_digest"], valid["subject_digest"])
         self.assertEqual(accepted["decision"]["response_en_excerpt"], valid["response_en"])
@@ -308,7 +368,7 @@ class V12CompatibilityTests(unittest.TestCase):
             "instructions": "Submit a bounded plan report.", "model": "gpt-5.6-luna", "reasoning_effort": "high",
         })
         self._successful_tool("submit_report", {
-            "delegation_ref": delegation["handles"]["delegation_ref"], "report_type": "plan",
+            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "single", "report_type": "plan",
             "status": "completed", "content": {"advisory": True},
         })
         closure = self._successful_tool("submit_governance_closure", {
@@ -365,7 +425,8 @@ class V12CompatibilityTests(unittest.TestCase):
         decision_schema = contracts["record_user_decision"]["inputSchema"]
         read_schema = contracts["read_reports"]["inputSchema"]
         governance_schema = contracts["set_governance_mode"]["inputSchema"]
-        self.assertNotIn("oneOf", decision_schema)
+        self.assertIn("oneOf", decision_schema)
+        self.assertNotIn("subject_digest", decision_schema["required"])
         self.assertNotIn("report_ref", decision_schema["properties"])
         self.assertNotIn("byte_budget", read_schema["properties"])
         self.assertEqual(read_schema["properties"]["max_bytes"]["type"], "integer")

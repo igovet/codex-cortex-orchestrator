@@ -142,6 +142,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             task_id=task_id,
             delegation_id=delegation_id,
             report_type="plan",
+            mode="single",
             status="completed",
             content={"steps": ["Keep the plan digest stable."]},
         )[0]["report"]
@@ -209,6 +210,7 @@ class V12TimelineRepairTests(unittest.TestCase):
                 task_id=task_id,
                 delegation_id=delegations[number],
                 report_type="result",
+                mode="single",
                 status="completed",
                 content={"report": number + 1},
             )[0]["report"]["report_id"]
@@ -549,7 +551,7 @@ class V12TimelineRepairTests(unittest.TestCase):
         task_b = self._task(store, "Conflicting revision lineage B.")
         delegation = self._delegation(store, task_a, 1)
         report_id = store.submit_report(
-            task_id=task_a, delegation_id=delegation, report_type="result", status="completed", content={"task": "a"},
+            task_id=task_a, delegation_id=delegation, report_type="result", mode="single", status="completed", content={"task": "a"},
         )[0]["report"]["report_id"]
         initiative_id = store.record_initiative(
             task_id=task_a,
@@ -604,10 +606,10 @@ class V12TimelineRepairTests(unittest.TestCase):
         delegation_a = self._delegation(store, task_a, 1)
         delegation_b = self._delegation(store, task_b, 2)
         report_a = store.submit_report(
-            task_id=task_a, delegation_id=delegation_a, report_type="result", status="completed", content={"task": "a"},
+            task_id=task_a, delegation_id=delegation_a, report_type="result", mode="single", status="completed", content={"task": "a"},
         )[0]["report"]["report_id"]
         report_b = store.submit_report(
-            task_id=task_b, delegation_id=delegation_b, report_type="result", status="completed", content={"task": "b"},
+            task_id=task_b, delegation_id=delegation_b, report_type="result", mode="single", status="completed", content={"task": "b"},
         )[0]["report"]["report_id"]
         initiative_id = store.record_initiative(
             task_id=task_a,

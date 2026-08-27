@@ -584,7 +584,7 @@ flowchart TB
     PLANWRITE -. "finalized plan report is predecessor" .-> D1
     PLANPOLICY -- "required or light/full review relation" --> PLANLINK["Read ready approval_view; publish exact plan revision<br/>and plans/current.md as a localized clickable link"]
     PLANLINK --> UDEC{"User decision<br/>approve · reject · request_revision<br/>clarification · cancel · accept_risk · override"}
-    UDEC --> DECISION["record_user_decision<br/>append original + English normalization<br/>bind exact compact subject_ref, digest,<br/>ready-view sequence and approval_handle"]
+    UDEC --> DECISION["record_user_decision<br/>append original + English normalization<br/>bind exact compact subject_ref<br/>and plan/report digest when applicable<br/>ready-view sequence and approval_handle for plan approve"]
     DECISION -- "approve exact revision" --> EVIDENCE
     DECISION -- "revision requested" --> REWORK
     DECISION -- "clarification only" --> PLANLINK
@@ -869,10 +869,11 @@ value from a successful result or current inspection before every call. Never
 parse, concatenate, reconstruct, normalize, reformat, or append a suffix to one
 of these values, even when a validation error exposes its syntax.
 
-`submit_report` supports five modes without adding another public tool:
+`submit_report` supports five modes without adding another public tool. Every
+submission must set its operation explicitly:
 
-- omitted/`single` accepts one `progress`, `result`, `synthesis`, or `plan` JSON
-  body up to 64 KiB;
+- `single` accepts one `progress`, `result`, `synthesis`, or `plan` JSON body up
+  to 64 KiB;
 - `begin` creates a stable assembling `report_ref`;
 - sequential `append` adds a labeled complete-JSON chunk up to 32 KiB;
 - `finalize` accepts only the exact chunk count and manifest digest, then stores
@@ -918,15 +919,18 @@ rejected, cancelled, and superseded plans.
 
 `record_user_decision` appends coordinator-attributed `user_via_coordinator`
 evidence for a task, plan, initiative, delegation, or report. Its canonical
-request contains `task_ref`, `subject_type`, `subject_ref`, `subject_digest`,
-`decision_type`, `prompt_en`, exact `response_original`, English `response_en`,
-and `user_language`; it records one of `approve`, `reject`, `request_revision`,
+request contains `task_ref`, `subject_type`, `subject_ref`, `decision_type`,
+`prompt_en`, exact `response_original`, English `response_en`, and
+`user_language`; it records one of `approve`, `reject`, `request_revision`,
 `clarification`, `cancel`, `accept_risk`, or `override`. Plan/report decisions
-require the exact `sha256:<64hex>` subject digest; a plan must already be
+require the exact `sha256:<64hex>` subject digest; task, delegation, and
+initiative decisions omit it, and a plan must already be
 finalized and completed. A plan `approve` additionally requires the exact
 ready-view relation from one successful read: `approval_handle`,
 `approval_view_content_digest`, and `approval_view_source_sequence` matching
-the plan report ref/digest. Revision and cancellation remain bound to the
+the plan report ref/digest. Ready plan reads also return
+`handles.decision_binding` with existing relation values under the exact
+`record_user_decision` input names. Revision and cancellation remain bound to the
 immutable plan digest but do not require a volatile view handle. A later
 decision may supersede an earlier decision but may never bind a different
 digest through replay. Missing, extra, renamed, or cross-mixed fields are
@@ -1162,7 +1166,7 @@ from host metadata, thread identity, or process working directory.
 | `record_initiative` | Use `task_ref` as the project anchor and only `dependency_refs`, `linked_task_refs`, `linked_delegation_refs`, `linked_report_refs`, and `linked_decision_refs` for initiative relationships. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative governance history. |
 | `submit_governance_closure` | Use `task_ref` to append an advisory closure with required `subject_type` and matching compact `subject_ref`. It records evidence but never gates safe work or a truthful user-facing answer. |
-| `record_user_decision` | Use the complete canonical `task_ref`/subject-ref/digest/decision/response field set to append coordinator-attributed original/English evidence. For `approve`, also copy the complete exact ready approval-view relation: report ref/digest, opaque handle, view digest, and source sequence. |
+| `record_user_decision` | Use the canonical `task_ref`/subject-ref/decision/response field set to append coordinator-attributed original/English evidence; include `subject_digest` for plan/report subjects only. For plan `approve`, also copy the complete exact ready approval-view relation: report ref/digest, opaque handle, view digest, and source sequence. |
 
 There is no coordinator/worker audience filtering, capability matrix,
 host-bound lifecycle authority, receipt-gated lifecycle admission, action

@@ -55,7 +55,7 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 - For a normal bounded report, call `submit_report` once with your exact
   `delegation_ref`, `report_type`, `status`, and one bounded JSON `content`
   value. For a durable plan, use `report_type="plan"` and
-  `status="completed"`; `mode="single"` is explicit but may be omitted.
+  `status="completed"`; `mode="single"` is required.
   `content` is opaque report material: Cortex limits its JSON encoding and
   size only, and never parses or semantically validates its prose. Do not add
   `task_ref`, `task_id`, another worker's ID, or made-up identifiers. Submit

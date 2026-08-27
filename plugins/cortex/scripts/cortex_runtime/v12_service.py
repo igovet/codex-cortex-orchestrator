@@ -506,7 +506,7 @@ def record_user_decision(
     response_original: Any,
     response_en: Any,
     user_language: Any,
-    subject_digest: str,
+    subject_digest: str | None = None,
     approval_handle: str | None = None,
     approval_view_content_digest: str | None = None,
     approval_view_source_sequence: int | None = None,
@@ -516,7 +516,7 @@ def record_user_decision(
     """Persist an asserted ordinary-chat user decision as non-authoritative evidence."""
     store, canonical = _task_store(task_ref)
     approval_fields = (approval_handle, approval_view_content_digest, approval_view_source_sequence)
-    if decision_type == "approve" and any(value is None for value in approval_fields):
+    if subject_type == "plan" and decision_type == "approve" and any(value is None for value in approval_fields):
         raise V12ServiceError(
             "approve requires the complete approval-view relation",
             code="approval_view_required",

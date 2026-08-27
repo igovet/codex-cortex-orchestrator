@@ -523,8 +523,8 @@ For a worker question or a blocked/partial report, use this exact sequence:
    delegation and obtain a corrected handoff before proceeding.
 2. Ask the user in the task's current user language, then record the exact
    answer (the exact original answer and English normalization) with
-   `record_user_decision` bound
-   to the exact immutable decision subject/digest.
+   `record_user_decision` bound to the exact subject; include the immutable
+   digest when the subject is a plan or report.
 3. Send `followup_task` to the same persisted `native_task_name`, carrying the
    exact decision ref plus report refs/digests. Do this only when the host still
    recognizes that exact live handle for the non-root worker and its ownership

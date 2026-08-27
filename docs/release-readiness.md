@@ -77,8 +77,9 @@ and the complete rendered message occurs only once at
 matching host spawn. `read_delegation` retains the verbose brief and bounded
 chronology for recovery and is not required on the healthy path.
 `record_user_decision` uses one closed canonical request containing the task and
-subject refs/digest, decision type, English prompt, exact original response,
-English response normalization, and user language. Plan approval additionally
+subject refs, decision type, English prompt, exact original response, English
+response normalization, and user language; `subject_digest` is required only
+for plan/report subjects. Plan approval additionally
 requires the matching ready-view handle, view digest, and source sequence from
 one returned relation; missing, renamed, extra, or cross-mixed fields fail
 before mutation.

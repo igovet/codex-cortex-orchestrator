@@ -50,6 +50,7 @@ class SubmitReportHandoffTests(unittest.TestCase):
 
                 receipt = submit_report(
                     delegation_ref=record_ref(delegation),
+                    mode="single",
                     report_type="plan",
                     status="completed",
                     content={"summary": "Ready"},

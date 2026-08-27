@@ -98,7 +98,7 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | `record_initiative` | Use `task_ref` only as the project anchor to create or revise an initiative and its links. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative assessments, revisions, links, warnings, and closures. |
 | `submit_governance_closure` | Use `task_ref` to append an advisory verdict and evidence for required `subject_type` plus matching compact task/initiative `subject_ref`. |
-| `record_user_decision` | Use one canonical task-ref/subject-ref/digest/decision/response field set to append coordinator-attributed original/English evidence. For `approve`, include the complete exact ready approval-view relation: report ref/digest, handle, view digest, and source sequence. |
+| `record_user_decision` | Use one canonical task-ref/subject-ref/decision/response field set to append coordinator-attributed original/English evidence; include the subject digest for plan/report subjects only. For plan `approve`, include the complete exact ready approval-view relation: report ref/digest, handle, view digest, and source sequence. |
 
 The catalog is identical for coordinators and workers. There is no audience
 filter, capability matrix, host-bound lifecycle authority, receipt-gated
@@ -144,8 +144,8 @@ Independent delegations may proceed concurrently, and a missing worker report
 does not block replacement or synthesis. Status is `partial`, `completed`,
 `blocked`, or `failed`; it does not imply acceptance or native termination.
 
-`submit_report` defaults to `single`, which accepts one complete JSON body up to
-64 KiB. A larger report uses one stable ID across `begin`, sequential labeled
+Use `mode=single` for one complete JSON body up to 64 KiB. A larger report uses
+one stable ID across `begin`, sequential labeled
 `append` chunks up to 32 KiB, exact-manifest `finalize`, or `abort`. The limits
 are 256 chunks and 8 MiB per report, eight assembling reports and 16 MiB of
 assembling content per task, and 128 MiB retained report content per task.
@@ -177,8 +177,9 @@ finalized predecessor. A required review is a coordinator-owned pause for
 plan-dependent work, not a backend gate. `record_user_decision` preserves an
 exact response plus its English normalization and attribution
 `user_via_coordinator` through one closed canonical request containing task and
-subject refs/digest, decision type, English prompt, original response, English
-response, and user language. Plan/report decisions require the canonical
+subject refs, decision type, English prompt, original response, English
+response, and user language; plan/report decisions additionally require the
+canonical
 digest; only plan `approve` also requires the current ready approval-view
 digest/source sequence and opaque handle copied from one returned relation. Plan
 `request_revision` and `cancel`

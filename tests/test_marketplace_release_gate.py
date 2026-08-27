@@ -94,7 +94,7 @@ EXPECTED_REQUIRED_FIELDS = {
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
     "record_user_decision": {
-        "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type",
+        "task_ref", "subject_type", "subject_ref", "decision_type",
         "prompt_en", "response_original", "response_en", "user_language",
     },
 }
@@ -1375,7 +1375,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         _require_idempotency_conflict(server, "create_delegation", {**luna_args, "scope": "Conflicting delegated scope."})
 
         first_report_args = {
-            "task_id": task_a, "delegation_id": delegation_a, "report_type": "progress", "status": "partial",
+            "task_id": task_a, "delegation_id": delegation_a, "mode": "single", "report_type": "progress", "status": "partial",
             "content": "The first independent worker made bounded progress.", "idempotency_key": "report-a-progress",
         }
         first_report_receipt = server.tool("submit_report", first_report_args)
@@ -1395,6 +1395,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             {
                 "task_id": task_a,
                 "delegation_id": delegation_a,
+                "mode": "single",
                 "report_type": "progress",
                 "status": "partial",
                 "content": "x" * 70_000,
@@ -1423,7 +1424,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         report_b = _report_id(server.tool(
             "submit_report",
             {
-                "task_id": task_a, "delegation_id": delegation_b, "report_type": "result", "status": "completed",
+                "task_id": task_a, "delegation_id": delegation_b, "mode": "single", "report_type": "result", "status": "completed",
                 "content": "Independent review completed without a predecessor lifecycle gate.", "idempotency_key": "report-b-result",
             },
         ))
@@ -1765,7 +1766,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         revised_plan = server.tool(
             "submit_report",
             {
-                "task_id": task_a, "delegation_id": delegation_b, "report_type": "plan", "status": "completed",
+                "task_id": task_a, "delegation_id": delegation_b, "mode": "single", "report_type": "plan", "status": "completed",
                 "content": {"summary": "A revised plan needs its own explicit review."}, "supersedes_report_id": plan_id,
                 "review_policy": "required", "idempotency_key": "plan-revision-single",
             },
@@ -2045,6 +2046,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             {
                 "task_id": task_a,
                 "delegation_id": qa_closure_delegation,
+                "mode": "single",
                 "report_type": "result",
                 "status": "completed",
                 "content": "Independent QA completed against the approved plan and primary result.",
@@ -2066,6 +2068,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             {
                 "task_id": task_a,
                 "delegation_id": docs_closure_delegation,
+                "mode": "single",
                 "report_type": "result",
                 "status": "completed",
                 "content": "Documentation-impact assessment completed with no unrecorded documentation changes.",
@@ -2182,7 +2185,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         require(_report_id(server.tool(
             "submit_report",
             {
-                "task_id": task_a, "delegation_id": rework_id, "report_type": "synthesis", "status": "completed",
+                "task_id": task_a, "delegation_id": rework_id, "mode": "single", "report_type": "synthesis", "status": "completed",
                 "content": "Rework delegation was allowed after advisory not-ready closure.", "idempotency_key": "rework-report",
             },
         )), "report remains allowed after not-ready closure")
@@ -2276,7 +2279,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             report_id = _report_id(child.tool(
                 "submit_report",
                 {
-                    "task_id": task_a, "delegation_id": _delegation_id(delegation), "report_type": "progress", "status": "completed",
+                    "task_id": task_a, "delegation_id": _delegation_id(delegation), "mode": "single", "report_type": "progress", "status": "completed",
                     "content": f"Concurrent report {index}.", "idempotency_key": f"concurrent-report-{index}",
                 },
             ))
@@ -2497,11 +2500,11 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         ))
         first_report = _report_id(legacy_server.tool(
             "submit_report",
-            {"task_id": migrated_task_one, "delegation_id": first_delegation, "report_type": "result", "status": "completed", "content": "First migrated task report.", "idempotency_key": "legacy-migration-first-report"},
+            {"task_id": migrated_task_one, "delegation_id": first_delegation, "mode": "single", "report_type": "result", "status": "completed", "content": "First migrated task report.", "idempotency_key": "legacy-migration-first-report"},
         ))
         second_report = _report_id(legacy_server.tool(
             "submit_report",
-            {"task_id": migrated_task_two, "delegation_id": second_delegation, "report_type": "result", "status": "completed", "content": "Second migrated task report.", "idempotency_key": "legacy-migration-second-report"},
+            {"task_id": migrated_task_two, "delegation_id": second_delegation, "mode": "single", "report_type": "result", "status": "completed", "content": "Second migrated task report.", "idempotency_key": "legacy-migration-second-report"},
         ))
         first_snapshot = legacy_server.tool("inspect_task", {"task_id": migrated_task_one})
         second_snapshot = legacy_server.tool("inspect_task", {"task_id": migrated_task_two})
@@ -3231,6 +3234,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
         implementation_args = {
             "task_id": task_id,
             "delegation_id": implementation_delegation,
+            "mode": "single",
             "report_type": "result",
             "status": "completed",
             "content": {"owner": "backend_dev", "result": "Implementation evidence is complete.", "verification": "passed"},
@@ -3268,6 +3272,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             {
                 "task_id": task_id,
                 "delegation_id": qa_delegation,
+                "mode": "single",
                 "report_type": "result",
                 "status": "completed",
                 "content": {"owner": "qa_engineer", "result": "Independent QA evidence is complete."},
@@ -3305,6 +3310,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             {
                 "task_id": task_id,
                 "delegation_id": documentation_delegation,
+                "mode": "single",
                 "report_type": "result",
                 "status": "completed",
                 "content": {
@@ -3350,6 +3356,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             {
                 "task_id": task_id,
                 "delegation_id": verification_delegation,
+                "mode": "single",
                 "report_type": "synthesis",
                 "status": "completed",
                 "content": {"owner": "build_verification", "result": "All linked evidence verified.", "exit_status": 0},
@@ -3674,7 +3681,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
         plan = server.tool(
             "submit_report",
             {
-                "task_id": task_id, "delegation_id": plan_delegation, "report_type": "plan", "status": "completed",
+                "task_id": task_id, "delegation_id": plan_delegation, "mode": "single", "report_type": "plan", "status": "completed",
                 "content": {"owner": "planner", "summary": "Repair the retained V12 chronology."}, "review_policy": "informational",
                 "idempotency_key": "backfill-r1",
             },
@@ -3689,7 +3696,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
         implementation_id = _report_id(server.tool(
             "submit_report",
             {
-                "task_id": task_id, "delegation_id": implementation_delegation, "report_type": "result", "status": "completed",
+                "task_id": task_id, "delegation_id": implementation_delegation, "mode": "single", "report_type": "result", "status": "completed",
                 "content": {"owner": "backend_dev", "result": "implementation evidence"}, "idempotency_key": "backfill-r2",
             },
         ))
@@ -3756,7 +3763,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
         qa_id = _report_id(server.tool(
             "submit_report",
             {
-                "task_id": task_id, "delegation_id": qa_delegation, "report_type": "result", "status": "completed",
+                "task_id": task_id, "delegation_id": qa_delegation, "mode": "single", "report_type": "result", "status": "completed",
                 "content": {"owner": "qa_engineer", "result": "Independent QA evidence is complete."}, "idempotency_key": "backfill-r3-qa",
             },
         ))
@@ -3784,7 +3791,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
         documentation_id = _report_id(server.tool(
             "submit_report",
             {
-                "task_id": task_id, "delegation_id": documentation_delegation, "report_type": "result", "status": "completed",
+                "task_id": task_id, "delegation_id": documentation_delegation, "mode": "single", "report_type": "result", "status": "completed",
                 "content": {"owner": "technical_writer", "documentation_impact": "no-impact", "evidence": "No user-visible document changes."},
                 "idempotency_key": "backfill-r3-post-approval",
             },
@@ -3916,7 +3923,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
         other_report = _report_id(ambiguity_server.tool(
             "submit_report",
             {
-                "task_id": other_task, "delegation_id": other_delegation, "report_type": "result", "status": "completed",
+                "task_id": other_task, "delegation_id": other_delegation, "mode": "single", "report_type": "result", "status": "completed",
                 "content": {"owner": "general", "result": "unrelated same-shard evidence"}, "idempotency_key": "backfill-other-report",
             },
         ))

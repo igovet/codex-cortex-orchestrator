@@ -174,13 +174,14 @@ receipt for the exact consuming delegation.
 
 `record_user_decision` appends coordinator-asserted ordinary-chat evidence, not
 backend authority. Its one canonical request contains `task_ref`,
-`subject_type`, `subject_ref`, `subject_digest`, `decision_type`, `prompt_en`,
+`subject_type`, `subject_ref`, `decision_type`, `prompt_en`,
 exact `response_original`, English `response_en`, and `user_language`. It
 preserves an exact `*_original` response alongside English normalization,
 language, subject binding, and the required immutable digest for plan/report
-subjects. Only plan approval additionally binds a current ready approval view
+subjects; task, delegation, and initiative decisions omit that digest. Only plan approval additionally binds a current ready approval view
 with `approval_handle`, `approval_view_content_digest`, and
-`approval_view_source_sequence` copied from one returned relation; plan
+`approval_view_source_sequence` copied from one returned relation. A ready plan
+read also provides `handles.decision_binding` with exact decision-input names; plan
 revision/cancellation feedback preserves the exact plan digest and response
 without volatile view binding. Missing, renamed, extra, or cross-mixed fields
 are rejected before mutation.

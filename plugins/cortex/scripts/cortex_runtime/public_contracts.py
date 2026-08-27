@@ -206,7 +206,7 @@ _PROPERTY_DESCRIPTIONS: dict[str, str] = {
     "parent_delegation_ref": "Optional exact emitted same-task predecessor delegation reference; it is evidence linkage, never a lifecycle gate.",
     "model": "Exact logical model selected by the coordinator. Luna remains explicit in durable data; only native serialization omits its override.",
     "reasoning_effort": "Exact coordinator-selected reasoning effort paired atomically with model; the runtime never escalates it.",
-    "mode": "Report upload operation. For one bounded report use single (or omit mode); for a large report use begin, then sequential append, then finalize; abort only an assembling report.",
+    "mode": "Report upload operation. Use single for one bounded report; for a large report use begin, then sequential append, then finalize; abort only an assembling report.",
     "report_type": "Immutable report kind selected only for single or begin: progress, result, synthesis, or plan. It is fixed after begin and omitted for append, finalize, and abort.",
     "status": "Required only for single or finalize: partial, completed, blocked, or failed. A plan must be finalized with completed before it can receive an approval decision.",
     "content": "Required only for single or append. Supply one finite bounded JSON value (object, array, string, number, boolean, or null); Cortex never parses or semantically validates its report text. Content is returned publicly only by read_reports.",
@@ -234,7 +234,7 @@ _PROPERTY_DESCRIPTIONS: dict[str, str] = {
     "follow_ups": "Optional bounded opaque advisory next-action strings. Omit to store an empty list.",
     "initiative_status": "Optional next initiative status, permitted only for an initiative closure.",
     "completion_notes": "Optional bounded opaque JSON completion notes for either a task or initiative closure. Cortex stores them without semantic or Markdown validation.",
-    "subject_digest": "sha256: digest binding a plan or report decision to the exact immutable revision. Copy the digest byte-for-byte from the selected subject.",
+    "subject_digest": "sha256: digest binding a plan or report decision to the exact immutable revision. It is required only for plan and report subjects; copy it byte-for-byte from the selected subject.",
     "decision_type": "Coordinator-asserted ordinary-chat user decision type; it is durable evidence, never backend authority.",
     "prompt_en": "English prompt or decision context shown by the coordinator to the user.",
     "response_original": "Exact arbitrary-Unicode user response. It is stored privately and is not copied into compact inspection evidence.",
@@ -355,6 +355,15 @@ _APPROVAL_VIEW_SCHEMA = _result_object("Exact server-verified plan-review view f
     "content_digest": _opaque_digest("Exact verified derived-view digest when status is ready; otherwise null.", nullable=True),
     "approval_handle": _string(maximum=IDENTIFIER_MAX_LENGTH, pattern=IDENTIFIER_PATTERN, description="Server-issued opaque relation for this exact ready report/view/request snapshot; null unless status is ready.") | {"type": ["string", "null"]},
 })
+_DECISION_BINDING_SCHEMA = _result_object("Ready plan-approval arguments already named for record_user_decision. Copy this object field-for-field; it is a convenience projection of the verified approval relation, not a new authority token.", {
+    "task_ref": _opaque_task_ref("Exact anchored task locator."),
+    "subject_type": _string(enum=("plan",), maximum=16),
+    "subject_ref": _entity_ref("report"),
+    "subject_digest": _opaque_digest("Exact immutable plan digest."),
+    "approval_handle": _string(maximum=IDENTIFIER_MAX_LENGTH, pattern=IDENTIFIER_PATTERN),
+    "approval_view_content_digest": _opaque_digest("Exact ready view digest."),
+    "approval_view_source_sequence": {"type": "integer", "minimum": 0},
+})
 _HANDLES_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -372,6 +381,7 @@ _HANDLES_SCHEMA = {
         "next_sequence": {"type": "integer", "minimum": 0, "description": "Exact durable timeline sequence for inspect_task, read_delegation, or inspect_governance. Copy it only into after_sequence. " + HANDLE_COPY_RULE},
         "human_view": _HUMAN_VIEW_SCHEMA,
         "approval_view": _APPROVAL_VIEW_SCHEMA,
+        "decision_binding": _DECISION_BINDING_SCHEMA,
     },
 }
 _RENDERER_SCHEMA = _result_object("Packaged-profile renderer proof.", {
@@ -557,7 +567,7 @@ def _report_operation_schema() -> list[dict[str, Any]]:
     """
     common = ("delegation_ref",)
 
-    def create_shape(*, mode: str | None, report_types: tuple[str, ...], required: tuple[str, ...], forbidden: tuple[str, ...]) -> dict[str, Any]:
+    def create_shape(*, mode: str, report_types: tuple[str, ...], required: tuple[str, ...], forbidden: tuple[str, ...]) -> dict[str, Any]:
         properties: dict[str, Any] = {
             "report_type": {
                 "enum": list(report_types),
@@ -566,11 +576,8 @@ def _report_operation_schema() -> list[dict[str, Any]]:
         }
         requirements = [*common, *required]
         guards = _forbid_properties(*forbidden)
-        if mode is None:
-            guards.extend(_forbid_properties("mode"))
-        else:
-            properties["mode"] = {"const": mode, "description": _PROPERTY_DESCRIPTIONS["mode"]}
-            requirements.append("mode")
+        properties["mode"] = {"const": mode, "description": _PROPERTY_DESCRIPTIONS["mode"]}
+        requirements.append("mode")
         return {
             "type": "object",
             "properties": properties,
@@ -581,11 +588,10 @@ def _report_operation_schema() -> list[dict[str, Any]]:
     plan_fields = ("review_policy", "supersedes_report_ref")
     create_tail = ("chunk_index", "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en")
     alternatives: list[dict[str, Any]] = []
-    for mode in (None, "single"):
-        alternatives.extend((
-            create_shape(mode=mode, report_types=("plan",), required=("report_type", "status", "content"), forbidden=create_tail),
-            create_shape(mode=mode, report_types=("progress", "result", "synthesis"), required=("report_type", "status", "content"), forbidden=(*create_tail, *plan_fields)),
-        ))
+    alternatives.extend((
+        create_shape(mode="single", report_types=("plan",), required=("report_type", "status", "content"), forbidden=create_tail),
+        create_shape(mode="single", report_types=("progress", "result", "synthesis"), required=("report_type", "status", "content"), forbidden=(*create_tail, *plan_fields)),
+    ))
     for report_types, forbidden in (
         (("plan",), ("content", "status", *create_tail)),
         (("progress", "result", "synthesis"), ("content", "status", *create_tail, *plan_fields)),
@@ -684,7 +690,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "outputSchema": _tool_output_schema("delegation", "worker_brief", "reports", "consumption_receipts", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
         },
         "submit_report": {
-            "description": "Create, assemble, finalize, or abort one immutable bounded report using this single canonical field set. The worker alone calls this with its exact emitted delegation_ref, which resolves the authoritative task; never supply task_ref or a canonical ID. Canonical one-call plan: delegation_ref + mode=single (or omit mode) + report_type=plan + status=completed + one bounded opaque JSON content value; review_policy is optional. Submit these as top-level fields only: do not use wrappers or alternate names such as report, body, title, reportType, delegationId, or taskId. Large report: begin needs delegation_ref + mode=begin + report_type; each append needs the begin-returned report_ref + exact next_chunk_index + section + content; finalize needs that report_ref + status + exact expected_chunk_count and expected_content_digest returned by append. The schema checks references and operation fields; Cortex never semantically validates report prose.",
+            "description": "Create, assemble, finalize, or abort one immutable bounded report using this single canonical field set. The worker alone calls this with its exact emitted delegation_ref, which resolves the authoritative task; never supply task_ref or a canonical ID. A one-call report requires delegation_ref + mode=single + report_type=plan + status=completed + one bounded opaque JSON content value. review_policy is optional. Submit these as top-level fields only: do not use wrappers or alternate names such as report, body, title, reportType, delegationId, or taskId. Large report: begin needs delegation_ref + mode=begin + report_type; each append needs the begin-returned report_ref + exact next_chunk_index + section + content; finalize needs that report_ref + status + exact expected_chunk_count and expected_content_digest returned by append. The schema checks references and operation fields; Cortex never semantically validates report prose.",
             "inputSchema": _closed(
                 {
                     "delegation_ref": delegation_id,
@@ -789,7 +795,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             ),
         },
         "record_user_decision": {
-            "description": "Append an ordinary-chat user decision asserted by the coordinator using one canonical field set. A plan decision always needs its exact finalized report digest and one new non-empty response. An approve decision additionally requires the complete returned ready approval_view relation: approval_handle, approval_view_content_digest, and approval_view_source_sequence. A revision or cancellation remains bound to the immutable plan digest but is not blocked by later unrelated chronology. Original task text, silence, inferred consent, wrappers, aliases, and mixed request shapes are invalid. The approval handle proves only the ready-view relation, not a host-authenticated user turn.",
+            "description": "Append an ordinary-chat user decision asserted by the coordinator using one canonical field set. Plan and report decisions need their exact immutable subject digest; task, delegation, and initiative decisions do not. Only a plan approve decision additionally requires the complete returned ready approval_view relation: approval_handle, approval_view_content_digest, and approval_view_source_sequence. A revision or cancellation remains bound to the immutable plan digest but is not blocked by later unrelated chronology. Original task text, silence, inferred consent, wrappers, aliases, and mixed request shapes are invalid. The approval handle proves only the ready-view relation, not a host-authenticated user turn.",
             "inputSchema": _closed(
                 {
                     "task_ref": task_ref,
@@ -807,25 +813,47 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                     "supersedes_decision_ref": decision_id,
                     "idempotency_key": idempotency_key,
                 },
-                ("task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en", "response_original", "response_en", "user_language"),
+                ("task_ref", "subject_type", "subject_ref", "decision_type", "prompt_en", "response_original", "response_en", "user_language"),
             ) | {
-                "allOf": [
+                "oneOf": [
                     {
-                        "anyOf": [
-                            {
-                                "not": {
-                                    "properties": {"decision_type": {"const": "approve"}},
-                                    "required": ["decision_type"],
-                                },
-                            },
-                            {
-                                "properties": {"decision_type": {"const": "approve"}},
-                                "required": [
-                                    "approval_handle",
-                                    "approval_view_content_digest",
-                                    "approval_view_source_sequence",
-                                ],
-                            },
+                        "type": "object",
+                        "properties": {
+                            "subject_type": {"enum": ["task", "delegation", "initiative"]},
+                            "subject_ref": _string(maximum=14, pattern=r"^(?:t|d|i)_[0-9a-f]{12}$"),
+                        },
+                        "required": ["subject_type", "subject_ref"],
+                        "allOf": _forbid_properties("subject_digest", "approval_handle", "approval_view_content_digest", "approval_view_source_sequence"),
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "subject_type": {"const": "report"},
+                            "subject_ref": _string(maximum=14, pattern=r"^r_[0-9a-f]{12}$"),
+                        },
+                        "required": ["subject_type", "subject_ref", "subject_digest"],
+                        "allOf": _forbid_properties("approval_handle", "approval_view_content_digest", "approval_view_source_sequence"),
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "subject_type": {"const": "plan"},
+                            "subject_ref": _string(maximum=14, pattern=r"^r_[0-9a-f]{12}$"),
+                            "decision_type": {"not": {"const": "approve"}},
+                        },
+                        "required": ["subject_type", "subject_ref", "subject_digest", "decision_type"],
+                        "allOf": _forbid_properties("approval_handle", "approval_view_content_digest", "approval_view_source_sequence"),
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "subject_type": {"const": "plan"},
+                            "subject_ref": _string(maximum=14, pattern=r"^r_[0-9a-f]{12}$"),
+                            "decision_type": {"const": "approve"},
+                        },
+                        "required": [
+                            "subject_type", "subject_ref", "subject_digest", "decision_type",
+                            "approval_handle", "approval_view_content_digest", "approval_view_source_sequence",
                         ],
                     },
                 ],

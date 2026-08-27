@@ -68,7 +68,7 @@ immutable evidence and retain their normal project/reference validation.
 | `record_initiative` | Create or revise advisory same-project initiative context and evidence lineage. |
 | `inspect_governance` | Read scoped governance history and its current advisory projection. |
 | `submit_governance_closure` | Record a model-authored task or initiative closure recommendation. |
-| `record_user_decision` | Append an exact ordinary-chat user decision bound to an existing subject and immutable digest. |
+| `record_user_decision` | Append an exact ordinary-chat user decision bound to an existing subject; plan/report subjects additionally bind an immutable digest. |
 
 ## Root, task, and exact contract identity
 
@@ -292,7 +292,8 @@ coordinator policy, not a backend approval gate.
 
 For a worker question or a blocked/partial report, preserve this durable order:
 worker report/question reference → localized coordinator question →
-`record_user_decision` with its exact subject/digest → `followup_task` to the
+`record_user_decision` with its exact subject and, for plan/report subjects, exact
+digest → `followup_task` to the
 same persisted `native_task_name` with exact decision and report references →
 finalized or superseding worker report → downstream delegation/read receipt.
 The stored native name is a server-derived identity for a live host call, not a

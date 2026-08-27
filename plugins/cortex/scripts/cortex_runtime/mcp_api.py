@@ -273,7 +273,18 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
                 failures.append(error)
         else:
             if failures:
-                raise failures[0]
+                # A union commonly has a discriminator branch and one or more
+                # shape branches.  Returning the first failure made a useful
+                # missing-field error lose to a root-level ``not`` guard.
+                # Prefer the deepest safe JSON location, then a concrete
+                # missing/unsupported-field diagnostic, without exposing a
+                # caller value.
+                def failure_rank(error: _SchemaError) -> tuple[int, int]:
+                    return (
+                        error.path.count(".") + error.path.count("["),
+                        int(error.message.startswith(("missing required", "unsupported"))),
+                    )
+                raise max(failures, key=failure_rank)
             raise _SchemaError(path, "value does not match a permitted input shape")
     one_of = schema.get("oneOf")
     if isinstance(one_of, list):
@@ -281,8 +292,8 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
         failures: list[_SchemaError] = []
         alternatives = [item for item in one_of if isinstance(item, Mapping)]
         # Prefer a branch whose explicit discriminator already matches the
-        # supplied object.  This keeps a missing append/finalize field from
-        # being reported as the unrelated legacy-single branch.
+        # supplied object. This keeps a missing operation field from being
+        # reported as an unrelated report shape.
         if isinstance(value, Mapping):
             matching_discriminators = [
                 item for item in alternatives
@@ -364,7 +375,7 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
         required = schema.get("required")
         for name in required if isinstance(required, list) else []:
             if name not in value:
-                raise _SchemaError(path, f"missing required property {name!r}")
+                raise _SchemaError(f"{path}.{name}", f"missing required property {name!r}")
         if schema.get("additionalProperties") is False:
             extras = set(value) - set(property_map)
             if extras:
@@ -440,9 +451,9 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
         path = details.get("path")
         field = details.get("field")
         expected = details.get("expected")
-        if isinstance(path, str):
+        if isinstance(path, str) and not (path == "$" and isinstance(field, str)):
             parts.append(f"Location: {path}.")
-        elif isinstance(field, str):
+        if isinstance(field, str):
             parts.append(f"Field: {field}.")
         if isinstance(expected, str):
             parts.append(f"Expected: {expected[:256]}.")
@@ -625,6 +636,8 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
         action_task_ref = arguments.get("task_ref") if isinstance(arguments, Mapping) else None
     reports = value.get("reports")
     if isinstance(reports, list):
+        if task_id is None:
+            task_id = next((entity_id(item, "task_id") for item in reports if entity_id(item, "task_id") is not None), None)
         report_ids = [item["report_id"] for item in reports if isinstance(item, Mapping) and isinstance(item.get("report_id"), str) and item["report_id"]]
         if report_ids:
             # Read order remains observable in the structured body; only the
@@ -651,6 +664,29 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
         compact_entity = record_ref(canonical)
         if compact_entity is not None:
             result[compact_name] = compact_entity
+    approval = result.get("approval_view")
+    if (
+        isinstance(approval, Mapping)
+        and approval.get("status") == "ready"
+        and isinstance(approval.get("report_ref"), str)
+        and isinstance(approval.get("report_content_digest"), str)
+        and isinstance(approval.get("approval_handle"), str)
+        and isinstance(approval.get("content_digest"), str)
+        and isinstance(approval.get("source_sequence"), int)
+        and compact is not None
+    ):
+        # Keep the public output directly composable with the plan-approve
+        # request.  These are the existing relation values under their exact
+        # input names; no durable ID or new bearer authority is introduced.
+        result["decision_binding"] = {
+            "task_ref": compact,
+            "subject_type": "plan",
+            "subject_ref": approval["report_ref"],
+            "subject_digest": approval["report_content_digest"],
+            "approval_handle": approval["approval_handle"],
+            "approval_view_content_digest": approval["content_digest"],
+            "approval_view_source_sequence": approval["source_sequence"],
+        }
     return result
 
 

@@ -89,10 +89,11 @@ The V12 protocol evidence must prove:
   are not native lifecycle evidence;
 - `record_user_decision` accepts only an existing in-scope task, delegation,
   plan, report, or same-project initiative subject; accepts the complete
-  canonical field set (`task_ref`, subject type/ref/digest, decision type,
+  canonical field set (`task_ref`, subject type/ref, decision type,
   `prompt_en`, exact `response_original`, English `response_en`, and
-  `user_language`); preserves attribution and supersession; and
-  requires/validates the exact immutable digest for plan and report subjects;
+  `user_language`, with `subject_digest` for plan/report subjects only);
+  preserves attribution and supersession; and requires/validates the exact
+  immutable digest for plan and report subjects;
 - only plan `decision_type=approve` requires the exact finalized plan
   revision/digest plus a current ready approval view and opaque approval handle;
   the approval payload must also copy the matching view digest and source

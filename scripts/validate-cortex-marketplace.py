@@ -105,7 +105,7 @@ EXPECTED_TOOL_REQUIRED = {
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
     "record_user_decision": {
-        "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type",
+        "task_ref", "subject_type", "subject_ref", "decision_type",
         "prompt_en", "response_original", "response_en", "user_language",
     },
 }
@@ -516,22 +516,15 @@ def validate_runtime(plugin: Path) -> None:
         if name == "record_user_decision":
             if set(properties) != EXPECTED_DECISION_FIELDS:
                 fail("record_user_decision fields drifted from the canonical V12 user-decision contract")
-            if "oneOf" in schema:
-                fail("record_user_decision must expose one canonical field set, not legacy request shapes")
-            conditionals = schema.get("allOf")
-            decision_shapes = (
-                conditionals[0].get("anyOf")
-                if isinstance(conditionals, list)
-                and len(conditionals) == 1
-                and isinstance(conditionals[0], dict)
-                else None
-            )
+            decision_shapes = schema.get("oneOf")
             approval_required = {"approval_handle", "approval_view_content_digest", "approval_view_source_sequence"}
             if (
                 not isinstance(decision_shapes, list)
                 or not any(
                     isinstance(shape, dict)
                     and isinstance(shape.get("properties"), dict)
+                    and isinstance(shape["properties"].get("subject_type"), dict)
+                    and shape["properties"]["subject_type"].get("const") == "plan"
                     and isinstance(shape["properties"].get("decision_type"), dict)
                     and shape["properties"]["decision_type"].get("const") == "approve"
                     and approval_required.issubset(set(shape.get("required") or ()))
