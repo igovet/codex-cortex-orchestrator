@@ -152,7 +152,9 @@ path requires a complete explicit role contract plus an explicit
 not build a second prompt contract in a profile, skill, or spawn helper. Model
 and effort stay coordinator-selected and travel through the separate native
 projection; the backend never chooses, promotes, or substitutes either.
-`native_dispatch.task_name` is server-derived and host-safe: copy it
+`native_dispatch.task_name` is server-derived and host-safe. It is the exact
+selected profile name for its first sibling and uses a numeric suffix only for
+additional siblings of that profile; copy it
 byte-for-byte into `spawn_agent.task_name`, never invent, sanitize, replace, or
 transform it.
 
@@ -332,6 +334,12 @@ The database is canonical. Per-task Markdown files are derived host-private
 views beside the V12 shard and are never written to the target project. A
 report ID identifies evidence; a verified absolute Markdown path is a human
 link. They are not interchangeable.
+
+Human views must be ordinary readable Markdown. Render structured ledger data
+as labeled headings, prose, lists, or tables with safe text escaping. Never
+dump a JSON object/array, serialized payload, or script block into a `.md` view;
+JSON belongs in the canonical database. The view is a presentation of that data,
+not a JSON export and never a recovery source.
 
 Never create project-local Cortex state or a project-local `.codex` layout.
 The V12 shard and projections remain host-private, and the separate V11

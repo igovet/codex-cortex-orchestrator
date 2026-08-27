@@ -762,7 +762,9 @@ apply.
    Every delegation also records its objective, separate human-readable `role`,
    exact packaged `profile_name`, required concise textual `scope`, finalized
    compact input report/decision refs, persisted server-derived native task
-   name, and exact model/effort pair. The returned worker brief carries the
+   name, and exact model/effort pair. The first worker of a profile uses that
+   exact profile name; same-profile siblings receive `_2`, `_3`, and later
+   numeric suffixes. The returned worker brief carries the
    corresponding immutable manifest digests.
    Detailed execution belongs in `instructions`; an object-shaped `scope` is
    invalid. The coordinator—not the backend—chooses profile, model, and effort.

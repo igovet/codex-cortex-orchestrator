@@ -13,6 +13,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import stat
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -25,21 +26,63 @@ from cortex_runtime.v12_contract import PROJECTION_RENDERER_VERSION, task_ref
 _MAX_RENDER_BYTES = 10 * 1024 * 1024
 
 
-def _canonical(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
 def _digest_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+_MARKDOWN_PUNCTUATION = re.compile(r"([\\`*_{}\[\]()#+.!|>~-])")
+
+
+def _markdown_text(value: object) -> str:
+    """Escape untrusted text so it remains readable, inert Markdown prose."""
+    escaped = html.escape(str(value), quote=False)
+    escaped = _MARKDOWN_PUNCTUATION.sub(r"\\\1", escaped)
+    # A user-controlled newline must not be able to turn the remainder into a
+    # new list item or heading.  Markdown's hard-break syntax keeps it prose.
+    return escaped.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "  \n")
+
+
+def _markdown_value(value: object, indent: str = "") -> list[str]:
+    """Render structured ledger values as ordinary, readable Markdown lists.
+
+    This intentionally does not serialize values as JSON.  Keys and all
+    caller-authored strings are escaped before being placed in Markdown, so
+    the projection remains a display-only view even when content contains
+    Markdown or HTML-looking text.
+    """
+    if isinstance(value, Mapping):
+        lines: list[str] = []
+        for key, item in value.items():
+            label = _markdown_text(key)
+            if isinstance(item, (Mapping, Sequence)) and not isinstance(item, (str, bytes, bytearray)):
+                lines.append(f"{indent}- **{label}**")
+                lines.extend(_markdown_value(item, indent + "  "))
+            else:
+                lines.append(f"{indent}- **{label}:** {_markdown_text(item)}")
+        return lines or [f"{indent}- *(empty)*"]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        lines = []
+        for item in value:
+            if isinstance(item, (Mapping, Sequence)) and not isinstance(item, (str, bytes, bytearray)):
+                lines.append(f"{indent}-")
+                lines.extend(_markdown_value(item, indent + "  "))
+            else:
+                lines.append(f"{indent}- {_markdown_text(item)}")
+        return lines or [f"{indent}- *(empty)*"]
+    return [f"{indent}{_markdown_text(value)}"]
+
+
 def _inert(value: object) -> str:
-    """Render arbitrary ledger content as escaped inert JSON, never Markdown."""
-    return "<pre>" + html.escape(_canonical(value), quote=False) + "</pre>\n"
+    """Render arbitrary ledger content as escaped, inert Markdown.
+
+    The historical helper name is retained for callers, but its output is no
+    longer an embedded JSON document or an HTML ``<pre>`` block.
+    """
+    return "\n".join(_markdown_value(value)) + "\n\n"
 
 
 def _text(value: object) -> str:
-    return html.escape(str(value or ""), quote=False)
+    return _markdown_text(value or "")
 
 
 def _regular(path: Path, *, required: bool = False) -> bool:

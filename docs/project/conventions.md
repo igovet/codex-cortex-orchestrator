@@ -161,7 +161,9 @@
 - For native dispatch use `fork_turns="none"` and preserve the exact effort.
   Omit the native `model` argument for logical Luna because it is the configured
   default; pass exact Terra or Sol overrides.
-- Map each successful durable delegation to exactly one native host spawn. Copy
+- Map each successful durable delegation to exactly one native host spawn. The
+  first worker with a profile uses its exact profile name; same-profile
+  siblings use the server-issued `_2`, `_3`, and later numeric suffixes. Copy
   the returned native arguments byte-for-byte, including the exact rendered
   message and explicit effort; never assemble an ad-hoc prompt, omit a spawn,
   dispatch twice, or reuse one worker for multiple delegations. Reconcile an

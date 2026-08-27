@@ -103,9 +103,11 @@ replace, and read-back verification sequence. Directories use mode `0700` and
 files use mode `0600`. The final path is rechecked as a regular non-symlink
 file, then its digest and source sequence are verified before it becomes ready.
 Every output path is derived from server-generated validated identifiers rather
-than caller-supplied export paths. Arbitrary task/report/user content is
-rendered as inert escaped JSON or clearly labeled text, so it cannot become a
-trusted Markdown instruction, path, or projection directive.
+than caller-supplied export paths. Generated files are ordinary, readable
+Markdown: values are presented under labeled headings, lists, tables, and
+paragraphs, with safe escaping for Markdown punctuation. Structured JSON is
+canonical database data only; it is never dumped as a JSON object, script block,
+or opaque blob into a human view.
 
 The view writer intentionally preserves direct edits. If the on-disk content no
 longer matches the derived artifact that Cortex last verified, it records a

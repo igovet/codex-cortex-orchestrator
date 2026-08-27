@@ -118,6 +118,43 @@ Further documentation discovery: not authorized.
 Return a compact durable report without lifecycle gates."""
 
 
+def _markdown_timeline_index(path: Path) -> tuple[int | None, list[dict[str, object]]]:
+    """Read server-derived timeline fields without treating Markdown as JSON."""
+    text = path.read_text(encoding="utf-8")
+    latest_match = re.search(r"\*\*latest\\_sequence:\*\*\s+(\d+)", text)
+    pages: list[dict[str, object]] = []
+    for line in text.splitlines():
+        match = re.search(r"\*\*path:\*\*\s+(pages/(\d+))\\-(\d+)\\\.md", line)
+        if match:
+            pages.append({
+                "path": f"{match.group(1)}-{match.group(3)}.md",
+                "first_sequence": int(match.group(2)),
+                "last_sequence": int(match.group(3)),
+            })
+            continue
+        match = re.search(r"\*\*events:\*\*\s+(\d+)", line)
+        if match and pages:
+            pages[-1]["events"] = int(match.group(1))
+    return (None if latest_match is None else int(latest_match.group(1))), pages
+
+
+def _markdown_timeline_sequences(path: Path) -> list[int]:
+    return [
+        int(value)
+        for value in re.findall(r"\*\*sequence:\*\*\s+(\d+)", path.read_text(encoding="utf-8"))
+    ]
+
+
+def _markdown_timeline_events(path: Path) -> list[tuple[int, str, str]]:
+    """Extract the three canonical event labels from an inert Markdown page."""
+    text = path.read_text(encoding="utf-8")
+    sequences = re.findall(r"\*\*sequence:\*\*\s+(\d+)", text)
+    event_types = re.findall(r"\*\*event\_type:\*\*\s+([^\n]+)", text)
+    entity_ids = re.findall(r"\*\*entity\_id:\*\*\s+([^\n]+)", text)
+    unescape = lambda value: value.replace("\\-", "-").replace("\\_", "_").replace("\\.", ".")
+    return [(int(sequence), unescape(event_type), unescape(entity_id)) for sequence, event_type, entity_id in zip(sequences, event_types, entity_ids)]
+
+
 def require(condition: object, label: str) -> None:
     if not condition:
         raise AssertionError(label)
@@ -2171,21 +2208,17 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             task_views / "timeline" / "index.md",
         )
         timeline_index_path = task_views / "timeline" / "index.md"
-        timeline_index_match = re.search(r"<pre>(.+)</pre>", timeline_index_path.read_text(encoding="utf-8"), re.DOTALL)
-        require(timeline_index_match is not None, "timeline index contains one inert JSON page map")
-        timeline_index = json.loads(timeline_index_match.group(1))
-        timeline_index_pages = timeline_index.get("pages") if isinstance(timeline_index, Mapping) else None
+        timeline_latest, timeline_index_pages = _markdown_timeline_index(timeline_index_path)
         require(
-            isinstance(timeline_index, Mapping)
-            and timeline_index.get("page_size") == 100
+            timeline_latest == max(row[0] for row in timeline_rows)
+            and timeline_index_path.read_text(encoding="utf-8").startswith("# Timeline")
             and isinstance(timeline_index_pages, list)
             and timeline_index_pages,
-            "timeline index records a bounded current range-page map",
+            "timeline Markdown index records a bounded current range-page map",
         )
         timeline_pages: list[Path] = []
         page_ranges: list[tuple[int, int]] = []
         for item in timeline_index_pages:
-            require(isinstance(item, Mapping), "timeline index page entry is structured")
             relative = item.get("path")
             first, last, events = item.get("first_sequence"), item.get("last_sequence"), item.get("events")
             require(
@@ -2193,9 +2226,8 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                 and re.fullmatch(r"pages/\d+-\d+\.md", relative) is not None
                 and isinstance(first, int)
                 and isinstance(last, int)
-                and isinstance(events, int)
                 and first <= last
-                and 1 <= events <= 100
+                and (events is None or (isinstance(events, int) and 1 <= events <= 100))
                 and relative == f"pages/{first}-{last}.md",
                 "timeline index references deterministic bounded sequence-range pages",
             )
@@ -3580,25 +3612,30 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
     )
 
     task_views = shard_root / "tasks" / f"t_{task_match.group(2)[-12:]}"
-    index_match = re.search(r"<pre>(.+)</pre>", (task_views / "timeline" / "index.md").read_text(encoding="utf-8"), re.DOTALL)
-    require(index_match is not None, "production task has a host-private timeline index")
-    timeline_index = json.loads(index_match.group(1))
-    pages = timeline_index.get("pages") if isinstance(timeline_index, Mapping) else None
+    timeline_latest, pages = _markdown_timeline_index(task_views / "timeline" / "index.md")
+    index_text = (task_views / "index.md").read_text(encoding="utf-8")
+    initiative_marker = initiative_id.replace("-", "\\-")
     require(
         isinstance(pages, list)
-        and timeline_index.get("latest_sequence") == sequences[-1]
-        and sum(int(item.get("events") or 0) for item in pages if isinstance(item, Mapping)) == len(timeline_rows)
-        and f"initiatives/{initiative_id}.md" in (json.loads(re.search(r"<pre>(.+)</pre>", (task_views / "index.md").read_text(encoding="utf-8"), re.DOTALL).group(1)).get("initiatives") or []),
+        and timeline_latest == sequences[-1]
+        and sum(
+            len(_markdown_timeline_sequences(task_views / "timeline" / str(item["path"])))
+            for item in pages
+            if isinstance(item, Mapping) and isinstance(item.get("path"), str)
+        ) == len(timeline_rows)
+        and initiative_marker in index_text,
         "task projection advertises the exact final initiative and every current canonical timeline event",
     )
     projected_events: list[Mapping[str, Any]] = []
     for page in pages:
         require(isinstance(page, Mapping) and isinstance(page.get("path"), str), "timeline index uses structured server-derived page paths")
-        page_match = re.search(r"<pre>(.+)</pre>", (task_views / "timeline" / str(page["path"])).read_text(encoding="utf-8"), re.DOTALL)
-        require(page_match is not None, "each advertised timeline page is an inert canonical projection")
-        events = json.loads(page_match.group(1))
-        require(isinstance(events, list), "timeline page contains an ordered event list")
-        projected_events.extend(item for item in events if isinstance(item, Mapping))
+        page_path = task_views / "timeline" / str(page["path"])
+        event_sequences = _markdown_timeline_sequences(page_path)
+        require(event_sequences == sorted(event_sequences), "timeline Markdown page has ordered event sequence labels")
+        projected_events.extend(
+            {"sequence": sequence, "event_type": event_type, "entity_id": entity_id}
+            for sequence, event_type, entity_id in _markdown_timeline_events(page_path)
+        )
     require(
         [(item.get("sequence"), item.get("event_type"), item.get("entity_id")) for item in projected_events]
         == [(row[0], row[1], row[2]) for row in timeline_rows]

@@ -346,7 +346,10 @@ healthy path, prefer durable evidence in this order:
    manifest digests, and the selected logical model/effort, and that its nested
    native-dispatch payload carries that exact rendered message and selection.
 5. Make exactly one native host spawn for that durable delegation immediately:
-   copy `native_dispatch.task_name` byte-for-byte as `spawn_agent.task_name`,
+   the returned task name uses the selected profile exactly (`planner`,
+   `qa_engineer`, and so on); additional same-profile sibling delegations use
+   the server-assigned numeric suffix (`qa_engineer_2`, then `_3`). Copy
+   `native_dispatch.task_name` byte-for-byte as `spawn_agent.task_name`,
    then copy the returned native message, effort, `fork_turns`, and applicable
    model override byte-for-byte. Never invent, sanitize, or transform the task
    name; Luna omits only its native model override, while Terra and Sol include
@@ -610,6 +613,10 @@ Canonical evidence remains in the host-private ledger. Markdown projections
 are derived host-private human views, never authority or recovery state. Before
 publishing a projection, require successful current freshness and digest
 verification plus an absolute contained path returned by the active tool.
+Every projection file must remain ordinary readable Markdown: present fields as
+labels, paragraphs, lists, or tables with safe escaping. Do not embed serialized
+JSON objects/arrays, script blocks, or opaque payloads in a view; structured JSON
+is retained in SQLite and only summarized for human reading.
 Never write a Cortex database, projection, report, decision, or other Cortex
 state into the target project, including a project-local `.codex` directory.
 Never guess a path, reuse stale metadata, publish a bare path/link or raw ID, or

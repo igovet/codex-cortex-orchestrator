@@ -891,7 +891,7 @@ class V12Store:
             (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
         ] or "native_task_name" in self._column_names(connection, "delegations"):
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
-        from cortex_runtime.delegation import native_task_name
+        from cortex_runtime.delegation import legacy_native_task_name
 
         try:
             connection.execute("ALTER TABLE delegations ADD COLUMN native_task_name TEXT")
@@ -899,7 +899,7 @@ class V12Store:
                 delegation_id = str(row["delegation_id"])
                 connection.execute(
                     "UPDATE delegations SET native_task_name=? WHERE delegation_id=?",
-                    (native_task_name(delegation_id), delegation_id),
+                    (legacy_native_task_name(delegation_id), delegation_id),
                 )
             connection.execute(
                 "INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)",
@@ -1022,10 +1022,20 @@ class V12Store:
         for table, columns in required_columns.items():
             if not columns.issubset(self._column_names(connection, table)):
                 raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
-        from cortex_runtime.delegation import native_task_name
-        for row in connection.execute("SELECT delegation_id,native_task_name FROM delegations").fetchall():
-            if row["native_task_name"] != native_task_name(str(row["delegation_id"])):
+        from cortex_runtime.delegation import is_profile_native_task_name, legacy_native_task_name
+        seen_native_names: set[tuple[str, str]] = set()
+        for row in connection.execute("SELECT task_id,delegation_id,profile_name,native_task_name FROM delegations").fetchall():
+            native_name = str(row["native_task_name"])
+            native_key = (str(row["task_id"]), native_name)
+            if (
+                native_key in seen_native_names
+                or (
+                    native_name != legacy_native_task_name(str(row["delegation_id"]))
+                    and not is_profile_native_task_name(native_name, str(row["profile_name"]))
+                )
+            ):
                 raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
+            seen_native_names.add(native_key)
         objects = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('index','trigger')")}
         if not {"reports_terminal_no_update", "reports_no_delete", "report_chunks_no_update", "report_chunks_no_delete", "decisions_no_update", "decisions_no_delete", "decisions_task_created", "report_chunks_report_order", "timeline_decision_sequence", "projection_jobs_pending", "consumption_task_sequence", "consumption_delegation_report", "governance_gates_assessment", "approval_handles_task_report"}.issubset(objects):
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
@@ -1880,8 +1890,12 @@ class V12Store:
             raise V12StoreError("delegation was not found", code="delegation_not_found")
         if task_id is not None and found["task_id"] != task_id:
             raise V12StoreError("reference does not belong to the task", code="cross_project_reference")
-        from cortex_runtime.delegation import native_task_name
-        if found.get("native_task_name") != native_task_name(identifier):
+        from cortex_runtime.delegation import is_profile_native_task_name, legacy_native_task_name
+        native_name = found.get("native_task_name")
+        if (
+            native_name != legacy_native_task_name(identifier)
+            and not is_profile_native_task_name(native_name, found.get("profile_name"))
+        ):
             raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
         found["input_report_ids"] = _load_json(str(found.pop("input_report_ids_json")), label="delegation inputs")
         found["input_decision_ids"] = _load_json(str(found.pop("input_decision_ids_json")), label="delegation decision inputs")
@@ -1974,6 +1988,30 @@ class V12Store:
         return {key: delegation[key] for key in ("delegation_id", "project_hash", "task_id", "parent_delegation_id", "native_task_name", "objective", "role", "profile_name", "scope", "model", "reasoning_effort", "created_at", "created_sequence")}
 
     @staticmethod
+    def _next_native_task_name(connection: sqlite3.Connection, *, task_id: str, profile_name: str) -> str:
+        """Allocate the first unused profile-derived native name in one task.
+
+        The surrounding write transaction serializes same-profile siblings.
+        Opaque legacy names remain reserved for their live workers, but do
+        not consume one of the readable profile-name slots.
+        """
+        from cortex_runtime.delegation import native_task_name
+
+        existing = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT native_task_name FROM delegations WHERE task_id=?",
+                (task_id,),
+            ).fetchall()
+        }
+        instance = 1
+        while True:
+            candidate = native_task_name(profile_name, instance)
+            if candidate not in existing:
+                return candidate
+            instance += 1
+
+    @staticmethod
     def _compact_decision(decision: Mapping[str, Any]) -> dict[str, Any]:
         value = {key: decision.get(key) for key in ("decision_id", "task_id", "subject_type", "subject_id", "subject_digest", "decision_type", "user_language", "attribution", "supersedes_decision_id", "created_at", "created_sequence")}
         value["response_en_excerpt"] = str(decision.get("response_en") or "")[:512]
@@ -2015,8 +2053,6 @@ class V12Store:
             raise V12StoreError("model selection is invalid", code="invalid_model_selection") from exc
         payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "model": selection.model, "reasoning_effort": selection.reasoning_effort}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
-            from cortex_runtime.delegation import native_task_name
-
             task = self._task(connection, payload["task_id"])
             if payload["parent_delegation_id"] is not None:
                 self._delegation(connection, payload["parent_delegation_id"], task_id=task["task_id"])
@@ -2051,7 +2087,11 @@ class V12Store:
             identifier = str(payload["delegation_id"] or new_sharded_id("delegation", self.project_hash))
             if connection.execute("SELECT 1 FROM delegations WHERE delegation_id=?", (identifier,)).fetchone() is not None:
                 raise V12StoreError("delegation_id already exists", code="delegation_exists")
-            native_name = native_task_name(identifier)
+            native_name = self._next_native_task_name(
+                connection,
+                task_id=str(task["task_id"]),
+                profile_name=payload["profile_name"],
+            )
             sequence = self._timeline(connection, event_type="delegation_created", entity_type="delegation", entity_id=identifier, payload={"delegation_id": identifier, "task_id": task["task_id"], "native_task_name": native_name}, task_id=task["task_id"], delegation_id=identifier)
             connection.execute("INSERT INTO delegations(delegation_id,project_hash,task_id,parent_delegation_id,native_task_name,objective,role,profile_name,scope,instructions,input_report_ids_json,input_decision_ids_json,model,reasoning_effort,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, task["task_id"], payload["parent_delegation_id"], native_name, payload["objective"], payload["role"], payload["profile_name"], payload["scope"], payload["instructions"], _canonical_json(payload["input_report_ids"], label="input_report_ids"), _canonical_json(payload["input_decision_ids"], label="input_decision_ids"), payload["model"], payload["reasoning_effort"], _now(), sequence))
             delegation = self._delegation(connection, identifier, task_id=task["task_id"])

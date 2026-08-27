@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import os
 import re
@@ -24,11 +23,29 @@ from cortex_runtime.v12_projections import materialize_task  # noqa: E402
 from cortex_runtime.v12_contract import task_ref  # noqa: E402
 
 
-def _inert_json(path: Path) -> object:
-    match = re.search(r"<pre>(.+)</pre>", path.read_text(encoding="utf-8"), re.DOTALL)
-    if match is None:
-        raise AssertionError("expected inert JSON projection")
-    return json.loads(html.unescape(match.group(1)))
+def _markdown_timeline_index(path: Path) -> tuple[int, list[dict[str, object]]]:
+    """Read only the server-shaped fields from the human Markdown index."""
+    text = path.read_text(encoding="utf-8")
+    latest = re.search(r"^\s*- \*\*latest\\_sequence:\*\* (\d+)$", text, re.MULTILINE)
+    if latest is None:
+        raise AssertionError("Markdown timeline index has no latest sequence")
+    pages: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    for line in text.splitlines():
+        path_match = re.search(r"\*\*path[^*]*\*\*\s+(pages/\d+)\\-(\d+)\\\.md", line)
+        if path_match:
+            current = {"path": f"pages/{path_match.group(1).split('/')[-1]}-{path_match.group(2)}.md"}
+            pages.append(current)
+            continue
+        events_match = re.search(r"\*\*events[^*]*\*\*\s+(\d+)", line)
+        if events_match and pages:
+            pages[-1]["events"] = int(events_match.group(1))
+    return int(latest.group(1)), pages
+
+
+def _markdown_timeline_sequences(path: Path) -> list[int]:
+    """Extract the repeated canonical sequence labels from a page."""
+    return [int(value) for value in re.findall(r"^\s*- \*\*sequence:\*\* (\d+)$", path.read_text(encoding="utf-8"), re.MULTILINE)]
 
 
 class V12TimelineRepairTests(unittest.TestCase):
@@ -86,6 +103,27 @@ class V12TimelineRepairTests(unittest.TestCase):
             model="gpt-5.6-luna",
             reasoning_effort="high",
         )[0]["delegation"]["delegation_id"]
+
+    def test_profile_names_are_used_for_native_workers_and_numbered_for_siblings(self) -> None:
+        store = self._store()
+        task_id = self._task(store, "Name same-profile native workers clearly.")
+
+        def create(number: int) -> str:
+            result, _ = store.create_delegation(
+                task_id=task_id,
+                objective=f"General worker {number}",
+                role="general worker",
+                profile_name="general",
+                scope="Own the bounded worker-name evidence.",
+                instructions="Return bounded worker-name evidence.",
+                model="gpt-5.6-luna",
+                reasoning_effort="high",
+            )
+            return str(result["delegation"]["native_task_name"])
+
+        self.assertEqual(create(1), "general")
+        self.assertEqual(create(2), "general_2")
+        self.assertEqual(create(3), "general_3")
 
     def _seed_live_shape_with_only_task_created_timeline(self) -> tuple[V12Store, str, str, str]:
         """Reproduce the reported shape in an isolated current-V12 shard.
@@ -310,16 +348,19 @@ class V12TimelineRepairTests(unittest.TestCase):
         compact_task_ref = task_ref(task_id)
         self.assertIsInstance(compact_task_ref, str)
         view_root = repaired.root / "tasks" / str(compact_task_ref)
-        page_index = _inert_json(view_root / "timeline" / "index.md")
+        latest_sequence, page_index = _markdown_timeline_index(view_root / "timeline" / "index.md")
         # The projection is the completed backfill snapshot.  The subsequent
         # coordinator read deliberately appends one receipt event and is not a
         # projection refresh trigger.
-        self.assertEqual(page_index["latest_sequence"], max(sequences))
-        self.assertEqual(sum(int(page["events"]) for page in page_index["pages"]), len(task["timeline"]))
-        for page in page_index["pages"]:
-            events = _inert_json(view_root / "timeline" / str(page["path"]))
-            self.assertEqual(len(events), int(page["events"]))
-            self.assertEqual([event["sequence"] for event in events], sorted(event["sequence"] for event in events))
+        self.assertEqual(latest_sequence, max(sequences))
+        projected_count = 0
+        for page in page_index:
+            sequences_in_page = _markdown_timeline_sequences(view_root / "timeline" / str(page["path"]))
+            projected_count += len(sequences_in_page)
+            if "events" in page:
+                self.assertEqual(len(sequences_in_page), int(page["events"]))
+            self.assertEqual(sequences_in_page, sorted(sequences_in_page))
+        self.assertEqual(projected_count, len(task["timeline"]))
 
         # The marker makes every following normal open idempotent.
         before = post_read_sequences
@@ -591,12 +632,11 @@ class V12TimelineRepairTests(unittest.TestCase):
         compact_task_ref = task_ref(task_id)
         self.assertIsInstance(compact_task_ref, str)
         view_root = store.root / "tasks" / str(compact_task_ref)
-        page_index = _inert_json(view_root / "timeline" / "index.md")
-        self.assertEqual(len(page_index["pages"]), 2)
+        _latest_sequence, page_index = _markdown_timeline_index(view_root / "timeline" / "index.md")
+        self.assertEqual(len(page_index), 2)
         flattened: list[int] = []
-        for page in page_index["pages"]:
-            events = _inert_json(view_root / "timeline" / str(page["path"]))
-            flattened.extend(int(event["sequence"]) for event in events)
+        for page in page_index:
+            flattened.extend(_markdown_timeline_sequences(view_root / "timeline" / str(page["path"])))
         self.assertEqual(flattened, sorted(flattened))
         self.assertEqual(len(flattened), 102)
         self.assertEqual(len(set(flattened)), 102)
