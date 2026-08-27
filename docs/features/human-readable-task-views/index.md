@@ -105,9 +105,10 @@ file, then its digest and source sequence are verified before it becomes ready.
 Every output path is derived from server-generated validated identifiers rather
 than caller-supplied export paths. Generated files are ordinary, readable
 Markdown: values are presented under labeled headings, lists, tables, and
-paragraphs, with safe escaping for Markdown punctuation. Structured JSON is
-canonical database data only; it is never dumped as a JSON object, script block,
-or opaque blob into a human view.
+paragraphs. Markdown supplied as task or report content is preserved verbatim:
+the renderer does not add backslashes, entity-escape HTML, or otherwise rewrite
+the content. Structured JSON is canonical database data only; it is never
+dumped as a JSON object, script block, or opaque blob into a human view.
 
 The view writer intentionally preserves direct edits. If the on-disk content no
 longer matches the derived artifact that Cortex last verified, it records a

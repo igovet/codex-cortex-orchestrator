@@ -151,8 +151,7 @@ def _markdown_timeline_events(path: Path) -> list[tuple[int, str, str]]:
     sequences = re.findall(r"\*\*sequence:\*\*\s+(\d+)", text)
     event_types = re.findall(r"\*\*event_type:\*\*\s+([^\n]+)", text)
     entity_ids = re.findall(r"\*\*entity_id:\*\*\s+([^\n]+)", text)
-    unescape = lambda value: value.replace("\\-", "-").replace("\\_", "_").replace("\\.", ".")
-    return [(int(sequence), unescape(event_type), unescape(entity_id)) for sequence, event_type, entity_id in zip(sequences, event_types, entity_ids)]
+    return [(int(sequence), event_type, entity_id) for sequence, event_type, entity_id in zip(sequences, event_types, entity_ids)]
 
 
 def require(condition: object, label: str) -> None:
