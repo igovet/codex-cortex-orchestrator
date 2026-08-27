@@ -56,14 +56,14 @@ TASK_ANCHORED_TOOLS = {
 }
 EXPECTED_TOOL_FIELDS = {
     "create_task": {
-        "project_root", "objective", "user_request_original", "user_language", "task_contract_version",
+        "project_root", "objective", "user_request_original", "user_language",
         "requirements", "constraints", "acceptance_criteria", "verification_plan", "context",
         "idempotency_key",
     },
     "inspect_task": {"task_ref", "after_sequence", "limit"},
     "create_delegation": {
         "task_ref", "objective", "role", "profile_name", "scope", "instructions",
-        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "approval_decision_ref", "model", "reasoning_effort",
+        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "model", "reasoning_effort",
         "idempotency_key",
     },
     "read_delegation": {"delegation_ref", "after_sequence", "limit"},
@@ -74,7 +74,7 @@ EXPECTED_TOOL_FIELDS = {
     },
     "read_reports": {
         "report_refs", "sections", "cursor", "max_bytes",
-        "consumer_delegation_ref", "reader_kind",
+        "consumer_delegation_ref",
     },
     "set_governance_mode": {
         "task_ref", "mode", "rationale", "risk_factors", "source", "initiative_ref", "idempotency_key",
@@ -92,16 +92,16 @@ EXPECTED_TOOL_FIELDS = {
 EXPECTED_TOOL_REQUIRED = {
     "create_task": {
         "project_root", "objective", "user_request_original", "user_language",
-        "task_contract_version", "requirements", "constraints",
+        "requirements", "constraints",
         "acceptance_criteria", "verification_plan",
     },
     "inspect_task": {"task_ref"},
     "create_delegation": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"},
-    "read_delegation": {"delegation_ref", "after_sequence"},
+    "read_delegation": {"delegation_ref"},
     "submit_report": {"delegation_ref"},
     "read_reports": {"report_refs"},
     "set_governance_mode": {"task_ref", "mode"},
-    "record_initiative": {"task_ref", "goal"},
+    "record_initiative": {"task_ref"},
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
     "record_user_decision": {
@@ -462,7 +462,7 @@ def validate_runtime(plugin: Path) -> None:
                 fail("create_task.project_root must remain the explicit V12 shard anchor")
         elif name in {"read_delegation", "submit_report", "read_reports"}:
             derived_required = {
-                "read_delegation": {"delegation_ref", "after_sequence"},
+                "read_delegation": {"delegation_ref"},
                 "submit_report": {"delegation_ref"},
                 "read_reports": {"report_refs"},
             }[name]

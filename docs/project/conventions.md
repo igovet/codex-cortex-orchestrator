@@ -105,8 +105,9 @@
   original record; conflicting content must fail without mutation.
 - Treat reports as immutable evidence. Pass only finalized relevant report refs
   and their exact manifest digests to later delegations. Worker consumption is
-  evidenced only by `read_reports(reader_kind="worker", consumer_delegation_ref=…)`
-  receipts; coordinator reads never substitute for that evidence.
+  evidenced only by a `read_reports` call with `reader_kind="worker"` and the
+  consuming worker's own exact `consumer_delegation_ref`, plus its receipt;
+  coordinator reads never substitute for that evidence.
 - The owning native worker alone calls `submit_report` for its plan, result,
   verification, synthesis, or documentation-impact evidence. Its completion
   handoff returns a concise `Summary` and exact `Report ref`; the coordinator
@@ -253,20 +254,26 @@
 - Keep secrets, credentials, personal data, raw reports, prompts, worker
   transcripts, and private diagnostics out of documentation, fixtures, issues,
   commits, and logs.
-- Keep end-user install/update on the README's GitHub Marketplace flow. Use
-  `./scripts/cortex-dev` for interactive repository development: it isolates
-  `HOME` and `CODEX_HOME` under the exact persistent `$HOME/.cortex-dev`
-  candidate directory before synchronizing and launching Codex. Use
-  `./scripts/cortex-dev-reset --confirm` only to remove that dedicated
-  candidate; its path guards must never be weakened. Direct
-  `./scripts/sync-cortex.sh` remains an explicitly authorized repository
-  source-synchronization operation; `--dry-run`/`--check` are validation modes.
+- Keep end-user install/update on the README's GitHub Marketplace flow. Every
+  interactive repository live-dev test starts through `./scripts/cortex-dev`:
+  it isolates `HOME` and `CODEX_HOME` under the exact persistent
+  `$HOME/.cortex-dev` candidate directory, refreshes the candidate cache/version
+  there, and only then launches Codex. Use `./scripts/cortex-dev-reset --confirm`
+  only to remove that dedicated candidate; its path guards must never be
+  weakened. Direct `./scripts/sync-cortex.sh` is not a live-dev mechanism and
+  must never synchronize the user's real installed plugin; `--dry-run`/`--check`
+  are read-only validation modes.
 - Delegate the smallest non-destructive checks that prove affected behavior,
   broaden in proportion to risk, and report every unrun release or live-host
   check.
-- Live tests use ordinary interactive Codex inside `tmux` only, never `codex
-  exec`; keep them narrowly targeted to the modified function, tool, or
-  contract and record the exact session command and outcome.
+- Live tests use ordinary interactive Codex inside a named background `tmux`
+  session only, never `codex exec`; create the session with `-d`, send the
+  launcher and targeted input with `tmux send-keys`, capture a bounded pane,
+  and clean up. Run `./scripts/cortex-dev` before the targeted input, verify
+  and record its printed isolated `HOME`/`CODEX_HOME` target and refreshed cache
+  version, then keep the smoke narrow and record the exact command and outcome.
+  A terminal-permission prompt/denial or ordinary-Codex startup failure is
+  failed or unverified from the bounded capture, never inferred as success.
 - After behavior, interface, command, diagram, or version changes, delegate a
   documentation verifier to re-read README, SECURITY, release readiness, and
   all affected Markdown and validate links, Mermaid syntax, tool names, paths,

@@ -194,16 +194,23 @@
 ## Installation and validation
 
 - End users install/update through the README's GitHub Marketplace flow.
-- `./scripts/cortex-dev` is the repository developer workflow: it keeps the
+- Every live-dev test starts through `./scripts/cortex-dev`: it keeps the
   candidate's HOME, CODEX_HOME, plugin cache, config, and V12 state under the
-  exact persistent `$HOME/.cortex-dev` boundary before synchronizing. Reset
-  requires `./scripts/cortex-dev-reset --confirm` and cannot target stable or
-  arbitrary paths.
-- `./scripts/sync-cortex.sh` remains the repository local-source
-  synchronization path, not the public installation replacement.
+  exact persistent `$HOME/.cortex-dev` boundary, prints the candidate target,
+  and refreshes its cache/version before launching Codex. Reset requires
+  `./scripts/cortex-dev-reset --confirm` and cannot target stable or arbitrary
+  paths.
+- `./scripts/sync-cortex.sh` is a local-source synchronization path, not a
+  live-dev or public installation replacement; never use it to synchronize the
+  user's real installed plugin.
 - A source test does not prove the installed plugin or a live Codex session.
-- Live acceptance uses ordinary interactive `codex` inside tmux, never
-  `codex exec`.
+- Live acceptance uses ordinary interactive `codex` in a named background tmux
+  session, never `codex exec`; create the session with `-d`, send the launcher
+  and targeted input with `tmux send-keys`, capture a bounded pane, and clean
+  up. Run `./scripts/cortex-dev` before the targeted input and record its
+  printed isolated target and refreshed cache version. A terminal-permission
+  prompt/denial or ordinary-Codex startup failure is failed or unverified from
+  the bounded capture, never inferred as success.
 - V12 has no lifecycle hooks or hook-trust flow. A hook prompt is a
   package/configuration mismatch, not an expected step.
 - V11 databases are untouched and incompatible. Never migrate or adopt them for

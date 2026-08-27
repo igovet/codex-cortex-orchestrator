@@ -238,7 +238,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             mode="finalize",
             status="completed",
             expected_chunk_count=1,
-            expected_content_digest=appended["current_content_digest"],
+            expected_content_digest=appended["expected_content_digest"],
         )
         reports.append(begun)
         store.set_governance_mode(
@@ -473,7 +473,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             mode="finalize",
             status="completed",
             expected_chunk_count=1,
-            expected_content_digest=appended["current_content_digest"],
+            expected_content_digest=appended["expected_content_digest"],
         )
         store.set_governance_mode(
             task_id=task_id, mode="minimal", rationale=None, risk_factors=[], source="model", initiative_id=None,

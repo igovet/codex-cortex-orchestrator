@@ -109,7 +109,8 @@ normalization. Include explicit requirements, constraints, observable
 acceptance conditions, proportional verification, and bounded context. These
 are outcome semantics; the active MCP registry owns the request shape.
 
-Use the active `task_contract_version`. Separate facts from assumptions, retain
+The backend stamps the active task-contract version; do not make the model
+supply or guess it. Separate facts from assumptions, retain
 material user wording exactly, and do not turn an implementation plan into a
 backend permission boundary. This is an outcome contract, never a project
 solution plan: the coordinator must not author implementation steps,
@@ -495,8 +496,12 @@ initiative, or closure state into a user question.
 
 The coordinator should continue orchestration while safe meaningful work
 remains and until the requested outcome is reached or a material limitation is
-honestly disclosed. Closure evidence is advisory and best effort; recording or
-inspecting it is not a prerequisite for a truthful final answer. Ending a turn
+honestly disclosed. After required evidence settles, a completed Cortex task
+must attempt its supported closure and verify the intended inspection before it
+is described as closure-confirmed. A write or inspection outage remains
+nonblocking for a truthful answer, but must be disclosed as
+`closure_unconfirmed`; never silently omit the attempt or call it closed/ready.
+Ending a turn
 before the outcome is reached is permitted after one genuine user question
 whose answer materially changes requirements, scope, acceptance, or grants
 needed external/destructive authority. A completed worker, an incomplete
@@ -766,11 +771,16 @@ The legacy statement “This distinct task closure is mandatory whenever the
 task has an initiative” is not an active V12 rule; task and initiative closure
 remain optional advisory evidence.
 
-## Advisory closure and final answer
+## Closure confirmation and final answer
 
-Make a best effort to record closure at the selected depth. When initiatives
-are relevant, record initiative evidence and inspect its links when useful;
-there is no mandatory initiative-before-task or task-before-final sequence.
+After required worker, verification, and documentation-impact evidence settles,
+attempt the supported closure and verify it with the intended scoped inspection
+before a Cortex task is described as closure-confirmed. When initiatives are
+relevant, use only active-registry shapes and exact returned handles; a
+suggested subject is not a complete callable payload. There is no invented
+initiative-before-task order. An initiative-only closure cannot support a
+task_closed claim: the distinct supported task closure and inspection provide
+that evidence when task closure is selected.
 Closure remains advisory, but evidence integrity is mandatory: do not claim a
 durable `ready` or `ready_with_risks` closure while required worker evidence is
 assembling, missing, unread, or unsettled. Use only a subject type supported by
@@ -792,6 +802,28 @@ possible. A `ready` claim is durable only when the relevant closure write and
 intended inspection agree; when a task closure is recorded, task inspection may
 surface `task_closed`, but that state is advisory and not required for a final
 answer.
+
+On a closure storage or inspection failure, preserve the project outcome but
+label the Cortex state `closure_unconfirmed`. Retry only a verified transient
+failure with the exact returned retry handle; schema, reference, or evidence
+errors require correction. This never becomes a backend workflow gate.
+
+## Event-selected cognitive overlays
+
+Keep a small orchestrator kernel and select compact playbooks from existing
+overlays rather than adding installable skills. `USER_STEER` uses intent
+reconciliation; `BEFORE_DELEGATION` uses delegation strategy and tool-call
+discipline; `REPORT_RECEIVED` uses evidence reasoning and orchestration critic;
+`TOOL_ERROR` uses failure recovery and tool-call discipline; `BEFORE_CLOSURE`
+uses evidence reasoning and orchestration critic; `CONTEXT_LOST` uses
+capability-gap analysis and failure recovery; and `TASK_FINISHED` uses intent
+reconciliation and evidence reasoning. Intent reconciliation, tool-call
+discipline, and evidence reasoning are the priority modes.
+
+Each mode may write one compact Decision Capsule with only: decision, evidence
+refs, explicit assumptions, next safe action, and invalidation trigger. A
+capsule is advisory reasoning evidence, not a backend command, project plan,
+secret container, raw log, or invented handle.
 
 The localized final answer leads with the outcome, then verified important
 human-view links with summaries, decisive checks and results, documentation

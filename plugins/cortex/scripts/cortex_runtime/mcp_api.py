@@ -494,11 +494,11 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
         field = direct.group(1)
     else:
         named = re.fullmatch(
-            r"(?:missing required|unsupported) property '([a-z][a-z0-9_]{0,63})'",
+            r"(?:missing required|unsupported) property '([a-z][a-z0-9_]{0,63})'|property '([a-z][a-z0-9_]{0,63})' is not permitted for this input shape",
             error.message,
         )
         if named is not None:
-            field = named.group(1)
+            field = named.group(1) or named.group(2)
     details = _safe_details({"path": error.path, "field": field, "expected": "advertised_input_schema"})
     retryable, action = _recovery("validation_error", details)
     if tool_name == "create_delegation" and "delegation_id" in arguments:
@@ -632,8 +632,8 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     action = value.get("next_action")
     action_task_ref = action.get("task_ref") if isinstance(action, Mapping) else None
     if not isinstance(action_task_ref, str) and isinstance(action, Mapping):
-        arguments = action.get("arguments")
-        action_task_ref = arguments.get("task_ref") if isinstance(arguments, Mapping) else None
+        suggested_subject = action.get("suggested_subject")
+        action_task_ref = suggested_subject.get("task_ref") if isinstance(suggested_subject, Mapping) else None
     reports = value.get("reports")
     if isinstance(reports, list):
         if task_id is None:
@@ -651,6 +651,12 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     sequence = value.get("next_sequence")
     if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
         result["next_sequence"] = sequence
+    for field in ("next_chunk_index", "expected_chunk_count", "expected_content_digest"):
+        candidate = value.get(field)
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+            result[field] = candidate
+        elif field == "expected_content_digest" and isinstance(candidate, str) and candidate:
+            result[field] = candidate
     for field, approval in (("human_view", False), ("approval_view", True)):
         projected = _public_view(value.get(field), approval=approval, owner=value)
         if projected is not None:

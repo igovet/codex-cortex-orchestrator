@@ -42,14 +42,14 @@ EXPECTED_TOOLS = (
 
 EXPECTED_INPUT_FIELDS = {
     "create_task": {
-        "project_root", "objective", "user_request_original", "user_language", "task_contract_version",
+        "project_root", "objective", "user_request_original", "user_language",
         "requirements", "constraints", "acceptance_criteria", "verification_plan", "context",
         "idempotency_key",
     },
     "inspect_task": {"task_ref", "after_sequence", "limit"},
     "create_delegation": {
         "task_ref", "objective", "role", "profile_name", "scope", "instructions",
-        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "approval_decision_ref", "model", "reasoning_effort",
+        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "model", "reasoning_effort",
         "idempotency_key",
     },
     "read_delegation": {"delegation_ref", "after_sequence", "limit"},
@@ -58,7 +58,7 @@ EXPECTED_INPUT_FIELDS = {
         "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en", "supersedes_report_ref",
         "review_policy", "idempotency_key",
     },
-    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "consumer_delegation_ref", "reader_kind"},
+    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "consumer_delegation_ref"},
     "set_governance_mode": {
         "task_ref", "mode", "rationale", "risk_factors", "source", "initiative_ref", "idempotency_key",
     },
@@ -81,16 +81,16 @@ EXPECTED_INPUT_FIELDS = {
 EXPECTED_REQUIRED_FIELDS = {
     "create_task": {
         "project_root", "objective", "user_request_original", "user_language",
-        "task_contract_version", "requirements", "constraints",
+        "requirements", "constraints",
         "acceptance_criteria", "verification_plan",
     },
     "inspect_task": {"task_ref"},
     "create_delegation": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"},
-    "read_delegation": {"delegation_ref", "after_sequence"},
+    "read_delegation": {"delegation_ref"},
     "submit_report": {"delegation_ref"},
     "read_reports": {"report_refs"},
     "set_governance_mode": {"task_ref", "mode"},
-    "record_initiative": {"task_ref", "goal"},
+    "record_initiative": {"task_ref"},
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
     "record_user_decision": {
@@ -225,16 +225,12 @@ def _public_arguments(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]
             result.setdefault(new, _ref_list(result.pop(old), kind))
     if "linked_task_ids" in result:
         result.setdefault("linked_task_refs", [_task_ref(item) for item in result.pop("linked_task_ids")])
-    if "approval_decision_id" in result:
-        result.setdefault("approval_decision_ref", _record_ref(result.pop("approval_decision_id"), "decision"))
     if "subject_id" in result:
         subject = result.pop("subject_id")
         result.setdefault(
             "subject_ref",
             _task_ref(subject) if result.get("subject_type") == "task" else _record_ref(subject, "initiative" if result.get("subject_type") == "initiative" else "report" if result.get("subject_type") in {"plan", "report"} else "delegation"),
         )
-    if name == "read_delegation":
-        result.setdefault("after_sequence", 0)
     return result
 
 
@@ -813,7 +809,6 @@ def _task_payload(project_root: str | Path, *, objective: str, key: str, origina
         "objective": objective,
         "user_request_original": objective if original is None else original,
         "user_language": language,
-        "task_contract_version": "cortex/task-contract/v1",
         "requirements": ["Preserve the bounded V12 task contract."],
         "constraints": ["No additional constraints."],
         "acceptance_criteria": ["The task ledger records one complete contract."],
@@ -1130,7 +1125,6 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "objective": "Preserve a durable V12 coordination audit trail.",
             "user_request_original": "Провести проверку архитектуры Cortex V12.",
             "user_language": "ru",
-            "task_contract_version": "cortex/task-contract/v1",
             "requirements": ["Preserve the eleven-tool public MCP contract."],
             "constraints": ["Keep all ledger and human-view content host-private."],
             "acceptance_criteria": ["The bounded release gate completes successfully."],
@@ -1458,7 +1452,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             plan_chunk_zero.get("accepted_chunk_index") == 0
             and plan_chunk_zero.get("next_chunk_index") == 1
             and isinstance(plan_chunk_zero.get("chunk_digest"), str)
-            and isinstance(plan_chunk_zero.get("current_content_digest"), str),
+            and isinstance(plan_chunk_zero.get("expected_content_digest"), str),
             "chunk append returns resumable ordered acknowledgement metadata without a body echo",
         )
         require(server.tool("submit_report", plan_chunk_zero_args).get("replayed") is True, "chunk append is idempotent")
@@ -1480,7 +1474,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "idempotency_key": "plan-append-1",
         }
         plan_chunk_one = server.tool("submit_report", plan_chunk_one_args)
-        plan_digest = plan_chunk_one.get("current_content_digest")
+        plan_digest = plan_chunk_one.get("expected_content_digest")
         require(isinstance(plan_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", plan_digest), "chunk append returns the whole immutable manifest digest")
 
         plan_first_page = server.tool(
@@ -2147,8 +2141,8 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             },
         )
         require(
-                _error_code(mixed_task_fields) == "invalid_closure_subject",
-                "task closure rejects initiative-only status while allowing opaque completion notes",
+                _error_code(mixed_task_fields) == "validation_error",
+                "task closure rejects initiative-only status at the public schema boundary while allowing opaque completion notes",
         )
         require(
             server.tool("inspect_governance", {"task_id": task_a}).get("closures")
@@ -2178,7 +2172,6 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                 "role": "rework", "scope": "Address advisory not-ready finding.",
                 "instructions": KNOWLEDGE_CONTRACT_INSTRUCTIONS,
                 "input_report_ids": [plan_id, report_b],
-                "approval_decision_id": post_full_decision_id,
             },
         )
         rework_id = _delegation_id(rework)
@@ -2273,7 +2266,6 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                     **_delegation_payload(task_a, model="gpt-5.6-terra", effort="high", key=f"concurrent-delegation-{index}"),
                     "role": "concurrent-review", "scope": f"Independent atomic write {index}.",
                     "input_report_ids": [plan_id, report_b],
-                    "approval_decision_id": post_full_decision_id,
                 },
             )
             report_id = _report_id(child.tool(
@@ -2987,7 +2979,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             "objective": "Deliver an English-normalized V12 production acceptance record.",
             "user_request_original": "Проверьте готовность координационного журнала к выпуску.",
             "user_language": "ru",
-            "task_contract_version": "cortex/task-contract/v1",
             "requirements": ["Preserve public MCP compatibility.", "Use worker-owned durable evidence."],
             "constraints": ["Never write Cortex state below project_root."],
             "acceptance_criteria": ["Every semantic mutation has canonical task-scoped chronology."],
@@ -3049,7 +3040,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             key: str,
             input_report_ids: list[str] | None = None,
             input_decision_ids: list[str] | None = None,
-            approval_decision_id: str | None = None,
         ) -> tuple[str, Mapping[str, Any]]:
             arguments = {
                 **_delegation_payload(task_id, model=model, effort=effort, key=key, profile_name=profile_name),
@@ -3059,8 +3049,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "input_report_ids": [] if input_report_ids is None else input_report_ids,
                 "input_decision_ids": [] if input_decision_ids is None else input_decision_ids,
             }
-            if approval_decision_id is not None:
-                arguments["approval_decision_id"] = approval_decision_id
             receipt = server.tool(
                 "create_delegation",
                 arguments,
@@ -3136,7 +3124,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "idempotency_key": "production-plan-append-one",
             },
         )
-        plan_digest = plan_append_one.get("current_content_digest")
+        plan_digest = plan_append_one.get("expected_content_digest")
         require(
             isinstance(plan_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", plan_digest) is not None,
             "the multi-chunk plan returns one canonical manifest digest",
@@ -3254,7 +3242,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             key="production-qa-delegation",
             input_report_ids=[plan_id, implementation_id],
             input_decision_ids=[decision_id],
-            approval_decision_id=decision_id,
         )
         qa_worker_read = server.tool(
             "read_reports",
@@ -3262,7 +3249,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "task_id": task_id,
                 "report_ids": [plan_id, implementation_id],
                 "consumer_delegation_id": qa_delegation,
-                "reader_kind": "worker",
                 "max_bytes": 65_536,
             },
         )
@@ -3289,7 +3275,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             key="production-documentation-delegation",
             input_report_ids=[plan_id, implementation_id, qa_id],
             input_decision_ids=[decision_id],
-            approval_decision_id=decision_id,
         )
         documentation_worker_read = server.tool(
             "read_reports",
@@ -3297,7 +3282,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "task_id": task_id,
                 "report_ids": [plan_id, implementation_id, qa_id],
                 "consumer_delegation_id": documentation_delegation,
-                "reader_kind": "worker",
                 "max_bytes": 65_536,
             },
         )
@@ -3349,7 +3333,6 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             key="production-verification-delegation",
             input_report_ids=[plan_id, implementation_id, qa_id, documentation_id],
             input_decision_ids=[decision_id],
-            approval_decision_id=decision_id,
         )
         verification_id = _report_id(server.tool(
             "submit_report",
@@ -3658,7 +3641,6 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
             objective: str,
             input_report_ids: list[str] | None = None,
             input_decision_ids: list[str] | None = None,
-            approval_decision_id: str | None = None,
         ) -> str:
             arguments = {
                 **_delegation_payload(task_id, model=model, effort=effort, key=key, profile_name=profile_name),
@@ -3667,8 +3649,6 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
                 "input_report_ids": [] if input_report_ids is None else input_report_ids,
                 "input_decision_ids": [] if input_decision_ids is None else input_decision_ids,
             }
-            if approval_decision_id is not None:
-                arguments["approval_decision_id"] = approval_decision_id
             return _delegation_id(server.tool(
                 "create_delegation",
                 arguments,
@@ -3717,7 +3697,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
                 "idempotency_key": "backfill-r4-append",
             },
         )
-        verification_digest = verification_append.get("current_content_digest")
+        verification_digest = verification_append.get("expected_content_digest")
         require(isinstance(verification_digest, str), "streamed repair fixture returns its final digest")
         server.tool(
             "submit_report",
@@ -3747,7 +3727,6 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
             objective="Produce an independent completed result for the repaired task.",
             input_report_ids=[plan_id, implementation_id],
             input_decision_ids=[decision_id],
-            approval_decision_id=decision_id,
         )
         qa_worker_read = server.tool(
             "read_reports",
@@ -3755,7 +3734,6 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
                 "task_id": task_id,
                 "report_ids": [plan_id, implementation_id],
                 "consumer_delegation_id": qa_delegation,
-                "reader_kind": "worker",
                 "max_bytes": 65_536,
             },
         )
@@ -3772,7 +3750,6 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
             objective="Produce the post-approval documentation-impact report for the repaired task.",
             input_report_ids=[plan_id, implementation_id, qa_id],
             input_decision_ids=[decision_id],
-            approval_decision_id=decision_id,
         )
         documentation_worker_read = server.tool(
             "read_reports",
@@ -3780,7 +3757,6 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
                 "task_id": task_id,
                 "report_ids": [plan_id, implementation_id, qa_id],
                 "consumer_delegation_id": documentation_delegation,
-                "reader_kind": "worker",
                 "max_bytes": 65_536,
             },
         )

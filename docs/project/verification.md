@@ -304,22 +304,23 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode hea
 ## Installed-host checks
 
 End users install through the GitHub Marketplace instructions in
-[README.md](../../README.md). Repository developers may synchronize the current
-checkout only after explicit user direction. For an interactive candidate
-session, use the isolated helper so the stable HOME/CODEX_HOME and V12 state
-remain untouched:
+[README.md](../../README.md). For every interactive repository live-dev test,
+use the isolated helper before ordinary Codex so the stable HOME/CODEX_HOME and
+V12 state remain untouched and the candidate cache/version is refreshed first:
 
 ```bash
 ./scripts/cortex-dev
 ```
 
-The helper synchronizes the checkout under the exact persistent
-`$HOME/.cortex-dev` candidate runtime, then launches ordinary Codex. Its
+The helper prints and then synchronizes the checkout under the exact persistent
+`$HOME/.cortex-dev` candidate runtime (`CODEX_HOME=$HOME/.cortex-dev/.codex`),
+then launches ordinary Codex. Its
 companion reset requires `./scripts/cortex-dev-reset --confirm` and refuses
 stable, repository, broad, symlinked, or non-regular targets. Direct
-`./scripts/sync-cortex.sh` is still the explicitly authorized local-source
-operation; `--check` remains read-only and must be run in the environment whose
-candidate or installation is being checked.
+`./scripts/sync-cortex.sh` is never a live-dev mechanism; `--check` remains
+read-only and must be run in the environment whose candidate is being checked.
+Never install, reinstall, update, or synchronize the user's real installed
+plugin for repository live development.
 
 Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 eleven-tool catalog, bundled skill/profile content, schema-v1 path, host-private
@@ -328,11 +329,19 @@ after any install or update.
 
 ## Interactive tmux smoke
 
-Use an ordinary interactive Codex CLI inside tmux. Do not use `codex exec`:
+Use an ordinary interactive Codex CLI inside a background tmux session. Create
+the named session, send commands directly, capture a bounded pane, and clean
+up the session; do not use `codex exec`:
 
 ```bash
-tmux new-session -s cortex-v12-smoke
-codex
+session_name=cortex-v12-smoke
+tmux has-session -t "$session_name" 2>/dev/null && tmux kill-session -t "$session_name" || true
+tmux new-session -d -s "$session_name" -c "/path/to/codex-orchestration" bash
+tmux send-keys -t "$session_name" 'cd /path/to/codex-orchestration && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
+# After the launcher is ready, inject only the narrow smoke input:
+tmux send-keys -t "$session_name" '<targeted test input>' C-m
+tmux capture-pane -p -t "$session_name" -S -200 -E -1
+tmux kill-session -t "$session_name" 2>/dev/null || true
 ```
 
 After installation or source synchronization, run exactly one fresh interactive
@@ -343,7 +352,11 @@ single-session pass may concurrent multi-session smoke begin.
 Live tests are narrow and must exercise only the modified function, tool, or
 contract in the active session. Do not use `codex exec`, an exec-mode wrapper,
 or a detached substitute for the interactive tmux Codex session. Record the
-session command, test scope, outcome, and unrun checks.
+session command, the launcher's printed `HOME`/`CODEX_HOME` target, refreshed
+cache version, test scope, outcome, and unrun checks. If ordinary Codex cannot
+start or a terminal permission prompt/denial prevents the targeted input or
+result, classify the smoke as failed or unverified from the bounded capture;
+never infer success. Always clean up the named session.
 
 Exercise several explicit `$cortex:orchestrator` tasks:
 

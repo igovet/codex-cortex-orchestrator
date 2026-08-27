@@ -2051,7 +2051,7 @@ class V12Store:
         value["response_en_excerpt"] = str(decision.get("response_en") or "")[:512]
         return value
 
-    def create_task(self, *, objective: Any, user_request_original: Any, user_language: Any, task_contract_version: Any, requirements: Any, constraints: Any, acceptance_criteria: Any, verification_plan: Any, context: Any = None, task_id: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
+    def create_task(self, *, objective: Any, user_request_original: Any, user_language: Any, requirements: Any, constraints: Any, acceptance_criteria: Any, verification_plan: Any, context: Any = None, task_id: Any = None, idempotency_key: Any = None, task_contract_version: Any = TASK_CONTRACT_VERSION) -> tuple[dict[str, Any], bool]:
         english_objective = _opaque_text(objective, label="objective")
         payload = {
             "objective": english_objective,
@@ -2357,7 +2357,7 @@ class V12Store:
                 if chunk_index < int(report["next_chunk_index"]):
                     existing = _row(connection.execute("SELECT section,content_digest,content_bytes FROM report_chunks WHERE report_id=? AND chunk_index=?", (identifier, chunk_index)).fetchone())
                     if existing is not None and existing["section"] == section and existing["content_digest"] == chunk[3] and int(existing["content_bytes"]) == chunk[2]:
-                        return {"report": self._compact_report(report), "accepted_chunk_index": chunk_index, "next_chunk_index": report["next_chunk_index"], "chunk_digest": chunk[3], "chunk_bytes": chunk[2], "current_content_digest": report["content_digest"]}
+                        return {"report": self._compact_report(report), "accepted_chunk_index": chunk_index, "next_chunk_index": report["next_chunk_index"], "chunk_digest": chunk[3], "chunk_bytes": chunk[2], "expected_chunk_count": report["total_chunks"], "expected_content_digest": report["content_digest"]}
                     raise V12StoreError("report chunk conflicts with existing chunk", code="report_chunk_conflict")
                 if chunk_index != int(report["next_chunk_index"]):
                     raise V12StoreError("report chunk is out of order", code="report_chunk_out_of_order")
@@ -2378,7 +2378,7 @@ class V12Store:
                 state["assembling_bytes"] += chunk[2]
                 update_usage(connection, str(task["task_id"]), state)
                 current = self._report(connection, identifier, task_id=task["task_id"])
-                return {"report": self._compact_report(current), "accepted_chunk_index": chunk_index, "next_chunk_index": current["next_chunk_index"], "chunk_digest": chunk[3], "chunk_bytes": chunk[2], "current_content_digest": current["content_digest"]}
+                return {"report": self._compact_report(current), "accepted_chunk_index": chunk_index, "next_chunk_index": current["next_chunk_index"], "chunk_digest": chunk[3], "chunk_bytes": chunk[2], "expected_chunk_count": current["total_chunks"], "expected_content_digest": current["content_digest"]}
             if mode_value == "finalize":
                 if report["assembly_state"] == "finalized" and int(report["total_chunks"]) == expected_chunk_count and report["content_digest"] == expected_content_digest and report["status"] == status_value:
                     return {"report": self._compact_report(report)}
@@ -2532,17 +2532,19 @@ class V12Store:
             return {"assessment": self._assessment(connection, identifier)}
         return self._mutation("set_governance_mode", payload, idempotency_key, write)
 
-    def record_initiative(self, *, task_id: Any, goal: Any, initiative_id: Any, parent_initiative_id: Any, risk: Any, status: Any, dependencies: Any, linked_task_ids: Any, linked_delegation_ids: Any = None, linked_report_ids: Any = None, linked_decision_ids: Any = None, notes: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
+    def record_initiative(self, *, task_id: Any, goal: Any = None, initiative_id: Any = None, parent_initiative_id: Any = None, risk: Any = None, status: Any = None, dependencies: Any = None, linked_task_ids: Any = None, linked_delegation_ids: Any = None, linked_report_ids: Any = None, linked_decision_ids: Any = None, notes: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
         state = None if status is None else _required_text(status, label="status", maximum=16).lower()
         if state is not None and state not in INITIATIVE_STATUSES:
             raise V12StoreError("initiative status is invalid", code="invalid_initiative_status")
-        payload = {"task_id": self._task_identifier(task_id), "goal": _opaque_text(goal, label="goal"), "initiative_id": None if initiative_id is None else self._record_identifier(initiative_id, label="initiative_id"), "parent_initiative_id": None if parent_initiative_id is None else self._record_identifier(parent_initiative_id, label="parent_initiative_id"), "parent_present": parent_initiative_id is not None, "risk": _optional_text(risk, label="risk"), "risk_present": risk is not None, "status": state, "dependencies": None if dependencies is None else _identifier_list(dependencies, label="dependencies"), "linked_task_ids": None if linked_task_ids is None else _identifier_list(linked_task_ids, label="linked_task_ids"), "linked_delegation_ids": None if linked_delegation_ids is None else _identifier_list(linked_delegation_ids, label="linked_delegation_ids"), "linked_report_ids": None if linked_report_ids is None else _identifier_list(linked_report_ids, label="linked_report_ids"), "linked_decision_ids": None if linked_decision_ids is None else _identifier_list(linked_decision_ids, label="linked_decision_ids"), "notes": None if notes is None else _strict_json(notes, label="notes"), "notes_present": notes is not None}
+        payload = {"task_id": self._task_identifier(task_id), "goal": None if goal is None else _opaque_text(goal, label="goal"), "goal_present": goal is not None, "initiative_id": None if initiative_id is None else self._record_identifier(initiative_id, label="initiative_id"), "parent_initiative_id": None if parent_initiative_id is None else self._record_identifier(parent_initiative_id, label="parent_initiative_id"), "parent_present": parent_initiative_id is not None, "risk": _optional_text(risk, label="risk"), "risk_present": risk is not None, "status": state, "dependencies": None if dependencies is None else _identifier_list(dependencies, label="dependencies"), "linked_task_ids": None if linked_task_ids is None else _identifier_list(linked_task_ids, label="linked_task_ids"), "linked_delegation_ids": None if linked_delegation_ids is None else _identifier_list(linked_delegation_ids, label="linked_delegation_ids"), "linked_report_ids": None if linked_report_ids is None else _identifier_list(linked_report_ids, label="linked_report_ids"), "linked_decision_ids": None if linked_decision_ids is None else _identifier_list(linked_decision_ids, label="linked_decision_ids"), "notes": None if notes is None else _strict_json(notes, label="notes"), "notes_present": notes is not None}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             self._task(connection, payload["task_id"])
             identifier = str(payload["initiative_id"] or new_sharded_id("initiative", self.project_hash))
             existing = None
             if payload["initiative_id"] is not None and connection.execute("SELECT 1 FROM initiatives WHERE initiative_id=? AND project_hash=?", (identifier, self.project_hash)).fetchone() is not None:
                 existing = self._initiative(connection, identifier)
+            if existing is None and not payload["goal_present"]:
+                raise V12StoreError("goal is required when creating an initiative", code="invalid_argument", details={"field": "goal"})
             current_links = [] if existing is None else self._initiative_links(connection, [identifier])
             by_kind = {kind: sorted(link["target_id"] for link in current_links if link["relationship"] == kind) for kind in _LINK_TYPES}
             parent = payload["parent_initiative_id"] if payload["parent_present"] else (by_kind["parent"][0] if by_kind["parent"] else None)
@@ -2554,6 +2556,7 @@ class V12Store:
             state_value = (existing["status"] if existing is not None else "proposed") if payload["status"] is None else payload["status"]
             risk_value = (existing["risk"] if existing is not None else None) if not payload["risk_present"] else payload["risk"]
             notes_value = (existing["notes"] if existing is not None else []) if not payload["notes_present"] else payload["notes"]
+            goal_value = (existing["goal"] if existing is not None else None) if not payload["goal_present"] else payload["goal"]
             for candidate, label in [(parent, "parent_initiative_id"), *[(item, "dependencies") for item in dependency_values]]:
                 if candidate is not None:
                     self._record_identifier(candidate, label=label)
@@ -2579,10 +2582,10 @@ class V12Store:
             timestamp, revision = _now(), 1 if existing is None else int(existing["latest_revision"]) + 1
             sequence = self._timeline(connection, event_type="initiative_created" if existing is None else "initiative_revised", entity_type="initiative", entity_id=identifier, payload={"initiative_id": identifier, "revision_number": revision, "status": state_value}, task_id=payload["task_id"], initiative_id=identifier)
             if existing is None:
-                connection.execute("INSERT INTO initiatives(initiative_id,project_hash,goal,risk,status,notes_json,created_at,updated_at,latest_revision,created_sequence,updated_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, payload["goal"], risk_value, state_value, _canonical_json(notes_value, label="notes"), timestamp, timestamp, revision, sequence, sequence))
+                connection.execute("INSERT INTO initiatives(initiative_id,project_hash,goal,risk,status,notes_json,created_at,updated_at,latest_revision,created_sequence,updated_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, goal_value, risk_value, state_value, _canonical_json(notes_value, label="notes"), timestamp, timestamp, revision, sequence, sequence))
             else:
-                connection.execute("UPDATE initiatives SET goal=?,risk=?,status=?,notes_json=?,updated_at=?,latest_revision=?,updated_sequence=? WHERE initiative_id=? AND project_hash=?", (payload["goal"], risk_value, state_value, _canonical_json(notes_value, label="notes"), timestamp, revision, sequence, identifier, self.project_hash))
-            revision_payload = {"initiative_id": identifier, "revision_number": revision, "task_id": payload["task_id"], "goal": payload["goal"], "risk": risk_value, "status": state_value, "notes": notes_value, "parent_initiative_id": parent, "dependencies": dependency_values, "linked_task_ids": task_values, "linked_delegation_ids": delegation_values, "linked_report_ids": report_values, "linked_decision_ids": decision_values}
+                connection.execute("UPDATE initiatives SET goal=?,risk=?,status=?,notes_json=?,updated_at=?,latest_revision=?,updated_sequence=? WHERE initiative_id=? AND project_hash=?", (goal_value, risk_value, state_value, _canonical_json(notes_value, label="notes"), timestamp, revision, sequence, identifier, self.project_hash))
+            revision_payload = {"initiative_id": identifier, "revision_number": revision, "task_id": payload["task_id"], "goal": goal_value, "risk": risk_value, "status": state_value, "notes": notes_value, "parent_initiative_id": parent, "dependencies": dependency_values, "linked_task_ids": task_values, "linked_delegation_ids": delegation_values, "linked_report_ids": report_values, "linked_decision_ids": decision_values}
             connection.execute("INSERT INTO initiative_revisions(initiative_id,revision_number,project_hash,occurred_at,sequence,payload_json) VALUES (?, ?, ?, ?, ?, ?)", (identifier, revision, self.project_hash, timestamp, sequence, _canonical_json(revision_payload, label="initiative revision")))
             connection.execute("DELETE FROM initiative_links WHERE initiative_id=? AND project_hash=?", (identifier, self.project_hash))
             if parent is not None:
@@ -2762,7 +2765,7 @@ class V12Store:
                 connection.execute("UPDATE tasks SET updated_at=?,updated_sequence=? WHERE task_id=? AND project_hash=?", (timestamp, sequence, anchor, self.project_hash))
             links = [] if closure_initiative is None else self._initiative_links(connection, [closure_initiative])
             next_action = (
-                {"tool": "submit_governance_closure", "arguments": {"task_ref": task_ref(anchor), "subject_type": "task", "subject_ref": task_ref(anchor)}}
+                {"tool": "submit_governance_closure", "suggested_subject": {"task_ref": task_ref(anchor), "subject_type": "task", "subject_ref": task_ref(anchor)}}
                 if kind == "initiative"
                 else {"state": "task_closed", "task_ref": task_ref(anchor)}
             )

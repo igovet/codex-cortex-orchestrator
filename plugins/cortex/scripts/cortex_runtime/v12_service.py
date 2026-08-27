@@ -241,7 +241,6 @@ def create_task(
     objective: Any,
     user_request_original: Any,
     user_language: Any,
-    task_contract_version: Any,
     requirements: Any,
     constraints: Any,
     acceptance_criteria: Any,
@@ -256,7 +255,6 @@ def create_task(
         objective=objective,
         user_request_original=user_request_original,
         user_language=user_language,
-        task_contract_version=task_contract_version,
         requirements=requirements,
         constraints=constraints,
         acceptance_criteria=acceptance_criteria,
@@ -286,18 +284,11 @@ def create_delegation(
     parent_delegation_ref: str | None = None,
     input_report_refs: list[str] | None = None,
     input_decision_refs: list[str] | None = None,
-    approval_decision_ref: str | None = None,
 ) -> dict[str, Any]:
     """Persist a coordinator-supplied delegation without selecting a route."""
     store, canonical = _task_store(task_ref)
     input_report_ids = _record_list_in_task(store, input_report_refs, label="report_id")
     input_decision_ids = _record_list_in_task(store, input_decision_refs, label="decision_id")
-    approval_decision_id = _record_in_task(store, approval_decision_ref, label="decision_id")
-    # approval_decision_ref is a distinct explicit canonical relation.  Store
-    # input evidence in one list while preserving that relation; never infer
-    # a missing plan or decision from the current governance projection.
-    if approval_decision_id is not None and approval_decision_id not in (input_decision_ids or []):
-        input_decision_ids = [*(input_decision_ids or []), approval_decision_id]
     return _mutation_store(
         store,
         "create_delegation",
@@ -361,25 +352,14 @@ def submit_report(
     )
 
 
-def read_reports(*, report_refs: list[str], sections: list[str] | None = None, cursor: str | None = None, max_bytes: int = REPORT_READ_MAX_BYTES, consumer_delegation_ref: str | None = None, reader_kind: str | None = None) -> dict[str, Any]:
+def read_reports(*, report_refs: list[str], sections: list[str] | None = None, cursor: str | None = None, max_bytes: int = REPORT_READ_MAX_BYTES, consumer_delegation_ref: str | None = None) -> dict[str, Any]:
     """Read ordered report chunks and append classified structural receipts."""
     if not isinstance(report_refs, list) or not report_refs:
         raise V12ServiceError("report_refs are invalid", code="invalid_argument", details={"field": "report_refs"})
-    if reader_kind == "worker" and consumer_delegation_ref is None:
-        raise V12ServiceError(
-            "worker report reads require consumer_delegation_ref",
-            code="invalid_argument",
-            details={"field": "consumer_delegation_ref"},
-        )
-    if consumer_delegation_ref is not None and reader_kind != "worker":
-        raise V12ServiceError(
-            "consumer_delegation_ref requires reader_kind=worker",
-            code="invalid_argument",
-            details={"field": "reader_kind"},
-        )
     store, _canonical = _record_store(report_refs[0], label="report_id")
     canonical_reports = _record_list_in_task(store, report_refs, label="report_id")
-    return _call_task(canonical_reports[0], "read_reports", report_ids=canonical_reports, sections=sections, cursor=cursor, max_bytes=_validate_report_read_budget(max_bytes), consumer_delegation_id=_record_in_task(store, consumer_delegation_ref, label="delegation_id"), reader_kind=reader_kind, store=store)
+    consumer_delegation_id = _record_in_task(store, consumer_delegation_ref, label="delegation_id")
+    return _call_task(canonical_reports[0], "read_reports", report_ids=canonical_reports, sections=sections, cursor=cursor, max_bytes=_validate_report_read_budget(max_bytes), consumer_delegation_id=consumer_delegation_id, reader_kind="worker" if consumer_delegation_id is not None else "coordinator", store=store)
 
 
 def set_governance_mode(
@@ -410,7 +390,7 @@ def set_governance_mode(
 def record_initiative(
     *,
     task_ref: str,
-    goal: Any,
+    goal: Any = None,
     risk: Any = None,
     status: str | None = None,
     notes: Any = None,

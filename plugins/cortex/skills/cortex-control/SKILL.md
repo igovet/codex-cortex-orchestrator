@@ -409,7 +409,9 @@ inside the link destination.
 
 ## Closure field and ordering contract
 
-Use the active closure contract exactly. A task closure refers to the exact
+Use the active closure contract exactly. A completed Cortex task must attempt
+the supported closure and verify the intended scoped inspection before a
+closure-confirmed claim. A task closure refers to the exact
 anchored task; an initiative closure refers to the exact initiative returned by
 the ledger and may include its supported initiative status. Opaque completion
 notes remain unmodified. Consult the active MCP registry for supported subject
@@ -423,7 +425,7 @@ worker. For an approved-plan task, the documentation-impact delegation is still
 an ordinary post-approval delegation: it may include
 the finalized plan `r_…` plus every relevant finalized implementation or
 verification `r_…` in `input_report_refs`, and the exact approved-plan `u_…` in
-`approval_decision_ref` as declared inputs when that evidence is relevant. These
+approval decision evidence in `input_decision_refs` when that evidence is relevant. These
 compact relations are evidence, not an admission gate; never replace a failed
 creation with a degraded native fallback. The coordinator consumes the worker's
 concise summary and exact report reference first. An initiative may be recorded before the assessment when
@@ -436,12 +438,12 @@ governance scoped to the same task and initiative. A self-asserted
 invalid. A `ready` claim is durable only when that inspection shows the expected
 links and latest closure. Inspect both task scope and initiative scope; each
 must surface the exact task relationship, every required report link, and the
-closure. The returned `next_action` may provide exact arguments for a distinct
-task closure; when that verdict is useful, confirm the task closure succeeds
+closure. The returned `next_action` may provide a suggested subject, never a
+complete callable payload, for a distinct task closure; when that verdict is useful, confirm the task closure succeeds
 and inspect its task-scoped evidence. Neither closure is required for an honest
 final response. Never create a report-only final initiative. A failed write or
-inspection remains an honest advisory limitation and never authorizes a
-premature task-subject retry.
+inspection remains an honest `closure_unconfirmed` limitation and never
+authorizes a premature task-subject retry or a closed/ready claim.
 
 ## Coordination, failure, and nonblocking governance
 

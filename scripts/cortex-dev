@@ -46,5 +46,6 @@ chmod 700 -- "${dev_home}" "${dev_home}/.codex"
 export HOME="${dev_home}"
 export CODEX_HOME="${HOME}/.codex"
 cd -- "${project_dir}"
+printf 'Cortex isolated candidate target: HOME=%s CODEX_HOME=%s\n' "${HOME}" "${CODEX_HOME}"
 ./scripts/sync-cortex.sh
 exec codex "$@"

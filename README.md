@@ -1633,17 +1633,32 @@ advisory profile invariants without making a model call. It is structural source
 evidence, not behavioral evaluation. Actual coordinator behavior is verified in
 fresh ordinary interactive Luna/high `codex` tasks inside tmux.
 
-Live verification is separate installation/host evidence. Use an ordinary
-interactive `codex` session inside tmux; do **not** use `codex exec`:
+Every live-development smoke must refresh the isolated candidate cache/version
+first. Create the named tmux session in the background, send the launcher and
+the narrow smoke input directly with `tmux send-keys`, capture a bounded pane,
+and clean up the session; do **not** use `codex exec` or run normal
+`sync-cortex.sh` against the stable user environment:
 
 ```bash
-tmux new-session -s cortex-v12-smoke
-codex
+session_name=cortex-v12-smoke
+tmux has-session -t "$session_name" 2>/dev/null && tmux kill-session -t "$session_name" || true
+tmux new-session -d -s "$session_name" -c "/path/to/codex-orchestration" bash
+tmux send-keys -t "$session_name" 'cd /path/to/codex-orchestration && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
+# After the launcher is ready, inject only the targeted smoke input:
+tmux send-keys -t "$session_name" '<targeted test input>' C-m
+tmux capture-pane -p -t "$session_name" -S -200 -E -1
+tmux kill-session -t "$session_name" 2>/dev/null || true
 ```
 
 Keep live checks narrowly targeted to the modified function, tool, or contract;
-do not substitute an exec-mode wrapper or detached session. Record the exact
-session command, scope, outcome, and any unrun checks.
+do not substitute an exec-mode wrapper or detached session. The launcher prints
+the isolated `HOME` and `CODEX_HOME` target before it synchronizes, so record
+that target, the refreshed cache version, the exact session command, scope,
+outcome, and any unrun checks. If ordinary Codex cannot start or a terminal
+permission prompt/denial prevents the targeted input or result, report the
+smoke as failed or unverified from the bounded capture; never infer success.
+Always clean up the named session. Never install, reinstall, update, or
+synchronize the user's real installed plugin for a repository live-dev smoke.
 
 After installation or update, run exactly one fresh interactive Cortex session
 first. Require worker-verified acceptance and an advisory `ready` closure with

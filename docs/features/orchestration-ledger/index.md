@@ -132,8 +132,8 @@ and return a concise native `Summary` plus exact `Report ref` in the completion
 handoff. The coordinator consumes that handoff without rereading the report
 body merely to summarize it. Later delegations receive only relevant finalized report refs, their exact
 manifest digests, and user-decision refs. A successor must call `read_reports`
-with `reader_kind="worker"` and its own exact `consumer_delegation_ref` before using a
-predecessor report. The server rejects a report outside that delegation's
+with `reader_kind="worker"` and its own exact `consumer_delegation_ref` before
+using a predecessor report. The server rejects a report outside that delegation's
 declared inputs and appends a structural receipt for every returned page:
 consumer delegation ref, report ref, observed manifest digest, selected sections,
 input/output cursors, returned chunk indexes, byte count, and chronology

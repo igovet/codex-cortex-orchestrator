@@ -162,11 +162,12 @@ class V12CompatibilityTests(unittest.TestCase):
     def test_advisory_closure_contract_does_not_require_initiative_order(self) -> None:
         contracts = build_public_contracts()
         closure_description = contracts["submit_governance_closure"]["description"]
-        self.assertIn("never block a safe operation", closure_description)
-        self.assertIn("neither that follow-up nor any initiative-first order is required", closure_description)
+        self.assertIn("must attempt closure", closure_description)
+        self.assertIn("never claim confirmation", closure_description)
+        self.assertIn("does not prohibit safe work", closure_description)
         self.assertNotIn("first requires a finalized", closure_description)
         next_action = contracts["submit_governance_closure"]["outputSchema"]["properties"]["next_action"]
-        self.assertIn("never requires that closure", next_action["description"])
+        self.assertIn("not a complete callable payload", next_action["description"])
 
     def test_schema_failures_name_output_only_and_approval_relation_fields(self) -> None:
         task = self._successful_tool("create_task", {
@@ -174,7 +175,6 @@ class V12CompatibilityTests(unittest.TestCase):
             "objective": "Verify public validation diagnostics.",
             "user_request_original": "Verify public validation diagnostics.",
             "user_language": "en",
-            "task_contract_version": "cortex/task-contract/v1",
             "requirements": ["Use only advertised public fields."],
             "constraints": ["Do not mutate on schema rejection."],
             "acceptance_criteria": ["Failures name the repairable field."],
@@ -221,7 +221,6 @@ class V12CompatibilityTests(unittest.TestCase):
             "objective": "Verify one canonical decision request.",
             "user_request_original": "Verify one canonical decision request.",
             "user_language": "en",
-            "task_contract_version": "cortex/task-contract/v1",
             "requirements": ["Use the public schema."],
             "constraints": ["Do not infer request fields."],
             "acceptance_criteria": ["Only canonical decision inputs mutate."],
@@ -320,13 +319,11 @@ class V12CompatibilityTests(unittest.TestCase):
             "instructions": "Read the exact predecessor report before verification.",
             "input_report_refs": [valid["subject_ref"]],
             "input_decision_refs": [accepted["handles"]["decision_ref"]],
-            "approval_decision_ref": accepted["handles"]["decision_ref"],
             "model": "gpt-5.6-luna",
             "reasoning_effort": "high",
         })
         same_task_read = self._successful_tool("read_reports", {
             "report_refs": [valid["subject_ref"]],
-            "reader_kind": "worker",
             "consumer_delegation_ref": successor["handles"]["delegation_ref"],
         })
         self.assertEqual(same_task_read["consumption_receipts"][0]["reader_kind"], "worker")
@@ -355,7 +352,7 @@ class V12CompatibilityTests(unittest.TestCase):
         task = self._successful_tool("create_task", {
             "project_root": str(self.project), "objective": "Advisory governance only.",
             "user_request_original": "Advisory governance only.", "user_language": "en",
-            "task_contract_version": "cortex/task-contract/v1", "requirements": ["Keep modes advisory."],
+            "requirements": ["Keep modes advisory."],
             "constraints": ["Do not weaken reference validation."],
             "acceptance_criteria": ["Safe work continues without a workflow gate."],
             "verification_plan": ["Exercise a light-mode non-planner delegation."],
@@ -381,7 +378,7 @@ class V12CompatibilityTests(unittest.TestCase):
         task = self._successful_tool("create_task", {
             "project_root": str(self.project), "objective": "Recover an open delegation.",
             "user_request_original": "Recover an open delegation.", "user_language": "en",
-            "task_contract_version": "cortex/task-contract/v1", "requirements": ["Recover exact dispatch data."],
+            "requirements": ["Recover exact dispatch data."],
             "constraints": ["Never duplicate host work."],
             "acceptance_criteria": ["Recovered data is byte-identical."],
             "verification_plan": ["Compare create and inspect receipts."],
@@ -400,6 +397,85 @@ class V12CompatibilityTests(unittest.TestCase):
             "delegation_ref": created["handles"]["delegation_ref"], "after_sequence": 0,
         })
         self.assertEqual(recovered["worker_brief"]["native_dispatch"], created["native_dispatch"])
+
+    def test_completed_task_closure_is_schema_safe_and_confirmable(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project), "objective": "Confirm completed-task closure.",
+            "user_request_original": "Confirm completed-task closure.", "user_language": "en",
+            "requirements": ["Attempt closure after completion evidence."],
+            "constraints": ["Never claim an unverified closure."],
+            "acceptance_criteria": ["A successful closure is inspectable."],
+            "verification_plan": ["Exercise task and initiative closure branches."],
+        })
+        task_ref_value = task["handles"]["task_ref"]
+        before = self._successful_tool("inspect_task", {"task_ref": task_ref_value})
+        invalid_ref = self._rejected_tool("submit_governance_closure", {
+            "task_ref": task_ref_value, "subject_type": "task", "subject_ref": "i_000000000000",
+            "verdict": "ready", "evidence": {"completed": True},
+        })
+        self.assertIn("subject_ref", invalid_ref["content"][0]["text"])
+        invalid_status = self._rejected_tool("submit_governance_closure", {
+            "task_ref": task_ref_value, "subject_type": "task", "subject_ref": task_ref_value,
+            "verdict": "ready", "evidence": {"completed": True}, "initiative_status": "closed",
+        })
+        self.assertIn("initiative_status", invalid_status["content"][0]["text"])
+        self.assertEqual(self._successful_tool("inspect_task", {"task_ref": task_ref_value})["timeline"], before["timeline"])
+
+        initiative = self._successful_tool("record_initiative", {
+            "task_ref": task_ref_value, "goal": "Close the completed task with evidence.", "linked_task_refs": [task_ref_value],
+        })
+        initiative_ref = initiative["handles"]["initiative_ref"]
+        revised = self._successful_tool("record_initiative", {
+            "task_ref": task_ref_value, "initiative_ref": initiative_ref, "status": "completed",
+        })
+        self.assertEqual(revised["initiative"]["goal"], "Close the completed task with evidence.")
+        initiative_closure = self._successful_tool("submit_governance_closure", {
+            "task_ref": task_ref_value, "subject_type": "initiative", "subject_ref": initiative_ref,
+            "verdict": "ready", "evidence": {"completed": True}, "initiative_status": "closed",
+        })
+        suggested = initiative_closure["next_action"]["suggested_subject"]
+        self.assertEqual(suggested["subject_ref"], task_ref_value)
+        self.assertNotIn("arguments", initiative_closure["next_action"])
+        task_closure = self._successful_tool("submit_governance_closure", {
+            "task_ref": task_ref_value, "subject_type": "task", "subject_ref": task_ref_value,
+            "verdict": "ready", "evidence": {"completed": True, "closure_attempt": "verified"},
+        })
+        self.assertEqual(task_closure["next_action"]["state"], "task_closed")
+        inspected = self._successful_tool("inspect_governance", {"task_ref": task_ref_value})
+        self.assertTrue(any(item["closure_id"] == task_closure["closure"]["closure_id"] for item in inspected["closures"]))
+
+    def test_report_continuation_and_reader_mode_are_unambiguous(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project), "objective": "Exercise report continuations.",
+            "user_request_original": "Exercise report continuations.", "user_language": "en",
+            "requirements": ["Return exact finalization inputs."], "constraints": ["Keep reads classified from the consumer."],
+            "acceptance_criteria": ["Append result supplies finalize fields."], "verification_plan": ["Append then finalize a report."],
+        })
+        delegated = self._successful_tool("create_delegation", {
+            "task_ref": task["handles"]["task_ref"], "objective": "Write a result report.",
+            "role": "writer", "profile_name": "technical_writer", "scope": "One report.",
+            "instructions": "Write a two-chunk result report.", "model": "gpt-5.6-luna", "reasoning_effort": "high",
+        })
+        started = self._successful_tool("submit_report", {"delegation_ref": delegated["handles"]["delegation_ref"], "mode": "begin", "report_type": "result"})
+        appended = self._successful_tool("submit_report", {
+            "delegation_ref": delegated["handles"]["delegation_ref"], "mode": "append", "report_ref": started["handles"]["report_ref"],
+            "chunk_index": started["handles"]["next_chunk_index"], "section": "body", "content": {"done": True},
+        })
+        self.assertEqual(appended["handles"]["expected_chunk_count"], appended["expected_chunk_count"])
+        self.assertEqual(appended["handles"]["expected_content_digest"], appended["expected_content_digest"])
+        finalized = self._successful_tool("submit_report", {
+            "delegation_ref": delegated["handles"]["delegation_ref"], "mode": "finalize", "report_ref": started["handles"]["report_ref"],
+            "status": "completed", "expected_chunk_count": appended["handles"]["expected_chunk_count"],
+            "expected_content_digest": appended["handles"]["expected_content_digest"],
+        })
+        consumer = self._successful_tool("create_delegation", {
+            "task_ref": task["handles"]["task_ref"], "objective": "Consume the finalized result.",
+            "role": "qa", "profile_name": "qa_engineer", "scope": "Read one declared report.",
+            "instructions": "Read the declared report only.", "input_report_refs": [finalized["handles"]["report_ref"]],
+            "model": "gpt-5.6-luna", "reasoning_effort": "high",
+        })
+        read = self._successful_tool("read_reports", {"report_refs": [finalized["handles"]["report_ref"]], "consumer_delegation_ref": consumer["handles"]["delegation_ref"]})
+        self.assertEqual(read["consumption_receipts"][0]["reader_kind"], "worker")
 
     def test_storage_unavailable_preserves_pending_decision_and_mutates_nothing(self) -> None:
         store = V12Store(self.project)

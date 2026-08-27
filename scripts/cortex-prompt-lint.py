@@ -1191,7 +1191,7 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
     )
     require_concepts(
         section(orchestrator, "Final documentation assessment")
-        + section(orchestrator, "Advisory closure and final answer")
+        + section(orchestrator, "Closure confirmation and final answer")
         + section(control, "Closure field and ordering contract")
         + texts[DOCUMENTATION],
         ORCHESTRATOR,

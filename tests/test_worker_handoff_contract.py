@@ -127,6 +127,20 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("narrowly targeted", agents)
         self.assertIn("Live tests are narrow", verification)
 
+    def test_orchestrator_routes_attachment_modes_and_requires_confirmed_closure(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        orchestrator = (repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md").read_text(encoding="utf-8")
+        control = (repository / "plugins" / "cortex" / "skills" / "cortex-control" / "SKILL.md").read_text(encoding="utf-8")
+        progress = (repository / "plugins" / "cortex" / "skills" / "progress-accounting" / "SKILL.md").read_text(encoding="utf-8")
+        for event in ("USER_STEER", "BEFORE_DELEGATION", "REPORT_RECEIVED", "TOOL_ERROR", "BEFORE_CLOSURE", "CONTEXT_LOST", "TASK_FINISHED"):
+            self.assertIn(event, orchestrator)
+        for mode in ("intent reconciliation", "delegation strategy", "evidence reasoning", "tool-call discipline", "failure recovery", "orchestration critic", "capability-gap analysis"):
+            self.assertIn(mode, orchestrator.lower())
+        self.assertIn("Decision Capsule", orchestrator)
+        for contract in (orchestrator, control, progress):
+            self.assertIn("closure-confirmed", contract)
+            self.assertIn("closure_unconfirmed", contract)
+
 
 if __name__ == "__main__":
     unittest.main()
