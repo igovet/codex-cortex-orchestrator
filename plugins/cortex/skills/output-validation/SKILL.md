@@ -49,9 +49,10 @@ permission barrier or prevents an honest final answer.
 Record decisive check evidence in the immutable report, including selected
 large-report sections when chunking is required. A status or final handoff may
 summarize that evidence only after the relevant report sections were read.
-When a current contained digest-verified report/status Markdown projection is
+When a current contained digest-verified report or plan Markdown projection is
 available, publish its clickable absolute path with a localized result summary
-and implication. A missing or stale projection produces no link and does not
+and implication. Task/status/decision/delegation and other non-report records
+remain SQLite-only. A missing or stale projection produces no link and does not
 change the acceptance classification.
 
 Project verification precedes the conditional documentation stage. The

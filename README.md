@@ -1014,19 +1014,9 @@ private Markdown beside the database:
 ~/.codex/cortex/v12/projects/p-<project-hash>/
 ├── cortex.db
 └── tasks/<task_ref>/
-    ├── index.md
-    ├── task.md
     ├── plans/current.md
     ├── plans/revisions/<plan-report-id>.md
-    ├── delegations/<delegation-id>.md
-    ├── reports/<report-id>.md
-    ├── decisions/<decision-id>.md
-    ├── initiatives/<initiative-id>.md
-    ├── closures/<closure-id>.md
-    ├── governance-gate.md
-    ├── handoffs/report-consumption-receipts.md
-    ├── timeline/index.md
-    └── timeline/pages/<first-sequence>-<last-sequence>.md
+    └── reports/<report-id>.md
 ```
 
 The compact `task_ref` (`t_<12-hex>`) is the readable directory name. Full
@@ -1035,15 +1025,21 @@ user-facing projection link path. Existing released `tasks/<task-id>/`
 directories migrate lazily with an atomic no-replace rename; a competing compact
 directory is preserved and reported as a non-ready conflict.
 
-When a ready view is useful, the coordinator publishes only the exact returned
-path as a localized clickable Markdown link, for example
-`[Обзор задачи](</absolute/path/to/t_ref/task.md>)`; it never constructs, wraps,
-or line-breaks that destination.
+Only finalized reports and plans are materialized. They are human-readable
+documents with a title, state, labeled headings, normal lists, paragraphs, and
+report sections; they are not raw nested field dumps and do not expose task IDs,
+timeline history, delegation details, decision records, or other SQLite ledger
+data. Caller-authored Markdown is preserved verbatim: the renderer adds no
+backslash escapes, HTML entities, JSON, or `<pre>` blocks. When a ready view is
+useful, the coordinator publishes only the
+exact returned report or plan path as a localized clickable Markdown link, for
+example `[Открыть план](</absolute/path/to/t_ref/plans/current.md>)`; it never
+constructs, wraps, or line-breaks that destination.
 
 V12 creates no `.codex` directory, database, plan, report, view, or ignore rule
 under `project_root`. Markdown is disposable and never parsed back into SQLite.
-A delegation view is human/audit output, not the native worker brief, a bearer
-capability, a receipt, or lifecycle evidence.
+Task, delegation, decision, initiative, closure, governance, handoff, index,
+and timeline records remain SQLite-only; none has a user-facing Markdown view.
 
 The canonical mutation, timeline event, and private projection job commit in
 one SQLite transaction. Materialization runs afterward as a nonblocking,

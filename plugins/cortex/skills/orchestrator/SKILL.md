@@ -251,10 +251,12 @@ downgrade never clears a persisted light/full plan-and-approval obligation or
 authorizes research, implementation, verification, or other downstream project
 work. Recover by retrying the live planner when safe, reworking it, or creating
 a parent-linked planner replacement. It must submit a finalized completed plan;
-the coordinator must read it until the exact returned `approval_view` is ready,
-copy its `report_ref`, `delegation_ref`, server-issued `approval_handle`, and the report/view digests
-and source sequence, present a localized explicit approve/revise/cancel ask,
-then wait for one new user response before recording that exact decision. The
+the coordinator must present a localized explicit approve/revise/cancel ask and
+wait for one new user response. For an `approve` response, read until the exact
+returned `approval_view` is ready and copy its `report_ref`, `delegation_ref`,
+server-issued `approval_handle`, report/view digests, and source sequence. For
+`request_revision` or `cancel`, record against the exact finalized plan digest
+and response without a volatile view binding. The
 original task request, silence, implicit instruction, or inferred consent is
 never approval. Only an explicit
 user cancellation or task revision, durably recorded before a
@@ -492,8 +494,12 @@ above to compile a planner delegation; it must not run a project search or
 state/artifact check to improve, confirm, or preview the plan.
 
 Record the next unambiguous response with `record_user_decision` against the
-exact plan `report_ref` and digest. The durable exact plan report ID is
-non-callable evidence; approval applies only to that revision.
+exact plan `report_ref` and digest. Only `approve` additionally uses the
+current ready approval-view digest/source sequence and opaque approval handle;
+`request_revision` and `cancel` preserve the exact plan digest and response
+without volatile view binding, so intervening non-plan timeline events cannot
+block saving feedback. The durable exact plan report ID is non-callable
+evidence; approval applies only to that revision.
 Revision preserves the feedback verbatim, creates a parent-linked planner
 replacement and a new immutable plan/digest, and requires a new review.
 Rejection or revision preserves feedback verbatim, resumes the same live planner
@@ -613,22 +619,29 @@ Canonical evidence remains in the host-private ledger. Markdown projections
 are derived host-private human views, never authority or recovery state. Before
 publishing a projection, require successful current freshness and digest
 verification plus an absolute contained path returned by the active tool.
-Every projection file must remain ordinary readable Markdown: present fields as
-labels, paragraphs, lists, or tables. Preserve task/report content verbatim:
-do not add backslashes, entity-escape HTML, or otherwise rewrite it. Do not
-embed serialized JSON objects/arrays, script blocks, or opaque payloads in a
-view; structured JSON is retained in SQLite and only summarized for human
-reading.
+Every projection file must remain ordinary readable Markdown: plans and reports
+are structured documents with labeled headings, normal lists, and paragraphs,
+not raw nested field dumps. Preserve authored task/report Markdown verbatim: do
+not add backslashes, entity-escape HTML, or otherwise rewrite it. Do not embed
+serialized JSON objects/arrays, script blocks, `<pre>` blocks, or entity-encoded
+payloads in a view; structured JSON is retained in SQLite and only summarized
+for human reading.
+The user-facing projection set is intentionally narrow: materialize only the
+current plan, immutable plan revisions, and finalized report links. Task,
+decision, delegation, initiative, closure, governance, handoff, index, and
+timeline records stay in SQLite and are not emitted as Markdown artifacts.
 Never write a Cortex database, projection, report, decision, or other Cortex
 state into the target project, including a project-local `.codex` directory.
 Never guess a path, reuse stale metadata, publish a bare path/link or raw ID, or
 expose a private path in errors, logs, worker messages, or external messages.
 
 For user-facing plan review, progress, decisions, and the final response, emit
-only a clickable Markdown link in the exact form `[localized readable label](</exact returned absolute path>)`.
-The label is in the user's language; the destination is copied byte-for-byte
-from the current verified tool response. Never use a backticked or bare path,
-a code block, a constructed path, or a line break inside the link destination.
+only a clickable Markdown link in the exact form of the server-provided
+`markdown_link` from the current `ready` view, copied byte-for-byte. It is the
+exact Markdown link with its localized readable label
+and exact returned absolute path. Never reconstruct it from compact refs or
+path fields; never use a backticked or bare path, a code block, or a line break
+inside the link destination.
 
 For each of these user surfaces, pair every verified clickable absolute path
 with a localized summary and its effect or next step:

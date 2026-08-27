@@ -61,11 +61,13 @@ plan digest, and approval decision ID in each successor input list. A failed,
 partial, missing, or schema-rejected planner report requires correction, rework,
 or a parent-linked planner replacement—not a downgrade, native-prose
 substitute, explorer/QA/implementation bypass, or free-text instruction. After
-the replacement submits a finalized completed plan, read it to obtain the exact
+the replacement submits a finalized completed plan, obtain one new explicit
+localized user decision. If it is `approve`, read the plan to obtain the exact
 ready `approval_view`, copy its server-issued approval handle and exact
-report/view digest and sequence, obtain one new explicit localized user
-decision, and record it against those exact values before dispatching
-downstream work. Never reuse the original task request or infer consent.
+report/view digest and sequence, and record approval against those exact values
+before dispatching downstream work. A `request_revision` or `cancel` decision
+is recorded against the exact finalized plan digest and response without a
+volatile view binding. Never reuse the original task request or infer consent.
 
 The coordinator makes adaptation decisions only from user input, ledger state,
 and worker reports. Any new project inspection, domain analysis, implementation,
@@ -153,13 +155,18 @@ only when its live handle and ownership are known and ordinary host follow-up
 is safe; otherwise create a parent-linked replacement. Cortex does not
 guarantee same-child continuation.
 
-For plan review, approval applies only to the exact plan report and digest.
-Revision records the user's feedback verbatim, preserves the old plan, creates
+For plan review, `approve` applies only to the exact plan report and digest and
+requires the current ready approval view plus opaque approval handle. Plan
+`request_revision` and `cancel` preserve the exact finalized plan digest and
+response without volatile view binding, so intervening non-plan timeline events
+cannot block feedback. Revision records the user's feedback verbatim, preserves
+the old plan, creates
 a new immutable plan/digest through the same live planner when possible (or a
 parent-linked replacement only when it is unavailable), then asks for a new
 decision. A requested/necessary main plan must have a finalized verified
-Markdown link and explicit localized approval. Record approval against its exact
-digest and pass that decision ID to every plan-dependent delegation; do not
+Markdown link and explicit localized approval. Record `approve` against its
+exact digest plus the ready-view binding and pass that decision ID to every
+plan-dependent delegation; do not
 dispatch implementation or research beyond discovery/planning first. Cancellation
 stops later dispatch by coordinator policy, not backend gate. If persistence is
 unavailable, never infer approval; proceed only from an unambiguous safe user

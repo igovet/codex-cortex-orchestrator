@@ -32,7 +32,7 @@ completed reports.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) maps public calls to the store.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) owns bounded V12 task/report constants and canonical report digests.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 persistence.
-- [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) materializes derived host-private Markdown views.
+- [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) materializes derived host-private plan/report Markdown views.
 - [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the direct native worker message from bundled policy and coordinator-authored delegation data.
 - [delegation.py](../../../plugins/cortex/scripts/cortex_runtime/delegation.py) projects coordinator-owned model metadata to native spawn arguments.
 - [model_routing.py](../../../plugins/cortex/scripts/cortex_runtime/model_routing.py) validates exact native model/effort support.
@@ -173,8 +173,11 @@ finalized predecessor. A required review is a coordinator-owned pause for
 plan-dependent work, not a backend gate. `record_user_decision` preserves an
 exact response plus its English normalization and attribution
 `user_via_coordinator`. Plan/report decisions require the canonical digest;
-approval does not transfer to a revised report ID/digest, and clarification is
-not approval.
+only plan `approve` also requires the current ready approval-view
+digest/source sequence and opaque handle. Plan `request_revision` and `cancel`
+preserve the exact plan digest/response without volatile view binding, so
+unrelated timeline events do not block feedback. Approval does not transfer to
+a revised report ID/digest, and clarification is not approval.
 
 ## Coordinator-only execution boundary
 
@@ -207,7 +210,7 @@ to recover from a report gap, or explicitly requested from the coordinator.
 
 The coordinator communicates with the user in the user's latest meaningful
 language. Worker messages, worker reports, plans, normalized decisions,
-governance records, timeline records, and generated operational Markdown are
+governance records, timeline records, and generated plan/report Markdown are
 English. Exact user text is retained only in labeled original fields beside
 separate English-normalized fields and is never treated as unquoted worker
 instruction. A task-required product/output language remains part of the

@@ -352,15 +352,17 @@ _REPORT_CONSUMPTION_RECEIPT_SCHEMA = _result_object("Immutable structural eviden
 _HUMAN_VIEW_SCHEMA = _result_object("Volatile host-private derived-view status; it never changes canonical ledger evidence.", {
     "status": _string(enum=("ready", "stale", "conflict", "unavailable", "disabled"), maximum=16, description="Current derived-view availability state."),
     "path": {"type": ["string", "null"], "description": "Verified absolute host-private view path only when status is ready; otherwise null."},
+    "markdown_link": {"type": "string", "description": "Server-formatted exact Markdown link, present only when status=ready and path exists. Copy byte-for-byte; never reconstruct it from compact refs."},
     "source_sequence": {"type": "integer", "minimum": 0, "description": "Timeline sequence used to verify a ready derived view."},
     "content_digest": _opaque_digest("SHA-256 digest of verified ready view content.", nullable=True),
 })
-_APPROVAL_VIEW_SCHEMA = _result_object("Exact server-verified plan-review view from a completed finalized plan read. Only status=ready with the returned opaque approval_handle can support a later plan decision. Copy every handle, path, and digest byte-for-byte; never construct, concatenate, shorten, substitute native_task_name, or infer a path.", {
+_APPROVAL_VIEW_SCHEMA = _result_object("Exact server-verified plan-review view from a completed finalized plan read. Only status=ready with the returned opaque approval_handle can support a later plan approval. Copy every handle, path, and digest byte-for-byte; never construct, concatenate, shorten, substitute native_task_name, or infer a path.", {
     "report_ref": _entity_ref("report"),
     "delegation_ref": _entity_ref("delegation"),
     "report_content_digest": _opaque_digest("Exact immutable plan report manifest digest required by record_user_decision."),
     "status": _string(enum=("ready", "stale", "conflict", "unavailable", "disabled"), maximum=16, description="Only ready permits presenting the returned path for approval."),
     "path": {"type": ["string", "null"], "description": "Exact verified host-private plan path when status is ready; otherwise null. Never construct this value."},
+    "markdown_link": {"type": "string", "description": "Server-formatted exact Markdown plan link, present only when status=ready and path exists. Copy byte-for-byte; never reconstruct it from compact refs."},
     "source_sequence": {"type": ["integer", "null"], "minimum": 0, "description": "Exact ledger sequence used to verify the returned path, or null when not ready."},
     "content_digest": _opaque_digest("Exact verified derived-view digest when status is ready; otherwise null.", nullable=True),
     "approval_handle": _string(maximum=IDENTIFIER_MAX_LENGTH, pattern=IDENTIFIER_PATTERN, description="Server-issued opaque relation for this exact ready report/view/request snapshot; null unless status is ready.") | {"type": ["string", "null"]},
@@ -793,7 +795,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             ),
         },
         "record_user_decision": {
-            "description": "Append an ordinary-chat user decision asserted by the coordinator. For a plan, first obtain a returned ready approval_view, ask the user in the user's language to approve, request a revision, or cancel, then submit one new non-empty response with its exact report digest, view digest/sequence, and server-issued approval_handle. Original task text, silence, or inferred consent is invalid. The handle proves only the ready-view relation, not a host-authenticated user turn.",
+            "description": "Append an ordinary-chat user decision asserted by the coordinator. A plan decision always needs its exact finalized report digest and one new non-empty response. Only decision_type=approve additionally requires a returned ready approval_view, its digest/sequence, and the server-issued approval_handle. A revision or cancellation remains bound to the immutable plan digest but is not blocked by later unrelated chronology. Original task text, silence, or inferred consent is invalid. The handle proves only the ready-view relation, not a host-authenticated user turn.",
             "inputSchema": _closed(
                 {
                     "task_ref": task_ref,
@@ -805,9 +807,9 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                     "response_original": _string(minimum=0, description="Exact arbitrary-Unicode user response."),
                     "response_en": _string(minimum=0, description="Coordinator-authored English normalization; it never replaces response_original."),
                     "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH),
-                    "approval_handle": _identifier(description="Exact opaque approval_view handle. Required for every plan decision; never construct or reuse for a different plan/view."),
-                    "approval_view_content_digest": _string(minimum=0, maximum=71, pattern=DIGEST_PATTERN, description="Exact ready approval_view.content_digest. Required for every plan decision."),
-                    "approval_view_source_sequence": {"type": "integer", "minimum": 0, "description": "Exact ready approval_view.source_sequence. Required for every plan decision."},
+                    "approval_handle": _identifier(description="Exact opaque approval_view handle. Required only for decision_type=approve; never construct or reuse for a different plan/view."),
+                    "approval_view_content_digest": _string(minimum=0, maximum=71, pattern=DIGEST_PATTERN, description="Exact ready approval_view.content_digest. Required only for decision_type=approve."),
+                    "approval_view_source_sequence": {"type": "integer", "minimum": 0, "description": "Exact ready approval_view.source_sequence. Required only for decision_type=approve."},
                     "supersedes_decision_ref": decision_id,
                     "idempotency_key": idempotency_key,
                 },

@@ -29,6 +29,12 @@ def _digest_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def _markdown_link(relative: str, path: str) -> str:
+    """Format an exact copyable link only after the path has been verified."""
+    label = "current plan" if relative == "plans/current.md" else "plan revision" if relative.startswith("plans/revisions/") else "report"
+    return f"[Open {label}]({path})"
+
+
 def _markdown_text(value: object) -> str:
     """Preserve caller-provided text verbatim in a readable Markdown view.
 
@@ -81,6 +87,83 @@ def _inert(value: object) -> str:
 
 def _text(value: object) -> str:
     return _markdown_text(value or "")
+
+
+def _field_title(value: object) -> str:
+    """Turn storage-oriented field names into readable Markdown headings."""
+    labels = {
+        "implementation_work_breakdown": "Implementation Work Breakdown",
+        "ordered_verification": "Ordered Verification",
+        "test_acceptance_matrix": "Test Acceptance Matrix",
+        "observed_baseline": "Observed Baseline",
+        "requirements_and_boundaries": "Requirements & Boundaries",
+        "contradictions_and_risks": "Contradictions & Risks",
+        "consumed_inputs": "Consumed Inputs",
+    }
+    key = str(value).strip()
+    return _markdown_text(labels.get(key, key.replace("_", " ").replace("-", " ").title()))
+
+
+_ITEM_TITLE_FIELDS = ("stage", "title", "name", "objective", "test", "command")
+
+
+def _report_item_heading(item: Mapping[str, Any], index: int, heading_level: int) -> tuple[str, str | None]:
+    for field in _ITEM_TITLE_FIELDS:
+        value = item.get(field)
+        if value is None or isinstance(value, (Mapping, Sequence)) and not isinstance(value, (str, bytes, bytearray)):
+            continue
+        text = _markdown_text(value)
+        if field == "stage":
+            return f"{'#' * min(heading_level, 6)} Stage {index} — {text}", field
+        if field == "test":
+            return f"{'#' * min(heading_level, 6)} {text}", field
+        return f"{'#' * min(heading_level, 6)} {text}", field
+    return f"{'#' * min(heading_level, 6)} Item {index}", None
+
+
+def _report_content(value: object, heading_level: int = 3, *, ordered: bool = False, compact: bool = False, omit_keys: set[str] | None = None) -> list[str]:
+    """Render report content as a structured document rather than a field dump."""
+    if isinstance(value, Mapping):
+        lines: list[str] = []
+        for key, item in value.items():
+            if omit_keys and str(key).lower() in omit_keys:
+                continue
+            level = min(heading_level, 6)
+            is_structured = isinstance(item, (Mapping, Sequence)) and not isinstance(item, (str, bytes, bytearray))
+            if compact and not is_structured:
+                lines.append(f"- **{_field_title(key)}:** {_markdown_text(item)}")
+                continue
+            lines.extend((f"{'#' * level} {_field_title(key)}", ""))
+            if isinstance(item, Mapping):
+                # Keep scalar leaves compact beneath their parent heading;
+                # headings are reserved for nested structured values.
+                lines.extend(_report_content(item, heading_level + 1, ordered=False, compact=True))
+            elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+                # Verification plans are naturally read in order; other
+                # sequences retain ordinary unordered Markdown list semantics.
+                lines.extend(_report_content(item, heading_level + 1, ordered=str(key) == "ordered_verification", compact=compact))
+            else:
+                lines.extend((_markdown_text(item), ""))
+        return lines
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        lines = []
+        for index, item in enumerate(value, start=1):
+            if isinstance(item, Mapping):
+                # A bare ``-`` followed by indented headings is parsed as a
+                # code block by Markdown renderers.  Give each structured item
+                # a real heading instead, keeping all fields readable.
+                heading, title_field = _report_item_heading(item, index, heading_level)
+                lines.extend((heading, ""))
+                lines.extend(_report_content(item, heading_level + 1, ordered=False, compact=True, omit_keys={title_field} if title_field else None))
+            elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+                prefix = f"{index}." if ordered else "-"
+                lines.extend((f"{prefix}", ""))
+                lines.extend(_report_content(item, heading_level + 1, ordered=ordered))
+            else:
+                prefix = f"{index}." if ordered else "-"
+                lines.extend((f"{prefix} {_markdown_text(item)}", ""))
+        return lines
+    return [_markdown_text(value), ""]
 
 
 def _regular(path: Path, *, required: bool = False) -> bool:
@@ -268,7 +351,14 @@ def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
             return {"status": "conflict", "path": None}
         except OSError:
             return {"status": "unavailable", "path": None}
-        return {"status": "ready", "path": str(path), "source_sequence": source_sequence, "content_digest": digest}
+        verified_path = str(path)
+        return {
+            "status": "ready",
+            "path": verified_path,
+            "markdown_link": _markdown_link(relative, verified_path),
+            "source_sequence": source_sequence,
+            "content_digest": digest,
+        }
     try:
         return store._read(read)
     except Exception:
@@ -276,7 +366,15 @@ def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
 
 
 def human_view(store: Any, task_id: str, relative: str) -> dict[str, Any]:
-    """Return a verified current absolute path only; never expose stale paths."""
+    """Return only user-facing report/plan links; other ledger data is SQLite-only."""
+    candidate = Path(relative)
+    allowed = (
+        candidate == Path("plans/current.md")
+        or (candidate.parent == Path("reports") and candidate.suffix == ".md")
+        or (candidate.parent == Path("plans/revisions") and candidate.suffix == ".md")
+    )
+    if not allowed:
+        return {"status": "disabled", "path": None}
     return _view_metadata(store, task_id, relative)
 
 
@@ -316,32 +414,27 @@ def _render_report(store: Any, report: Mapping[str, Any]) -> bytes:
         return store._report_chunks(connection, str(report["report_id"]))
     chunks = store._read(read)
     state = str(report["assembly_state"]).upper()
-    title = "ABORTED — NOT FINAL EVIDENCE" if report["assembly_state"] == "aborted" else state
-    lines = [f"# Report: {_text(report['report_id'])}", "", f"**State:** {title}", "", "## Metadata", "", _inert(store._compact_report(report)), "## Content", ""]
+    title = "Plan" if report.get("report_type") == "plan" else "Report"
+    if report["assembly_state"] == "aborted":
+        state = "ABORTED — NOT FINAL EVIDENCE"
+    lines = [f"# {title}", "", f"**Status:** {state}", ""]
     for chunk in chunks:
-        lines.extend((f"### {_text(chunk['section'])} (chunk {chunk['chunk_index']})", "", _inert(chunk["content"])))
+        section = "Content" if str(chunk["section"]).strip().lower() == "body" else _text(chunk["section"])
+        lines.extend((f"## {section}", "", *_report_content(chunk["content"])))
     return ("\n".join(lines)).encode("utf-8")
 
 
 def _render_files(store: Any, task_id: str) -> tuple[dict[str, bytes], int, str]:
     task, delegations, reports, decisions, timeline, initiatives, closures, receipts, sequence = _task_data(store, task_id)
     files: dict[str, bytes] = {}
-    governance_gate = store._read(lambda connection: store._governance_gate(connection, task_id))
-    if isinstance(governance_gate, dict):
-        governance_gate = dict(governance_gate) | {
-            "documentation_impact_required_before_closure": governance_gate.get("mode") in {"light", "full"},
-        }
-    files["governance-gate.md"] = ("# Governance gate\n\n" + _inert(governance_gate)).encode("utf-8")
-    files["task.md"] = ("# Task\n\n## English objective\n\n" + _text(task["objective"]) + "\n\n## Closure state\n\n" + _inert({key: task[key] for key in ("closure_state", "task_closure_ref", "task_closure_verdict", "task_closure_sequence")}) + "## User-authored original source\n\n" + _inert(task["user_request_original"]) + "## Task contract\n\n" + _inert({key: task[key] for key in ("task_contract_version", "user_language", "requirements", "constraints", "acceptance_criteria", "verification_plan")}) + "## Context\n\n" + _inert(task["context"])).encode("utf-8")
-    for delegation in delegations:
-        files[f"delegations/{delegation['delegation_id']}.md"] = ("# Delegation\n\n" + _inert({key: delegation[key] for key in ("delegation_id", "native_task_name", "objective", "role", "scope", "instructions", "input_report_ids", "input_decision_ids", "model", "reasoning_effort")})).encode("utf-8")
-    files["handoffs/report-consumption-receipts.md"] = ("# Report consumption receipts\n\n" + _inert(receipts)).encode("utf-8")
-    for initiative in initiatives:
-        files[f"initiatives/{initiative['initiative_id']}.md"] = ("# Initiative\n\n" + _inert(initiative)).encode("utf-8")
-    for closure in closures:
-        files[f"closures/{closure['closure_id']}.md"] = ("# Governance closure\n\n" + _inert(closure)).encode("utf-8")
+    # The SQLite ledger is canonical.  Materialize only documents that a
+    # coordinator can actually publish to the user: immutable reports and
+    # plan views.  All task, delegation, decision, governance, handoff, index,
+    # and timeline evidence remains queryable through bounded MCP reads only.
     latest_plan: Mapping[str, Any] | None = None
     for report in reports:
+        if report["assembly_state"] != "finalized":
+            continue
         report_path = f"reports/{report['report_id']}.md"
         files[report_path] = _render_report(store, report)
         if report["report_type"] == "plan":
@@ -350,39 +443,6 @@ def _render_files(store: Any, task_id: str) -> tuple[dict[str, bytes], int, str]
                 latest_plan = report
     if latest_plan is not None:
         files["plans/current.md"] = files[f"plans/revisions/{latest_plan['report_id']}.md"]
-    for decision in decisions:
-        files[f"decisions/{decision['decision_id']}.md"] = ("# User decision\n\n## Binding\n\n" + _inert({key: decision[key] for key in ("decision_id", "subject_type", "subject_id", "subject_digest", "decision_type", "attribution", "user_language", "supersedes_decision_id")}) + "## Coordinator prompt (English)\n\n" + _inert(decision["prompt_en"]) + "## User-authored original source\n\n" + _inert(decision["response_original"]) + "## English normalization\n\n" + _inert(decision["response_en"])).encode("utf-8")
-    # Timeline pages are deterministic bounded sequence ranges, not ordinal
-    # filenames.  A range remains meaningful when SQLite sequence values have
-    # gaps, and lets a reader select an evidence window without depending on
-    # a previous materialization's page count.  Deliberately do not delete or
-    # read historic ``timeline/0001.md``-style residue from earlier preview
-    # builds: derived files may have been locally altered and are not ledger
-    # authority.
-    page_index: list[dict[str, Any]] = []
-    for offset in range(0, len(timeline), 100):
-        page = timeline[offset:offset + 100]
-        first_sequence, last_sequence = int(page[0]["sequence"]), int(page[-1]["sequence"])
-        relative = f"timeline/pages/{first_sequence}-{last_sequence}.md"
-        page_index.append({
-            "first_sequence": first_sequence,
-            "last_sequence": last_sequence,
-            "events": len(page),
-            "path": f"pages/{first_sequence}-{last_sequence}.md",
-        })
-        files[relative] = (
-            f"# Timeline events {first_sequence}–{last_sequence}\n\n" + _inert(page)
-        ).encode("utf-8")
-    files["timeline/index.md"] = (
-        "# Timeline\n\n" + _inert({
-            "page_size": 100,
-            "pages": page_index,
-            "latest_sequence": sequence,
-        })
-    ).encode("utf-8")
-    index = {"task_id": task_id, "task_ref": task["task_ref"], "latest_sequence": sequence, "closure_state": task["closure_state"], "task_closure_ref": task["task_closure_ref"], "task_closure_verdict": task["task_closure_verdict"], "task": "task.md", "governance_gate": "governance-gate.md", "report_receipts": "handoffs/report-consumption-receipts.md", "current_plan": None if latest_plan is None else "plans/current.md", "delegations": [f"delegations/{item['delegation_id']}.md" for item in delegations], "reports": [f"reports/{item['report_id']}.md" for item in reports], "decisions": [f"decisions/{item['decision_id']}.md" for item in decisions], "timeline": "timeline/index.md", "initiatives": [f"initiatives/{item['initiative_id']}.md" for item in initiatives], "closures": [f"closures/{item['closure_id']}.md" for item in closures]}
-    # Index is deliberately written last by materialize_task.
-    files["index.md"] = ("# Cortex task human view\n\n" + _inert(index)).encode("utf-8")
     return files, sequence, str(task["task_ref"])
 
 
@@ -391,7 +451,7 @@ def materialize_task(store: Any, task_id: str) -> dict[str, Any]:
     try:
         files, source_sequence, task_ref_value = _render_files(store, task_id)
         task_directory = _migrate_legacy_task_directory(store, task_id, task_ref_value)
-        ordered = [item for item in sorted(files) if item != "index.md"] + ["index.md"]
+        ordered = sorted(files)
         outcomes: dict[str, str] = {}
         for relative in ordered:
             target = task_directory / Path(relative)
@@ -408,25 +468,6 @@ def materialize_task(store: Any, task_id: str) -> dict[str, Any]:
                 connection.execute("INSERT INTO projection_files(task_id,relative_path,source_sequence,renderer_version,content_digest,status,updated_at) VALUES (?, ?, ?, ?, ?, 'ready', ?) ON CONFLICT(task_id,relative_path) DO UPDATE SET source_sequence=excluded.source_sequence,renderer_version=excluded.renderer_version,content_digest=excluded.content_digest,status='ready',updated_at=excluded.updated_at", (task_id, item, source_sequence, PROJECTION_RENDERER_VERSION, value, __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()))
             store._write(record)
             outcomes[relative] = "ready"
-        expected_pages = {relative for relative in files if relative.startswith("timeline/pages/")}
-        if outcomes.get("timeline/index.md") == "ready" and all(outcomes.get(item) == "ready" for item in expected_pages):
-            # Do not delete a historical host-private file implicitly: it may
-            # have been externally altered.  Its old metadata must nevertheless
-            # stop looking like a current timeline page, because the freshly
-            # rendered index is the sole canonical page map.
-            def retire_stale_pages(connection: Any) -> None:
-                if expected_pages:
-                    placeholders = ",".join("?" for _ in expected_pages)
-                    connection.execute(
-                        f"UPDATE projection_files SET status='stale' WHERE task_id=? AND relative_path LIKE 'timeline/%' AND relative_path <> 'timeline/index.md' AND relative_path NOT IN ({placeholders})",
-                        [task_id, *sorted(expected_pages)],
-                    )
-                else:
-                    connection.execute(
-                        "UPDATE projection_files SET status='stale' WHERE task_id=? AND relative_path LIKE 'timeline/%' AND relative_path <> 'timeline/index.md'",
-                        (task_id,),
-                    )
-            store._write(retire_stale_pages)
         return {"status": "ready" if all(value == "ready" for value in outcomes.values()) else "conflict", "files": outcomes}
     except FileExistsError:
         return {"status": "conflict", "files": {}}

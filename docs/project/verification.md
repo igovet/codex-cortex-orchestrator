@@ -82,10 +82,14 @@ The V12 protocol evidence must prove:
   `response_original`, English `response_en`, `prompt_en`, language, attribution,
   and supersession; and requires/validates the exact immutable digest for plan
   and report subjects;
-- plan approval applies only to the exact finalized plan revision/digest;
-  silence/unrelated text is not approval, and clarification, pause, revision,
-  cancellation, and plan review remain coordinator-owned ordinary-chat policy,
-  never a backend gate or authorization claim;
+- only plan `decision_type=approve` requires the exact finalized plan
+  revision/digest plus a current ready approval view and opaque approval handle;
+  plan `request_revision` and `cancel` preserve the exact finalized plan
+  digest/response without volatile view binding, so intervening non-plan events
+  cannot block saving feedback; silence/unrelated text is not approval, and
+  clarification, pause, revision, cancellation, and plan review remain
+  coordinator-owned ordinary-chat policy, never a backend gate or
+  authorization claim;
 - missing closure, `not_ready`, open initiative, unfinished linked work,
   unresolved/cyclic dependency, and missing worker report do not block a new
   delegation, report, synthesis, rework, or final answer;
@@ -116,27 +120,23 @@ The V12 protocol evidence must prove:
 Verify that the canonical V12 database is the only mutable authority and that a
 semantic mutation enqueues a best-effort projection job in the same transaction.
 Projection failure must not reject or roll back canonical evidence. Confirm the
-exact private layout:
+exact private plan/report layout:
 
 ```text
 ~/.codex/cortex/v12/projects/p-<hash>/
 └── tasks/<task_ref>/
-    ├── index.md
-    ├── task.md
     ├── plans/
     │   ├── current.md
     │   └── revisions/<plan-report-id>.md
-    ├── delegations/<delegation-id>.md
-    ├── reports/<report-id>.md
-    ├── decisions/<decision-id>.md
-    ├── initiatives/<initiative-id>.md
-    ├── closures/<closure-id>.md
-    ├── governance-gate.md
-    ├── handoffs/report-consumption-receipts.md
-    └── timeline/
-        ├── index.md
-        └── pages/<first-sequence>-<last-sequence>.md
+    └── reports/<report-id>.md
 ```
+
+Task, decision, delegation, initiative, closure, governance, handoff, index,
+and timeline records remain in SQLite and are not emitted as user-facing
+Markdown. Plan and report views must be ordinary readable Markdown rather than
+JSON ledger exports: use labeled headings, normal lists, and paragraphs rather
+than raw nested field dumps; preserve authored Markdown verbatim with no JSON,
+`<pre>`, HTML entities, or added backslash escapes.
 
 Use the compact `task_ref` (`t_<12-hex>`) only for the task-view directory;
 canonical full IDs remain in SQLite and rendered evidence. Verify lazy migration
@@ -154,7 +154,7 @@ Also prove all of the following:
 - direct local edits are preserved as `conflict`; materialization uses safe
   atomic write/read-back verification and a newer source sequence supersedes a
   stale job;
-- task views and internal durable/projection source content are English while
+- plan/report views and internal durable/projection source content are English while
   `*_original` fields preserve user text; and
 - coordinator publication pairs every returned ready absolute link with a
   localized evidence summary and effect/next step, while a non-ready view is

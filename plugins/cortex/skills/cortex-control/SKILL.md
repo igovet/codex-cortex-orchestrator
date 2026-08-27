@@ -243,24 +243,32 @@ and ID, immutable subject digest when applicable, supersession, attribution,
 and chronology. The backend verifies binding and project/task scope but does
 not authenticate the user or interpret the row as authorization.
 
-Plan approval binds only the exact immutable plan revision and digest.
-Revision creates a new plan and digest; cancellation is durable evidence, not a
-backend state transition. Silence and unrelated text are not approval.
+Plan `approve` binds only the exact immutable plan revision and digest and also
+requires the current ready approval view plus opaque approval handle. Plan
+`request_revision` and `cancel` preserve the exact finalized plan digest and
+response without a volatile view binding, so intervening non-plan timeline
+events cannot block saving feedback. Revision creates a new plan and digest;
+cancellation is durable evidence, not a backend state transition. Silence and
+unrelated text are not approval.
 Clarification answers, steering, follow-up, scope, acceptance, product, risk,
 override, and authorization decisions use the closest active decision type
 without replacing exact original wording. A stored authorization assertion is
 never a bearer token; ordinary live approval requirements remain in force.
 
-For a requested or necessary main plan, use the existing bounded plan read or
-inspection until its explicit `approval_view` is `ready`. Copy its exact
-`report_ref`, `delegation_ref`, path, report digest, view digest, source sequence,
-and server-issued approval handle
-sequence byte-for-byte from the MCP response. Never construct, concatenate,
-shorten, substitute `native_task_name`, or infer a view path. Present only that
-returned verified path and request explicit approve/revise/reject/cancel input
-in the user's language, then wait for a new response. Record an approval only
-with that exact plan `report_ref`/digest, view digest/sequence, and approval handle
-via `record_user_decision`; the original task request, implicit instruction,
+For a requested or necessary main plan, present the exact server-provided
+`approval_view.markdown_link` and request
+explicit approve/revise/reject/cancel input in the user's language, then wait
+for a new response. For `approve`, use the existing bounded plan read or
+inspection until its explicit `approval_view` is `ready`; copy its exact
+`markdown_link`, `report_ref`, `delegation_ref`, path, report digest, view digest,
+source sequence, and server-issued approval handle byte-for-byte from the MCP
+response. Never
+construct, concatenate, shorten, substitute `native_task_name`, or infer a view
+path. Record `approve` only
+with that exact plan `report_ref`/digest, view digest/sequence, and approval
+handle via `record_user_decision`. Record `request_revision` or `cancel` against
+the exact plan `report_ref`/digest and response without a view binding; the
+original task request, implicit instruction,
 silence, or inferred consent cannot satisfy review. The handle proves the
 ready-view relation only; MCP provides no host-authenticated user-turn receipt.
 No
@@ -335,12 +343,18 @@ views beside the V12 shard and are never written to the target project. A
 report ID identifies evidence; a verified absolute Markdown path is a human
 link. They are not interchangeable.
 
-Human views must be ordinary readable Markdown. Render structured ledger data
-as labeled headings, prose, lists, or tables. Preserve task/report content
-verbatim: do not add backslashes, entity-escape HTML, or otherwise rewrite it.
-Never dump a JSON object/array, serialized payload, or script block into a
-`.md` view; JSON belongs in the canonical database. The view is a presentation
-of that data, not a JSON export and never a recovery source.
+Human views must be ordinary readable Markdown. Render plans and reports as
+structured documents with labeled headings, normal lists, and paragraphs, not
+raw nested field dumps. Preserve authored task/report Markdown verbatim: do not
+add backslashes, entity-escape HTML, or otherwise rewrite it. Never dump a JSON
+object/array, serialized payload, script block, `<pre>` block, or entity-encoded
+payload into a `.md` view; JSON belongs in the canonical database. The view is
+a presentation of that data, not a JSON export and never a recovery source.
+Only plan and report links are user-facing Markdown artifacts: the current plan,
+immutable plan revisions, and finalized reports. Task, decision, delegation,
+initiative, closure, governance, handoff, index, and timeline data remain
+SQLite-only and are read through bounded inspection tools instead of published
+as additional Markdown files.
 
 Never create project-local Cortex state or a project-local `.codex` layout.
 The V12 shard and projections remain host-private, and the separate V11
@@ -355,10 +369,11 @@ external channels. Projection failure returns no link, does not damage
 canonical rows, and never blocks a safe final answer.
 
 For user-facing plan review, progress, decisions, and the final response, emit
-only a clickable Markdown link in the exact form `[localized readable label](</exact returned absolute path>)`.
-The label is in the user's language; the destination is copied byte-for-byte
-from the current verified tool response. Never use a backticked or bare path,
-a code block, a constructed path, or a line break inside the link destination.
+only a clickable Markdown link in the exact form of the server-provided
+`markdown_link` from the current `ready` view, copied byte-for-byte. It has a
+readable label and the exact verified absolute destination. Never reconstruct it from compact refs or
+path fields; never use a backticked or bare path, a code block, or a line break
+inside the link destination.
 
 ## Closure field and ordering contract
 

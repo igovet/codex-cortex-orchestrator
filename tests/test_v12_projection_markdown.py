@@ -10,7 +10,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from cortex_runtime.v12_projections import _inert, _render_report  # noqa: E402
+from cortex_runtime.v12_projections import _inert, _markdown_link, _render_report  # noqa: E402
+from cortex_runtime.mcp_api import _public_view  # noqa: E402
 
 
 class ProjectionMarkdownTests(unittest.TestCase):
@@ -46,11 +47,13 @@ class ProjectionMarkdownTests(unittest.TestCase):
         report = {"report_id": "r_test", "assembly_state": "finalized"}
         rendered = _render_report(Store(), report).decode("utf-8")
 
-        self.assertIn("# Report: r_test", rendered)
-        self.assertIn("## Content", rendered)
-        self.assertIn("- **summary:** - injected list  \n  ## injected heading", rendered)
+        self.assertIn("# Report", rendered)
+        self.assertIn("**Status:** FINALIZED", rendered)
+        self.assertIn("## User *section*", rendered)
+        self.assertIn("### Summary\n\n- injected list  \n## injected heading", rendered)
         self.assertNotIn("<pre>", rendered)
         self.assertNotIn('"summary"', rendered)
+        self.assertNotIn("r_test", rendered)
 
     def test_profile_names_and_identifiers_remain_readable(self) -> None:
         rendered = _inert({
@@ -70,6 +73,66 @@ class ProjectionMarkdownTests(unittest.TestCase):
 
         self.assertIn("Trusted policy:  \n  - Keep identifiers readable.  \n  - Do not add slash escapes.", rendered)
         self.assertNotIn("\\- Keep identifiers", rendered)
+
+    def test_plan_body_uses_headings_for_structured_work_and_lists_for_checks(self) -> None:
+        class Store:
+            def _read(self, callback):
+                return callback(None)
+
+            def _report_chunks(self, _connection, _report_id):
+                return [{
+                    "section": "plan",
+                    "chunk_index": 0,
+                    "content": {
+                        "implementation_work_breakdown": [{
+                            "stage": "Build",
+                            "owner": "backend_dev",
+                            "work": "Implement the API",
+                            "acceptance": "The focused test passes",
+                        }],
+                        "ordered_verification": ["Run unit tests", "Run the release gate"],
+                        "test_acceptance_matrix": [{
+                            "test": "projection rendering",
+                            "acceptance": "No JSON dump is emitted",
+                        }],
+                        "observed_baseline": {
+                            "branch": "feature/rendering",
+                            "evidence": "Focused regression test",
+                        },
+                    },
+                }]
+
+        rendered = _render_report(Store(), {"report_id": "r_plan", "assembly_state": "finalized", "report_type": "plan"}).decode("utf-8")
+
+        self.assertIn("### Implementation Work Breakdown", rendered)
+        self.assertIn("#### Stage 1 — Build", rendered)
+        self.assertIn("- **Owner:** backend_dev", rendered)
+        self.assertIn("### Ordered Verification", rendered)
+        self.assertIn("1. Run unit tests", rendered)
+        self.assertIn("2. Run the release gate", rendered)
+        self.assertIn("### Test Acceptance Matrix", rendered)
+        self.assertIn("#### projection rendering", rendered)
+        self.assertIn("- **Acceptance:** No JSON dump is emitted", rendered)
+        self.assertIn("### Observed Baseline", rendered)
+        self.assertIn("- **Branch:** feature/rendering", rendered)
+        self.assertIn("- **Evidence:** Focused regression test", rendered)
+        self.assertNotIn("#### Branch", rendered)
+        self.assertNotIn("\n-\n", rendered)
+        self.assertNotIn("\n  #", rendered)
+        self.assertNotIn("<pre>", rendered)
+        self.assertNotIn('"implementation_work_breakdown"', rendered)
+        self.assertNotIn("&lt;", rendered)
+        self.assertNotIn("\\", rendered)
+
+    def test_ready_view_exposes_exact_server_link_and_non_ready_view_does_not(self) -> None:
+        canonical = "/private/tasks/t_ref/plans/revisions/report-full-canonical-id.md"
+        link = _markdown_link("plans/revisions/report-full-canonical-id.md", canonical)
+        ready = _public_view({"status": "ready", "path": canonical, "markdown_link": link}, approval=False)
+        stale = _public_view({"status": "stale", "path": None, "markdown_link": link}, approval=False)
+
+        self.assertEqual(ready["markdown_link"], f"[Open plan revision]({canonical})")
+        self.assertIn("report-full-canonical-id.md", ready["markdown_link"])
+        self.assertNotIn("markdown_link", stale)
 
 
 if __name__ == "__main__":

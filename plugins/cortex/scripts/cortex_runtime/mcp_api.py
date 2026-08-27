@@ -70,7 +70,7 @@ _RECOVERY_ACTIONS = {
     "invalid_decision_type": "Use one advertised decision_type value.",
     "decision_subject_not_finalized": "Finalize the selected plan report with completed status before recording a plan decision.",
     "decision_subject_digest_mismatch": "Copy the current selected subject digest byte-for-byte before recording the decision.",
-    "approval_view_required": "Read the exact finalized plan until its returned approval_view is ready, then copy its handle and view identifiers byte-for-byte.",
+    "approval_view_required": "For plan approval, read the exact finalized plan until its returned approval_view is ready, then copy its handle and view identifiers byte-for-byte.",
     "approval_view_not_ready": "Refresh the exact plan read until a new ready approval_view is returned; do not construct a path or reuse a stale view.",
     "approval_view_mismatch": "Use the exact report and ready approval_view values returned together by Cortex.",
     "approval_handle_not_found": "Use only the opaque approval_handle returned in the ready approval_view.",
@@ -122,7 +122,7 @@ _PUBLIC_ERROR_MESSAGES = {
     "invalid_decision_type": "The supplied decision type is invalid.",
     "decision_subject_not_finalized": "The selected decision subject is not finalized evidence.",
     "decision_subject_digest_mismatch": "The supplied decision subject digest does not match.",
-    "approval_view_required": "The plan decision requires an exact ready approval view.",
+    "approval_view_required": "The plan approval requires an exact ready approval view.",
     "approval_view_not_ready": "The approval view is not currently ready.",
     "approval_view_mismatch": "The supplied approval view does not match the plan.",
     "approval_handle_not_found": "The supplied approval handle was not found.",
@@ -512,11 +512,14 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
     if not isinstance(value, Mapping):
         return None
     if not approval:
-        return {
+        result = {
             field: value[field]
             for field in ("status", "path", "source_sequence", "content_digest")
             if field in value
         }
+        if value.get("status") == "ready" and isinstance(value.get("path"), str) and value.get("path") and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
+            result["markdown_link"] = value["markdown_link"]
+        return result
     result = {
         field: value[field]
         for field in (
@@ -529,6 +532,8 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
         )
         if field in value
     }
+    if value.get("status") == "ready" and isinstance(value.get("path"), str) and value.get("path") and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
+        result["markdown_link"] = value["markdown_link"]
     fallback: Mapping[str, Any] = {}
     if owner is not None and isinstance(owner.get("reports"), list):
         for report in owner["reports"]:

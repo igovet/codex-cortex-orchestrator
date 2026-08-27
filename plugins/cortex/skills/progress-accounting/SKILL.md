@@ -46,13 +46,15 @@ failed/unavailable/idle-without-work evidence, host-confirmed no-progress, or
 user cancellation. Do not expose recovery chatter, skip a planner dependency,
 or start downstream work without required report and plan-decision evidence.
 
-When the active tool returns a current contained digest-verified absolute
-Markdown projection, include it as a clickable link with a localized summary
-and explain why it matters. Never publish a bare path, raw task/delegation/
-report/decision ID, guessed location, stale projection, or private operational
-path. A verified projection link is the only allowed user-facing host-private
-path. If projection verification fails, omit the link, continue from canonical
-evidence, and disclose the human-view limitation only when material.
+When the active tool returns a current contained digest-verified ready plan or
+report Markdown projection, copy its server-provided `markdown_link` field
+byte-for-byte as the clickable link, with a localized summary explaining why it
+matters. Never publish a bare path, raw
+task/delegation/report/decision ID, guessed location, stale projection, or
+private operational path. Only verified plan/report links are allowed as
+user-facing host-private paths; other records remain SQLite-only. If projection
+verification fails, omit the link, continue from canonical evidence, and
+disclose the human-view limitation only when material.
 
 Use English for coordinator-to-worker and inter-worker messages, report and
 decision-normalization content, and other durable coordination prose. Preserve
