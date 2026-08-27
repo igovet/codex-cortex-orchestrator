@@ -108,9 +108,9 @@ returns preferred `task_ref` plus canonical `task_id`. The seven
 task-anchored public tools require `task_ref` and resolve it fail-closed to the
 saved canonical task. The 14-character reference contains only a 12-hex task
 suffix; resolution scans private V12 shards and rejects zero or ambiguous
-matches. Full `task_id` remains a legacy direct-service locator below public
-schemas; entity-derived public calls resolve from their delegation or report
-identifiers instead.
+matches. Full `task_id` remains durable database evidence, not a public request
+locator; entity-derived public calls resolve only from their exact emitted
+delegation or report refs instead.
 Initiative operations use the resolved task only as a project locator, never
 as authority. Current MCP call
 metadata does not provide a guaranteed project-root binding, the plugin stdio
@@ -137,15 +137,16 @@ both `subject_type` and the matching compact task or initiative `subject_ref`.
 When a task has relevant initiatives, close each initiative first, then record
 the distinct task-subject closure that alone marks the task closed.
 
-`record_user_decision` is the durable record of an ordinary-chat decision. Its
-current form requires `task_ref`, subject type and ID, decision type, English
-prompt context, exact `response_original`, English `response_en`, and
-`user_language`; plan and report subjects also require the exact immutable
-`subject_digest`. A complete, non-mixed legacy plan-decision shape remains a
-compatibility path; partial or mixed forms are rejected. A plan decision binds
-only that completed, finalized plan revision. The record may supersede a prior
-decision on the same subject, but it never replaces original wording or acts as
-a bearer approval token.
+`record_user_decision` is the durable record of an ordinary-chat decision. It
+requires one canonical field set: `task_ref`, subject type/ref/digest, decision
+type, English prompt context, exact `response_original`, English `response_en`,
+and `user_language`. A plan decision binds only that completed, finalized plan
+revision. An `approve` decision additionally requires the complete exact ready
+approval-view relation returned together by Cortex: the report ref/digest,
+approval handle, view digest, and view source sequence. Missing, legacy, or
+mixed fields are rejected before the service mutation. The record may supersede
+a prior decision on the same subject, but it never replaces original wording or
+acts as a bearer approval token.
 The mutation response is compact: it may include at most a 512-character
 English response excerpt and never returns `response_original`.
 
@@ -178,7 +179,7 @@ rows. Preserve exact arbitrary-Unicode user wording only in
 its designated `user_request_original` or `response_original` field with its
 `user_language`; never overwrite or silently translate that source text.
 
-Reports may contain material engineering evidence, so report IDs should be
+Reports may contain material engineering evidence, so exact emitted report refs should be
 passed to later workers instead of copying full reports into prompts. A small
 report may use `single`; a large report uses `begin`, sequential indexed
 `append` calls with bounded lowercase section labels, then `finalize` with the
@@ -195,10 +196,9 @@ order and is the only report body/chunk reader. A coordinator does not call it
 merely to summarize a completed worker report: the worker must return a concise
 `Summary` and exact `Report ref`. Downstream workers use `read_reports` when
 their declared work genuinely requires the report body. It returns only complete JSON
-chunks that fit its bounded byte budget (at most 65,536 bytes), with a
+chunks that fit its bounded integer `max_bytes` budget (at most 65,536 bytes), with a
 selection-scoped cursor for resume; `max_bytes=0` returns metadata only and no
-bodies. Deprecated `byte_budget` is an equivalent alias, but a different
-simultaneous `max_bytes` value is rejected. Inspection tools use
+bodies. Inspection tools use
 `after_sequence` plus `limit`, return compact
 references and bounded timeline pages, and expose `next_sequence`/`has_more`.
 

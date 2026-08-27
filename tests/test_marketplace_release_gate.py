@@ -58,9 +58,9 @@ EXPECTED_INPUT_FIELDS = {
         "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en", "supersedes_report_ref",
         "review_policy", "idempotency_key",
     },
-    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "byte_budget", "consumer_delegation_ref", "reader_kind"},
+    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "consumer_delegation_ref", "reader_kind"},
     "set_governance_mode": {
-        "task_ref", "mode", "rationale", "reason", "risk_factors", "source", "initiative_ref", "idempotency_key",
+        "task_ref", "mode", "rationale", "risk_factors", "source", "initiative_ref", "idempotency_key",
     },
     "record_initiative": {
         "task_ref", "goal", "initiative_ref", "parent_initiative_ref", "risk", "status", "dependency_refs",
@@ -74,8 +74,7 @@ EXPECTED_INPUT_FIELDS = {
     "record_user_decision": {
         "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en",
         "response_original", "response_en", "user_language", "approval_handle", "approval_view_content_digest",
-        "approval_view_source_sequence", "supersedes_decision_ref", "idempotency_key", "report_ref",
-        "report_content_digest", "decision", "user_response_original", "english_normalization",
+        "approval_view_source_sequence", "supersedes_decision_ref", "idempotency_key",
     },
 }
 
@@ -94,7 +93,10 @@ EXPECTED_REQUIRED_FIELDS = {
     "record_initiative": {"task_ref", "goal"},
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
-    "record_user_decision": {"task_ref"},
+    "record_user_decision": {
+        "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type",
+        "prompt_en", "response_original", "response_en", "user_language",
+    },
 }
 
 MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
@@ -619,7 +621,7 @@ def _assert_tool_schemas(tools: Mapping[str, Mapping[str, Any]]) -> None:
         require(isinstance(field_schema, Mapping) and field_schema.get("uniqueItems") is True, f"{tool_name}.{field_name} rejects duplicate identifiers")
     for field_name in ("input_report_refs", "input_decision_refs"):
         field_schema = tools["create_delegation"]["inputSchema"]["properties"][field_name]
-        require(isinstance(field_schema, Mapping) and field_schema.get("uniqueItems") is False, f"create_delegation.{field_name} accepts duplicates for first-seen canonicalization")
+        require(isinstance(field_schema, Mapping) and field_schema.get("uniqueItems") is True, f"create_delegation.{field_name} rejects duplicate canonical references")
 
     delegation_scope = tools["create_delegation"]["inputSchema"]["properties"]["scope"]
     require(isinstance(delegation_scope, Mapping), "delegation scope schema is published")

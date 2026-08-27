@@ -527,9 +527,11 @@ class V12Store:
         return identifier
 
     def resolve_record_ref(self, value: Any, *, label: str) -> str:
-        """Resolve a public ref within this known shard, retaining direct-ID compatibility."""
+        """Resolve one canonical public ref within this known shard."""
         suffix = record_ref_parts(value, label=label)
-        return self._record_identifier(value, label=label) if suffix is None else self._record_id_for_ref_suffix(suffix, label=label)
+        if suffix is None:
+            raise V12StoreError(f"{label} is invalid", code="invalid_identifier", details={"field": label})
+        return self._record_id_for_ref_suffix(suffix, label=label)
 
     @staticmethod
     def _directory(path: Path, *, normalize: bool) -> None:

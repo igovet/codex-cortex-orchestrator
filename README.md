@@ -869,10 +869,9 @@ Chunked reports allow at most 256 chunks and 8 MiB per report, eight assembling
 reports and 16 MiB of assembling content per task, and 128 MiB retained content
 per task. Each accepted append records the task-scoped
 `report_chunk_appended` event as well as the report start, final submission, or
-abort event. `read_reports` accepts 1–20 unique known IDs in requested order, up to 32
+abort event. `read_reports` accepts 1–20 unique known report refs in requested order, up to 32
 section filters, an opaque selection-scoped cursor, and `max_bytes` up to 65,536.
-Deprecated `byte_budget` remains an equivalent compatibility alias; supplying
-both with different values is rejected. It returns ordered, complete JSON chunks
+It returns ordered, complete JSON chunks
 within a 224 KiB response ceiling; `max_bytes=0` returns metadata only. A small complete one-chunk report may also
 expose legacy `content`. Task/delegation inspection never exposes bodies.
 
@@ -1120,7 +1119,7 @@ post-approval documentation evidence for closure.
 governance operations require `task_ref`; `read_delegation` resolves its owner
 from `delegation_ref`, `submit_report` from `delegation_ref`, and `read_reports`
 from `report_refs`. These entity-derived public calls accept neither `task_ref`
-nor canonical `task_id`; legacy direct-service compatibility stays below the
+nor canonical `task_id`; no direct-ID, alias, or mixed request shape is accepted by the
 public MCP schema. No public operation infers a root
 from host metadata, thread identity, or process working directory.
 
@@ -1131,12 +1130,12 @@ from host metadata, thread identity, or process working directory.
 | `create_delegation` | Use `task_ref` to persist bounded work with separate human `role`, exact packaged `profile_name`, required textual `scope`, exact model/effort, and selected report/decision inputs; return an attested worker brief and exact native-dispatch payload carrying the saved root. |
 | `read_delegation` | Use `delegation_ref` plus `after_sequence` to resolve and read compact history without a receipt; do not supply `task_ref` or `task_id`. |
 | `submit_report` | Use `delegation_ref` for a single body or stable-reference `begin`/`append`/`finalize`/`abort` report: `progress`, `result`, `synthesis`, or `plan`; do not supply `task_ref` or `task_id`. |
-| `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and `max_bytes` budget; deprecated `byte_budget` is an equivalent alias, and differing simultaneous values are rejected. Do not supply `task_ref` or `task_id`. Worker handoff reads additionally name the exact consuming delegation reference and leave immutable page receipts. |
+| `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and integer `max_bytes` budget. Do not supply `task_ref` or `task_id`. Worker handoff reads additionally name the exact consuming delegation reference and leave immutable page receipts. |
 | `set_governance_mode` | Use `task_ref` to append a `minimal`, `light`, or `full` assessment. |
 | `record_initiative` | Use `task_ref` as the project anchor and only `dependency_refs`, `linked_task_refs`, `linked_delegation_refs`, `linked_report_refs`, and `linked_decision_refs` for initiative relationships. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative governance history. |
 | `submit_governance_closure` | Use `task_ref` to append an advisory closure with required `subject_type` and matching compact `subject_ref`. Close relevant initiatives first, then record the distinct task-subject closure before a completion final. |
-| `record_user_decision` | Use `task_ref` to append coordinator-attributed original/English user evidence for an exact task/plan/initiative/delegation/report subject; require digest binding for plan/report. A complete, non-mixed legacy plan-decision shape remains a compatibility path. |
+| `record_user_decision` | Use the complete canonical `task_ref`/subject-ref/digest/decision/response field set to append coordinator-attributed original/English evidence. For `approve`, also copy the complete exact ready approval-view relation: report ref/digest, opaque handle, view digest, and source sequence. |
 
 There is no coordinator/worker audience filtering, capability matrix,
 host-bound authority, read receipt, profile-based lifecycle admission, action

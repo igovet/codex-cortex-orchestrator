@@ -42,16 +42,23 @@ errors. The server is a storage/integrity sidecar and contains no V11
 control-plane route.
 
 Only `create_task` accepts explicit `project_root`; it stores the canonical
-project association and returns `task_id`. Every other schema requires that
-opaque task anchor and accepts no root. No host metadata, plugin `cwd`, or hook
-binds a project. `create_task` records the exact original request and a
-concrete language tag beside the English objective and four non-empty,
-meaningful result-contract lists; `context` remains optional arbitrary JSON.
-Delegation
-`scope` is required non-empty text defining the concise worker-ownership
-boundary, not an object, and detailed execution belongs in `instructions`.
-Exact model and effort are required together. Closure requires `subject_type`
-plus existing `subject_id`.
+project association and returns a compact `task_ref` for later task-anchored
+calls. The durable `task_id` in results and ledger evidence is non-callable.
+The seven task-anchored tools use `task_ref`: `inspect_task`,
+`create_delegation`, `set_governance_mode`, `record_initiative`,
+`inspect_governance`, `submit_governance_closure`, and
+`record_user_decision`. The entity-derived tools use their compact emitted
+refs: `read_delegation` uses `delegation_ref`, `submit_report` uses
+`delegation_ref` (and continuation `report_ref`), and `read_reports` uses
+`report_refs`; these tools do not accept `task_ref` or durable `*_id` values.
+No host metadata, plugin `cwd`, or hook binds a project. `create_task` records
+the exact original request and a concrete language tag beside the English
+objective and four non-empty, meaningful result-contract lists; `context`
+remains optional arbitrary JSON. Delegation `scope` is required non-empty text
+defining the concise worker-ownership boundary, not an object, and detailed
+execution belongs in `instructions`. Exact model and effort are required
+together. Closure selects the existing subject with `subject_type` plus the
+compact `subject_ref`; durable `subject_id` is evidence only.
 
 Reports support `single`, `begin`, `append`, `finalize`, and `abort` under
 bounded chunk, assembling, retained-content, and response limits. Plan reports
@@ -118,8 +125,10 @@ The release candidate must prove:
 - uniform participant catalog, closed input schemas, advertised successful
   `outputSchema` validation, and the distinct success/correctable-error/server
   fault transport shapes;
-- explicit root only on `create_task`, `task_id` on each other tool, arbitrary
-  optional task context, bounded task contract/language fields, required
+- explicit root only on `create_task`, `task_ref` on the seven task-anchored
+  tools, `delegation_ref`/`report_ref`/`report_refs` on entity-derived tools,
+  `subject_ref` and `initiative_ref` where applicable, arbitrary optional task
+  context, bounded task contract/language fields, required
   non-empty textual delegation scope with object rejection, exact model/effort,
   and required closure subject fields;
 - schema-v1 bootstrap/additive migration, project isolation, idempotency,

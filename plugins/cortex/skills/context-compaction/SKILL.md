@@ -77,7 +77,7 @@ If a native child was known live before compaction, reconcile that exact handle
 through ordinary host coordination. Continue or follow it up only when the
 handle and ownership scope remain known and safe. When its state is unknown,
 do not overlap mutation ownership; wait for bounded host evidence when useful,
-or create a `parent_delegation_id`-linked replacement after containing the
+or create a `parent_delegation_ref`-linked replacement after containing the
 scope. A durable delegation with no report does not reveal whether the native
 child never started, is running, stopped, or was abandoned.
 

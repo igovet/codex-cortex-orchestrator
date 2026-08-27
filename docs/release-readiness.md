@@ -48,9 +48,12 @@ success is transported as JSON text plus `structuredContent` with
 sanitized JSON-RPC internal errors.
 
 Only `create_task` accepts the exact resolved `project_root` and stores the
-canonical project association; it is the sole public project-root boundary. All
-other ten tools require its returned `task_id` and use that anchor to locate and
-validate the saved project ledger; initiative calls use it only as a locator,
+canonical project association; it is the sole public project-root boundary. It
+returns compact `task_ref` for the seven task-anchored tools. The durable
+`task_id` in results is non-callable evidence. `read_delegation` instead uses
+`delegation_ref`; `submit_report` uses `delegation_ref` and continuation
+`report_ref`; and `read_reports` uses `report_refs`, resolving their task from
+those exact compact refs. Initiative calls use `task_ref` only as a locator,
 never as permission. The native worker brief carries the saved root only for
 working-directory context. No root is inferred from MCP metadata, thread
 identity, the plugin process `cwd`, or a lifecycle hook.
@@ -68,8 +71,8 @@ detailed execution belongs in `instructions`, and object-shaped scope is
 invalid. `create_delegation` also separates exact packaged `profile_name` from
 the human-readable `role`, requires loaded renderer proof, and returns one exact
 native-dispatch payload for one matching host spawn.
-`submit_governance_closure` requires `subject_type` and the existing
-task or initiative `subject_id`.
+`submit_governance_closure` requires `subject_type` and the existing compact
+task or initiative `subject_ref`; durable `subject_id` is evidence only.
 
 The root coordinator may use the ledger, user interaction, native worker
 coordination, and worker reports to orchestrate and synthesize. It must never
@@ -148,11 +151,9 @@ Release evidence must prove:
   sequential chunks, terminal finalization/abort, and explicit supersession;
 - each chunk is bounded to 32 KiB; report assembly is bounded to 256 chunks and
   8 MiB; its final digest binds the complete immutable manifest;
-- `read_reports` preserves requested order for 1–20 known IDs, returns only
+- `read_reports` preserves requested order for 1–20 known compact `report_refs`, returns only
   complete chunks within a 65,536-byte budget, and returns a selection-scoped
   cursor without duplication; `max_bytes=0` returns only assembly metadata;
-  deprecated `byte_budget` is an equivalent compatibility alias and conflicts
-  with a different simultaneous `max_bytes` value;
 - inspection pages use `after_sequence` plus `limit`, return stable
   `next_sequence`/`has_more`, and expose compact report references while
   `read_reports` remains the only bounded report body/chunk reader;
@@ -167,8 +168,10 @@ Release evidence must prove:
 ## User decisions, plan review, and human views
 
 `record_user_decision` records an ordinary-chat decision only when the
-coordinator asserts that the user made one. The record keeps subject type and
-ID, a subject digest when applicable, a decision type, English prompt context,
+coordinator asserts that the user made one. The request selects the subject
+with compact `subject_ref`; the returned durable `subject_id` is evidence only.
+The record keeps subject type and
+a subject digest when applicable, a decision type, English prompt context,
 exact arbitrary-Unicode `response_original`, English `response_en`, user
 language, attribution, and optional supersession. The English value supports
 durable internal work; it never replaces the original response. Plan and report
@@ -252,9 +255,10 @@ shared worker, missing spawn, or duplicate spawn is acceptable.
 ## Operator maintenance contract
 
 The packaged `cortex_runtime.v12_maintenance` module remains outside
-`tools/list`; it cannot change the eleven-tool catalog. Every command starts
-from one exact V12 `task_id`, derives its shard and host-private targets from
-that ID, accepts no root/arbitrary path/V11 target, validates the owner-only
+`tools/list`; it cannot change the eleven-tool catalog. Every command in this
+separately invoked non-MCP operator module starts from one exact V12 durable
+`task_id`, derives its shard and host-private targets from that ID, accepts no
+root/arbitrary path/V11 target, validates the owner-only
 filesystem and complete V12 database identity, and emits bounded sanitized
 JSON.
 
@@ -346,8 +350,9 @@ requires a delegated documentation-sync update to the harvest documentation
 under `docs/project/` and `docs/features/`, then delegated documentation
 verification. A no-impact task requires a finalized worker-owned report with an
 explicit English documentation-impact section and material/no-impact rationale,
-links its exact report ID in the final initiative, and cites that ID plus its
-returned digest in closure evidence. A self-asserted
+links its exact compact `report_ref` in the final initiative, and cites that ref
+plus its returned digest in closure evidence. Durable `report_id` is evidence
+only. A self-asserted
 `documentation_not_required` value is invalid. This
 conditional stage precedes advisory closure and the final answer. Missing
 documentation evidence leads to model-owned rework, replacement, or explicit
@@ -411,12 +416,13 @@ Exercise several explicit `$cortex:orchestrator` tasks:
 13. A no-doc task where the owning worker submits a finalized report with an
     explicit English documentation-impact section and material/no-impact
     rationale, the final initiative links the exact task and that exact report
-    plus all other required reports, closure evidence cites their exact IDs and
+    plus all other required reports, closure evidence cites their exact compact
+    refs (durable IDs remain non-callable evidence) and
     returned digests, and both task-scoped and initiative-scoped governance
     verify the closure before any durable-ready claim.
 14. An explicit activation with no `read_mcp_resource`, `resources/read`, or
-    `skill://` MCP attempt, plus exact byte-for-byte reuse of every returned ID
-    and digest.
+    `skill://` MCP attempt, plus exact byte-for-byte reuse of every returned
+    compact ref, durable evidence ID, and digest in the appropriate context.
 15. Four durable delegations produce four matching host spawns copied exactly
     from their returned native-dispatch payloads, with correct fork isolation,
     model/effort fields, renderer/profile evidence, and worker-owned reports.
@@ -442,7 +448,8 @@ material task with a documentation-sync worker plus an independent
 documentation verifier, and one no-impact task with an explicit
 English documentation-impact rationale in a finalized worker-owned report, no
 documentation churn, the exact report link in the initiative, and exact report
-ID/digest citations in closure evidence. Reject coordinator self-assertion.
+    compact ref/digest citations in closure evidence (durable IDs remain
+    non-callable evidence). Reject coordinator self-assertion.
 Verify that Cortex writes no file or directory below `project_root`; every
 published task/plan/report/decision/timeline link must point to a current,
 digest-verified regular file inside the host-private V12 task subtree and must
@@ -460,8 +467,10 @@ Before release, re-read [README.md](../README.md),
 manifest, profiles, authoritative skills, schemas, and executable package
 configuration. Verify links, Mermaid syntax, version strings, tool names,
 storage paths, model/effort rules, commands, and the V11 compatibility boundary.
-Also verify explicit root only on `create_task`, `task_id` on each other tool,
-the exact task/result language fields, textual delegation scope, exact
+Also verify explicit root only on `create_task`, compact `task_ref` on the seven
+task-anchored tools, compact `delegation_ref`/`report_ref`/`report_refs` on
+entity-derived tools, `subject_ref`/`initiative_ref` where applicable, the exact
+task/result language fields, textual delegation scope, exact
 `profile_name`/human `role`, loaded proof, one-to-one native dispatch,
 model/effort, English-only complete child transcripts, chunked report modes and bounded complete-chunk reads, plan-review
 and user-decision subject/digest semantics, compact paginated inspections,

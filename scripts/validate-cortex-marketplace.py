@@ -73,11 +73,11 @@ EXPECTED_TOOL_FIELDS = {
         "supersedes_report_ref", "review_policy", "idempotency_key",
     },
     "read_reports": {
-        "report_refs", "sections", "cursor", "max_bytes", "byte_budget",
+        "report_refs", "sections", "cursor", "max_bytes",
         "consumer_delegation_ref", "reader_kind",
     },
     "set_governance_mode": {
-        "task_ref", "mode", "rationale", "reason", "risk_factors", "source", "initiative_ref", "idempotency_key",
+        "task_ref", "mode", "rationale", "risk_factors", "source", "initiative_ref", "idempotency_key",
     },
     "record_initiative": {
         "task_ref", "goal", "initiative_ref", "parent_initiative_ref", "risk", "status", "dependency_refs",
@@ -104,22 +104,16 @@ EXPECTED_TOOL_REQUIRED = {
     "record_initiative": {"task_ref", "goal"},
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
-    "record_user_decision": {"task_ref"},
+    "record_user_decision": {
+        "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type",
+        "prompt_en", "response_original", "response_en", "user_language",
+    },
 }
 EXPECTED_DECISION_FIELDS = {
     "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en",
     "response_original", "response_en", "user_language", "approval_handle",
     "approval_view_content_digest", "approval_view_source_sequence", "supersedes_decision_ref",
-    "idempotency_key", "report_ref", "report_content_digest", "decision",
-    "user_response_original", "english_normalization",
-}
-EXPECTED_DECISION_CURRENT_FIELDS = {
-    "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type",
-    "prompt_en", "response_original", "response_en", "user_language",
-}
-EXPECTED_DECISION_LEGACY_FIELDS = {
-    "task_ref", "report_ref", "report_content_digest", "decision",
-    "user_response_original", "english_normalization",
+    "idempotency_key",
 }
 ACTIVE_RUNTIME_FILES = {
     "__init__.py",
@@ -451,6 +445,7 @@ def validate_runtime(plugin: Path) -> None:
             or "audience" in contract
             or not isinstance(registration, dict)
             or not callable(registration.get("handler"))
+            or registration.get("inputSchema") != schema
         ):
             fail(f"V12 public contract is invalid: {name}")
         properties = schema["properties"]
@@ -489,27 +484,14 @@ def validate_runtime(plugin: Path) -> None:
                 fail(f"{name} must resolve through required compact task_ref without a public task_id alternative")
         if name == "read_reports":
             max_bytes = properties.get("max_bytes")
-            byte_budget = properties.get("byte_budget")
-            max_bytes_maximum = max_bytes.get("maximum") if isinstance(max_bytes, dict) else None
-            if max_bytes_maximum is None and isinstance(max_bytes, dict):
-                max_bytes_maximum = next(
-                    (
-                        branch.get("maximum")
-                        for branch in max_bytes.get("anyOf", ())
-                        if isinstance(branch, dict) and branch.get("maximum") is not None
-                    ),
-                    None,
-                )
             if (
                 not isinstance(max_bytes, dict)
-                or not isinstance(byte_budget, dict)
-                or byte_budget.get("type") != "integer"
-                or byte_budget.get("minimum") != 0
-                or byte_budget.get("maximum") != max_bytes_maximum
-                or "deprecated" not in str(byte_budget.get("description", "")).lower()
-                or "byte_budget" in required
+                or max_bytes.get("type") != "integer"
+                or max_bytes.get("minimum") != 0
+                or not isinstance(max_bytes.get("maximum"), int)
+                or "byte_budget" in properties
             ):
-                fail("read_reports.byte_budget must remain an optional deprecated alias for max_bytes")
+                fail("read_reports must expose only the canonical integer max_bytes field")
         if name == "create_delegation":
             scope = properties.get("scope")
             if (
@@ -532,17 +514,29 @@ def validate_runtime(plugin: Path) -> None:
         if name == "record_user_decision":
             if set(properties) != EXPECTED_DECISION_FIELDS:
                 fail("record_user_decision fields drifted from the canonical V12 user-decision contract")
-            decision_shapes = schema.get("oneOf")
+            if "oneOf" in schema:
+                fail("record_user_decision must expose one canonical field set, not legacy request shapes")
+            conditionals = schema.get("allOf")
+            decision_shapes = (
+                conditionals[0].get("anyOf")
+                if isinstance(conditionals, list)
+                and len(conditionals) == 1
+                and isinstance(conditionals[0], dict)
+                else None
+            )
+            approval_required = {"approval_handle", "approval_view_content_digest", "approval_view_source_sequence"}
             if (
                 not isinstance(decision_shapes, list)
-                or {
-                    frozenset(shape.get("required") or ())
+                or not any(
+                    isinstance(shape, dict)
+                    and isinstance(shape.get("properties"), dict)
+                    and isinstance(shape["properties"].get("decision_type"), dict)
+                    and shape["properties"]["decision_type"].get("const") == "approve"
+                    and approval_required.issubset(set(shape.get("required") or ()))
                     for shape in decision_shapes
-                    if isinstance(shape, dict)
-                }
-                != {frozenset(EXPECTED_DECISION_CURRENT_FIELDS), frozenset(EXPECTED_DECISION_LEGACY_FIELDS)}
+                )
             ):
-                fail("record_user_decision must preserve its complete non-mixed current and legacy shapes")
+                fail("record_user_decision must require the complete approval relation for approve")
             subject_type = properties.get("subject_type")
             decision_type = properties.get("decision_type")
             approval_handle = properties.get("approval_handle")
@@ -560,7 +554,7 @@ def validate_runtime(plugin: Path) -> None:
             ):
                 fail("record_user_decision must preserve the canonical V12 subject and decision enums")
             if (
-                {"approval_handle", "approval_view_content_digest", "approval_view_source_sequence"} & required
+                approval_required & required
                 or not isinstance(approval_handle, dict)
                 or approval_handle.get("type") != "string"
                 or approval_handle.get("minLength") != 1
@@ -574,7 +568,7 @@ def validate_runtime(plugin: Path) -> None:
                 or approval_view_sequence.get("type") != "integer"
                 or approval_view_sequence.get("minimum") != 0
             ):
-                fail("record_user_decision must preserve optional plan approval relation fields")
+                fail("record_user_decision must preserve the canonical approval relation fields")
     if hasattr(__import__("cortex_runtime.mcp_api", fromlist=["public_tools_for_audience"]), "public_tools_for_audience"):
         fail("V12 MCP transport must not project tools by audience")
 

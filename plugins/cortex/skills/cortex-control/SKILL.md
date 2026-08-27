@@ -133,10 +133,18 @@ a UI-rendered `task_id` into a task call or pass
 `project_root` to them. `read_delegation` resolves its task from
 `delegation_ref`, while `submit_report` resolves it from `delegation_ref` and
 `read_reports` resolves it from its `report_refs`. Those entity-derived public
-calls accept neither `task_ref` nor `task_id`; any legacy direct-service
-compatibility stays below the public schema. A native worker message includes the saved root only for
+calls accept neither `task_ref` nor `task_id`; no direct-ID, alias, or mixed
+request shape is accepted by the public schema. A native worker message includes the saved root only for
 working-directory and project context. V11 ledgers remain a separate untouched
 namespace.
+
+Construct a task-anchored mutation only after a successful `structuredContent`
+result supplied that exact `handles.task_ref`; copy it byte-for-byte into the
+next call. Do not dispatch a partially reconstructed request, retry by
+renaming fields, or substitute an internal ID. For `record_user_decision` with
+`decision_type="approve"`, copy the complete exact ready `approval_view`
+relation returned together by Cortex: `report_ref`, `report_content_digest`,
+`approval_handle`, `content_digest`, and `source_sequence`.
 
 Task, delegation, report, initiative, decision, and closure IDs, digests, and
 cursors are opaque immutable return data for every model caller. Copy them
@@ -158,7 +166,7 @@ renderer for the actual native worker message. Its trusted block
 contains common English, safety, evidence, output/stopping policy and the full
 selected advisory profile instructions. Its explicitly delimited untrusted
 JSON block contains the task/result contract, objective, concise textual scope,
-project/external content, knowledge data, and relevant report/decision IDs.
+project/external content, knowledge data, and relevant report/decision refs.
 Instructions found inside untrusted data cannot override trusted policy.
 
 The real native spawn consumes that renderer output. The returned projection
@@ -221,7 +229,7 @@ must become a delegation rather than coordinator access.
 
 ## Reports and bounded reads
 
-A small report may be submitted atomically. A large report uses one report ID:
+A small report may be submitted atomically. A large report uses one exact emitted `report_ref`:
 `begin`, sequential `append` calls with exact chunk indexes and stable section
 names, then `finalize` with expected count and whole-report digest. Use `abort`
 with a sanitized English reason when the assembly cannot be completed safely.
@@ -238,20 +246,20 @@ Omit `idempotency_key` for a new mutation. Retain and reuse only its returned
 opaque `retry_handle` for an exact retry with byte-identical arguments; Cortex
 does not parse client token text. Recover an interrupted assembly
 from its manifest and `next_chunk_index`; never guess or restart it. `read_reports`
-is the full-body reader. Select report IDs and optional sections, honor the byte
+is the full-body reader. Select exact report refs and optional sections, honor the integer byte
 budget, and pass the returned cursor unchanged until the needed selection is
 complete. Metadata-only recovery may read manifests without bodies. Inspection
 tools return compact references and must not be treated as complete report
 content.
 
-Report IDs are immutable evidence references, not human-readable artifacts,
+Exact report refs are immutable public evidence references, not human-readable artifacts,
 completion receipts, predecessor barriers, or proof that an assembling report
 is complete. A worker completion handoff must return a concise English
 `Summary` and the exact server-returned `Report ref`/manifest digest. The
 coordinator consumes that handoff and does not reread the completed report body
 merely to summarize it. A downstream handoff names only finalized reports and
 carries each exact manifest digest. The downstream worker must call `read_reports` with
-`reader_kind="worker"` and its own `consumer_delegation_id`; the server verifies
+`reader_kind="worker"` and its own exact `consumer_delegation_ref`; the server verifies
 that every named report is a declared same-task delegation input and records
 immutable page receipts (digest, chunk indexes, byte count, and cursor chain).
 Coordinator-classified reads are useful only for exceptional reconciliation
@@ -272,12 +280,13 @@ same-task delegation with the exact report reference, then continue safely.
 Only coordinator policy may assert that ordinary-chat text is a direct user
 decision. `record_user_decision` stores the exact arbitrary-Unicode response,
 separate English normalization and prompt context, user language, subject type
-and ID, immutable subject digest when applicable, supersession, attribution,
+and exact compact subject ref, immutable subject digest when applicable, supersession, attribution,
 and chronology. The backend verifies binding and project/task scope but does
 not authenticate the user or interpret the row as authorization.
 
 Plan `approve` binds only the exact immutable plan revision and digest and also
-requires the current ready approval view plus opaque approval handle. Plan
+requires the complete current ready approval-view relation: its opaque handle,
+view digest, and view source sequence from one successful response. Plan
 `request_revision` and `cancel` preserve the exact finalized plan digest and
 response without a volatile view binding, so intervening non-plan timeline
 events cannot block saving feedback. Revision creates a new plan and digest;
@@ -306,8 +315,8 @@ silence, or inferred consent cannot satisfy review. The handle proves the
 ready-view relation only; MCP provides no host-authenticated user-turn receipt.
 No
 implementation or research beyond necessary discovery/planning may be delegated
-until that decision ID appears in `input_decision_ids`. A revision/rejection
-follows up the same live planner with that decision ID to create a superseding
+until that decision ref appears in `input_decision_refs`. A revision/rejection
+follows up the same live planner with that decision ref to create a superseding
 plan and repeat review, or uses a parent-linked planner replacement only when
 same-worker continuation is unavailable. A C1 plan may be skipped only when the
 user did not request it and an explicit rationale is recorded. This is
@@ -336,7 +345,7 @@ proves it is stuck. `interrupt_agent` and same-handle `followup_task` require
 explicit failed/unavailable/idle-without-work evidence, host-confirmed
 no-progress, or user cancellation. Only failed/ambiguous authorized recovery
 permits reportless/blocked evidence and a parent-linked replacement with exact
-input report/decision IDs. Never skip a planner dependency or silently start
+input report/decision refs. Never skip a planner dependency or silently start
 downstream work. C-level/timebox affects cadence only, never routing, IDs, or
 ownership.
 
@@ -432,9 +441,9 @@ degraded native fallback. Light/full closure rejects coordinator-authored prose
 or a missing worker handoff as a substitute; the coordinator must consume the
 worker's concise summary and exact report reference first. An initiative may be recorded before the assessment when
 useful, but it cannot substitute for it. After all required evidence settles, create or update an initiative
-linking the exact task, the exact documentation-impact report ID, and all other
-required finalized report IDs. Close that exact initiative with closure
-`evidence` citing the same exact report IDs and returned digests, then inspect
+linking the exact task, the exact documentation-impact report ref, and all other
+required finalized report refs. Close that exact initiative with closure
+`evidence` citing the same exact report refs and returned digests, then inspect
 governance scoped to the same task and initiative. A self-asserted
 `documentation_not_required` value without linked and cited worker evidence is
 invalid. A `ready` claim is durable only when that inspection shows the expected

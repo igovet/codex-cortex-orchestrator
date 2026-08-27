@@ -61,8 +61,10 @@ model escalation, or user-approval gate.
 Light/full additionally create a closed durable governance relation gate. It
 allows `planner` first, narrowly permits an `explorer` only through a
 planner-parented finalized partial/blocked plan handoff, and requires the exact
-finalized planner report plus approval decision IDs as inputs for downstream
-delegations. It validates identifiers and immutable digest bindings only; it
+finalized planner `report_ref` plus approval `decision_ref` values in the
+downstream delegation's `input_report_refs` and `input_decision_refs` arrays.
+Durable `report_id`/`decision_id` values are evidence only and are not public
+inputs. It validates compact references and immutable digest bindings only; it
 does not choose stages, profiles, models, or free-text work.
 
 ## Project-level initiatives
@@ -82,23 +84,25 @@ assessment. It may:
 is limited to `proposed`, `active`, `paused`, `completed`, `closed`, and
 `cancelled`, but the backend accepts every transition among these values. It
 does not assign an owner, select a milestone, compute completion, or enforce a
-transition graph. Its required `task_id` only anchors the saved project ledger;
-the task does not grant initiative permission or lifecycle authority.
+transition graph. Its required `task_ref` only anchors the saved project ledger;
+the returned durable `task_id` is non-callable evidence, and the task does not
+grant initiative permission or lifecycle authority.
 
 For one task, the coordinator also uses the task-linked initiative revision as
 the durable projection of its model-owned orchestration DAG. A revision records
 the evidence-backed stages derived from the planner report (or the minimal C1
-task contract), each worker owner, predecessor report/decision IDs, acceptance
+task contract), each worker owner, predecessor report/decision refs, acceptance
 and expected evidence, and the current advisory state. The coordinator never
 writes the project solution plan: that is the planner worker's immutable `plan`
 report. New evidence can append a revision that adds, removes, reorders, retries,
 or parent-links rework stages. The backend stores this graph history but never
 executes it or parses free text as workflow control.
 
-The coordinator treats every returned task, initiative, report, decision, and
-closure ID and digest as opaque byte-for-byte data. It never parses an embedded
-shard, reconstructs a value, normalizes it, or appends a suffix before another
-call.
+The coordinator treats every returned compact task/entity reference, durable
+evidence ID, and digest as opaque byte-for-byte data. Compact refs are the only
+callable public locators; durable `*_id` values are non-callable evidence. It
+never parses an embedded shard, reconstructs a value, normalizes it, or appends
+a suffix before another call.
 
 Task and report links must resolve in the current project. An unresolved
 dependency identifier is retained with `unresolved_dependency`; a dependency
@@ -106,17 +110,17 @@ cycle is retained with `cyclic_dependency`. Warnings are model-visible evidence,
 not rejection reasons. A later status update or initiative closure remains
 allowed.
 
-`inspect_governance(task_id=...)` uses the task only to anchor the project and
+`inspect_governance(task_ref=...)` uses the task only to anchor the project and
 returns initiatives/links related to that task, the effective mode projection,
 immutable initiative revision payloads, and a bounded timeline page. An
-optional `initiative_id` narrows the view; it does not authorize or gate the
-initiative.
+optional compact `initiative_ref` narrows the view; the durable `initiative_id`
+is evidence only and does not authorize or gate the initiative.
 
 ## Plans and user decisions
 
 A plan is a finalized `report_type=plan` report. Its review policy is
 `informational` or `required`; an updated plan names a finalized predecessor
-through `supersedes_report_id` and receives a new immutable report ID and
+through `supersedes_report_ref` and receives a new immutable report ref and
 content-manifest digest. Informational plans do not pause work. Required review
 creates a coordinator-owned pause only for plan-dependent work when explicit
 review or a real product, scope, destructive, external, security, privacy, or
@@ -146,9 +150,10 @@ Markdown link and request explicit approve/revise/reject/cancel input. Only an
 `approve` response requires the current ready approval view and opaque handle;
 `request_revision` and `cancel` retain the exact plan report/digest and response
 without volatile view binding. No implementation or research
-beyond discovery/planning starts until that decision ID is an input to the
-plan-dependent delegation. Rejection/revision follows up the same live planner
-with the decision ID for a superseding plan, or uses a parent-linked replacement
+beyond discovery/planning starts until that compact decision ref is included in
+the plan-dependent delegation's `input_decision_refs` array. Rejection/revision
+follows up the same live planner with that decision ref for a superseding plan,
+or uses a parent-linked replacement
 only when same-worker continuation is unavailable. A C1 task skips planning only
 when the user did not request one and an explicit rationale is recorded.
 
@@ -165,9 +170,11 @@ within its size bound. The verdict is one of:
 - `not_ready`.
 
 The subjects are not interchangeable. A supported task closure uses the exact
-anchored `task_id` and omits initiative-only `initiative_status` and
-`completion_notes`. An initiative closure uses the exact returned
-task-related `initiative_id` and may include those fields. `unresolved_risks`
+anchored `task_ref` as `subject_ref` and omits initiative-only
+`initiative_status` and `completion_notes`. An initiative closure uses the
+exact returned compact `initiative_ref` as `subject_ref` and may include those
+fields. Durable `task_id`/`initiative_id` values are evidence only and are not
+callable closure inputs. `unresolved_risks`
 and `follow_ups` are optional and default to empty lists. The closure call has
 no subject digest argument. Required reports must be finalized and read before
 a ready closure is attempted.
@@ -198,8 +205,9 @@ the coordinator never calls `submit_report` or self-asserts
 
 The no-impact close has a deterministic evidence sequence. After every required
 report is finalized, `record_initiative` creates or updates an initiative with
-the exact `linked_task_ref`, the exact documentation-impact `linked_report_ref`, and every
-other implementation and verification report link. Closure evidence cites those
+the `linked_task_refs` and `linked_report_refs` arrays, containing compact
+`task_ref` and `report_ref` values, respectively, plus every other implementation
+and verification report link. Closure evidence cites those
 exact report references and returned digests. A report-only final initiative or
 self-asserted no-impact value is invalid. The coordinator closes that exact
 initiative, then calls `inspect_governance`

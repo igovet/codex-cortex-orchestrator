@@ -18,7 +18,7 @@ durable `plan` report that plan-dependent nodes name as their predecessor.
 Maintain an evidence-backed DAG and persist its current projection through the
 existing task-linked initiative revision plus delegation/report/decision links.
 For each stage retain: its unique purpose; worker owner/profile/model/effort;
-scope and mutation boundary; named predecessor report/decision IDs; acceptance
+scope and mutation boundary; named predecessor report/decision refs; acceptance
 and expected evidence; and state. Valid model-owned
 states are `proposed → waiting_predecessors → ready → dispatched →
 evidence_received → settled`, with `rework_required` returning to a new
@@ -33,14 +33,14 @@ Use this transition discipline:
    changes which assumption, risk, acceptance criterion, or predecessor.
 2. Decide whether current nodes still cover the outcome. Add, remove, reorder,
    retry, or create rework only for the evidence-backed delta, then append the
-   updated pipeline revision with its stage owners, input report/decision IDs,
+updated pipeline revision with its stage owners, input report/decision refs,
    acceptance, evidence, and rationale. Completed worker reports remain
    immutable and are never relabeled as a new solution.
 3. Preserve parallelism only for non-overlapping ownership. Make a predecessor
    edge only when a later worker needs its evidence, particularly the finalized
    planner plan report for plan-dependent implementation or review.
 4. Dispatch the next ready worker through a new durable delegation. A retry or
-   rework uses `parent_delegation_id`; do not reuse a worker or invent a report.
+   rework uses the exact emitted `parent_delegation_ref`; do not reuse a worker or invent a report.
 5. Reassess C1/C2/C3, governance depth, residual risk, verification depth, and
    the final documentation branch after every material evidence arrival.
 
@@ -136,9 +136,9 @@ user cancellation. If the child is live and its mutation scope is active, avoid
 overlapping write ownership. If its state is unknown, preserve uncertainty and
 do not infer that a durable delegation proves it started or stopped. Only failed
 or ambiguous authorized recovery permits blocked evidence and a replacement.
-Every semantic replacement or rework delegation uses
-`parent_delegation_id` and carries only relevant input report and user-decision
-IDs. Do not create a new task, skip a planner predecessor, or silently start a
+Every semantic replacement or rework delegation uses the exact emitted
+`parent_delegation_ref` and carries only relevant input report and user-decision
+refs. Do not create a new task, skip a planner predecessor, or silently start a
 downstream stage to simulate recovery. C-level/timebox can shorten the count,
 never alter server-owned model routing.
 

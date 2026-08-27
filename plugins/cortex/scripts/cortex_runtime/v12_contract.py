@@ -24,10 +24,6 @@ TASK_ID_RE = re.compile(TASK_ID_PATTERN)
 TASK_REF_SUFFIX_LENGTH = 12
 TASK_REF_PATTERN = rf"^t_([0-9a-f]{{{TASK_REF_SUFFIX_LENGTH}}})$"
 TASK_REF_RE = re.compile(TASK_REF_PATTERN)
-# Retain direct-service recovery for older stored callers only. The public MCP
-# schema advertises and accepts only TASK_REF_PATTERN above.
-LEGACY_TASK_REF_SUFFIX_LENGTH = 20
-LEGACY_TASK_REF_RE = re.compile(rf"^t_([0-9a-f]{{{LEGACY_TASK_REF_SUFFIX_LENGTH}}})$")
 SHARDED_RECORD_PATTERN = rf"^(delegation|report|initiative|decision)-([0-9a-f]{{{PROJECT_HASH_LENGTH}}})-([0-9a-f]{{{TASK_RANDOM_LENGTH}}})$"
 SHARDED_RECORD_RE = re.compile(SHARDED_RECORD_PATTERN)
 # Public entity references deliberately carry only a type discriminator and
@@ -69,10 +65,6 @@ REPORT_ASSEMBLING_MAX_PER_TASK = 8
 REPORT_ASSEMBLING_MAX_BYTES_PER_TASK = 16 * 1024 * 1024
 REPORT_RETAINED_MAX_BYTES_PER_TASK = 128 * 1024 * 1024
 REPORT_READ_MAX_BYTES = 65_536
-# Compatibility wire form for older workers that serialized the bounded page
-# budget as a decimal string.  The range is encoded here so advertised input
-# validation agrees with the server boundary (0 through 65,536 inclusive).
-REPORT_READ_MAX_BYTES_STRING_PATTERN = r"^(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-6])$"
 REPORT_RESPONSE_MAX_BYTES = 224 * 1024
 REPORT_SECTION_MAX_LENGTH = 128
 REPORT_SECTION_PATTERN = r"^[a-z][a-z0-9_.-]{0,127}$"
@@ -144,18 +136,12 @@ def task_ref(task_id: object) -> str | None:
     return f"t_{match.group(2)[-TASK_REF_SUFFIX_LENGTH:]}"
 
 
-def task_ref_parts(value: object, *, allow_legacy: bool = True) -> str | None:
-    """Return an exact public or direct-legacy suffix without fuzzy matching."""
+def task_ref_parts(value: object) -> str | None:
+    """Return the exact canonical public task-reference suffix."""
     if not isinstance(value, str):
         return None
     match = TASK_REF_RE.fullmatch(value)
-    if match is not None:
-        return match.group(1)
-    if allow_legacy:
-        legacy = LEGACY_TASK_REF_RE.fullmatch(value)
-        if legacy is not None:
-            return legacy.group(1)
-    return None
+    return None if match is None else match.group(1)
 
 
 def new_sharded_id(prefix: str, project_hash: str) -> str:

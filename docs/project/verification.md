@@ -42,15 +42,19 @@ The V12 protocol evidence must prove:
   `outputSchema`; successful calls carry matching JSON text content plus
   `structuredContent` with `isError=false`, while caller-correctable errors use
   `isError=true` bounded sanitized text only (no `structuredContent`);
-- only `create_task` accepts explicit `project_root`; all other ten tools
-  require `task_id`, accept no root, and use that anchor to locate and validate
-  the saved project ledger; its task/result contract separately preserves exact
+- only `create_task` accepts explicit `project_root`; the seven task-anchored
+  tools use the returned compact `task_ref`, while `read_delegation`,
+  `submit_report`, and `read_reports` use compact
+  `delegation_ref`/`report_ref`/`report_refs` and resolve their task from those
+  references. No public tool accepts a durable `task_id` or another direct-ID
+  alternate; the task/result contract separately preserves exact
   `user_request_original`, `user_language`, English `objective`, contract
   version, requirements, constraints, acceptance criteria, verification plan,
   and optional arbitrary-JSON `context`; no host metadata, plugin `cwd`, or hook
   supplies the root;
-- returned task IDs match the shard-addressable opaque format and resolve the
-  ledger without directory scanning;
+- returned `task_ref` values match the compact locator format and resolve the
+  ledger without directory scanning; durable task IDs remain non-callable
+  evidence;
 - `create_delegation.scope` is required non-empty text no longer than 65,536
   characters, object scope is rejected, and detailed execution belongs in
   `instructions`;
@@ -58,8 +62,8 @@ The V12 protocol evidence must prove:
   `profile_name`, and exact model/effort together; the returned native brief
   contains the saved canonical root, unchanged coordinator `instructions`,
   loaded profile proof/digest, and one exact native-dispatch payload;
-- `submit_governance_closure` requires `subject_type` plus the existing task or
-  initiative `subject_id`;
+- `submit_governance_closure` requires `subject_type` plus the existing compact
+  task or initiative `subject_ref`; durable `subject_id` is evidence only;
 - `submit_report` accepts the immutable types `progress`, `result`, `synthesis`,
   and `plan`, with `informational`/`required` review policy for plans; it
   supports `single`, `begin`, sequential `append`, `finalize`, and `abort`, and
@@ -68,11 +72,9 @@ The V12 protocol evidence must prove:
 - interrupted report assembly resumes from manifest and `next_chunk_index`,
   rejects gaps, post-finalize/abort appends, and overwrites, and uses explicit
   supersession for a replacement;
-- `read_reports` accepts 1–20 known IDs, preserves requested order, supports
-  named sections, obeys the 65,536-byte content budget, returns a scope-bound
+- `read_reports` accepts 1–20 known compact `report_refs`, preserves requested
+  order, supports named sections, obeys the 65,536-byte content budget, returns a scope-bound
   cursor for exact resumption, and supports `max_bytes=0` metadata-only reads;
-  deprecated `byte_budget` remains an equivalent compatibility alias, and
-  conflicting simultaneous values are rejected;
 - `inspect_task`, `read_delegation`, and `inspect_governance` bound incremental
   reads with `after_sequence` default 0 plus `limit` default 50/range 1–200,
   return `timeline`, `next_sequence`, and `has_more`, and expose only compact
@@ -133,6 +135,10 @@ exact private plan/report layout:
     └── reports/<report-id>.md
 ```
 
+The report-ID placeholders above name host-private storage files; they are not
+public MCP inputs. Public report operations use compact `report_ref` values,
+while canonical durable report IDs remain ledger/evidence fields.
+
 Task, decision, delegation, initiative, closure, governance, handoff, index,
 and timeline records remain in SQLite and are not emitted as user-facing
 Markdown. Plan and report views must be ordinary readable Markdown rather than
@@ -169,8 +175,9 @@ module, not an MCP tool:
 
 - `tools/list` remains the exact eleven-tool registry when the module is
   packaged;
-- every command requires a valid retained V12 `task_id`, derives the exact
-  host-private shard, and rejects a root, arbitrary filesystem target, unsafe
+- every command in this separately invoked non-MCP operator module requires a
+  valid retained V12 durable `task_id`, derives the exact host-private shard,
+  and rejects a root, arbitrary filesystem target, unsafe
   mode/owner/symlink, wrong schema/migrations/metadata, or V11 state;
 - `health` is read-only and reports bounded integrity, foreign-key, schema,
   migration, task-binding, WAL, and `synchronous=FULL` checks;
@@ -316,7 +323,8 @@ Exercise several explicit `$cortex:orchestrator` tasks:
 8. A verified no-impact task whose existing finalized reports either contain an
    explicit English documentation-impact section with a material/no-impact
    rationale or cause one bounded evidence-synthesis worker to submit it. The
-   final initiative links that exact report ID and closure evidence cites it;
+   final initiative links that exact compact report ref and closure evidence
+   cites it (with any durable report ID retained as non-callable evidence);
    the coordinator creates no documentation edit, never calls `submit_report`,
    and never self-asserts `documentation_not_required`.
 9. A task whose coordinator reads only applicable `AGENTS.md`, both knowledge
@@ -401,8 +409,10 @@ configuration. Check:
 - Mermaid syntax and visual completeness;
 - V12/12.0.0/schema-v1 identifiers;
 - exact eleven-tool names;
-- explicit `project_root` only on `create_task`, `task_id` on every other tool,
-  exact task/result contract fields, arbitrary optional task `context`, textual
+- explicit `project_root` only on `create_task`, compact `task_ref` on the seven
+  task-anchored tools, compact `delegation_ref`/`report_ref`/`report_refs` on
+  entity-derived tools, `subject_ref`/`initiative_ref` where applicable, exact
+  task/result contract fields, arbitrary optional task `context`, textual
   delegation scope, exact model/effort, compact paginated inspections, report
   bodies/chunks only through bounded `read_reports`, and required closure subject
   fields;
@@ -422,7 +432,8 @@ configuration. Check:
   capabilities, and server recovery claims;
 - coordinator-only orchestration, worker-owned project action/analysis, and the
   conditional report-grounded documentation stage before closure;
-- opaque byte-for-byte IDs/digests/cursors, worker-only `submit_report`, exact
+- opaque byte-for-byte compact refs, durable evidence IDs, digests/cursors,
+  worker-only `submit_report`, exact
   task-versus-initiative closure fields, and ready claims only after closure
   write plus scoped governance inspection;
 - complete English-only child transcripts and a finalized worker-owned

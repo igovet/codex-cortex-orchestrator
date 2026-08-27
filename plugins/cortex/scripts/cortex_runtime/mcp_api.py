@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cortex_runtime.v12_service import V12ServiceError
-from cortex_runtime.v12_contract import MAX_PAGE_LIMIT, record_ref, task_ref, task_ref_parts
+from cortex_runtime.v12_contract import MAX_PAGE_LIMIT, record_ref, record_ref_parts, task_ref, task_ref_parts
 
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -35,14 +35,14 @@ _RECOVERY_ACTIONS = {
     "cross_project_reference": "Use references that belong to the supplied task and its resolved project shard.",
     "task_not_found": "Use the task_ref emitted by create_task and verify it was copied byte-for-byte.",
     "task_ref_ambiguous": "Do not guess or expand the task_ref. Use the exact task_ref from the successful create_task result.",
-    "delegation_not_found": "Use a delegation_id emitted for the supplied task_id.",
-    "report_not_found": "Use a report_id emitted for the supplied task_id.",
-    "initiative_not_found": "Use an initiative_id from the same resolved project ledger.",
-    "decision_not_found": "Use a decision_id emitted for the supplied task_id.",
+    "delegation_not_found": "Use the exact delegation_ref emitted for this task.",
+    "report_not_found": "Use the exact report_ref emitted for this task.",
+    "initiative_not_found": "Use the exact initiative_ref from the same resolved project ledger.",
+    "decision_not_found": "Use the exact decision_ref emitted for this task.",
     "idempotency_conflict": "Reuse the exact retry handle and byte-identical arguments for the same mutation. A new mutation receives a distinct server retry handle.",
-    "task_exists": "Use a new task_id, or omit task_id and let Cortex mint one.",
-    "delegation_exists": "Use a new delegation_id, or omit delegation_id and let Cortex mint one.",
-    "report_exists": "Use a new report_id, or omit report_id and let Cortex mint one.",
+    "task_exists": "Create a distinct task contract or reuse only the exact returned retry handle for the original mutation.",
+    "delegation_exists": "Create a distinct delegation contract or reuse only the exact returned retry handle for the original mutation.",
+    "report_exists": "Create a distinct report operation or reuse only the exact returned retry handle for the original mutation.",
     "invalid_model_selection": "Select one advertised model and one advertised reasoning_effort as the required atomic pair.",
     "profile_unavailable": "Select an advertised packaged profile after the plugin profile catalogue is available; do not substitute the free-form role.",
     "governance_gate_preapproval": "Before plan approval, use only the allowed planner path or the explicitly parent-linked discovery path with its finalized planner handoff.",
@@ -60,7 +60,7 @@ _RECOVERY_ACTIONS = {
     "report_chunk_out_of_order": "Append exactly the next_chunk_index acknowledged by the report receipt.",
     "report_manifest_mismatch": "Read report metadata, then finalize with the exact current chunk count and content digest.",
     "report_cursor_invalid": "Restart read_reports without cursor, or copy the last returned cursor byte-for-byte.",
-    "report_cursor_scope_mismatch": "Reuse the cursor only with the exact original task_id, report_ids order, and sections filter.",
+    "report_cursor_scope_mismatch": "Reuse the cursor only with the exact original report_refs order and sections filter.",
     "report_cursor_stale": "Restart read_reports without cursor because the selected report snapshot changed.",
     "invalid_governance_mode": "Use one advertised governance mode and source value.",
     "invalid_initiative_status": "Use one advertised initiative status value.",
@@ -542,6 +542,10 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
                 break
     for canonical_name, compact_name in (("report_id", "report_ref"), ("delegation_id", "delegation_ref")):
         compact = record_ref(value.get(canonical_name)) or record_ref(fallback.get(canonical_name))
+        if compact is None:
+            emitted = value.get(compact_name)
+            if record_ref_parts(emitted, label=canonical_name) is not None:
+                compact = emitted
         if compact is not None:
             result[compact_name] = compact
     return result
@@ -611,7 +615,7 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
         if projected is not None:
             result[field] = projected
     compact = task_ref(task_id)
-    if compact is None and task_ref_parts(action_task_ref, allow_legacy=False) is not None:
+    if compact is None and task_ref_parts(action_task_ref) is not None:
         compact = action_task_ref
     if compact is not None:
         result["task_ref"] = compact

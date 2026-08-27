@@ -91,14 +91,14 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | `create_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful `cortex/task-contract/v1` result fields; return preferred `task_ref` and canonical `task_id`. |
 | `inspect_task` | Use `task_ref` to return compact task history after `after_sequence`, bounded by `limit`. |
 | `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return a direct worker brief carrying the saved root. |
-| `read_delegation` | Use `delegation_id` plus `after_sequence` to resolve its owner task and return compact local history without a receipt. Do not supply `task_ref` or `task_id`; any legacy direct-service compatibility stays below the public MCP schema. |
-| `submit_report` | Use `delegation_id` for single or stable-ID `begin`/`append`/`finalize`/`abort` progress, result, synthesis, or plan evidence. It resolves the owner task; do not supply `task_ref` or `task_id`. |
-| `read_reports` | Use report IDs to resolve their owner task and read metadata or whole JSON chunks for 1–20 known reports in requested order, with section/cursor/byte bounds. Do not supply `task_ref` or `task_id`. |
+| `read_delegation` | Use the exact emitted `delegation_ref` plus `after_sequence` to resolve its owner task and return compact local history without a receipt. Do not supply `task_ref` or `task_id`; no legacy or direct-ID public shape is accepted. |
+| `submit_report` | Use the exact emitted `delegation_ref` for single or stable-reference `begin`/`append`/`finalize`/`abort` progress, result, synthesis, or plan evidence. It resolves the owner task; do not supply `task_ref` or `task_id`. |
+| `read_reports` | Use exact `report_refs` to resolve their owner task and read metadata or whole JSON chunks for 1–20 known reports in requested order, with section/cursor/integer-byte bounds. Do not supply `task_ref` or `task_id`. |
 | `set_governance_mode` | Use `task_ref` to append a model or user-override assessment. |
 | `record_initiative` | Use `task_ref` only as the project anchor to create or revise an initiative and its links. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative assessments, revisions, links, warnings, and closures. |
-| `submit_governance_closure` | Use `task_ref` to append an advisory verdict and evidence for required `subject_type` plus existing task/initiative `subject_id`. |
-| `record_user_decision` | Use `task_ref` to append coordinator-attributed original/English user evidence for an exact task/plan/initiative/delegation/report; bind plan/report to the canonical digest. |
+| `submit_governance_closure` | Use `task_ref` to append an advisory verdict and evidence for required `subject_type` plus matching compact task/initiative `subject_ref`. |
+| `record_user_decision` | Use one canonical task-ref/subject-ref/digest/decision/response field set to append coordinator-attributed original/English evidence. For `approve`, include the complete exact ready approval-view relation: report ref/digest, handle, view digest, and source sequence. |
 
 The catalog is identical for coordinators and workers. There is no audience
 filter, capability matrix, host-bound authority, read receipt, selector,
@@ -129,12 +129,12 @@ scope is rejected by the closed schema.
 Workers publish immutable `progress`, `result`, `synthesis`, or `plan` reports
 and return a concise native `Summary` plus exact `Report ref` in the completion
 handoff. The coordinator consumes that handoff without rereading the report
-body merely to summarize it. Later delegations receive only relevant finalized report IDs, their exact
-manifest digests, and user-decision IDs. A successor must call `read_reports`
-with `reader_kind="worker"` and its own `consumer_delegation_id` before using a
+body merely to summarize it. Later delegations receive only relevant finalized report refs, their exact
+manifest digests, and user-decision refs. A successor must call `read_reports`
+with `reader_kind="worker"` and its own exact `consumer_delegation_ref` before using a
 predecessor report. The server rejects a report outside that delegation's
 declared inputs and appends a structural receipt for every returned page:
-consumer delegation, report ID, observed manifest digest, selected sections,
+consumer delegation ref, report ref, observed manifest digest, selected sections,
 input/output cursors, returned chunk indexes, byte count, and chronology
 sequence. Coordinator reads are explicitly classified and cannot be mistaken
 for downstream consumption. Receipts prove ledger delivery, not semantic use of
@@ -154,8 +154,7 @@ or out-of-order chunk is rejected.
 
 `read_reports` supports up to 32 section labels, an opaque scoped cursor, and a
 65,536-byte maximum/default `max_bytes` budget (`0` means metadata only).
-Deprecated `byte_budget` is an equivalent compatibility alias; different
-simultaneous values are rejected. It returns only
+It returns only
 whole JSON chunks under a 224 KiB response ceiling. A small finalized one-chunk
 report may additionally expose compatibility `content`; incomplete/aborted
 content is never presented as completed evidence. Recovery resumes from

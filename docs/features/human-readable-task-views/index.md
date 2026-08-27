@@ -196,8 +196,7 @@ and `finalize` requires the exact chunk count and manifest digest. `abort`
 retains an incomplete stream without pretending that it is complete. A report
 is limited to 256 chunks and 8 MiB; assembling and retained task totals are
 also bounded. `read_reports` applies optional section selection, an opaque
-cursor, and a maximum 65,536-byte `max_bytes` budget; deprecated `byte_budget`
-is an equivalent alias, while different simultaneous values are rejected. It
+cursor, and a maximum 65,536-byte integer `max_bytes` budget. It
 returns only whole chunks;
 it does not expose a partial chunk stream as completed evidence. The matching
 human-readable report view is likewise derived from the canonical complete

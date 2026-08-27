@@ -23,8 +23,9 @@
   graph; it is advisory history, not a backend-executed workflow.
 - A requested or necessary main plan requires a fresh verified host-private
   Markdown link and explicit localized approve/revise/reject/cancel input.
-  Record approval against its exact report/digest, then pass that decision ID to
-  every plan-dependent delegation. Do not start implementation or research
+  Record approval against its exact report/digest, then pass that compact
+  decision ref in `input_decision_refs` to every plan-dependent delegation. Do
+  not start implementation or research
   beyond discovery/planning first. A C1 skip is valid only without a user plan
   request and with explicit rationale.
 - Retain C1/C2/C3 as advisory baselines: bounded low-risk work / multi-step or
@@ -70,9 +71,9 @@
   response shapes. Documentation mirrors semantics and the exact tool names but
   is not validator input.
 - Supply the exact resolved repository/worktree as `project_root` only to
-  `create_task`; retain `handles.task_ref` for the seven task-anchored calls
-  and canonical `task_id` as durable evidence. Never copy a UI-rendered task
-  ID into a public task call or infer a root from MCP metadata, thread identity, the
+  `create_task`; retain `handles.task_ref` for the seven task-anchored calls.
+  The returned canonical `task_id` is non-callable durable evidence. Never copy
+  a UI-rendered task ID into a public task call or infer a root from MCP metadata, thread identity, the
   plugin process `cwd`, hooks, or project/database directory scanning.
 - Create a versioned task/result contract before the first project delegation:
   preserve `user_request_original` and `user_language`; store an English
@@ -87,21 +88,23 @@
 - Keep delegation `scope` a required non-empty text boundary of worker ownership;
   put detailed execution in `instructions` and reject object scope.
 - Call `submit_governance_closure` with required `subject_type`, the exact
-  existing `subject_id`, one `verdict`, and bounded opaque JSON `evidence`.
-  A task subject uses the exact anchored task ID and omits initiative-only
-  status/completion fields; an initiative subject uses the exact returned ID
-  related to the anchored task. Never invent a closure digest field.
-- Reuse returned task, delegation, report, initiative, assessment, and closure
-  IDs and every digest/cursor byte-for-byte. They are opaque durable references,
-  not bearer capabilities: never parse, concatenate, reconstruct, normalize,
-  reformat, or append a suffix.
+  existing compact `subject_ref`, one `verdict`, and bounded opaque JSON
+  `evidence`. A task subject uses the exact anchored `task_ref` as
+  `subject_ref` and omits initiative-only status/completion fields; an
+  initiative subject uses the exact returned `initiative_ref` as `subject_ref`.
+  Durable `subject_id` values are evidence only. Never invent a closure digest
+  field.
+- Reuse returned compact task/entity refs and every digest/cursor byte-for-byte.
+  Durable `*_id` values are opaque non-callable evidence, not bearer
+  capabilities. Never parse, concatenate, reconstruct, normalize, reformat, or
+  append a suffix to any ref or ID.
 - Treat the `task_ref` on initiative operations only as the locator for the
   saved project ledger, never as governance permission or a lifecycle gate.
 - Use idempotency keys for retried writes. Same normalized payload returns the
   original record; conflicting content must fail without mutation.
-- Treat reports as immutable evidence. Pass only finalized relevant report IDs
+- Treat reports as immutable evidence. Pass only finalized relevant report refs
   and their exact manifest digests to later delegations. Worker consumption is
-  evidenced only by `read_reports(reader_kind="worker", consumer_delegation_id=…)`
+  evidenced only by `read_reports(reader_kind="worker", consumer_delegation_ref=…)`
   receipts; coordinator reads never substitute for that evidence.
 - The owning native worker alone calls `submit_report` for its plan, result,
   verification, synthesis, or documentation-impact evidence. Its completion
@@ -121,10 +124,9 @@
   skip, overwrite, or append after finalization/abort. Use an explicit
   superseding report for replacement.
 - Preserve `read_reports` request order and its 20-report maximum; select only
-  needed sections, respect its maximum 65,536-byte content budget, and continue
+  needed sections, use compact `report_refs`, respect its maximum 65,536-byte content budget, and continue
   with the returned cursor until complete. `max_bytes=0` is metadata-only
-  recovery; deprecated `byte_budget` remains a compatibility alias and must
-  not conflict with `max_bytes` when both are supplied. A worker must name its
+  recovery. A worker must name its
   own delegation and may read only declared
   finalized inputs; retain the exact receipt digest, chunk indexes, and cursor
   transitions. Bound task/delegation/governance inspection with `after_sequence`
@@ -203,9 +205,10 @@
   impact on worker reports. Missing documentation evidence leads to model-owned
   rework, replacement, or risk disclosure, never a backend gate.
 - For that no-impact close, create/update an initiative with the exact task
-  relationship, the exact documentation-impact report ID, and every other
-  required finalized report link. Cite the exact report IDs and returned digests
-  in closure evidence, close the exact returned initiative, then inspect
+  relationship, the exact documentation-impact `report_ref`, and every other
+  required finalized report link. Cite the exact compact report refs and
+  returned digests in closure evidence, close the exact returned initiative,
+  then inspect
   governance in task scope and initiative scope. Never accept a self-asserted
   `documentation_not_required`, a report-only final initiative, or a durable
   `ready` claim before the closure write and both inspections agree.

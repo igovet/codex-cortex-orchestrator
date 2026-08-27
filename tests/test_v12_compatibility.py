@@ -1,6 +1,8 @@
-"""Focused coverage for compatibility aliases and approval-view freshness."""
+"""Focused coverage for canonical public inputs and approval-view freshness."""
 from __future__ import annotations
 
+import io
+import json
 import os
 import sys
 import tempfile
@@ -13,7 +15,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from cortex_runtime.mcp_api import _SchemaError, _validate_schema  # noqa: E402
+from cortex import PUBLIC_TOOLS, SERVER_INSTRUCTIONS, SERVER_VERSION  # noqa: E402
+from cortex_runtime.mcp_api import _SchemaError, _validate_schema, serve_stdio  # noqa: E402
 from cortex_runtime.public_contracts import build_public_contracts  # noqa: E402
 from cortex_runtime.v12_contract import record_ref, task_ref  # noqa: E402
 from cortex_runtime.v12_service import V12ServiceError, read_reports, record_user_decision  # noqa: E402
@@ -45,7 +48,7 @@ class V12CompatibilityTests(unittest.TestCase):
             task_contract_version="cortex/task-contract/v1",
             requirements=["Keep compatibility bounded."],
             constraints=["Do not weaken approval binding."],
-            acceptance_criteria=["Legacy aliases remain safe."],
+            acceptance_criteria=["Only canonical public fields are accepted."],
             verification_plan=["Run focused tests."],
             context={},
         )[0]["task"]["task_id"]
@@ -68,83 +71,144 @@ class V12CompatibilityTests(unittest.TestCase):
         )[0]["report"]
         return task, str(report["report_id"])
 
-    def test_legacy_decision_shape_and_byte_budget_alias_are_supported(self) -> None:
-        store = V12Store(self.project)
-        task_id, report_id = self._plan(store)
-        report = store._read(lambda connection: store._report(connection, report_id, task_id=task_id))
-        legacy = {
-            "task_ref": task_ref(task_id),
-            "report_ref": record_ref(report_id),
-            "report_content_digest": report["content_digest"],
-            "decision": "request_revision",
-            "user_response_original": "Please clarify the verification step.",
-            "english_normalization": "Please clarify the verification step.",
+    def _public_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        """Invoke one actual public MCP call through its schema gate."""
+        request_lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "canonical-input-test", "version": "1"},
+            }},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+        ]
+        output = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO("\n".join(json.dumps(item) for item in request_lines) + "\n")), mock.patch("sys.stdout", output):
+            serve_stdio(public_tools=PUBLIC_TOOLS, server_version=SERVER_VERSION, instructions=SERVER_INSTRUCTIONS)
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        reply = next(item for item in replies if item.get("id") == 2)
+        result = reply.get("result")
+        self.assertIsInstance(result, dict)
+        return result
+
+    def _successful_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        result = self._public_tool(name, arguments)
+        self.assertIsNot(result.get("isError"), True, result)
+        structured = result.get("structuredContent")
+        self.assertIsInstance(structured, dict)
+        return structured
+
+    def _rejected_tool(self, name: str, arguments: dict[str, object]) -> None:
+        result = self._public_tool(name, arguments)
+        self.assertIs(result.get("isError"), True)
+        self.assertNotIn("structuredContent", result)
+
+    def test_canonical_decision_contract_rejects_aliases_before_mutation(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project),
+            "objective": "Verify one canonical decision request.",
+            "user_request_original": "Verify one canonical decision request.",
+            "user_language": "en",
+            "task_contract_version": "cortex/task-contract/v1",
+            "requirements": ["Use the public schema."],
+            "constraints": ["Do not infer request fields."],
+            "acceptance_criteria": ["Only canonical decision inputs mutate."],
+            "verification_plan": ["Exercise the MCP schema boundary."],
+        })
+        task_ref = task["handles"]["task_ref"]
+        self.assertIsInstance(task_ref, str)
+        delegation = self._successful_tool("create_delegation", {
+            "task_ref": task_ref,
+            "objective": "Produce the plan evidence.",
+            "role": "planner",
+            "profile_name": "planner",
+            "scope": "Own the canonical plan evidence.",
+            "instructions": "Return one bounded plan report.",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "high",
+        })
+        delegation_ref = delegation["handles"]["delegation_ref"]
+        self.assertIsInstance(delegation_ref, str)
+        plan = self._successful_tool("submit_report", {
+            "delegation_ref": delegation_ref,
+            "report_type": "plan",
+            "status": "completed",
+            "content": {"steps": ["Use only canonical public fields."]},
+        })
+        approval_view = plan.get("approval_view")
+        self.assertIsInstance(approval_view, dict)
+        self.assertEqual(approval_view.get("status"), "ready")
+        valid = {
+            "task_ref": task_ref,
+            "subject_type": "plan",
+            "subject_ref": approval_view["report_ref"],
+            "subject_digest": approval_view["report_content_digest"],
+            "decision_type": "approve",
+            "prompt_en": "Approve this canonical plan?",
+            "response_original": "Approve.",
+            "response_en": "I approve the plan.",
+            "user_language": "en",
+            "approval_handle": approval_view["approval_handle"],
+            "approval_view_content_digest": approval_view["content_digest"],
+            "approval_view_source_sequence": approval_view["source_sequence"],
         }
-        schema = build_public_contracts()["record_user_decision"]["inputSchema"]
-        _validate_schema(schema, legacy)
-        result = record_user_decision(**legacy)
-        self.assertEqual(result["decision"]["decision_type"], "request_revision")
-        self.assertEqual(result["decision"]["subject_digest"], report["content_digest"])
+        accepted = self._successful_tool("record_user_decision", valid)
+        self.assertEqual(accepted["decision"]["subject_digest"], valid["subject_digest"])
 
-        # A legacy approve without the newer binding fields is upgraded only
-        # through a fresh server-verified ready view and handle.
-        approved = record_user_decision(**(legacy | {
-            "decision": "approve",
-            "user_response_original": "I approve the clarified plan.",
-            "english_normalization": "I approve the clarified plan.",
-        }))
-        self.assertEqual(approved["decision"]["decision_type"], "approve")
+        successor = self._successful_tool("create_delegation", {
+            "task_ref": task_ref,
+            "objective": "Consume the finalized same-task plan.",
+            "role": "qa",
+            "profile_name": "qa_engineer",
+            "scope": "Read only the declared plan evidence.",
+            "instructions": "Read the exact predecessor report before verification.",
+            "input_report_refs": [valid["subject_ref"]],
+            "input_decision_refs": [accepted["handles"]["decision_ref"]],
+            "approval_decision_ref": accepted["handles"]["decision_ref"],
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "high",
+        })
+        same_task_read = self._successful_tool("read_reports", {
+            "report_refs": [valid["subject_ref"]],
+            "reader_kind": "worker",
+            "consumer_delegation_ref": successor["handles"]["delegation_ref"],
+        })
+        self.assertEqual(same_task_read["consumption_receipts"][0]["reader_kind"], "worker")
 
-        read_schema = build_public_contracts()["read_reports"]["inputSchema"]
-        byte_budget = read_schema["properties"]["byte_budget"]
-        self.assertEqual(byte_budget["type"], "integer")
-        self.assertEqual(byte_budget["minimum"], 0)
-        self.assertIn("deprecated", byte_budget["description"].lower())
-        _validate_schema(read_schema, {"report_refs": [record_ref(report_id)], "byte_budget": 0})
+        before = self._successful_tool("inspect_task", {"task_ref": task_ref})
+        before_count = len(before["decisions"])
+        invalid_inputs = (
+            {name: value for name, value in valid.items() if name != "task_ref"},
+            valid | {"decision": "approve"},
+            {
+                "task_ref": task_ref,
+                "report_ref": valid["subject_ref"],
+                "report_content_digest": valid["subject_digest"],
+                "decision": "approve",
+                "user_response_original": "Approve.",
+                "english_normalization": "I approve the plan.",
+            },
+            {name: value for name, value in valid.items() if name != "approval_handle"},
+        )
+        for arguments in invalid_inputs:
+            self._rejected_tool("record_user_decision", arguments)
+        after = self._successful_tool("inspect_task", {"task_ref": task_ref})
+        self.assertEqual(len(after["decisions"]), before_count)
 
-        read = read_reports(report_refs=[record_ref(report_id)], byte_budget=0)
-        self.assertEqual(read["returned_content_bytes"], 0)
-        with self.assertRaises(V12ServiceError) as error:
-            read_reports(report_refs=[record_ref(report_id)], max_bytes=1, byte_budget=2)
-        self.assertEqual(error.exception.code, "invalid_argument")
-
-    def test_legacy_aliases_reject_ambiguous_mixed_shape(self) -> None:
-        schema = build_public_contracts()["record_user_decision"]["inputSchema"]
+    def test_canonical_schemas_reject_removed_aliases_and_string_budget(self) -> None:
+        contracts = build_public_contracts()
+        decision_schema = contracts["record_user_decision"]["inputSchema"]
+        read_schema = contracts["read_reports"]["inputSchema"]
+        governance_schema = contracts["set_governance_mode"]["inputSchema"]
+        self.assertNotIn("oneOf", decision_schema)
+        self.assertNotIn("report_ref", decision_schema["properties"])
+        self.assertNotIn("byte_budget", read_schema["properties"])
+        self.assertEqual(read_schema["properties"]["max_bytes"]["type"], "integer")
+        self.assertNotIn("reason", governance_schema["properties"])
         with self.assertRaises(_SchemaError):
-            _validate_schema(schema, {
-                "task_ref": "t_000000000000",
-                "report_ref": "r_000000000000",
-                "report_content_digest": "sha256:" + "0" * 64,
-                "decision": "cancel",
-                "user_response_original": "Cancel this plan.",
-                "english_normalization": "Cancel this plan.",
-                "decision_type": "cancel",
-            })
-
-    def test_read_budget_accepts_legacy_decimal_string_only_within_bound(self) -> None:
-        store = V12Store(self.project)
-        _task_id, report_id = self._plan(store, "Read budget compatibility")
-        schema = build_public_contracts()["read_reports"]["inputSchema"]
-
-        # The advertised schema accepts the legacy wire form, while rejecting
-        # whitespace, signs, leading zeroes, fractions, and booleans before the
-        # handler is invoked.
-        _validate_schema(schema, {"report_refs": [record_ref(report_id)], "max_bytes": "65536"})
-        for invalid in ("065536", " 10", "+10", "-1", "1.5", True, 65_537):
-            with self.subTest(invalid=invalid), self.assertRaises(_SchemaError):
-                _validate_schema(schema, {"report_refs": [record_ref(report_id)], "max_bytes": invalid})
-
-        read = read_reports(report_refs=[record_ref(report_id)], max_bytes="0")
-        self.assertEqual(read["returned_content_bytes"], 0)
-        self.assertEqual(read_reports(report_refs=[record_ref(report_id)], max_bytes="65536")["has_more"], False)
-
-        for invalid in ("065536", " 10", "+10", "-1", "1.5", True, 65_537):
-            with self.subTest(service_invalid=invalid), self.assertRaises(V12ServiceError) as error:
-                read_reports(report_refs=[record_ref(report_id)], max_bytes=invalid)
-            self.assertEqual(error.exception.code, "invalid_argument")
-
-        with self.assertRaises(V12ServiceError):
-            read_reports(report_refs=[record_ref(report_id)], max_bytes="1", byte_budget=2)
+            _validate_schema(read_schema, {"report_refs": ["r_000000000000"], "max_bytes": "0"})
+        with self.assertRaises(_SchemaError):
+            _validate_schema(read_schema, {"report_refs": ["r_000000000000"], "byte_budget": 0})
 
     def test_approval_survives_unrelated_timeline_but_not_changed_file(self) -> None:
         store = V12Store(self.project)

@@ -50,7 +50,7 @@ coordinator model ── classify/revise C1 | C2 | C3 and minimal | light | full
         ├── construct/follow/adapt a worker-owned-stage DAG
         ├── planner worker → durable plan report → plan-dependent nodes
         ├── choose exact profile/model/effort per worker
-        ├── pass immutable report/decision IDs as evidence
+        ├── pass compact report_ref/decision_ref links as evidence
         ├── adapt, delegate verification/rework, or request a real decision
         ├── conditionally delegate docs sync + docs verification
         └── submit advisory closure and synthesize the user answer
@@ -128,9 +128,12 @@ The same eleven tools are visible to every participant: `create_task`,
 `record_user_decision`.
 
 The active MCP registry owns exact shapes. `create_task` alone accepts the
-resolved `project_root` and returns preferred `task_ref` plus canonical
-`task_id`; the seven task-anchored tools use `task_ref` to locate and validate
-the project ledger, while delegation/report paths derive their owner. No host
+resolved `project_root` and returns preferred compact `task_ref`; its canonical
+`task_id` is durable evidence only. The seven task-anchored tools use `task_ref`
+to locate and validate the project ledger. `read_delegation` uses
+`delegation_ref`, `submit_report` uses `delegation_ref`/`report_ref`, and
+`read_reports` uses `report_refs`; no public call accepts a durable `*_id`.
+No host
 metadata, hook, thread identity, or plugin working directory supplies the root.
 The task persists the exact `user_request_original` and `user_language` beside
 the English `objective`, active contract version, requirements, constraints,
@@ -150,16 +153,17 @@ Only the native worker that owns the delegation calls `submit_report`; its
 completion handoff returns a concise `Summary` and exact `Report ref`. The
 coordinator dispatches, waits, and consumes that handoff without rereading the
 body merely to summarize it. A downstream worker reads finalized evidence only
-when its declared work requires the body. Every ID, digest,
-and cursor is opaque byte-for-byte return data for model callers.
+when its declared work requires the body. Compact refs, durable IDs, digests,
+and cursors are opaque byte-for-byte return data; only compact refs are
+callable public locators, while durable IDs are non-callable evidence.
 `read_reports` is the only report body/chunk reader: it accepts 1–20 unique
-known IDs in request order and resumes bounded section reads using its returned
+known report refs in request order and resumes bounded section reads using its returned
 cursor. Large reports are never returned as one unbounded body.
 Inspection reads use `after_sequence` plus `limit`, expose compact references,
 and return `next_sequence` with `has_more`; reads create no receipts.
 
 `record_user_decision` appends coordinator-asserted ordinary-chat evidence, not
-backend authority. It preserves an exact `*_original` response alongside English
+backend authority. Its one canonical request preserves an exact `*_original` response alongside English
 normalization, language, subject binding, and the required immutable digest for
 plan/report subjects. Only plan approval additionally binds a current ready
 approval view and opaque approval handle; plan revision/cancellation feedback
@@ -167,7 +171,7 @@ preserves the exact plan digest and response without volatile view binding.
 Delegation `scope` is required non-empty text defining the
 concise worker-ownership boundary, while execution detail belongs in
 `instructions`; object-shaped scope is invalid. Closure requires `subject_type`
-plus the existing `subject_id`.
+plus the existing compact `subject_ref`; durable `subject_id` is evidence only.
 
 After a worker verifies the project result, the coordinator evaluates
 documentation impact from reports. Material behavior, architecture, interface,
@@ -178,8 +182,9 @@ coordinator uses a finalized worker-owned report with an explicit English
 documentation-impact section and material/no-impact rationale and does not
 create an empty documentation edit. When existing finalized reports do not
 contain that section, one bounded evidence-synthesis worker submits it. The
-final initiative links the exact task, that documentation-impact report ID, and
-every other required report; closure evidence cites their exact IDs and returned
+final initiative links the exact task, that documentation-impact `report_ref`,
+and every other required report; closure evidence cites their exact compact refs
+and returned
 digests before task-scoped and initiative-scoped governance inspection. A
 self-asserted `documentation_not_required` value is invalid. This stage
 precedes closure; missing documentation evidence may

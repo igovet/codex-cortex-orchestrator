@@ -19,10 +19,10 @@ rework, close, or answer the user.
 Only `create_task` carries the exact resolved `project_root` and stores the
 canonical association on the task. The seven task-anchored public calls carry
 the compact `task_ref`; the three entity-derived public calls resolve their
-owner from delegation or report IDs. A `task_ref` is `t_` plus a 12-hex task
+owner from delegation or report refs. A `task_ref` is `t_` plus a 12-hex task
 suffix, scanned only across private V12 shards and rejected on zero or ambiguous
-matches. Full `task_id` remains canonical database evidence and a below-public
-schema direct-service locator. No trusted MCP metadata, plugin process `cwd`,
+matches. Full `task_id` remains canonical database evidence, not a public
+request locator. No trusted MCP metadata, plugin process `cwd`,
 thread identity, or lifecycle hook supplies the root. The native worker brief
 carries the saved root for working-directory context.
 Optional task `context` is arbitrary JSON rather than a root binding. The task
