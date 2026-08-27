@@ -46,11 +46,13 @@ class ProjectionMarkdownTests(unittest.TestCase):
         report = {"report_id": "r_test", "assembly_state": "finalized"}
         rendered = _render_report(Store(), report).decode("utf-8")
 
-        self.assertIn("# Report: r_test", rendered)
-        self.assertIn("## Content", rendered)
-        self.assertIn("- **summary:** - injected list  \n  ## injected heading", rendered)
+        self.assertIn("# Report", rendered)
+        self.assertIn("**Status:** FINALIZED", rendered)
+        self.assertIn("## User *section*", rendered)
+        self.assertIn("### Summary\n\n- injected list  \n## injected heading", rendered)
         self.assertNotIn("<pre>", rendered)
         self.assertNotIn('"summary"', rendered)
+        self.assertNotIn("r_test", rendered)
 
     def test_profile_names_and_identifiers_remain_readable(self) -> None:
         rendered = _inert({
@@ -70,6 +72,48 @@ class ProjectionMarkdownTests(unittest.TestCase):
 
         self.assertIn("Trusted policy:  \n  - Keep identifiers readable.  \n  - Do not add slash escapes.", rendered)
         self.assertNotIn("\\- Keep identifiers", rendered)
+
+    def test_plan_body_uses_headings_for_structured_work_and_lists_for_checks(self) -> None:
+        class Store:
+            def _read(self, callback):
+                return callback(None)
+
+            def _report_chunks(self, _connection, _report_id):
+                return [{
+                    "section": "plan",
+                    "chunk_index": 0,
+                    "content": {
+                        "implementation_work_breakdown": [{
+                            "stage": "Build",
+                            "owner": "backend_dev",
+                            "work": "Implement the API",
+                            "acceptance": "The focused test passes",
+                        }],
+                        "ordered_verification": ["Run unit tests", "Run the release gate"],
+                        "test_acceptance_matrix": [{
+                            "test": "projection rendering",
+                            "acceptance": "No JSON dump is emitted",
+                        }],
+                    },
+                }]
+
+        rendered = _render_report(Store(), {"report_id": "r_plan", "assembly_state": "finalized", "report_type": "plan"}).decode("utf-8")
+
+        self.assertIn("### Implementation Work Breakdown", rendered)
+        self.assertIn("#### Stage 1 — Build", rendered)
+        self.assertIn("- **Owner:** backend_dev", rendered)
+        self.assertIn("### Ordered Verification", rendered)
+        self.assertIn("1. Run unit tests", rendered)
+        self.assertIn("2. Run the release gate", rendered)
+        self.assertIn("### Test Acceptance Matrix", rendered)
+        self.assertIn("#### projection rendering", rendered)
+        self.assertIn("- **Acceptance:** No JSON dump is emitted", rendered)
+        self.assertNotIn("\n-\n", rendered)
+        self.assertNotIn("\n  #", rendered)
+        self.assertNotIn("<pre>", rendered)
+        self.assertNotIn('"implementation_work_breakdown"', rendered)
+        self.assertNotIn("&lt;", rendered)
+        self.assertNotIn("\\", rendered)
 
 
 if __name__ == "__main__":

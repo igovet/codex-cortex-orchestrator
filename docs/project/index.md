@@ -157,8 +157,10 @@ and return `next_sequence` with `has_more`; reads create no receipts.
 `record_user_decision` appends coordinator-asserted ordinary-chat evidence, not
 backend authority. It preserves an exact `*_original` response alongside English
 normalization, language, subject binding, and the required immutable digest for
-plan/report subjects. A plan approval binds only the exact finalized plan
-revision and digest. Delegation `scope` is required non-empty text defining the
+plan/report subjects. Only plan approval additionally binds a current ready
+approval view and opaque approval handle; plan revision/cancellation feedback
+preserves the exact plan digest and response without volatile view binding.
+Delegation `scope` is required non-empty text defining the
 concise worker-ownership boundary, while execution detail belongs in
 `instructions`; object-shaped scope is invalid. Closure requires `subject_type`
 plus the existing `subject_id`.

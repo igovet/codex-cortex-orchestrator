@@ -171,8 +171,12 @@ exact arbitrary-Unicode `response_original`, English `response_en`, user
 language, attribution, and optional supersession. The English value supports
 durable internal work; it never replaces the original response. Plan and report
 decisions require the exact immutable digest; a plan decision also requires a
-completed, finalized `plan` report. The record binds evidence and scope but is
-not authentication, a bearer approval token, or a backend lifecycle gate.
+completed, finalized `plan` report. Only plan `approve` additionally requires a
+current ready approval view and opaque approval handle. Plan `request_revision`
+and `cancel` preserve the exact finalized plan digest and response without
+volatile view binding, so intervening non-plan timeline events cannot block
+feedback. The record binds evidence and scope but is not authentication, a
+bearer approval token, or a backend lifecycle gate.
 
 `report_type=plan` provides immutable plan evidence without adding a twelfth
 tool. `review_policy=required` expresses a coordinator-owned ordinary-chat
@@ -253,8 +257,8 @@ regeneration; dry-run-by-default safe projection prune and explicit backup
 retention; invalid task/shard, symlink, permission, schema, manifest, digest,
 and confirmation rejection; and zero `project_root`/V11 writes. Projection
 prune may remove only exact registered non-ready derived Markdown and must
-preserve ready, conflict, unmanaged, or digest-mismatched files plus every
-canonical row. Retention may remove only 1–20 explicitly named complete sealed
+preserve ready, conflict, unmanaged, or digest-mismatched plan/report files plus
+every canonical row. Retention may remove only 1–20 explicitly named complete sealed
 backup bundles and must preserve the canonical database.
 
 Restore is never online. Tests and documentation must require the exact backup

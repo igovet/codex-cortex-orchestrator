@@ -100,9 +100,11 @@ steps, governance events, worker evidence, or prerequisites for a final answer.
 
 ## Projection regeneration and pruning
 
-Regeneration re-renders only the exact task's host-private derived Markdown.
-Canonical SQLite remains authoritative, and the normal renderer preserves
-direct-edit conflicts:
+Regeneration re-renders only the exact task's host-private plan and finalized
+report Markdown views. Task, decision, delegation, initiative, closure,
+governance, handoff, index, and timeline records remain SQLite-only. Canonical
+SQLite remains authoritative, and the normal renderer preserves direct-edit
+conflicts:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m cortex_runtime.v12_maintenance \

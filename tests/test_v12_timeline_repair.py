@@ -125,6 +125,73 @@ class V12TimelineRepairTests(unittest.TestCase):
         self.assertEqual(create(2), "general_2")
         self.assertEqual(create(3), "general_3")
 
+    def test_plan_revision_feedback_survives_intervening_timeline_activity(self) -> None:
+        store = self._store()
+        task_id = self._task(store, "Record a plan revision after unrelated activity.")
+        delegation_id = store.create_delegation(
+            task_id=task_id,
+            objective="Produce the plan for the revision-feedback regression.",
+            role="planner",
+            profile_name="planner",
+            scope="Own only the plan evidence for this regression test.",
+            instructions="Return the initial plan evidence.",
+            model="gpt-5.6-luna",
+            reasoning_effort="high",
+        )[0]["delegation"]["delegation_id"]
+        report = store.submit_report(
+            task_id=task_id,
+            delegation_id=delegation_id,
+            report_type="plan",
+            status="completed",
+            content={"steps": ["Keep the plan digest stable."]},
+        )[0]["report"]
+        plan_id, plan_digest = report["report_id"], report["content_digest"]
+
+        # This advances the task chronology after the plan was materialized,
+        # making any previously issued approval view stale by design.
+        store.record_initiative(
+            task_id=task_id,
+            goal="Unrelated advisory activity between plan review turns.",
+            initiative_id=None,
+            parent_initiative_id=None,
+            risk=None,
+            status="active",
+            dependencies=[],
+            linked_task_ids=[task_id],
+            linked_report_ids=[],
+            notes=[],
+            idempotency_key=None,
+        )
+
+        result, replayed = store.record_user_decision(
+            task_id=task_id,
+            subject_type="plan",
+            subject_id=plan_id,
+            subject_digest=plan_digest,
+            decision_type="request_revision",
+            prompt_en="What should be revised?",
+            response_original="Please clarify the verification step.",
+            response_en="Please clarify the verification step.",
+            user_language="en",
+            approval_handle=None,
+            approval_view_content_digest=None,
+            approval_view_source_sequence=None,
+            supersedes_decision_id=None,
+            idempotency_key=None,
+        )
+        self.assertFalse(replayed)
+        decision = result["decision"]
+        self.assertEqual(decision["subject_id"], plan_id)
+        self.assertEqual(decision["subject_digest"], plan_digest)
+        self.assertEqual(decision["decision_type"], "request_revision")
+
+        with sqlite3.connect(store.database_path) as connection:
+            row = connection.execute(
+                "SELECT subject_digest,decision_type,response_original FROM user_decisions WHERE decision_id=?",
+                (decision["decision_id"],),
+            ).fetchone()
+        self.assertEqual(row, (plan_digest, "request_revision", "Please clarify the verification step."))
+
     def _seed_live_shape_with_only_task_created_timeline(self) -> tuple[V12Store, str, str, str]:
         """Reproduce the reported shape in an isolated current-V12 shard.
 
@@ -323,44 +390,14 @@ class V12TimelineRepairTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM initiative_links WHERE initiative_id=? AND relationship='task' AND target_id=?",
                 (initiative_id, task_id),
             ).fetchone()[0]
-            ready_pages = connection.execute(
-                "SELECT COUNT(*) FROM projection_files WHERE task_id=? AND relative_path LIKE 'timeline/pages/%' AND status='ready'",
-                (task_id,),
-            ).fetchone()[0]
-            stale_pages = connection.execute(
-                "SELECT COUNT(*) FROM projection_files WHERE task_id=? AND relative_path LIKE 'timeline/pages/%' AND status='stale'",
-                (task_id,),
-            ).fetchone()[0]
-            retired_legacy_page = connection.execute(
-                "SELECT status FROM projection_files WHERE task_id=? AND relative_path='timeline/0001.md'",
-                (task_id,),
-            ).fetchone()
         self.assertEqual(marker, ("cortex/v12-timeline-backfill/v1",))
         self.assertEqual(task_link_count, 1)
-        self.assertEqual(ready_pages, 1)
-        self.assertGreater(stale_pages, 0)
-        self.assertEqual(retired_legacy_page, ("stale",))
         self.assertEqual(
             hashlib.sha256((self.home / ".codex" / "cortex" / "v11" / "cortex.db").read_bytes()).hexdigest(),
             v11_digest,
         )
 
-        compact_task_ref = task_ref(task_id)
-        self.assertIsInstance(compact_task_ref, str)
-        view_root = repaired.root / "tasks" / str(compact_task_ref)
-        latest_sequence, page_index = _markdown_timeline_index(view_root / "timeline" / "index.md")
-        # The projection is the completed backfill snapshot.  The subsequent
-        # coordinator read deliberately appends one receipt event and is not a
-        # projection refresh trigger.
-        self.assertEqual(latest_sequence, max(sequences))
-        projected_count = 0
-        for page in page_index:
-            sequences_in_page = _markdown_timeline_sequences(view_root / "timeline" / str(page["path"]))
-            projected_count += len(sequences_in_page)
-            if "events" in page:
-                self.assertEqual(len(sequences_in_page), int(page["events"]))
-            self.assertEqual(sequences_in_page, sorted(sequences_in_page))
-        self.assertEqual(projected_count, len(task["timeline"]))
+        self.assertEqual(repaired.human_view(task_id, "timeline/index.md"), {"status": "disabled", "path": None})
 
         # The marker makes every following normal open idempotent.
         before = post_read_sequences
@@ -612,7 +649,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             self.assertNotIn("initiative_created", event_types)
             self.assertNotIn("initiative_task_link_derived", event_types)
 
-    def test_projection_paginates_all_current_canonical_events(self) -> None:
+    def test_timeline_events_remain_sqlite_only(self) -> None:
         store = self._store()
         task_id = self._task(store, "Paginate canonical chronology.")
 
@@ -632,14 +669,8 @@ class V12TimelineRepairTests(unittest.TestCase):
         compact_task_ref = task_ref(task_id)
         self.assertIsInstance(compact_task_ref, str)
         view_root = store.root / "tasks" / str(compact_task_ref)
-        _latest_sequence, page_index = _markdown_timeline_index(view_root / "timeline" / "index.md")
-        self.assertEqual(len(page_index), 2)
-        flattened: list[int] = []
-        for page in page_index:
-            flattened.extend(_markdown_timeline_sequences(view_root / "timeline" / str(page["path"])))
-        self.assertEqual(flattened, sorted(flattened))
-        self.assertEqual(len(flattened), 102)
-        self.assertEqual(len(set(flattened)), 102)
+        self.assertFalse((view_root / "timeline").exists())
+        self.assertEqual(store.human_view(task_id, "timeline/index.md"), {"status": "disabled", "path": None})
 
 
 if __name__ == "__main__":

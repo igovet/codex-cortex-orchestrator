@@ -108,9 +108,6 @@ def _call_task(task_anchor: object, operation: str, *, store: V12Store | None = 
     try:
         result = getattr(store, operation)(**arguments)
         result = _with_human_view(store, result)
-        if isinstance(result, dict) and "human_view" not in result and isinstance(task_anchor, str):
-            result = dict(result)
-            result["human_view"] = store.human_view(task_anchor, "index.md")
         return result
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
@@ -183,19 +180,10 @@ def _with_human_view(store: V12Store, result: Any) -> Any:
         return result
     task: str | None = None
     relative: str | None = None
-    value = result.get("task")
-    if isinstance(value, Mapping) and isinstance(value.get("task_id"), str):
-        task, relative = value["task_id"], "task.md"
-    value = result.get("delegation")
-    if isinstance(value, Mapping) and isinstance(value.get("task_id"), str) and isinstance(value.get("delegation_id"), str):
-        task, relative = value["task_id"], f"delegations/{value['delegation_id']}.md"
     value = result.get("report")
     if isinstance(value, Mapping) and isinstance(value.get("task_id"), str) and isinstance(value.get("report_id"), str):
         task = value["task_id"]
         relative = f"plans/revisions/{value['report_id']}.md" if value.get("report_type") == "plan" else f"reports/{value['report_id']}.md"
-    value = result.get("decision")
-    if isinstance(value, Mapping) and isinstance(value.get("task_id"), str) and isinstance(value.get("decision_id"), str):
-        task, relative = value["task_id"], f"decisions/{value['decision_id']}.md"
     approval_report: Mapping[str, Any] | None = None
     reports_value = result.get("reports")
     # Plan approval is a verified full-report read product.  Delegation reads
@@ -224,12 +212,9 @@ def _with_human_view(store: V12Store, result: Any) -> Any:
             relative = f"plans/revisions/{approval_report['report_id']}.md"
     if task is None and isinstance(result.get("reports"), list):
         reports = result["reports"]
-        if reports and isinstance(reports[0], Mapping) and isinstance(reports[0].get("task_id"), str):
-            task, relative = reports[0]["task_id"], "index.md"
-    if task is None and isinstance(result.get("delegations"), list):
-        # inspect_task always includes a top-level task, but retain a safe
-        # fallback for future bounded projections.
-        return result
+        if len(reports) == 1 and isinstance(reports[0], Mapping) and isinstance(reports[0].get("task_id"), str) and isinstance(reports[0].get("report_id"), str):
+            task = reports[0]["task_id"]
+            relative = f"plans/revisions/{reports[0]['report_id']}.md" if reports[0].get("report_type") == "plan" else f"reports/{reports[0]['report_id']}.md"
     if task is not None and relative is not None:
         result = dict(result)
         result["human_view"] = store.human_view(task, relative)

@@ -47,7 +47,7 @@ criteria, and verification plan.
 | Ordered chronology | `timeline` | Every semantic mutation; scoped reads | Canonical sequence ordering for incremental inspection |
 | Retry records | `idempotency` | Mutations | Operation/key payload digest and original result; private retry integrity state |
 | Projection queue and metadata | `projection_jobs` and projection metadata | Semantic mutations enqueue; best-effort host materializer and returned `human_view` status | Canonical scheduling/freshness metadata for derived views; no filesystem failure can roll back a valid ledger mutation |
-| Human-readable task views | Private `tasks/<task_ref>/` directory beside the V12 shard | Best-effort materializer; coordinator publication after current verification | Disposable Markdown projection, never canonical state, a recovery input, or native worker instructions; full IDs remain in SQLite/rendered evidence and no write occurs under `project_root` |
+| Human-readable plan/report views | Private `tasks/<task_ref>/` directory beside the V12 shard | Best-effort materializer; coordinator publication after current verification | Disposable structured Markdown for current/immutable plans and finalized reports only; task, decision, delegation, initiative, closure, governance, handoff, index, and timeline data remain SQLite-only; never canonical state, a recovery input, or native worker instructions; full IDs remain in SQLite/rendered evidence and no write occurs under `project_root` |
 | Maintenance backups | Private `backups/<task-id>/<backup-id>/cortex.db` plus `manifest.json` beside the V12 shard | Explicit `v12_maintenance backup`; offline restore; explicit retention | Sealed whole-project-shard copy anchored to one task; owner-only and potentially contains every canonical record in the shard; never a task-only export |
 | WAL/SHM | Adjacent SQLite files | SQLite | Database machinery, never report evidence or lifecycle authority |
 | Bundled skills and profiles | Plugin package | Coordinator/worker model context and source lint | Authoritative orchestration policy plus advisory roles, not mutable task state |
@@ -86,9 +86,13 @@ are rejected without destination mutation.
 
 An ordinary-chat user decision must name an existing in-scope task, delegation,
 plan, report, or same-project initiative. Plan/report decisions bind to the
-exact immutable report digest; supersession must preserve subject identity. The
-backend verifies that scope and binding but does not authenticate a user or turn
-the record into authorization.
+exact immutable report digest; only plan `approve` additionally records the
+current ready approval-view digest/source sequence and opaque handle. Plan
+`request_revision` and `cancel` retain the exact plan digest and response
+without that volatile view binding, so unrelated timeline events cannot block
+feedback. Supersession must preserve subject identity. The backend verifies
+scope and binding but does not authenticate a user or turn the record into
+authorization.
 
 Initiative dependencies are different: a missing target is retained as an
 unresolved same-project relationship and returned with a warning. A cycle is
@@ -145,33 +149,24 @@ or user authorization.
 
 ## Derived human-readable task views
 
-The canonical database may best-effort materialize a host-private task view at
-the following exact layout. It never writes any database, report, decision,
-projection, or `.codex` state below the target `project_root`.
+The canonical database may best-effort materialize only user-facing plan and
+finalized-report Markdown views at the following exact layout. It never writes
+any database, report, decision, projection, or `.codex` state below the target
+`project_root`.
 
 ```text
 ~/.codex/cortex/v12/projects/p-<hash>/
 └── tasks/<task_ref>/
-    ├── index.md
-    ├── task.md
     ├── plans/
     │   ├── current.md
     │   └── revisions/<plan-report-id>.md
-    ├── delegations/<delegation-id>.md
-    ├── reports/<report-id>.md
-    ├── decisions/<decision-id>.md
-    ├── initiatives/<initiative-id>.md
-    ├── closures/<closure-id>.md
-    ├── governance-gate.md
-    ├── handoffs/report-consumption-receipts.md
-    └── timeline/
-        ├── index.md
-        └── pages/<first-sequence>-<last-sequence>.md
+    └── reports/<report-id>.md
 ```
 
-`index.md` is the compact entry point; `task.md` is the task summary; and plan,
-delegation, report, decision, and 100-event timeline pages are separately
-addressable. Direct local edits are preserved as `conflict`, not overwritten.
+Plan revisions and reports are separately addressable structured human-readable
+documents. Task, decision, delegation, initiative, closure, governance,
+handoff, index, and timeline data remain SQLite-only. Direct local edits are
+preserved as `conflict`, not overwritten.
 Projection materialization is nonblocking: its states are `ready`, `stale`,
 `conflict`, `unavailable`, and `disabled`. Only `ready` may return a path, after
 the regular non-symlink file, digest, containment, and current source-sequence

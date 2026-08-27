@@ -2413,7 +2413,8 @@ class V12Store:
             "approval_view_source_sequence": approval_view_source_sequence,
             "supersedes_decision_id": None if supersedes_decision_id is None else self._record_identifier(supersedes_decision_id, label="supersedes_decision_id"),
         }
-        if payload["approval_handle"] is not None and IDENTIFIER_RE.fullmatch(payload["approval_handle"]) is None:
+        requires_plan_approval_view = kind == "plan" and decision == "approve"
+        if requires_plan_approval_view and payload["approval_handle"] is not None and IDENTIFIER_RE.fullmatch(payload["approval_handle"]) is None:
             raise V12StoreError("approval_handle is invalid", code="invalid_argument", details={"field": "approval_handle"})
         if payload["approval_view_source_sequence"] is not None and (not isinstance(payload["approval_view_source_sequence"], int) or isinstance(payload["approval_view_source_sequence"], bool) or payload["approval_view_source_sequence"] < 0):
             raise V12StoreError("approval_view_source_sequence is invalid", code="invalid_argument", details={"field": "approval_view_source_sequence"})
@@ -2443,14 +2444,15 @@ class V12Store:
                 raise V12StoreError("decision subject digest does not match", code="decision_subject_digest_mismatch")
             approval_handle: sqlite3.Row | None = None
             if kind == "plan":
-                if payload["approval_handle"] is None or payload["approval_view_content_digest"] is None or payload["approval_view_source_sequence"] is None:
-                    raise V12StoreError("plan decision requires a ready approval view", code="approval_view_required")
                 if not payload["response_original"]:
                     raise V12StoreError("plan decision requires a new user response", code="decision_response_required")
                 if payload["response_original"] in {task["user_request_original"], task["objective"]}:
                     # Exact replay prevention only: arbitrary ordinary-chat
                     # prose is not semantically classified by the backend.
                     raise V12StoreError("plan decision response reuses the original task request", code="decision_response_reused_original")
+            if requires_plan_approval_view:
+                if payload["approval_handle"] is None or payload["approval_view_content_digest"] is None or payload["approval_view_source_sequence"] is None:
+                    raise V12StoreError("plan approval requires a ready approval view", code="approval_view_required")
                 approval_handle = connection.execute("SELECT * FROM approval_handles WHERE approval_handle=? AND project_hash=?", (payload["approval_handle"], self.project_hash)).fetchone()
                 if approval_handle is None:
                     raise V12StoreError("approval handle was not found", code="approval_handle_not_found")

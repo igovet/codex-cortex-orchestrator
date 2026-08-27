@@ -44,10 +44,12 @@ When durable knowledge changed:
 6. Use writer and verification reports to decide whether corrective
    documentation work or a residual-risk disclosure is needed.
 7. When the active tool returns a current contained digest-verified final
-   documentation/report Markdown projection, give the user its clickable
-   absolute path with a localized summary of what changed and verification
-   status. Never publish a bare, guessed, or stale path. Projection failure is
-   a human-view limitation, not evidence that documentation work failed.
+   report or plan Markdown projection, give the user its clickable absolute
+   path with a localized summary of what changed and verification status. Never
+   publish a bare, guessed, or stale path. Task, decision, delegation,
+   initiative, closure, governance, handoff, index, and timeline records are
+   SQLite-only and have no user-facing Markdown path. Projection failure is a
+   human-view limitation, not evidence that documentation work failed.
 
 For the `documentation not required` path, when the reports establish that no
 durable documentation surface changed, do not create a writer merely to record

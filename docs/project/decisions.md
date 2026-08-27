@@ -134,8 +134,12 @@ It retains `prompt_en`, exact `response_original`, English `response_en`, user
 language, subject identity, immutable plan/report digest where applicable, and
 optional supersession. The recorded `user_via_coordinator` attribution is
 durable evidence only: the backend verifies scope and binding, but does not
-authenticate the user or grant authorization. A revision receives a new plan
-and digest; silence and unrelated text are not approval.
+authenticate the user or grant authorization. Only plan `approve` additionally
+requires a current ready approval view and opaque approval handle. Plan
+`request_revision` and `cancel` retain the exact finalized plan digest and
+response without a volatile view binding, so intervening non-plan timeline
+events cannot block saving feedback. A revision receives a new plan and digest;
+silence and unrelated text are not approval.
 
 ## Model-owned governance
 
@@ -203,31 +207,23 @@ timeline order atomic.
 
 ## Canonical database and derived human views
 
-The host-private SQLite database is canonical. It may materialize a task's
-derived Markdown views beside the project shard, in this exact layout:
+The host-private SQLite database is canonical. It may materialize only
+user-facing plan and finalized-report Markdown views beside the project shard,
+in this exact layout:
 
 ```text
 ~/.codex/cortex/v12/projects/p-<hash>/
 └── tasks/<task_ref>/
-    ├── index.md
-    ├── task.md
     ├── plans/current.md
     ├── plans/revisions/<plan-report-id>.md
-    ├── delegations/<delegation-id>.md
-    ├── reports/<report-id>.md
-    ├── decisions/<decision-id>.md
-    ├── initiatives/<initiative-id>.md
-    ├── closures/<closure-id>.md
-    ├── governance-gate.md
-    ├── handoffs/report-consumption-receipts.md
-    └── timeline/
-        ├── index.md
-        └── pages/<first-sequence>-<last-sequence>.md
+    └── reports/<report-id>.md
 ```
 
-These files are disposable views, never ledger authority, recovery inputs, or
-native worker instructions. Cortex performs zero database, report, decision,
-projection, or `.codex` writes below `project_root`. A current view is publishable
+These files are disposable structured human-readable views, never ledger
+authority, recovery inputs, or native worker instructions. Task, decision,
+delegation, initiative, closure, governance, handoff, index, and timeline data
+remain SQLite-only. Cortex performs zero database, report, decision, projection,
+or `.codex` writes below `project_root`. A current view is publishable
 only as `ready`, after contained regular-file, digest, and source-sequence
 verification. `stale`, `conflict`, `unavailable`, and `disabled` produce no
 clickable path. A coordinator publishes a returned `ready` absolute path only

@@ -266,14 +266,16 @@ final answer. A released `tasks/<task-id>/` directory can move only through the
 runtime's atomic no-replace migration; a destination conflict preserves both
 directories and exposes no ready path.
 
-Every generated `.md` file is readable Markdown intended for direct human
-inspection. The renderer uses labeled headings, paragraphs, lists, and tables
-with caller content preserved verbatim: it does not add backslashes,
-entity-escape HTML, or otherwise rewrite Markdown text. It does not place JSON
-objects, JSON arrays, script blocks, or opaque serialized payloads in the view.
-Structured values remain in the canonical SQLite database and are summarized in
-Markdown only. This rule applies to task, plan, delegation, report, decision,
-initiative, closure, handoff, governance, index, and timeline views.
+Only current/immutable plan and finalized-report `.md` files are generated for
+user-facing publication. They are readable Markdown documents with labeled
+headings, normal lists, and paragraphs rather than raw nested field dumps.
+Caller-authored Markdown is preserved verbatim: the renderer does not add
+backslashes, entity-escape HTML, or otherwise rewrite Markdown text. It does
+not place JSON objects, JSON arrays, script blocks, `<pre>` blocks, or opaque
+serialized payloads in the view. Structured values remain in the canonical
+SQLite database. Task, decision, delegation, initiative, closure, governance,
+handoff, index, and timeline records are SQLite-only and have no user-facing
+Markdown view.
 
 ## Operator maintenance boundary
 

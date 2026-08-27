@@ -124,7 +124,7 @@ def _markdown_timeline_index(path: Path) -> tuple[int | None, list[dict[str, obj
     latest_match = re.search(r"\*\*latest_sequence:\*\*\s+(\d+)", text)
     pages: list[dict[str, object]] = []
     for line in text.splitlines():
-        match = re.search(r"\*\*path:\*\*\s+(pages/(\d+))-(\d+)\.md", line)
+        match = re.search(r"\*\*path:\*\*\s+(pages/(\d+))\-(\d+)\.md", line)
         if match:
             pages.append({
                 "path": f"{match.group(1)}-{match.group(3)}.md",
@@ -143,15 +143,6 @@ def _markdown_timeline_sequences(path: Path) -> list[int]:
         int(value)
         for value in re.findall(r"\*\*sequence:\*\*\s+(\d+)", path.read_text(encoding="utf-8"))
     ]
-
-
-def _markdown_timeline_events(path: Path) -> list[tuple[int, str, str]]:
-    """Extract the three canonical event labels from an inert Markdown page."""
-    text = path.read_text(encoding="utf-8")
-    sequences = re.findall(r"\*\*sequence:\*\*\s+(\d+)", text)
-    event_types = re.findall(r"\*\*event_type:\*\*\s+([^\n]+)", text)
-    entity_ids = re.findall(r"\*\*entity_id:\*\*\s+([^\n]+)", text)
-    return [(int(sequence), event_type, entity_id) for sequence, event_type, entity_id in zip(sequences, event_types, entity_ids)]
 
 
 def require(condition: object, label: str) -> None:
@@ -2196,49 +2187,11 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         shard_root = home / ".codex" / "cortex" / "v12" / "projects" / f"p-{task_id_match.group(1)}"
         task_views = shard_root / "tasks" / _task_ref(task_a)
         expected_views = (
-            task_views / "index.md",
-            task_views / "task.md",
-            task_views / "delegations" / f"{delegation_a}.md",
             task_views / "reports" / f"{report_a}.md",
             task_views / "plans" / "revisions" / f"{plan_id}.md",
             task_views / "plans" / "revisions" / f"{revised_plan_id}.md",
             task_views / "plans" / "current.md",
-            task_views / "decisions" / f"{decision_id}.md",
-            task_views / "timeline" / "index.md",
         )
-        timeline_index_path = task_views / "timeline" / "index.md"
-        timeline_latest, timeline_index_pages = _markdown_timeline_index(timeline_index_path)
-        require(
-            timeline_index_path.read_text(encoding="utf-8").startswith("# Timeline")
-            and isinstance(timeline_index_pages, list)
-            and timeline_index_pages,
-            "timeline Markdown index records a bounded current range-page map",
-        )
-        timeline_pages: list[Path] = []
-        page_ranges: list[tuple[int, int]] = []
-        for item in timeline_index_pages:
-            relative = item.get("path")
-            first, last, events = item.get("first_sequence"), item.get("last_sequence"), item.get("events")
-            require(
-                isinstance(relative, str)
-                and re.fullmatch(r"pages/\d+-\d+\.md", relative) is not None
-                and isinstance(first, int)
-                and isinstance(last, int)
-                and first <= last
-                and (events is None or (isinstance(events, int) and 1 <= events <= 100))
-                and relative == f"pages/{first}-{last}.md",
-                "timeline index references deterministic bounded sequence-range pages",
-            )
-            timeline_pages.append(task_views / "timeline" / relative)
-            page_ranges.append((first, last))
-        require(
-            timeline_latest == page_ranges[-1][1]
-            and page_ranges == sorted(page_ranges)
-            and all(previous[1] < current[0] for previous, current in zip(page_ranges, page_ranges[1:])),
-            "timeline range pages are chronologically ordered and never overlap",
-        )
-        require(not (task_views / "timeline" / "0001.md").exists(), "current projections never depend on unstable ordinal timeline filenames")
-        expected_views = (*expected_views, *timeline_pages)
         view_directories = {task_views, *(path.parent for path in expected_views)}
         for directory in view_directories:
             require(directory.is_dir() and not directory.is_symlink(), "human-view directories are regular host-private directories")
@@ -2248,15 +2201,19 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             require(stat.S_IMODE(view.stat().st_mode) == 0o600, "human-view Markdown is owner-only")
             require(view.resolve().is_relative_to(shard_root.resolve()), "human-view paths remain contained below the host-private V12 shard")
             require(not view.resolve().is_relative_to(project_a.resolve()), "human-view paths never resolve within the project root")
-
-        verified_index = server.tool("read_reports", {"task_id": task_a, "report_ids": [report_a]})
-        index_view = verified_index.get("human_view")
         require(
-            isinstance(index_view, Mapping)
-            and index_view.get("status") == "ready"
-            and index_view.get("path") == str(task_views / "index.md")
-            and Path(str(index_view.get("path"))).is_absolute(),
-            "public responses publish only a verified absolute host-private Markdown view",
+            not any((task_views / relative).exists() for relative in ("index.md", "task.md", "timeline", "delegations", "decisions", "initiatives", "closures", "governance-gate.md", "handoffs")),
+            "only reports and plans become user-facing Markdown projections",
+        )
+
+        verified_report = server.tool("read_reports", {"task_id": task_a, "report_ids": [report_a]})
+        report_view = verified_report.get("human_view")
+        require(
+            isinstance(report_view, Mapping)
+            and report_view.get("status") == "ready"
+            and report_view.get("path") == str(task_views / "reports" / f"{report_a}.md")
+            and Path(str(report_view.get("path"))).is_absolute(),
+            "report reads publish only their verified user-facing Markdown document",
         )
 
         altered_report_view = task_views / "reports" / f"{report_a}.md"
@@ -2905,7 +2862,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         and prune_apply.get("ok") is True
         and prune_apply.get("applied") is True
         and unmanaged_projection.read_text(encoding="utf-8").startswith("This host-private file")
-        and (task_views / "task.md").is_file(),
+        and (task_views / "reports" / f"{report_a}.md").is_file(),
         "projection prune defaults to dry-run and an explicit apply never walks or removes unregistered task files",
     )
 
@@ -3611,36 +3568,14 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
     )
 
     task_views = shard_root / "tasks" / f"t_{task_match.group(2)[-12:]}"
-    timeline_latest, pages = _markdown_timeline_index(task_views / "timeline" / "index.md")
-    index_text = (task_views / "index.md").read_text(encoding="utf-8")
-    initiative_marker = initiative_id
     require(
-        isinstance(pages, list)
-        and timeline_latest == sequences[-1]
-        and sum(
-            len(_markdown_timeline_sequences(task_views / "timeline" / str(item["path"])))
-            for item in pages
-            if isinstance(item, Mapping) and isinstance(item.get("path"), str)
-        ) == len(timeline_rows)
-        and initiative_marker in index_text,
-        "task projection advertises the exact final initiative and every current canonical timeline event",
-    )
-    projected_events: list[Mapping[str, Any]] = []
-    for page in pages:
-        require(isinstance(page, Mapping) and isinstance(page.get("path"), str), "timeline index uses structured server-derived page paths")
-        page_path = task_views / "timeline" / str(page["path"])
-        event_sequences = _markdown_timeline_sequences(page_path)
-        require(event_sequences == sorted(event_sequences), "timeline Markdown page has ordered event sequence labels")
-        projected_events.extend(
-            {"sequence": sequence, "event_type": event_type, "entity_id": entity_id}
-            for sequence, event_type, entity_id in _markdown_timeline_events(page_path)
-        )
-    require(
-        [(item.get("sequence"), item.get("event_type"), item.get("entity_id")) for item in projected_events]
-        == [(row[0], row[1], row[2]) for row in timeline_rows]
+        not (task_views / "timeline").exists()
+        and not (task_views / "index.md").exists()
+        and (task_views / "plans" / "revisions" / f"{plan_id}.md").is_file()
+        and (task_views / "reports" / f"{implementation_id}.md").is_file()
         and not (project / ".codex").exists()
         and hashlib.sha256(v11_database.read_bytes()).hexdigest() == v11_digest,
-        "host-private projections match the complete canonical chronology without V11 or project-local mutation",
+        "only report/plan documents are materialized without V11 or project-local mutation",
     )
 
 

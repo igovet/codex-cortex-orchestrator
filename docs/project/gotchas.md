@@ -138,7 +138,10 @@
 - `record_user_decision` is coordinator-asserted evidence. Preserve the exact
   ordinary-chat response in `response_original` and a separate English
   normalization in `response_en`; bind plan/report decisions to the exact
-  immutable digest. It neither authenticates the user nor grants authority.
+  immutable digest. Only plan `approve` also requires a current ready approval
+  view and opaque handle. Plan `request_revision` and `cancel` deliberately do
+  not use volatile view binding, so non-plan timeline events cannot block saved
+  feedback. It neither authenticates the user nor grants authority.
 - Ask a question only for a genuine product, requirement, scope, acceptance, or
   external/destructive authorization decision. Clarification, pause, plan
   revision, and cancellation are model-owned interaction policy, not a report,
@@ -199,10 +202,12 @@
   English. Retain user text in explicit `*_original` fields; localize
   coordinator-to-user summaries,
   questions, decisions, and ready-view explanations.
-- The database is canonical; Markdown task views are host-private derived files
-  under the V12 shard. Never write a database, report, decision, projection, or
-  project-local `.codex` state under `project_root`.
-- Publish a task-view link only from a current `ready` tool response using the
+- The database is canonical; only plan and finalized-report Markdown views are
+  host-private derived files under the V12 shard. Task, decision, delegation,
+  initiative, closure, governance, handoff, index, and timeline data remain in
+  SQLite. Never write a database, report, decision, projection, or project-local
+  `.codex` state under `project_root`.
+- Publish a plan/report-view link only from a current `ready` tool response using the
   exact returned absolute path, with a localized summary and next step. `stale`,
   `conflict`, `unavailable`, and `disabled` have no safe link; summarize the
   canonical evidence instead. See [human-readable task views](../features/human-readable-task-views/index.md).

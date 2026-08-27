@@ -128,8 +128,12 @@ task, plan, initiative, delegation, or report. Decision types are `approve`,
 `override`. The record preserves the original response beside a separate
 English normalization and asserted user language. Plan/report decisions require
 the canonical `sha256:<64-lowercase-hex>` subject digest; a plan must already be
-finalized and completed. Clarification is not approval, and approval of an old
-digest never transfers to a revised plan.
+finalized and completed. Only plan `approve` additionally requires a current
+ready `approval_view` and opaque approval handle. Plan `request_revision` and
+`cancel` preserve the exact finalized plan digest and response without volatile
+view binding, so intervening non-plan events cannot block feedback.
+Clarification is not approval, and approval of an old digest never transfers to
+a revised plan.
 
 This is append-only coordinator-attributed evidence, not cryptographic human
 attestation or a backend permission. The coordinator presents any required
@@ -138,8 +142,10 @@ revises, or discloses risk according to the decision and worker evidence.
 
 When the user requests a main plan, or planning is otherwise necessary, the
 coordinator must present the finalized plan through a fresh verified host-private
-Markdown link and request explicit approve/revise/reject/cancel input. It records
-approval against the exact plan report/digest; no implementation or research
+Markdown link and request explicit approve/revise/reject/cancel input. Only an
+`approve` response requires the current ready approval view and opaque handle;
+`request_revision` and `cancel` retain the exact plan report/digest and response
+without volatile view binding. No implementation or research
 beyond discovery/planning starts until that decision ID is an input to the
 plan-dependent delegation. Rejection/revision follows up the same live planner
 with the decision ID for a superseding plan, or uses a parent-linked replacement

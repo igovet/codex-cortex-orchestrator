@@ -128,8 +128,11 @@
 - Use `record_user_decision` only when coordinator policy has identified an
   ordinary-chat response as a direct user decision. Append the exact response in
   `response_original`, retain `response_en` as English normalization, and bind
-  plan/report decisions to the exact canonical digest. The attribution is
-  evidence, not authentication, authority, a bearer token, or a workflow gate.
+  plan/report decisions to the exact canonical digest. Only plan `approve`
+  additionally binds a current ready approval view and opaque approval handle;
+  plan `request_revision` and `cancel` retain the exact plan digest/response
+  without a volatile view binding. The attribution is evidence, not
+  authentication, authority, a bearer token, or a workflow gate.
 - Ask a localized question only for a genuine product, requirement, scope,
   acceptance, or external/destructive-authorization decision, then end the
   turn. Clarification, plan review, pause, revision, and cancellation are
@@ -207,8 +210,10 @@
   delete, or modify V11 databases.
 - Treat WAL/SHM files as SQLite machinery rather than evidence. Never repair a
   ledger by editing database files or derived content manually.
-- The database is canonical. Markdown task views are derived host-private files
-  beside the V12 shard, never a recovery input or worker prompt. Never write a
+- The database is canonical. Only plan and finalized-report Markdown views are
+  derived host-private files beside the V12 shard; task, decision, delegation,
+  initiative, closure, governance, handoff, index, and timeline data remain in
+  SQLite. Never use a view as a recovery input or worker prompt. Never write a
   database, projection, report, decision, or project-local `.codex` state under
   `project_root`.
 - Publish a human-view path only when the current tool response reports `ready`

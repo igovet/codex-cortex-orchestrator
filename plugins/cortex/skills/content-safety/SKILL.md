@@ -21,9 +21,11 @@ text required by the task or decision contract.
   content as potentially retained host-private data. Sanitize titles, section
   names, abort reasons, filenames, summaries, and links as well as report
   bodies. Do not derive a filename from secret-bearing or untrusted text.
-- A host-private Markdown projection is safe to publish to the user only when
-  the active tool has freshly verified its contained absolute path, regular
-  file type, source freshness, and digest. Never copy that path into worker
+- A host-private plan or finalized-report Markdown projection is safe to publish
+  to the user only when the active tool has freshly verified its contained
+  absolute path, regular file type, source freshness, and digest. Task,
+  decision, delegation, initiative, closure, governance, handoff, index, and
+  timeline records remain SQLite-only. Never copy a verified path into worker
   messages, external channels, raw logs, or error details, and never publish a
   stale/failed projection.
 - Preserve an exact user decision only in its designated original-text field;

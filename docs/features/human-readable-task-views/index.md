@@ -4,10 +4,11 @@
 
 ## Purpose and authority
 
-Cortex 12.0.0 projects selected host-private task evidence into
-human-readable Markdown views. These views make a task easier for a coordinator
-and user to inspect; they do not create another ledger or alter the execution
-model.
+Cortex 12.0.0 projects selected host-private plan and finalized-report evidence
+into human-readable Markdown views. These views make plan/report content easier
+for a coordinator and user to inspect; they do not create another ledger or
+alter the execution model. Other task records remain SQLite-only and are read
+through bounded inspection tools.
 
 The canonical record is always the task's SQLite database:
 
@@ -34,32 +35,18 @@ represented as `<task_ref>` (`t_<12-hex>`), the layout is exactly:
 ```text
 ~/.codex/cortex/v12/projects/p-<hash>/
 └── tasks/<task_ref>/
-    ├── index.md
-    ├── task.md
     ├── plans/
     │   ├── current.md
     │   └── revisions/<plan-report-id>.md
-    ├── delegations/<delegation-id>.md
-    ├── reports/<report-id>.md
-    ├── decisions/<decision-id>.md
-    ├── initiatives/<initiative-id>.md
-    ├── closures/<closure-id>.md
-    ├── governance-gate.md
-    ├── handoffs/report-consumption-receipts.md
-    └── timeline/
-        ├── index.md
-        └── pages/<first-sequence>-<last-sequence>.md
+    └── reports/<report-id>.md
 ```
 
-The timeline is partitioned into pages of 100 events. Its index identifies the
-available first/last-sequence boundaries, event counts, relative paths, and
-latest sequence; it is not an unbounded duplicate of task history. An empty
-chronology creates only `timeline/index.md`, with no empty page.
-
-`index.md` is the compact entry point, while `task.md` provides the task-level
-summary and current references. Plan, delegation, report, and decision pages
-are separate identity-addressable views so a coordinator can link a particular
-piece of evidence without making an entire task history the link target.
+Only plan and report links are materialized as user-facing Markdown. `current.md`
+is the current plan link, and each immutable plan revision and finalized report
+has its own identity-addressable document. Task, decision, delegation,
+initiative, closure, governance, handoff, index, and timeline records remain
+SQLite-only; they are available through bounded inspection tools and are not
+published as Markdown projections.
 
 Canonical full task IDs remain in SQLite and rendered evidence, but never in a
 user-facing projection link path. When an existing V12 shard has the released
@@ -104,11 +91,13 @@ files use mode `0600`. The final path is rechecked as a regular non-symlink
 file, then its digest and source sequence are verified before it becomes ready.
 Every output path is derived from server-generated validated identifiers rather
 than caller-supplied export paths. Generated files are ordinary, readable
-Markdown: values are presented under labeled headings, lists, tables, and
-paragraphs. Markdown supplied as task or report content is preserved verbatim:
-the renderer does not add backslashes, entity-escape HTML, or otherwise rewrite
-the content. Structured JSON is canonical database data only; it is never
-dumped as a JSON object, script block, or opaque blob into a human view.
+Markdown: plans and reports are structured human-readable documents with
+labeled headings, normal lists, and paragraphs, not raw nested field dumps.
+Authored Markdown in task or report content is preserved verbatim: the renderer
+does not add backslashes, entity-escape HTML, or otherwise rewrite the content.
+Structured JSON is canonical database data only; it is never dumped as a JSON
+object, script block, `<pre>` block, entity-encoded payload, or opaque blob into
+a human view.
 
 The view writer intentionally preserves direct edits. If the on-disk content no
 longer matches the derived artifact that Cortex last verified, it records a
@@ -118,9 +107,8 @@ host data, but it is not presented as canonical evidence.
 Projection work is coordinated with leases and supersession. A lease prevents
 simultaneous materializers from treating the same work item as theirs; a newer
 canonical source sequence supersedes older queued or running work. This keeps a
-slow projection from publishing an old snapshot after later task mutations.
-The compact task `index.md` is rendered last so it never advertises a newer set
-of dependent pages before those pages have been attempted.
+slow plan or report projection from publishing an old snapshot after later
+mutations.
 Failure handling is nonblocking: later mutations and later projection attempts
 may proceed even when one materialization attempt fails.
 
@@ -141,12 +129,12 @@ exact absolute path it returned. The accompanying summary is localized to the
 user's language and explains what evidence the particular page contains.
 
 The published form is a clickable Markdown link such as
-`[Обзор задачи](</absolute/path/to/t_ref/task.md>)`: its readable label is
+`[План задачи](</absolute/path/to/t_ref/plans/current.md>)`: its readable label is
 localized, and its destination is the exact returned verified path. Cortex never
 uses a bare or backticked path, a code block, a constructed path, or a line
 break inside the destination.
 
-If a requested or relevant view is `stale`, `conflict`, `unavailable`, or
+If a requested plan or report view is `stale`, `conflict`, `unavailable`, or
 `disabled`, the coordinator says so in the user's language and summarizes the
 canonical SQLite evidence inline. The user still receives the substantive task
 state; view delivery is an aid, not a gate on planning, acceptance, decisions,
@@ -172,11 +160,14 @@ text.
 `clarification`, `cancel`, `accept_risk`, or `override` against an exact task,
 plan, initiative, delegation, or report. For plan and report decisions, the
 decision is bound to the canonical `sha256:<64-lowercase-hex>` subject digest;
-a plan must be finalized and completed. A plan decision additionally requires
-the exact server-issued `approval_handle` from a ready `approval_view`, plus
-the matching plan digest, view digest, and view source sequence. That
-single-use relation is stored only after Cortex has verified the exact current
-view; it is relational proof of a ready review snapshot, not a
+a plan must be finalized and completed. Only `decision_type=approve` requires
+the exact server-issued `approval_handle` from a current ready `approval_view`,
+plus the matching plan digest, view digest, and view source sequence. The
+`request_revision` and `cancel` decisions preserve the exact finalized plan
+digest and user response but do not require a volatile approval-view binding;
+intervening non-plan timeline events therefore do not block saving that
+feedback. The approval relation is stored only after Cortex has verified the
+exact current view; it is relational proof of a ready review snapshot, not a
 host-authenticated user-turn receipt. The coordinator must therefore ask in
 the user's language and wait for a new response; exact reuse of the original
 task request is rejected, while arbitrary user prose is never semantically

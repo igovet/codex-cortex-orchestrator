@@ -18,7 +18,7 @@ and release-facing documentation must describe the same V12 contract.
 - [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the uniform catalog.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) defines bounded task/report constants and report-digest semantics.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 storage.
-- [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) owns host-private derived Markdown materialization.
+- [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) owns host-private plan/report Markdown materialization.
 - [v12_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/v12_maintenance.py) provides the task-anchored host-private operator CLI outside MCP.
 - [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the attested native worker message.
 - [profiles.json](../../../plugins/cortex/profiles.json) defines advisory roles and model recommendations.
@@ -84,7 +84,9 @@ remains outside the MCP server.
 
 The SQLite database remains schema v1 under the V12 project namespace, with
 additive V12 migration history. Host-private Markdown views are disposable
-projections beside that database; `v12_projections.py` writes no project file.
+structured projections for current/immutable plans and finalized reports only;
+`v12_projections.py` writes no project file. Other task records remain
+SQLite-only.
 V11 databases are deliberately excluded from migration and remain untouched.
 
 The task-ID-anchored `v12_maintenance` module is an operator/admin CLI, not an

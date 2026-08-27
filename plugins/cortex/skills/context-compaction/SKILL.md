@@ -18,9 +18,11 @@ and known initiative, delegation, report, and user-decision IDs. Preserve each
 decision's subject type, subject ID, subject digest, supersession, and effect on
 the orchestration DAG revision. Preserve incomplete report assembly state: report ID, state,
 next chunk index, expected count/digest when known, and completed section
-manifest. Preserve verified projection paths with their source sequence or
-revision and digest, but treat them as publishable only after fresh
-reverification. These are references, not bearer capabilities.
+manifest. Preserve verified plan/report projection paths with their source
+sequence or revision and digest, but treat them as publishable only after fresh
+reverification. Task, decision, delegation, initiative, closure, governance,
+handoff, index, and timeline records have no Markdown paths. These references
+are not bearer capabilities.
 
 Preserve every ID, digest, and cursor byte-for-byte as opaque immutable return
 data. Never recover one by parsing, concatenating, normalizing, reconstructing,
