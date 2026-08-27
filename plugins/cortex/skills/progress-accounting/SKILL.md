@@ -31,17 +31,31 @@ metrics only when the repository explicitly needs them.
 
 Send a user-facing progress update only when evidence changed the outcome,
 plan, risk, accepted scope, completed work, verification state, or next useful
-action. Use the language of the latest meaningful user message. Lead with what
-changed, state the evidence-backed implication, and end with the next step.
+action. Follow the mandatory packaged `coordinator-communication` policy. Use
+the language of the latest meaningful user message. Lead with the result,
+state what changed and the evidence-backed user impact, and end with the next safe step.
+Default-hide opaque IDs, ledger/governance jargon, private paths, raw
+diagnostics, and raw worker output; disclose technical detail progressively and
+use optional contextual humor only after the material fact when it is safe.
 Suppress unchanged waits, repeated summaries, routine pagination, chunk
 assembly, retry attempts, and internal worker-recovery chatter.
+
+Progress accounting does not authorize stopping orchestration. While the
+requested outcome or closure evidence is unfinished, the coordinator continues
+to reconcile state and advance the next safe worker or recovery stage. A
+completed worker, waiting or incomplete stage, technical/documentation/review
+error, Demo/production gate, or quiet interval is not terminal. The only
+early-turn pause is one genuine user question that materially changes
+requirements, scope, acceptance, or required external/destructive authority;
+after its answer, resume from the recorded decision. Record changed evidence
+and the next action without treating a progress update as completion.
 
 Workers must emit English checkpoints of at most five bullets/150 words and a
 final response of at most 300 words. A coordinator wait is at most 60 seconds.
 After the first quiet interval, request a checkpoint from the same exact native
 task and inspect/list status after later intervals. If it remains running, keep
-bounded waiting and update the user; elapsed time or quiet intervals do not
-prove it is stuck. Interrupt/follow up requires explicit
+bounded waiting without publishing an unchanged wait update; elapsed time or
+quiet intervals do not prove it is stuck. Interrupt/follow up requires explicit
 failed/unavailable/idle-without-work evidence, host-confirmed no-progress, or
 user cancellation. Do not expose recovery chatter, skip a planner dependency,
 or start downstream work without required report and plan-decision evidence.

@@ -72,7 +72,9 @@
 - `read_reports` accepts no more than 20 distinct known IDs and returns them in
   request order. Select only needed sections, observe its 65,536-byte read
   budget, and continue with its scope-bound cursor. `max_bytes=0` is
-  metadata-only recovery. Task and delegation inspections intentionally return
+  metadata-only recovery; deprecated `byte_budget` is an equivalent alias, but
+  a different simultaneous `max_bytes` value is rejected. Task and delegation
+  inspections intentionally return
   compact references instead of full report bodies.
 - Bound every inspection with `after_sequence` plus `limit`, and continue only
   while `has_more` using the returned `next_sequence`.

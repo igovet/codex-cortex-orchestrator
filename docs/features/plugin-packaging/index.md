@@ -24,6 +24,7 @@ and release-facing documentation must describe the same V12 contract.
 - [profiles.json](../../../plugins/cortex/profiles.json) defines advisory roles and model recommendations.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines the authoritative outcome-first coordinator contract.
 - [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative eleven-tool and nonblocking semantics.
+- [coordinator-communication/SKILL.md](../../../plugins/cortex/skills/coordinator-communication/SKILL.md) defines the mandatory coordinator-to-user policy.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates repository package structure.
 - [cortex_release_candidate.py](../../../scripts/cortex_release_candidate.py) builds the explicit source candidate and docs closure.
 - [verify-cortex-release.py](../../../scripts/verify-cortex-release.py) validates source or committed candidates.

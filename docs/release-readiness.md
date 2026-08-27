@@ -39,7 +39,7 @@ record may prohibit the model from taking the next safe meaningful step.
 11. `record_user_decision`
 
 The catalog is identical for every participant. There is no audience filter,
-capability matrix, host-bound authority, alias, or action selector. Each input
+capability matrix, host-bound authority, tool-name alias, or action selector. Each input
 schema is closed and is also the runtime validator's source; every tool also
 advertises its successful `outputSchema`, which runtime validates before a
 success is transported as JSON text plus `structuredContent` with
@@ -151,6 +151,8 @@ Release evidence must prove:
 - `read_reports` preserves requested order for 1–20 known IDs, returns only
   complete chunks within a 65,536-byte budget, and returns a selection-scoped
   cursor without duplication; `max_bytes=0` returns only assembly metadata;
+  deprecated `byte_budget` is an equivalent compatibility alias and conflicts
+  with a different simultaneous `max_bytes` value;
 - inspection pages use `after_sequence` plus `limit`, return stable
   `next_sequence`/`has_more`, and expose compact report references while
   `read_reports` remains the only bounded report body/chunk reader;
@@ -177,6 +179,11 @@ and `cancel` preserve the exact finalized plan digest and response without
 volatile view binding, so intervening non-plan timeline events cannot block
 feedback. The record binds evidence and scope but is not authentication, a
 bearer approval token, or a backend lifecycle gate.
+
+The current decision shape and the deprecated complete legacy plan-decision
+shape are mutually exclusive. The legacy compatibility path requires all of
+its fields; partial or mixed current/legacy input is rejected by the public
+schema.
 
 `report_type=plan` provides immutable plan evidence without adding a twelfth
 tool. `review_policy=required` expresses a coordinator-owned ordinary-chat

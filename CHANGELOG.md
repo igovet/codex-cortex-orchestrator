@@ -2,6 +2,19 @@
 
 ## [12.0.0] - 2026-08-27
 
+### Added
+
+- Add the packaged coordinator-communication policy. Coordinator-to-user
+  messages lead with result, impact, and next step; use the latest meaningful
+  user language; suppress unchanged waits; hide internal ledger details by
+  default; progressively disclose technical detail; and permit only safe
+  optional contextual humor. Worker and durable ledger/report content remain
+  English.
+- Include the eleventh packaged skill in source candidates and require its
+  deterministic lint, marketplace, and release-gate checks. This is static
+  contract enforcement only; no runtime dispatcher, A/B evaluation, or
+  model-quality gate was added.
+
 ### Changed
 
 - Replace the V11 control plane with an opt-in, durable, nonblocking V12

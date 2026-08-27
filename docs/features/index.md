@@ -16,6 +16,7 @@ project-local artifact/state check remain worker-owned.
 - [Human-readable task views](human-readable-task-views/index.md)
 - [Operator maintenance](operator-maintenance/index.md)
 - [Plugin packaging and validation](plugin-packaging/index.md)
+- [Coordinator communication](coordinator-communication/index.md)
 - [Knowledge-route contract](knowledge-route-contract/index.md)
 
 Lifecycle telemetry is not an active V12 feature. The package ships no native

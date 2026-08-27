@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "12.0.0+codex.20260827114000",
+  "version": "12.0.0+codex.20260827150000",
   "description": "Durable local coordination ledger for model-owned multi-agent governance.",
   "author": {
     "name": "igovet"
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate durable multi-agent work",
-    "longDescription": "Adds 22 advisory agent profiles and ten coordination skills around a local Cortex v12 ledger. Cortex stores project-scoped tasks, model-authored delegations, immutable reports, governance assessments, initiatives, and advisory closures. The coordinator model owns decomposition, native agent dispatch, exact model and effort selection, governance depth, rework, verification, and the final answer. The ledger enforces only data integrity, idempotency, project isolation, and safe bounded validation: governance records never become lifecycle gates.",
+    "longDescription": "Adds 22 advisory agent profiles and eleven coordination skills around a local Cortex v12 ledger. Cortex stores project-scoped tasks, model-authored delegations, immutable reports, governance assessments, initiatives, and advisory closures. The coordinator model owns decomposition, native agent dispatch, exact model and effort selection, governance depth, rework, verification, and the final answer. The ledger enforces only data integrity, idempotency, project isolation, and safe bounded validation: governance records never become lifecycle gates.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [

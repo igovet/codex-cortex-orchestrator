@@ -36,7 +36,7 @@ The V12 protocol evidence must prove:
   `set_governance_mode`, `record_initiative`, `inspect_governance`, and
   `submit_governance_closure`, and `record_user_decision`;
 - coordinator and worker catalogs are identical, with no audience filtering,
-  capabilities, aliases, or selector branches;
+  capabilities, tool-name aliases, or selector branches;
 - runtime validation uses the same closed input schemas advertised by the
   registry and validates successful results against each advertised
   `outputSchema`; successful calls carry matching JSON text content plus
@@ -71,6 +71,8 @@ The V12 protocol evidence must prove:
 - `read_reports` accepts 1–20 known IDs, preserves requested order, supports
   named sections, obeys the 65,536-byte content budget, returns a scope-bound
   cursor for exact resumption, and supports `max_bytes=0` metadata-only reads;
+  deprecated `byte_budget` remains an equivalent compatibility alias, and
+  conflicting simultaneous values are rejected;
 - `inspect_task`, `read_delegation`, and `inspect_governance` bound incremental
   reads with `after_sequence` default 0 plus `limit` default 50/range 1–200,
   return `timeline`, `next_sequence`, and `has_more`, and expose only compact
@@ -411,6 +413,10 @@ configuration. Check:
 - exact packaged `profile_name` versus human-readable `role`, loaded renderer
   proof, and one-to-one byte-exact native dispatch;
 - GitHub Marketplace user installation versus repository source sync;
+- the packaged coordinator-communication policy: result → impact → next step,
+  latest meaningful user language, silent unchanged waits, default hidden
+  internals, progressive detail, English durable-worker content, and safe
+  optional humor without any A/B or model-quality claim;
 - historical V11 mentions only at the untouched/incompatible boundary;
 - absence of active lifecycle telemetry, hooks, waves, gates, receipts,
   capabilities, and server recovery claims;

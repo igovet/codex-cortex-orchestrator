@@ -102,7 +102,7 @@ metadata, plugin `cwd`, thread identity, or a hook.
 
 The catalog is identical for coordinators and workers. There is no audience
 filter, capability matrix, host-bound authority, read receipt, selector,
-compatibility alias, or profile admission rule.
+tool-name alias, or profile admission rule.
 
 Returned task IDs use `task-<64-lowercase-hex-project-shard>-<32-lowercase-hex-record>`
 so the runtime can resolve a ledger without scanning project directories. Callers
@@ -126,8 +126,10 @@ plan. It is required, must contain at least one character, and is limited to
 65,536 characters. Detailed execution belongs in `instructions`; object-valued
 scope is rejected by the closed schema.
 
-Workers publish immutable `progress`, `result`, `synthesis`, or `plan` reports.
-Later delegations receive only relevant finalized report IDs, their exact
+Workers publish immutable `progress`, `result`, `synthesis`, or `plan` reports
+and return a concise native `Summary` plus exact `Report ref` in the completion
+handoff. The coordinator consumes that handoff without rereading the report
+body merely to summarize it. Later delegations receive only relevant finalized report IDs, their exact
 manifest digests, and user-decision IDs. A successor must call `read_reports`
 with `reader_kind="worker"` and its own `consumer_delegation_id` before using a
 predecessor report. The server rejects a report outside that delegation's
@@ -151,7 +153,9 @@ final submission, or abort. A duplicate identical chunk is safe; a conflicting
 or out-of-order chunk is rejected.
 
 `read_reports` supports up to 32 section labels, an opaque scoped cursor, and a
-65,536-byte maximum/default budget (`0` means metadata only). It returns only
+65,536-byte maximum/default `max_bytes` budget (`0` means metadata only).
+Deprecated `byte_budget` is an equivalent compatibility alias; different
+simultaneous values are rejected. It returns only
 whole JSON chunks under a 224 KiB response ceiling. A small finalized one-chunk
 report may additionally expose compatibility `content`; incomplete/aborted
 content is never presented as completed evidence. Recovery resumes from
@@ -215,6 +219,12 @@ English. Exact user text is retained only in labeled original fields beside
 separate English-normalized fields and is never treated as unquoted worker
 instruction. A task-required product/output language remains part of the
 delegated product contract.
+
+Coordinator-facing communication follows the packaged result → impact → next
+step policy. It suppresses unchanged waiting updates, defaults to hiding opaque
+IDs and ledger/governance jargon, and reveals technical detail progressively;
+safe contextual humor is optional only after the material fact. This is a
+prompt-policy integration, not a runtime dispatcher or model evaluation gate.
 
 After the project verifier reports, the coordinator evaluates documentation
 impact from report evidence. Material changes require a documentation-sync

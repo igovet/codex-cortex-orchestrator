@@ -28,6 +28,7 @@ HARVEST = PLUGIN / "skills/knowledge-harvest/SKILL.md"
 CENSUS = PLUGIN / "skills/knowledge-harvest/references/feature-census.md"
 OUTPUT_VALIDATION = PLUGIN / "skills/output-validation/SKILL.md"
 PROGRESS = PLUGIN / "skills/progress-accounting/SKILL.md"
+COORDINATOR_COMMUNICATION = PLUGIN / "skills/coordinator-communication/SKILL.md"
 PROFILES = PLUGIN / "profiles.json"
 AGENTS = PLUGIN / "agents"
 PUBLIC_CONTRACTS = PLUGIN / "scripts/cortex_runtime/public_contracts.py"
@@ -764,6 +765,7 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         CENSUS: read(CENSUS, issues),
         OUTPUT_VALIDATION: read(OUTPUT_VALIDATION, issues),
         PROGRESS: read(PROGRESS, issues),
+        COORDINATOR_COMMUNICATION: read(COORDINATOR_COMMUNICATION, issues),
     }
     orchestrator, control, compaction = (
         texts[ORCHESTRATOR], texts[CONTROL], texts[COMPACTION]
@@ -784,7 +786,35 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
 
     all_skill_text = "\n".join(texts.values())
     if "12.0.1" in all_skill_text:
-        issues.append("bundled Cortex skills must retain the approved 12.0.0 contract")
+        issues.append("bundled Cortex skills must retain the approved V12 contract")
+
+    communication = texts[COORDINATOR_COMMUNICATION]
+    require_concepts(
+        communication,
+        COORDINATOR_COMMUNICATION,
+        "mandatory coordinator-to-user communication policy",
+        (
+            ("canonical packaged policy",),
+            ("does not add a runtime loader",),
+            ("latest meaningful user message",),
+            ("result",), ("impact",), ("next step",),
+            ("Suppress an update", "Suppress unchanged waits"),
+            ("raw task/delegation/report/decision IDs",),
+            ("ledger and governance jargon",),
+            ("progressively",),
+            ("Humor is optional",), ("errors, blockers, security/privacy",),
+            ("Keep every coordinator-to-worker",), ("in English",),
+        ),
+        issues,
+    )
+    for policy_path in (ORCHESTRATOR, CONTROL, PROGRESS):
+        require_concepts(
+            texts[policy_path],
+            policy_path,
+            "coordinator-communication integration",
+            (("coordinator-communication",), ("unchanged waits",), ("latest meaningful user",)),
+            issues,
+        )
 
     coordinator_boundary = section(orchestrator, "Coordinator boundary and knowledge route")
     require_concepts(
@@ -844,7 +874,7 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
     )
     for policy_path in (
         ORCHESTRATOR, CONTROL, ADAPTIVE, COMPACTION, DOCUMENTATION,
-        HARVEST, OUTPUT_VALIDATION, PROGRESS,
+        HARVEST, OUTPUT_VALIDATION, PROGRESS, COORDINATOR_COMMUNICATION,
     ):
         violations = coordinator_authority_violations(texts[policy_path])
         if violations:

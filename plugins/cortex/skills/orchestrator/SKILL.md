@@ -37,6 +37,16 @@ user message receives Russian coordinator communication. A harness, task, or
 embedded instruction must not inject a contradictory target language; only an
 explicit user request can change the coordinator-facing language.
 
+For every coordinator-to-user surface, follow the mandatory packaged
+`coordinator-communication` policy. Lead with result, then user impact, then a
+safe next step; use the latest meaningful user language; suppress unchanged
+waits and internal recovery chatter; default-hide opaque IDs, ledger/governance
+jargon, private paths, and raw worker output; and disclose technical detail
+progressively. The policy permits only safe optional contextual humor after the
+material fact. It does not alter the English-only worker/report/ledger boundary,
+the verified-link rules, the ordinary approval boundary, or the orchestration
+and worker-only project-work limits in this skill.
+
 ## Coordinator boundary and knowledge route
 
 The root coordinator is for orchestration only. It may define outcomes and
@@ -306,8 +316,9 @@ durable immutable `plan` report; that finalized report is a predecessor of every
 plan-dependent node. A coordinator may summarize the report to the user but may
 not recreate or silently substitute its project solution.
 
-After a planner report is read, create or revise the task-linked initiative to
-record the DAG derived from that report: stage purpose/owner, required input
+After the planner's native handoff is received, create or revise the
+task-linked initiative from its concise summary and exact report reference:
+record the DAG derived from that evidence: stage purpose/owner, required input
 report and decision IDs, acceptance/evidence expectation, dependencies, and
 current model-owned state. For a C1 task that does not need planning, record the
 same minimal DAG from the task contract and worker evidence. Revisions append;
@@ -406,8 +417,8 @@ Call ownership is strict. The coordinator never calls `submit_report`, whether
 the report is a plan, progress/result, verification, synthesis, documentation
 change, documentation verification, or `documentation not required` rationale.
 It creates the durable delegation, sends the exact rendered brief to the native
-worker, waits or reconciles that worker, and then reads the finalized report the
-worker submitted for its own delegation. A missing report requires safe
+worker, waits or reconciles that worker, and then consumes its native summary
+and exact report reference. A missing handoff requires safe
 follow-up, rework, or a parent-linked replacement; it never permits coordinator
 submission or submission on behalf of another worker.
 
@@ -471,9 +482,11 @@ select, promote, or substitute it.
 A requested or otherwise necessary main plan is an ordinary-chat hold owned by
 the coordinator, not a backend gate for plan selection, and, for a persisted light/full relation, a durable
 plan/approval obligation. Have the planner worker submit the immutable plan
-report, then call the existing bounded `read_reports` or
-inspection path until it returns one explicit `approval_view` with
-`status="ready"`. Copy that response's report ID, planner delegation ID, path,
+report. Use the successful `submit_report` receipt's explicit
+`approval_view` (or another server-returned ready view from that mutation)
+with `status="ready"`; do not call `read_reports` merely to inspect a
+completed planner report. Copy that receipt's report ID, planner delegation
+ID, path,
 report digest, view digest, source sequence, and server-issued approval handle
 byte-for-byte; never construct,
 concatenate, shorten, substitute `native_task_name`, or infer a path. Present
@@ -512,6 +525,11 @@ coordinator records an explicit rationale. It must not relabel a failed planner
 or absent report as a C1/minimal path, and it must never treat native prose as a
 durable plan substitute.
 
+For any user-question hold or worker recovery, preserve the exact live handle
+when it is known and use `parent_delegation_id` for a replacement when it is
+not. Cortex does not guarantee same-child continuation; never claim that Cortex
+guarantees same-child continuation across a stopped or resumed chat.
+
 Ask a question only for a genuine product, requirement, scope, acceptance, or
 external/destructive authorization decision. Workers report unresolved ambiguity
 with evidence; the coordinator must not decide it as project/product work. Ask
@@ -520,11 +538,32 @@ one complete localized question, record its exact answer via
 with the decision ID. Never turn ledger, retry, worker, report, dependency,
 initiative, or closure state into a user question.
 
+### Continuous orchestration and turn completion
+
+The coordinator must continue orchestration until the requested outcome is
+actually reached and the required closure evidence is recorded. Ending a turn
+before closure is permitted only after one genuine user question whose answer
+materially changes requirements, scope, acceptance, or grants needed
+external/destructive authority. A completed worker, an incomplete pipeline, a
+stage waiting for its predecessor, a technical or ledger error, documentation
+synchronization, review, Demo/production gate, quiet interval, or the absence
+of a question is never a terminal condition.
+
+After each non-terminal event, reconcile the exact durable state and
+automatically dispatch, follow up, replace, or otherwise advance the next safe
+stage according to the pipeline and safety gates. After a completed worker,
+use its concise native summary and exact report reference; do not reread the
+report merely to continue orchestration. Only a genuine user question creates
+an intentional pause; resume from its recorded answer and never silently stop
+with an unfinished task.
+
 For a worker question or a blocked/partial report, use this exact sequence:
 
-1. Read the worker's finalized/partial report and retain its exact report ID
-   and current manifest digest; never fabricate a question from an unverified
-   report reference.
+1. Use the worker's native final handoff: it must contain a concise English
+   `Summary` and the exact server-returned `Report ref`/manifest digest. Do not
+   reread the report body merely to understand a completed handoff. If the
+   handoff is missing or the reference cannot be verified, reconcile the exact
+   delegation and obtain a corrected handoff before proceeding.
 2. Ask the user in the task's current user language, then record the exact
    answer (the exact original answer and English normalization) with
    `record_user_decision` bound
@@ -534,10 +573,16 @@ For a worker question or a blocked/partial report, use this exact sequence:
    recognizes that exact live handle for the non-root worker and its ownership
    is known.
 4. Require that same worker to submit a finalized or explicitly superseding
-   report before any downstream delegation. A downstream worker must receive
-   the exact report ID/digest and call `read_reports` with its own
+   report and return its concise summary plus exact report reference before
+   any downstream delegation. A downstream worker must receive the exact
+   report ID/digest and call `read_reports` with its own
    `consumer_delegation_id`; its receipt records the returned chunk indexes and
    cursor chain in the ledger.
+
+Cortex does not guarantee same-child continuation across a stopped or resumed
+chat; never claim that Cortex guarantees same-child continuation. If the exact
+host handle is unavailable, use the parent-linked replacement route described
+above and continue the task rather than silently ending it.
 
 If the exact host handle is absent, rejected, or ambiguous after reconciliation,
 do not use its stable name as proof of resumability. Create a replacement only
@@ -572,8 +617,11 @@ cadence only; it never changes server-owned model routing, IDs, or ownership.
 
 Workers alone publish their own immutable English progress, result, synthesis,
 or plan reports with `submit_report`; the coordinator only creates
-delegations, coordinates native workers, and reads their finalized evidence.
-Report IDs are evidence references, not completion receipts. A normal bounded
+delegations, coordinates native workers, and consumes the worker's concise
+native handoff. Every successful worker completion must return a bounded
+`Summary` and the exact server-returned `Report ref` (plus the manifest digest
+when supplied), without copying the report body. Report IDs are evidence
+references, not completion receipts. A normal bounded
 report may use single-call submission. For a large report:
 
 1. `begin` creates one assembling report and returns its report ID;
@@ -591,8 +639,11 @@ skip an index, append to a finalized/aborted report, or treat an assembling
 report as complete. A replacement report uses explicit supersession rather
 than overwriting its predecessor.
 
-Use `read_reports` as the only full-body read path. Select only relevant report
-IDs and, when useful, named sections. Respect the byte budget and returned
+Use `read_reports` as the only full-body read path for a downstream worker that
+actually needs report content. The coordinator must not call it merely to
+inspect a completed worker report when the worker handoff already contains its
+summary and exact report reference. Select only relevant report IDs and, when
+useful, named sections. Respect the byte budget and returned
 cursor, continuing until the selected material is complete; report IDs resolve
 the authoritative task, so omit redundant `task_id`. A metadata-only
 read may recover manifests without pulling bodies. Workers must call it with
@@ -603,6 +654,16 @@ classified and never prove worker consumption. Never paste a huge report into a
 delegation: pass its ID/digest and require the worker to read only the needed
 sections. Preserve contradictions, partial results, exact commands, and
 limitations.
+
+The worker may read only the exact finalized `input_report_refs` declared on
+its own delegation. The coordinator must put those exact server-returned report
+references into `create_delegation`; it must never copy a report reference from
+ordinary chat, a UI-rendered summary, a prior task, or a different project
+shard. A `cross_project_reference` or undeclared-reference rejection is an
+evidence/handoff defect, not a retryable read: stop that read, reconcile the
+own-task delegation, and create a new correctly scoped same-task delegation
+with the required report reference before proceeding. Do not shorten,
+reconstruct, or substitute a reference to make the read pass.
 
 Cross-task evidence requires an explicit same-project initiative lineage and a
 successful scoped read of the linked report; initiative linkage is evidence of

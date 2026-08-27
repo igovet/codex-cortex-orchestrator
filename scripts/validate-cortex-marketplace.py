@@ -25,6 +25,7 @@ EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
     "context-compaction",
+    "coordinator-communication",
     "cortex-control",
     "documentation-sync",
     "find-skills",
@@ -71,7 +72,10 @@ EXPECTED_TOOL_FIELDS = {
         "chunk_index", "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en",
         "supersedes_report_ref", "review_policy", "idempotency_key",
     },
-    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "consumer_delegation_ref", "reader_kind"},
+    "read_reports": {
+        "report_refs", "sections", "cursor", "max_bytes", "byte_budget",
+        "consumer_delegation_ref", "reader_kind",
+    },
     "set_governance_mode": {
         "task_ref", "mode", "rationale", "reason", "risk_factors", "source", "initiative_ref", "idempotency_key",
     },
@@ -100,16 +104,22 @@ EXPECTED_TOOL_REQUIRED = {
     "record_initiative": {"task_ref", "goal"},
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
-    "record_user_decision": {
-        "task_ref", "subject_type", "subject_ref", "decision_type", "prompt_en",
-        "response_original", "response_en", "user_language",
-    },
+    "record_user_decision": {"task_ref"},
 }
 EXPECTED_DECISION_FIELDS = {
     "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en",
     "response_original", "response_en", "user_language", "approval_handle",
     "approval_view_content_digest", "approval_view_source_sequence", "supersedes_decision_ref",
-    "idempotency_key",
+    "idempotency_key", "report_ref", "report_content_digest", "decision",
+    "user_response_original", "english_normalization",
+}
+EXPECTED_DECISION_CURRENT_FIELDS = {
+    "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type",
+    "prompt_en", "response_original", "response_en", "user_language",
+}
+EXPECTED_DECISION_LEGACY_FIELDS = {
+    "task_ref", "report_ref", "report_content_digest", "decision",
+    "user_response_original", "english_normalization",
 }
 ACTIVE_RUNTIME_FILES = {
     "__init__.py",
@@ -330,7 +340,7 @@ def validate_profiles(plugin: Path) -> None:
 def validate_skills(plugin: Path) -> None:
     folders = {path.name for path in (plugin / "skills").iterdir() if path.is_dir() and not path.is_symlink()}
     if folders != set(EXPECTED_SKILLS):
-        fail("bundled skills must be exactly the ten V12 skills")
+        fail("bundled skills must be exactly the eleven V12 skills")
     resources = {
         path.relative_to(plugin / "skills")
         for path in (plugin / "skills").rglob("*")
@@ -361,6 +371,18 @@ def validate_skills(plugin: Path) -> None:
     missing_safety_markers = [marker for marker in required_safety_markers if marker not in orchestrator]
     if missing_safety_markers:
         fail("orchestrator guidance lacks terminal create_task/language safeguards: " + ", ".join(missing_safety_markers))
+    communication = (plugin / "skills/coordinator-communication/SKILL.md").read_text(encoding="utf-8")
+    required_communication_markers = (
+        "result, then its user impact, then the next step",
+        "latest meaningful user message",
+        "Suppress an update",
+        "raw task/delegation/report/decision IDs",
+        "Humor is optional",
+        "does not add a runtime loader",
+    )
+    missing_communication_markers = [marker for marker in required_communication_markers if marker not in communication]
+    if missing_communication_markers:
+        fail("coordinator communication skill lacks required policy safeguards: " + ", ".join(missing_communication_markers))
 
 
 def validate_prompt_contract(root: Path) -> None:
@@ -465,6 +487,29 @@ def validate_runtime(plugin: Path) -> None:
                 or task_ref.get("maxLength") != 14
             ):
                 fail(f"{name} must resolve through required compact task_ref without a public task_id alternative")
+        if name == "read_reports":
+            max_bytes = properties.get("max_bytes")
+            byte_budget = properties.get("byte_budget")
+            max_bytes_maximum = max_bytes.get("maximum") if isinstance(max_bytes, dict) else None
+            if max_bytes_maximum is None and isinstance(max_bytes, dict):
+                max_bytes_maximum = next(
+                    (
+                        branch.get("maximum")
+                        for branch in max_bytes.get("anyOf", ())
+                        if isinstance(branch, dict) and branch.get("maximum") is not None
+                    ),
+                    None,
+                )
+            if (
+                not isinstance(max_bytes, dict)
+                or not isinstance(byte_budget, dict)
+                or byte_budget.get("type") != "integer"
+                or byte_budget.get("minimum") != 0
+                or byte_budget.get("maximum") != max_bytes_maximum
+                or "deprecated" not in str(byte_budget.get("description", "")).lower()
+                or "byte_budget" in required
+            ):
+                fail("read_reports.byte_budget must remain an optional deprecated alias for max_bytes")
         if name == "create_delegation":
             scope = properties.get("scope")
             if (
@@ -487,6 +532,17 @@ def validate_runtime(plugin: Path) -> None:
         if name == "record_user_decision":
             if set(properties) != EXPECTED_DECISION_FIELDS:
                 fail("record_user_decision fields drifted from the canonical V12 user-decision contract")
+            decision_shapes = schema.get("oneOf")
+            if (
+                not isinstance(decision_shapes, list)
+                or {
+                    frozenset(shape.get("required") or ())
+                    for shape in decision_shapes
+                    if isinstance(shape, dict)
+                }
+                != {frozenset(EXPECTED_DECISION_CURRENT_FIELDS), frozenset(EXPECTED_DECISION_LEGACY_FIELDS)}
+            ):
+                fail("record_user_decision must preserve its complete non-mixed current and legacy shapes")
             subject_type = properties.get("subject_type")
             decision_type = properties.get("decision_type")
             approval_handle = properties.get("approval_handle")

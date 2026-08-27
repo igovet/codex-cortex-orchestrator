@@ -105,6 +105,7 @@ machine. Exact packaged `profile_name` validation is a prompt-integrity check.
 - Advisory profile registry: [profiles.json](../../plugins/cortex/profiles.json)
 - Orchestration skill: [orchestrator/SKILL.md](../../plugins/cortex/skills/orchestrator/SKILL.md)
 - Control semantics: [cortex-control/SKILL.md](../../plugins/cortex/skills/cortex-control/SKILL.md)
+- Coordinator communication: [coordinator-communication/SKILL.md](../../plugins/cortex/skills/coordinator-communication/SKILL.md)
 - User installation: GitHub Marketplace flow in [README.md](../../README.md)
 - Contributor source synchronization: [sync-cortex.sh](../../scripts/sync-cortex.sh)
 
@@ -145,8 +146,11 @@ are explicit, and one worker is never reused across durable delegations.
 `submit_report` records immutable `progress`, `result`, `synthesis`, or `plan`
 evidence. It supports `single`, `begin`, sequential `append`, `finalize`, and
 `abort` modes; plans declare `informational` or `required` review policy.
-Only the native worker that owns the delegation calls `submit_report`; the
-coordinator dispatches, waits, and reads finalized evidence. Every ID, digest,
+Only the native worker that owns the delegation calls `submit_report`; its
+completion handoff returns a concise `Summary` and exact `Report ref`. The
+coordinator dispatches, waits, and consumes that handoff without rereading the
+body merely to summarize it. A downstream worker reads finalized evidence only
+when its declared work requires the body. Every ID, digest,
 and cursor is opaque byte-for-byte return data for model callers.
 `read_reports` is the only report body/chunk reader: it accepts 1–20 unique
 known IDs in request order and resumes bounded section reads using its returned
@@ -206,6 +210,7 @@ as a clickable link with a localized summary and next step; `stale`, `conflict`,
 - [Orchestration ledger](../features/orchestration-ledger/index.md)
 - [Advisory governance and initiatives](../features/advisory-governance/index.md)
 - [Plugin packaging and validation](../features/plugin-packaging/index.md)
+- [Coordinator communication](../features/coordinator-communication/index.md)
 - [Knowledge-route contract](../features/knowledge-route-contract/index.md)
 - [Human-readable task views](../features/human-readable-task-views/index.md)
 - [Operator maintenance](../features/operator-maintenance/index.md)

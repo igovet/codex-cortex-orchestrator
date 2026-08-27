@@ -38,6 +38,7 @@ PUBLIC_RELEASE_FILES = (
     "docs/features/lifecycle-telemetry/index.md",
     "docs/features/orchestration-ledger/index.md",
     "docs/features/plugin-packaging/index.md",
+    "docs/features/coordinator-communication/index.md",
     ".agents/plugins/marketplace.json",
 )
 SUPPORT_SCRIPTS = (
@@ -59,6 +60,7 @@ PLUGIN_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
     "context-compaction",
+    "coordinator-communication",
     "cortex-control",
     "documentation-sync",
     "find-skills",

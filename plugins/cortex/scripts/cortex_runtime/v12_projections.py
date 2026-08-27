@@ -324,7 +324,7 @@ def _migrate_legacy_task_directory(store: Any, task_id: str, task_ref_value: str
     return compact
 
 
-def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
+def _view_metadata(store: Any, task_id: str, relative: str, *, require_fresh: bool = True) -> dict[str, Any]:
     try:
         task_ref_value = _projection_task_ref(store, task_id)
         fragment = _task_relative(task_ref_value, relative).relative_to(Path("tasks") / task_ref_value)
@@ -339,7 +339,7 @@ def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
         if row is None:
             return {"status": "stale", "path": None}
         source_sequence, digest, status = int(row[0]), str(row[1]), str(row[2])
-        if status != "ready" or source_sequence < int(latest):
+        if status != "ready" or (require_fresh and source_sequence < int(latest)):
             return {"status": "stale", "path": None}
         try:
             _regular(path, required=True)
@@ -365,7 +365,7 @@ def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
         return {"status": "unavailable", "path": None}
 
 
-def human_view(store: Any, task_id: str, relative: str) -> dict[str, Any]:
+def human_view(store: Any, task_id: str, relative: str, *, require_fresh: bool = True) -> dict[str, Any]:
     """Return only user-facing report/plan links; other ledger data is SQLite-only."""
     candidate = Path(relative)
     allowed = (
@@ -375,7 +375,7 @@ def human_view(store: Any, task_id: str, relative: str) -> dict[str, Any]:
     )
     if not allowed:
         return {"status": "disabled", "path": None}
-    return _view_metadata(store, task_id, relative)
+    return _view_metadata(store, task_id, relative, require_fresh=require_fresh)
 
 
 def _task_data(store: Any, task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:

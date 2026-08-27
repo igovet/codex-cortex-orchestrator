@@ -69,6 +69,10 @@ REPORT_ASSEMBLING_MAX_PER_TASK = 8
 REPORT_ASSEMBLING_MAX_BYTES_PER_TASK = 16 * 1024 * 1024
 REPORT_RETAINED_MAX_BYTES_PER_TASK = 128 * 1024 * 1024
 REPORT_READ_MAX_BYTES = 65_536
+# Compatibility wire form for older workers that serialized the bounded page
+# budget as a decimal string.  The range is encoded here so advertised input
+# validation agrees with the server boundary (0 through 65,536 inclusive).
+REPORT_READ_MAX_BYTES_STRING_PATTERN = r"^(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-6])$"
 REPORT_RESPONSE_MAX_BYTES = 224 * 1024
 REPORT_SECTION_MAX_LENGTH = 128
 REPORT_SECTION_PATTERN = r"^[a-z][a-z0-9_.-]{0,127}$"

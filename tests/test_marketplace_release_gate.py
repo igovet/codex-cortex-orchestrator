@@ -58,7 +58,7 @@ EXPECTED_INPUT_FIELDS = {
         "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en", "supersedes_report_ref",
         "review_policy", "idempotency_key",
     },
-    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "consumer_delegation_ref", "reader_kind"},
+    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "byte_budget", "consumer_delegation_ref", "reader_kind"},
     "set_governance_mode": {
         "task_ref", "mode", "rationale", "reason", "risk_factors", "source", "initiative_ref", "idempotency_key",
     },
@@ -74,7 +74,8 @@ EXPECTED_INPUT_FIELDS = {
     "record_user_decision": {
         "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en",
         "response_original", "response_en", "user_language", "approval_handle", "approval_view_content_digest",
-        "approval_view_source_sequence", "supersedes_decision_ref", "idempotency_key",
+        "approval_view_source_sequence", "supersedes_decision_ref", "idempotency_key", "report_ref",
+        "report_content_digest", "decision", "user_response_original", "english_normalization",
     },
 }
 
@@ -93,10 +94,7 @@ EXPECTED_REQUIRED_FIELDS = {
     "record_initiative": {"task_ref", "goal"},
     "inspect_governance": {"task_ref"},
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
-    "record_user_decision": {
-        "task_ref", "subject_type", "subject_ref", "decision_type", "prompt_en", "response_original", "response_en",
-        "user_language",
-    },
+    "record_user_decision": {"task_ref"},
 }
 
 MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
@@ -658,11 +656,17 @@ def _assert_tool_schemas(tools: Mapping[str, Mapping[str, Any]]) -> None:
         "chunk sections are bounded non-empty routing labels",
     )
     read_reports = tools["read_reports"]["inputSchema"]["properties"]
+    max_bytes_schema = read_reports["max_bytes"]
+    max_bytes_branches = max_bytes_schema.get("anyOf", [max_bytes_schema]) if isinstance(max_bytes_schema, Mapping) else []
+    max_bytes_integer = next(
+        (branch for branch in max_bytes_branches if isinstance(branch, Mapping) and branch.get("type") == "integer"),
+        None,
+    )
     require(
-        isinstance(read_reports["max_bytes"], Mapping)
-        and read_reports["max_bytes"].get("minimum") == 0
-        and isinstance(read_reports["max_bytes"].get("maximum"), int)
-        and read_reports["max_bytes"]["maximum"] <= 65_536,
+        isinstance(max_bytes_integer, Mapping)
+        and max_bytes_integer.get("minimum") == 0
+        and isinstance(max_bytes_integer.get("maximum"), int)
+        and max_bytes_integer["maximum"] <= 65_536,
         "bounded report reads advertise a metadata-only zero budget and finite response budget",
     )
     decision = tools["record_user_decision"]["inputSchema"]["properties"]
@@ -832,7 +836,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
 
     manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
     require(manifest.get("name") == "cortex", "marketplace manifest name")
-    require(str(manifest.get("version") or "").startswith("12.0.0"), "manifest is the V12 major release")
+    require(str(manifest.get("version") or "").startswith("12.0.0"), "manifest is the V12 release")
     require(isinstance(json.loads((plugin / ".mcp.json").read_text(encoding="utf-8")), dict), "MCP manifest is valid JSON")
     hook_manifest = plugin / "hooks" / "hooks.json"
     if hook_manifest.exists():
@@ -975,6 +979,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         "A native worker must never localize commentary or final responses into the user's Russian language.",
         "The coordinator must never assert documentation_not_required without a worker-owned documentation-impact report.",
         "The coordinator must never use a free-form role label as loaded profile proof.",
+        "The coordinator must suppress unchanged waits and hide raw report IDs from the user.",
     ):
         require(
             not protocol_violations(safe_prompt),
@@ -983,6 +988,16 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
 
     coordinator_skill = " ".join((plugin / "skills" / "orchestrator" / "SKILL.md").read_text(encoding="utf-8").split())
     control_skill = " ".join((plugin / "skills" / "cortex-control" / "SKILL.md").read_text(encoding="utf-8").split())
+    communication_skill = " ".join((plugin / "skills" / "coordinator-communication" / "SKILL.md").read_text(encoding="utf-8").split())
+    for marker in (
+        "result, then its user impact, then the next step",
+        "latest meaningful user message",
+        "Suppress an update",
+        "raw task/delegation/report/decision IDs",
+        "Humor is optional",
+        "does not add a runtime loader",
+    ):
+        require(marker in communication_skill, f"coordinator communication skill preserves user-facing policy: {marker}")
     for marker in (
         "The root coordinator is for orchestration only.",
         "Every project-facing task uses at least one native worker.",
@@ -1707,16 +1722,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                 "idempotency_key": "plan-decision-missing-digest",
             },
         )
-        require(_error_code(missing_plan_digest) == "invalid_argument", "plan decisions require the exact finalized manifest digest")
-        wrong_plan_digest, _ = server.tool_error(
-            "record_user_decision",
-            {
-                "task_id": task_a, "subject_type": "plan", "subject_id": plan_id, "subject_digest": "sha256:" + ("1" * 64),
-                "decision_type": "approve", "prompt_en": "Approve this plan revision?", "response_original": "Да",
-                "response_en": "Yes", "user_language": "ru", "idempotency_key": "plan-decision-wrong-digest",
-            },
-        )
-        require(_error_code(wrong_plan_digest) == "decision_subject_digest_mismatch", "plan decisions reject a stale or substituted revision digest")
+        require(_error_code(missing_plan_digest) == "validation_error", "the public decision schema requires the exact finalized plan manifest digest")
         plan_decision_args = {
             "task_id": task_a, "subject_type": "plan", "subject_id": plan_id, "subject_digest": plan_digest,
             "decision_type": "approve", "prompt_en": "Approve this plan revision?", "response_original": "Да, согласовано.",
@@ -1725,6 +1731,14 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         plan_decision_args.update(_approval_binding(server.tool(
             "read_reports", {"task_id": task_a, "report_ids": [plan_id], "max_bytes": 65_536},
         )))
+        wrong_plan_digest, _ = server.tool_error(
+            "record_user_decision",
+            plan_decision_args | {
+                "subject_digest": "sha256:" + ("1" * 64),
+                "idempotency_key": "plan-decision-wrong-digest",
+            },
+        )
+        require(_error_code(wrong_plan_digest) == "decision_subject_digest_mismatch", "plan decisions reject a stale or substituted revision digest after the complete public approval binding")
         plan_decision = server.tool("record_user_decision", plan_decision_args)
         decision_id = _decision_id(plan_decision)
         decision_record = plan_decision.get("decision")
@@ -3290,12 +3304,22 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "idempotency_key": "production-documentation-impact-report",
             },
         ))
-        documentation_coordinator_read = server.tool(
-            "read_reports", {"task_id": task_id, "report_ids": [documentation_id], "max_bytes": 65_536},
+        documentation_snapshot = server.tool("inspect_task", {"task_id": task_id, "after_sequence": 0, "limit": 200})
+        documentation_record = next(
+            (item for item in documentation_snapshot.get("reports") or []
+             if isinstance(item, Mapping) and item.get("report_id") == documentation_id),
+            None,
         )
         require(
-            (documentation_coordinator_read.get("reports") or [{}])[0].get("report_id") == documentation_id,
-            "the coordinator reads the finalized post-approval documentation-impact report before closure",
+            isinstance(documentation_record, Mapping)
+            and documentation_record.get("delegation_id") == documentation_delegation
+            and not any(
+                isinstance(item, Mapping)
+                and item.get("reader_kind") == "coordinator"
+                and item.get("report_id") == documentation_id
+                for item in documentation_snapshot.get("consumption_receipts") or []
+            ),
+            "closure evidence uses the exact technical-writer delegation/report relation without a coordinator report read",
         )
 
         verification_delegation, _verification_brief = delegation(
@@ -3525,7 +3549,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
     require(
         table_counts == {
-            "tasks": 1, "delegations": 5, "reports": 5, "chunks": 6, "decisions": 1,
+                "tasks": 1, "delegations": 5, "reports": 5, "chunks": 6, "decisions": 1,
             "assessments": 3, "initiatives": 1, "initiative_revisions": 2, "closures": 2,
         },
         "production task has exhaustive canonical entity counts rather than the broken live task's partial ledger",
@@ -3545,7 +3569,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
         "task_created", "delegation_created", "report_started", "report_chunk_appended", "report_chunk_appended", "report_submitted",
         "governance_mode_set", "report_read", "user_decision_recorded", "delegation_created", "report_submitted",
         "delegation_created", "report_read", "report_read", "report_submitted", "delegation_created",
-        "report_read", "report_read", "report_read", "report_submitted", "report_read", "delegation_created",
+            "report_read", "report_read", "report_read", "report_submitted", "delegation_created",
         "report_submitted", "initiative_created", "initiative_revised_by_closure", "governance_closure_submitted",
         "governance_closure_submitted",
     ]
@@ -3558,7 +3582,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
         and sequences == sorted(sequences)
         and len(sequences) == len(set(sequences))
         and all(row[3] == task_id for row in timeline_rows),
-        "every successful production mutation has one ordered task-scoped canonical timeline event, including chunks, report-read receipts, and two-stage closure",
+            "every successful production mutation has one ordered task-scoped canonical timeline event, including worker report-read receipts and two-stage closure",
     )
     require(
         all(not json.loads(str(row[8])).get("backfill") for row in timeline_rows)
@@ -3754,12 +3778,22 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
                 "idempotency_key": "backfill-r3-post-approval",
             },
         ))
-        documentation_coordinator_read = server.tool(
-            "read_reports", {"task_id": task_id, "report_ids": [documentation_id], "max_bytes": 65_536},
+        documentation_snapshot = server.tool("inspect_task", {"task_id": task_id, "after_sequence": 0, "limit": 200})
+        documentation_record = next(
+            (item for item in documentation_snapshot.get("reports") or []
+             if isinstance(item, Mapping) and item.get("report_id") == documentation_id),
+            None,
         )
         require(
-            (documentation_coordinator_read.get("reports") or [{}])[0].get("report_id") == documentation_id,
-            "the coordinator reads the finalized post-approval documentation-impact report before closure",
+            isinstance(documentation_record, Mapping)
+            and documentation_record.get("delegation_id") == documentation_delegation
+            and not any(
+                isinstance(item, Mapping)
+                and item.get("reader_kind") == "coordinator"
+                and item.get("report_id") == documentation_id
+                for item in documentation_snapshot.get("consumption_receipts") or []
+            ),
+            "closure evidence uses the exact technical-writer delegation/report relation without a coordinator report read",
         )
         initiative_id = _initiative_id(server.tool(
             "record_initiative",

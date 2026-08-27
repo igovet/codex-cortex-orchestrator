@@ -104,9 +104,11 @@
   evidenced only by `read_reports(reader_kind="worker", consumer_delegation_id=…)`
   receipts; coordinator reads never substitute for that evidence.
 - The owning native worker alone calls `submit_report` for its plan, result,
-  verification, synthesis, or documentation-impact evidence. The coordinator
-  creates/dispatches the delegation, waits, and reads its finalized report; a
-  report gap leads to follow-up, rework, or parent-linked replacement.
+  verification, synthesis, or documentation-impact evidence. Its completion
+  handoff returns a concise `Summary` and exact `Report ref`; the coordinator
+  consumes that handoff and does not reread the body merely to summarize it. A
+  downstream worker reads the finalized report only when its declared work
+  requires the body. A report gap leads to follow-up, rework, or replacement.
 - Use the immutable report types `progress`, `result`, `synthesis`, and `plan`.
   A plan's review policy is `informational` or `required`; review is a
   coordinator-owned ordinary-chat hold, never a backend gate. A required review
@@ -121,7 +123,9 @@
 - Preserve `read_reports` request order and its 20-report maximum; select only
   needed sections, respect its maximum 65,536-byte content budget, and continue
   with the returned cursor until complete. `max_bytes=0` is metadata-only
-  recovery. A worker must name its own delegation and may read only declared
+  recovery; deprecated `byte_budget` remains a compatibility alias and must
+  not conflict with `max_bytes` when both are supplied. A worker must name its
+  own delegation and may read only declared
   finalized inputs; retain the exact receipt digest, chunk indexes, and cursor
   transitions. Bound task/delegation/governance inspection with `after_sequence`
   plus `limit` and preserve `next_sequence`/`has_more`.

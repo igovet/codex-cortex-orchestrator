@@ -147,6 +147,17 @@ behavior, or explicit external/destructive authorization. Never turn internal
 ledger status, mode, dependency, closure, retry, or worker conditions into a
 user decision.
 
+Pipeline progress is continuous until the requested outcome and closure
+evidence are complete. A worker completion, incomplete or waiting stage,
+technical/documentation/review error, Demo or production gate, or quiet host
+interval is evidence for the next safe coordinator action, not permission to
+end the task. Reconcile and dispatch, follow up, replace, or recover the next
+safe node automatically. The coordinator may pause before closure only after
+asking one genuine user question that materially changes requirements, scope,
+acceptance, or required external/destructive authority; after the answer,
+resume from that decision. Never leave an unfinished DAG stopped without such
+a question and an explicit recorded reason.
+
 When a genuine decision is required, ask one complete question in the language
 of the latest meaningful user message and end the turn. Silence is not an
 answer. Record the exact response and separate English normalization against

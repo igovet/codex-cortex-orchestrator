@@ -560,7 +560,7 @@ flowchart TB
     VCHECK -. "worker-owned verification" .-> CMDS
     FILES --- NOWRITE["Cortex writes no .codex directory,<br/>ledger, plan, report, or view under project_root"]
 
-    P1 --> EVIDENCE["Coordinator reads known report_refs<br/>in requested order with byte/section pagination<br/>passes only relevant refs into later delegations"]
+    P1 --> EVIDENCE["Coordinator consumes worker Summary + exact Report ref<br/>passes only relevant refs into later delegations"]
     P2 --> EVIDENCE
     P3 --> EVIDENCE
     MISS --> REWORK
@@ -592,7 +592,7 @@ flowchart TB
     DOCIMPACT -- "material impact" --> DOCDEL
     DP --> DOCVERIFY
     DP -. "missing/failed evidence" .-> REWORK
-    DVP --> DOCREADY["Coordinator reads documentation reports"]
+    DVP --> DOCREADY["Coordinator consumes documentation handoff"]
     DVP -. "inadequate evidence" .-> REWORK
     DOCIMPACT -- "no material impact" --> NODOCEVID{"Finalized worker report already<br/>contains explicit no-doc rationale?"}
     NODOCEVID -- "yes" --> NODOC["Use finalized worker-owned report<br/>explicit English documentation-impact section<br/>no meaningless edit"]
@@ -784,9 +784,12 @@ apply.
 6. **Immutable evidence with strict ownership.** Workers alone call
    `submit_report` for their own `progress`, `result`, `synthesis`, `plan`,
    verification, and documentation-impact reports. The coordinator creates the
-   delegation, dispatches its exact rendered brief, waits, and reads the
-   finalized report; it never submits on behalf of a worker. A small report can
-   be submitted once; a large report uses a stable ID across `begin`, sequential
+   delegation, dispatches its exact rendered brief, waits, and consumes the
+   worker's concise native `Summary` plus exact server-returned `Report ref`;
+   it does not reread the completed report merely to summarize it and never
+   submits on behalf of a worker. A downstream worker reads the report body
+   only when its declared work genuinely requires it. A small report can be
+   submitted once; a large report uses a stable ID across `begin`, sequential
    `append`, exact-manifest `finalize`, or explicit `abort`. Every compact ref, digest,
    and cursor is copied byte-for-byte from a successful result or inspection,
    never parsed, reconstructed, normalized, or suffixed.
@@ -868,13 +871,15 @@ per task. Each accepted append records the task-scoped
 `report_chunk_appended` event as well as the report start, final submission, or
 abort event. `read_reports` accepts 1–20 unique known IDs in requested order, up to 32
 section filters, an opaque selection-scoped cursor, and `max_bytes` up to 65,536.
-It returns ordered, complete JSON chunks within a 224 KiB response ceiling;
-`max_bytes=0` returns metadata only. A small complete one-chunk report may also
+Deprecated `byte_budget` remains an equivalent compatibility alias; supplying
+both with different values is rejected. It returns ordered, complete JSON chunks
+within a 224 KiB response ceiling; `max_bytes=0` returns metadata only. A small complete one-chunk report may also
 expose legacy `content`. Task/delegation inspection never exposes bodies.
 
 Later delegations receive only relevant finalized `report_refs` and their exact
 manifest digests, plus at most 20 selected user-decision refs. Before using a
-predecessor, a worker calls `read_reports` with `reader_kind="worker"` and its
+predecessor's full body, a worker calls `read_reports` with
+`reader_kind="worker"` and its
 own `consumer_delegation_ref`; the database records the exact returned digest,
 chunk indexes, and input/output cursor chain. Coordinator reads are explicitly
 classified and do not prove downstream consumption. The worker brief exposes
@@ -1126,16 +1131,16 @@ from host metadata, thread identity, or process working directory.
 | `create_delegation` | Use `task_ref` to persist bounded work with separate human `role`, exact packaged `profile_name`, required textual `scope`, exact model/effort, and selected report/decision inputs; return an attested worker brief and exact native-dispatch payload carrying the saved root. |
 | `read_delegation` | Use `delegation_ref` plus `after_sequence` to resolve and read compact history without a receipt; do not supply `task_ref` or `task_id`. |
 | `submit_report` | Use `delegation_ref` for a single body or stable-reference `begin`/`append`/`finalize`/`abort` report: `progress`, `result`, `synthesis`, or `plan`; do not supply `task_ref` or `task_id`. |
-| `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and byte budget; do not supply `task_ref` or `task_id`. Worker handoff reads additionally name the exact consuming delegation reference and leave immutable page receipts. |
+| `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and `max_bytes` budget; deprecated `byte_budget` is an equivalent alias, and differing simultaneous values are rejected. Do not supply `task_ref` or `task_id`. Worker handoff reads additionally name the exact consuming delegation reference and leave immutable page receipts. |
 | `set_governance_mode` | Use `task_ref` to append a `minimal`, `light`, or `full` assessment. |
 | `record_initiative` | Use `task_ref` as the project anchor and only `dependency_refs`, `linked_task_refs`, `linked_delegation_refs`, `linked_report_refs`, and `linked_decision_refs` for initiative relationships. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative governance history. |
 | `submit_governance_closure` | Use `task_ref` to append an advisory closure with required `subject_type` and matching compact `subject_ref`. Close relevant initiatives first, then record the distinct task-subject closure before a completion final. |
-| `record_user_decision` | Use `task_ref` to append coordinator-attributed original/English user evidence for an exact task/plan/initiative/delegation/report subject; require digest binding for plan/report. |
+| `record_user_decision` | Use `task_ref` to append coordinator-attributed original/English user evidence for an exact task/plan/initiative/delegation/report subject; require digest binding for plan/report. A complete, non-mixed legacy plan-decision shape remains a compatibility path. |
 
 There is no coordinator/worker audience filtering, capability matrix,
 host-bound authority, read receipt, profile-based lifecycle admission, action
-multiplexer, or compatibility alias. The server validates the exact packaged
+multiplexer, or tool-name alias. The server validates the exact packaged
 `profile_name` and projects native arguments statelessly, but never spawns,
 binds, or authorizes the native worker.
 
@@ -1419,7 +1424,7 @@ The complete commands, safety boundaries, and verification contract are in
 
 ### Versioning
 
-The V12 public contract begins at **12.0.0**. Version and build identity are
+The current V12 public contract release is **12.0.0**. Version and build identity are
 defined by `plugins/cortex/.codex-plugin/plugin.json`.
 
 When changing the plugin, update the version according to SemVer:
@@ -1472,7 +1477,9 @@ compatible with V12.
 - Keep large report content behind the single/chunked `submit_report` protocol
   and bounded `read_reports` section/cursor/byte selection. Do not expose report
   bodies through task or delegation inspection. The owning native worker alone
-  calls `submit_report`; the coordinator waits and reads finalized reports.
+  calls `submit_report`; the coordinator waits and consumes the worker's
+  concise Summary plus exact Report ref. A downstream worker reads the body
+  through `read_reports` only when its declared work requires it.
 - Treat `record_user_decision` as append-only coordinator-attributed evidence.
   Bind plan/report decisions to exact canonical digests. Preserve the single
   documented light/full plan-approval relation; never add approval, rejection,

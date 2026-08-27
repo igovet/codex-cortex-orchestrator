@@ -2418,6 +2418,14 @@ class V12Store:
             raise V12StoreError("approval_handle is invalid", code="invalid_argument", details={"field": "approval_handle"})
         if payload["approval_view_source_sequence"] is not None and (not isinstance(payload["approval_view_source_sequence"], int) or isinstance(payload["approval_view_source_sequence"], bool) or payload["approval_view_source_sequence"] < 0):
             raise V12StoreError("approval_view_source_sequence is invalid", code="invalid_argument", details={"field": "approval_view_source_sequence"})
+        if requires_plan_approval_view:
+            # Receipts and unrelated chronology may advance timeline after the
+            # handle was minted.  Approval still requires a real filesystem
+            # and digest check, but not a projection newer than every event.
+            from cortex_runtime.v12_projections import human_view as verified_human_view
+            current_view = verified_human_view(self, anchor, f"plans/revisions/{subject}.md", require_fresh=False)
+            if current_view.get("status") != "ready" or current_view.get("content_digest") != payload["approval_view_content_digest"]:
+                raise V12StoreError("approval view is no longer ready", code="approval_view_not_ready")
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
             bound_digest: str | None
@@ -2468,9 +2476,12 @@ class V12Store:
                     or approval_handle["consumed_decision_id"] is not None
                 ):
                     raise V12StoreError("approval handle does not match the ready plan view", code="approval_handle_mismatch")
-                latest = int(connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM timeline WHERE task_id=?", (anchor,)).fetchone()[0])
                 view = connection.execute("SELECT source_sequence,content_digest,status FROM projection_files WHERE task_id=? AND relative_path=?", (anchor, expected_relative)).fetchone()
-                if view is None or str(view["status"]) != "ready" or int(view["source_sequence"]) != payload["approval_view_source_sequence"] or str(view["content_digest"]) != payload["approval_view_content_digest"] or latest != payload["approval_view_source_sequence"]:
+                # The handle binds the immutable plan and the verified view
+                # digest.  Later task-scoped chronology (including read
+                # receipts and unrelated initiative events) must not revoke
+                # that relation when the same view content remains ready.
+                if view is None or str(view["status"]) != "ready" or str(view["content_digest"]) != payload["approval_view_content_digest"]:
                     raise V12StoreError("approval view is no longer ready", code="approval_view_not_ready")
             gate = self._governance_gate(connection, anchor)
             if kind == "plan" and gate is not None and gate["plan_required"]:
@@ -2639,9 +2650,9 @@ class V12Store:
         The relation check intentionally never reads a report body or closure
         evidence.  A light/full task needs a post-approval ``technical_writer``
         result that names the approved plan/decision and every earlier finalized
-        result report, then has been read by the coordinator.  This makes the
-        final documentation stage durable without turning opaque prose into a
-        backend policy language.
+        result report.  The worker handoff and its durable report are sufficient;
+        the coordinator must not reread opaque report prose merely to close the
+        task.
         """
         gate = self._governance_gate(connection, task_id)
         if gate is None or gate["mode"] not in {"light", "full"}:
@@ -2684,14 +2695,14 @@ class V12Store:
                 "ORDER BY created_sequence",
                 (delegation["delegation_id"], task_id),
             ).fetchall()
-            for report in reports:
-                consumed = connection.execute(
-                    "SELECT 1 FROM report_consumption_receipts WHERE task_id=? AND report_id=? "
-                    "AND reader_kind='coordinator' AND created_sequence>? LIMIT 1",
-                    (task_id, str(report["report_id"]), int(report["created_sequence"])),
-                ).fetchone()
-                if consumed is not None:
-                    return
+            # The finalized worker-owned report is the durable handoff.  Its
+            # body remains available to downstream workers through read_reports,
+            # but coordinator consumption is deliberately not a closure
+            # prerequisite.  Requiring a receipt here recreated the protocol
+            # contradiction where the coordinator had to reread the report it
+            # had already received as a Summary + exact Report ref.
+            if reports:
+                return
         raise V12StoreError(
             "documentation impact evidence is incomplete before closure",
             code="documentation_impact_evidence_missing",

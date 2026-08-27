@@ -21,7 +21,7 @@ from cortex_runtime.v12_contract import (
     MAX_PAGE_LIMIT,
     MAX_REPORT_IDS,
     PROJECT_ROOT_MAX_LENGTH,
-    PLAN_REVIEW_POLICIES, REPORT_MODES, REPORT_READ_MAX_BYTES,
+    PLAN_REVIEW_POLICIES, REPORT_MODES, REPORT_READ_MAX_BYTES, REPORT_READ_MAX_BYTES_STRING_PATTERN,
     REPORT_SECTION_MAX_LENGTH, REPORT_SECTION_PATTERN, REPORT_STATUSES,
     REPORT_TYPES,
     ROLE_MAX_LENGTH, LANGUAGE_TAG_MAX_LENGTH, LANGUAGE_TAG_PATTERN, TASK_CONTRACT_ITEM_MAX_LENGTH,
@@ -226,6 +226,7 @@ _PROPERTY_DESCRIPTIONS: dict[str, str] = {
     "sections": "Optional unique report section labels. The continuation cursor is valid only for the same ordered IDs and filters.",
     "cursor": "Opaque read_reports continuation cursor. Copy it byte-for-byte and reuse it only with the exact original report_ids and sections.",
     "max_bytes": "Maximum encoded report body bytes for this page. Zero returns metadata only and never consumes a cursor page.",
+    "byte_budget": "Deprecated compatibility alias for max_bytes. Do not supply both with different values.",
     "rationale": "Optional bounded advisory governance rationale. It records model or user evidence and never blocks coordination.",
     "reason": "Compatibility alias for rationale. Prefer rationale; when both are supplied, rationale is retained.",
     "risk_factors": "Optional bounded advisory risk labels for this governance assessment.",
@@ -709,15 +710,16 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                 },
                 ("delegation_ref",),
             ),
-            "outputSchema": _tool_output_schema("report", "replayed", optional_success_fields=("assembly_state", "next_chunk_index", "accepted_chunk_index", "chunk_digest", "chunk_bytes", "current_content_digest", "human_view")),
+            "outputSchema": _tool_output_schema("report", "replayed", optional_success_fields=("assembly_state", "next_chunk_index", "accepted_chunk_index", "chunk_digest", "chunk_bytes", "current_content_digest", "human_view", "approval_view")),
         },
         "read_reports": {
-            "description": "Read bounded complete report chunks in requested report order; report_refs resolve and verify one authoritative task.",
+            "description": "Read bounded complete report chunks in requested report order; report_refs resolve and verify one authoritative task. byte_budget is a deprecated alias for max_bytes and conflicting values are rejected.",
             "inputSchema": _closed({
                 "report_refs": _entity_ref_array("report", minimum=1, maximum=MAX_REPORT_IDS),
                 "sections": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": _string(maximum=REPORT_SECTION_MAX_LENGTH)},
                 "cursor": _string(maximum=2_048),
-                    "max_bytes": {"type": "integer", "minimum": 0, "maximum": REPORT_READ_MAX_BYTES, "default": REPORT_READ_MAX_BYTES},
+                    "max_bytes": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": REPORT_READ_MAX_BYTES}, {"type": "string", "pattern": REPORT_READ_MAX_BYTES_STRING_PATTERN}], "default": REPORT_READ_MAX_BYTES, "description": "Maximum encoded report body bytes for this page. Omit unless a smaller downstream-worker budget is genuinely needed; legacy canonical decimal strings are accepted."},
+                    "byte_budget": {"type": "integer", "minimum": 0, "maximum": REPORT_READ_MAX_BYTES, "description": "Deprecated alias for max_bytes; conflicting simultaneous values are rejected."},
                     "consumer_delegation_ref": delegation_id,
                     "reader_kind": _string(enum=("worker", "coordinator"), maximum=16, description="Worker reads require the exact consuming delegation; omitted legacy reads are classified as coordinator."),
                 }, ("report_refs",)),
@@ -768,7 +770,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "outputSchema": _tool_output_schema("initiatives", "assessments", "closures", "initiative_revisions", "links", "warnings", "projection", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
         },
         "submit_governance_closure": {
-            "description": "Append one advisory closure anchored by task_ref. For light/full governance, Cortex first requires a coordinator-consumed finalized result from a post-approval technical_writer delegation whose compact inputs include the approved plan report, approval decision, and every relevant earlier finalized result report; report prose and closure evidence remain opaque. When relevant initiatives exist, close each initiative first, then copy its returned next_action arguments into one distinct task closure with subject_type=task and subject_ref exactly equal to task_ref; only that task closure marks the task closed. unresolved_risks, follow_ups, and opaque completion_notes are optional for either subject; initiative_status is optional only for initiative subjects.",
+            "description": "Append one advisory closure anchored by task_ref. For light/full governance, Cortex first requires a finalized worker-owned result from a post-approval technical_writer delegation whose compact inputs include the approved plan report, approval decision, and every relevant earlier finalized result report; the worker handoff Summary and exact Report ref are sufficient, and coordinator report-body rereading is not required. Report prose and closure evidence remain opaque. When relevant initiatives exist, close each initiative first, then copy its returned next_action arguments into one distinct task closure with subject_type=task and subject_ref exactly equal to task_ref; only that task closure marks the task closed. unresolved_risks, follow_ups, and opaque completion_notes are optional for either subject; initiative_status is optional only for initiative subjects.",
             "inputSchema": _closed(
                 {
                     "task_ref": task_ref,
@@ -795,9 +797,12 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             ),
         },
         "record_user_decision": {
-            "description": "Append an ordinary-chat user decision asserted by the coordinator. A plan decision always needs its exact finalized report digest and one new non-empty response. Only decision_type=approve additionally requires a returned ready approval_view, its digest/sequence, and the server-issued approval_handle. A revision or cancellation remains bound to the immutable plan digest but is not blocked by later unrelated chronology. Original task text, silence, or inferred consent is invalid. The handle proves only the ready-view relation, not a host-authenticated user turn.",
-            "inputSchema": _closed(
-                {
+            "description": "Append an ordinary-chat user decision asserted by the coordinator. A plan decision always needs its exact finalized report digest and one new non-empty response. Only decision_type=approve additionally requires a returned ready approval_view, its digest/sequence, and the server-issued approval_handle. A revision or cancellation remains bound to the immutable plan digest but is not blocked by later unrelated chronology. Original task text, silence, or inferred consent is invalid. The handle proves only the ready-view relation, not a host-authenticated user turn. A deprecated legacy shape using report_ref, report_content_digest, decision, user_response_original, and english_normalization is accepted only as a complete non-mixed shape.",
+            "inputSchema": {
+                "$schema": _JSON_SCHEMA_DRAFT_2020_12,
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
                     "task_ref": task_ref,
                     "subject_type": _string(enum=DECISION_SUBJECTS, maximum=16),
                     "subject_ref": _string(maximum=14, pattern=r"^[tdriu]_[0-9a-f]{12}$", description="Exact compact reference for the selected subject; task decisions use the anchored task_ref."),
@@ -812,9 +817,24 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                     "approval_view_source_sequence": {"type": "integer", "minimum": 0, "description": "Exact ready approval_view.source_sequence. Required only for decision_type=approve."},
                     "supersedes_decision_ref": decision_id,
                     "idempotency_key": idempotency_key,
+                    "report_ref": _entity_ref("report", description="Deprecated legacy alias for subject_ref when recording a plan decision."),
+                    "report_content_digest": _string(minimum=0, maximum=71, pattern=DIGEST_PATTERN, description="Deprecated legacy alias for subject_digest."),
+                    "decision": _string(enum=DECISION_TYPES, maximum=32, description="Deprecated legacy alias for decision_type."),
+                    "user_response_original": _string(minimum=0, description="Deprecated legacy alias for response_original."),
+                    "english_normalization": _string(minimum=0, description="Deprecated legacy alias for response_en."),
                 },
-                ("task_ref", "subject_type", "subject_ref", "decision_type", "prompt_en", "response_original", "response_en", "user_language"),
-            ),
+                "required": ["task_ref"],
+                "oneOf": [
+                    {
+                        "required": ["task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en", "response_original", "response_en", "user_language"],
+                        "not": {"anyOf": [{"required": [name]} for name in ("report_ref", "report_content_digest", "decision", "user_response_original", "english_normalization")]},
+                    },
+                    {
+                        "required": ["task_ref", "report_ref", "report_content_digest", "decision", "user_response_original", "english_normalization"],
+                        "not": {"anyOf": [{"required": [name]} for name in ("subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en", "response_original", "response_en", "user_language")]},
+                    },
+                ],
+            },
             "outputSchema": _tool_output_schema("decision", "replayed", optional_success_fields=("human_view",)),
         },
     }

@@ -77,6 +77,24 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   those exact consumed references in your own finalized report. If an input
   report is incomplete, mismatched, or unreadable, submit a blocked/partial
   report; do not pretend it was consumed or launch a successor handoff.
+
+- Omit `read_reports.max_bytes` unless a downstream worker genuinely needs a
+  smaller page budget. When supplied, use an exact JSON integer from 0 through
+  65536. The server tolerates the legacy canonical decimal-string form for
+  compatibility, but new calls must use the integer form.
+
+## Native coordinator handoff
+
+- Final native handoff to the coordinator is compact and must be emitted after
+  the report mutation succeeds. Include exactly one short `Summary:` stating
+  the outcome, the next owner/action, and any unresolved risk, followed by
+  `Report ref:` copied byte-for-byte from the successful `submit_report`
+  structuredContent handle. Do not paste report content, canonical IDs, paths,
+  JSON, or a reconstructed/ellipsized reference into that handoff. The
+  coordinator uses this summary and report ref for routine progression; it
+  does not reread the report body. A downstream worker that genuinely needs
+  the evidence receives the report ref through its declared input handoff and
+  reads it itself.
 - If you need a real user decision, submit a blocked or partial report that
   identifies the exact unresolved project/product, requirement, scope, or
   acceptance question, evidence, consequences, decision subject, and current

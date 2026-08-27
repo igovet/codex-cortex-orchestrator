@@ -7,9 +7,10 @@ loading V11 contracts or importing the executable server entry point.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 from typing import Any
 
-from cortex_runtime.v12_contract import task_ref as compact_task_ref
+from cortex_runtime.v12_contract import REPORT_READ_MAX_BYTES, REPORT_READ_MAX_BYTES_STRING_PATTERN, task_ref as compact_task_ref
 from cortex_runtime.v12_store import V12Store, V12StoreError
 
 
@@ -20,6 +21,21 @@ class V12ServiceError(ValueError):
         super().__init__(message)
         self.code = code
         self.details = dict(details or {})
+
+
+def _normalize_report_read_budget(value: object, *, field: str) -> int:
+    """Normalize the bounded read budget at the public service boundary."""
+    if isinstance(value, bool):
+        raise V12ServiceError(f"{field} is invalid", code="invalid_argument", details={"field": field})
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str) and re.fullmatch(REPORT_READ_MAX_BYTES_STRING_PATTERN, value):
+        normalized = int(value)
+    else:
+        raise V12ServiceError(f"{field} is invalid", code="invalid_argument", details={"field": field})
+    if not 0 <= normalized <= REPORT_READ_MAX_BYTES:
+        raise V12ServiceError(f"{field} is invalid", code="invalid_argument", details={"field": field})
+    return normalized
 
 
 def _create_store(project_root: object) -> V12Store:
@@ -75,6 +91,44 @@ def _record_list_in_task(store: V12Store, values: list[str] | None, *, label: st
     if not isinstance(values, list):
         return values
     return [_record_in_task(store, value, label=label) for value in values]
+
+
+def _approved_gate_evidence(store: V12Store, task_id: str) -> tuple[str, str] | None:
+    """Return only a fully verified persisted plan/approval pair.
+
+    This is intentionally a read-only convenience for the public creation
+    boundary.  The store remains authoritative and repeats all governance
+    checks inside the create transaction; an incomplete or inconsistent gate
+    therefore cannot be turned into guessed evidence here.
+    """
+    def read(connection: Any) -> tuple[str, str] | None:
+        gate = store._governance_gate(connection, task_id)
+        if not gate or not gate.get("plan_required"):
+            return None
+        plan_id = gate.get("plan_report_id")
+        decision_id = gate.get("approval_decision_id")
+        digest = gate.get("plan_digest")
+        if not all(isinstance(value, str) and value for value in (plan_id, decision_id, digest)):
+            return None
+        try:
+            plan = store._report(connection, plan_id, task_id=task_id)
+            decision = store._decision(connection, decision_id, task_id=task_id)
+        except V12StoreError:
+            return None
+        if (
+            plan.get("report_type") != "plan"
+            or plan.get("assembly_state") != "finalized"
+            or plan.get("status") != "completed"
+            or plan.get("content_digest") != digest
+            or decision.get("decision_type") != "approve"
+            or decision.get("subject_type") != "plan"
+            or decision.get("subject_id") != plan_id
+            or decision.get("subject_digest") != digest
+        ):
+            return None
+        return plan_id, decision_id
+
+    return store._read(read)
 
 
 def _task_list_in_project(store: V12Store, values: list[str] | None) -> list[str] | None:
@@ -216,6 +270,25 @@ def _with_human_view(store: V12Store, result: Any) -> Any:
         if len(reports) == 1 and isinstance(reports[0], Mapping) and isinstance(reports[0].get("task_id"), str) and isinstance(reports[0].get("report_id"), str):
             task = reports[0]["task_id"]
             relative = f"plans/revisions/{reports[0]['report_id']}.md" if reports[0].get("report_type") == "plan" else f"reports/{reports[0]['report_id']}.md"
+    # A finalized plan submission is already the authoritative report handoff.
+    # Expose its verified approval binding in the same receipt so the
+    # coordinator can progress from the worker acknowledgement without
+    # re-reading the report body.  The binding is produced only by the same
+    # server-side readiness checks used by read_reports.
+    if (
+        approval_report is None
+        and isinstance(value, Mapping)
+        and value.get("report_type") == "plan"
+        and value.get("assembly_state") == "finalized"
+        and value.get("status") == "completed"
+        and isinstance(value.get("task_id"), str)
+        and isinstance(value.get("delegation_id"), str)
+        and isinstance(value.get("report_id"), str)
+        and isinstance(value.get("content_digest"), str)
+    ):
+        approval_report = value
+        task = str(value["task_id"])
+        relative = f"plans/revisions/{value['report_id']}.md"
     if task is not None and relative is not None:
         result = dict(result)
         result["human_view"] = store.human_view(task, relative)
@@ -298,6 +371,17 @@ def create_delegation(
         label="decision_id",
     ))
     approval_decision_id = _record_in_task(store, approval_decision_ref, label="decision_id")
+    # A coordinator may rely on the current task's already-approved gate.  In
+    # that case derive only the exact persisted pair; never synthesize or
+    # replace caller-provided references.  The store revalidates the pair in
+    # the create transaction, including its profile-specific rules.
+    gate_evidence = _approved_gate_evidence(store, canonical)
+    if gate_evidence is not None:
+        plan_id, gate_decision_id = gate_evidence
+        if plan_id not in (input_report_ids or []):
+            input_report_ids = [*(input_report_ids or []), plan_id]
+        if approval_decision_id is None:
+            approval_decision_id = gate_decision_id
     if approval_decision_id is not None and approval_decision_id not in (input_decision_ids or []):
         input_decision_ids = [*(input_decision_ids or []), approval_decision_id]
     return _mutation_store(
@@ -369,15 +453,23 @@ def submit_report(
     )
 
 
-def read_reports(*, report_ids: list[str] | None = None, report_refs: list[str] | None = None, sections: list[str] | None = None, cursor: str | None = None, max_bytes: int = 65_536, consumer_delegation_id: str | None = None, consumer_delegation_ref: str | None = None, reader_kind: str | None = None, task_id: str | None = None) -> dict[str, Any]:
+def read_reports(*, report_ids: list[str] | None = None, report_refs: list[str] | None = None, sections: list[str] | None = None, cursor: str | None = None, max_bytes: int | None = None, byte_budget: int | None = None, consumer_delegation_id: str | None = None, consumer_delegation_ref: str | None = None, reader_kind: str | None = None, task_id: str | None = None) -> dict[str, Any]:
     """Read ordered report chunks and append classified structural receipts."""
+    normalized_max = _normalize_report_read_budget(max_bytes, field="max_bytes") if max_bytes is not None else None
+    normalized_alias = _normalize_report_read_budget(byte_budget, field="byte_budget") if byte_budget is not None else None
+    if normalized_alias is not None:
+        if normalized_max is not None and normalized_max != normalized_alias:
+            raise V12ServiceError("max_bytes and byte_budget conflict", code="invalid_argument", details={"field": "byte_budget"})
+        normalized_max = normalized_alias
+    if normalized_max is None:
+        normalized_max = REPORT_READ_MAX_BYTES
     report_ids = report_refs if report_refs is not None else report_ids
     if not isinstance(report_ids, list) or not report_ids:
         raise V12ServiceError("report_ids are invalid", code="invalid_argument", details={"field": "report_ids"})
     store, _canonical = _record_store(report_ids[0], label="report_id")
     canonical_reports = _record_list_in_task(store, report_ids, label="report_id")
     consumer = consumer_delegation_ref if consumer_delegation_ref is not None else consumer_delegation_id
-    return _call_task(canonical_reports[0], "read_reports", task_id=task_id, report_ids=canonical_reports, sections=sections, cursor=cursor, max_bytes=max_bytes, consumer_delegation_id=_record_in_task(store, consumer, label="delegation_id"), reader_kind=reader_kind, store=store)
+    return _call_task(canonical_reports[0], "read_reports", task_id=task_id, report_ids=canonical_reports, sections=sections, cursor=cursor, max_bytes=normalized_max, consumer_delegation_id=_record_in_task(store, consumer, label="delegation_id"), reader_kind=reader_kind, store=store)
 
 
 def set_governance_mode(
@@ -512,7 +604,7 @@ def record_user_decision(
     *,
     task_ref: str | None = None,
     task_id: str | None = None,
-    subject_type: str,
+    subject_type: str | None = None,
     subject_id: str | None = None,
     decision_type: str | None = None,
     prompt_en: Any = None,
@@ -527,9 +619,63 @@ def record_user_decision(
     idempotency_key: str | None = None,
     subject_ref: str | None = None,
     supersedes_decision_ref: str | None = None,
+    # Compatibility aliases used by pre-V12 facades.  They are accepted only
+    # as one complete legacy shape and are normalized before storage.
+    report_ref: str | None = None,
+    report_content_digest: str | None = None,
+    decision: str | None = None,
+    user_response_original: Any = None,
+    english_normalization: Any = None,
 ) -> dict[str, Any]:
     """Persist an asserted ordinary-chat user decision as non-authoritative evidence."""
     store, canonical = _task_store(task_ref, task_id=task_id)
+    legacy_values = (report_ref, report_content_digest, decision, user_response_original, english_normalization)
+    legacy_present = any(value is not None for value in legacy_values)
+    if legacy_present:
+        if not all(value is not None for value in legacy_values) or any(
+            value is not None
+            for value in (subject_type, subject_id, subject_digest, decision_type, prompt_en, response_original, response_en, user_language)
+        ):
+            raise V12ServiceError(
+                "legacy decision aliases must be complete and cannot be mixed with current fields",
+                code="validation_error",
+                details={"field": "record_user_decision"},
+            )
+        try:
+            def decision_defaults(connection: Any) -> tuple[Any, Any]:
+                task = store._task(connection, canonical)
+                return task["objective"], task["user_language"]
+            prompt_en, user_language = store._read(decision_defaults)
+        except V12StoreError as exc:
+            raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+        subject_type = "plan"
+        subject_ref = _record_in_task(store, report_ref, label="report_id")
+        subject_digest = report_content_digest
+        decision_type = decision
+        response_original = user_response_original
+        response_en = english_normalization
+        # Very old callers did not have approval-view fields.  For an approve
+        # request, obtain a fresh server-verified view and opaque handle rather
+        # than weakening the current approval contract or inventing values.
+        if str(decision).lower() == "approve" and all(
+            value is None for value in (approval_handle, approval_view_content_digest, approval_view_source_sequence)
+        ):
+            view = store.human_view(canonical, f"plans/revisions/{subject_ref}.md")
+            if view.get("status") != "ready" or view.get("content_digest") is None or view.get("source_sequence") is None:
+                raise V12ServiceError("approval view is not currently ready", code="approval_view_not_ready")
+            try:
+                approval_handle = store.ready_approval_handle(
+                    task_id=canonical,
+                    report_id=subject_ref,
+                    report_content_digest=report_content_digest,
+                    view_relative_path=f"plans/revisions/{subject_ref}.md",
+                    view_content_digest=view["content_digest"],
+                    view_source_sequence=view["source_sequence"],
+                )
+            except V12StoreError as exc:
+                raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+            approval_view_content_digest = view["content_digest"]
+            approval_view_source_sequence = view["source_sequence"]
     return _mutation_store(
         store,
         "record_user_decision",

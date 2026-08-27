@@ -49,7 +49,7 @@ server does not authorize any of those actions.
 
 The root coordinator is an orchestration-only control plane. It may define the
 outcome and acceptance criteria, select or revise governance, use the ledger,
-create and coordinate workers, read their immutable reports, decide rework or
+create and coordinate workers, consume their native report handoffs, decide rework or
 replacement, record advisory closure, and synthesize the user answer. It must
 never inspect or search source/code/configuration, create or edit
 target-project files, run project commands, builds, tests, browser checks, or
@@ -137,13 +137,15 @@ both `subject_type` and the matching compact task or initiative `subject_ref`.
 When a task has relevant initiatives, close each initiative first, then record
 the distinct task-subject closure that alone marks the task closed.
 
-`record_user_decision` is the durable record of an ordinary-chat decision. It
-requires `task_ref`, subject type and ID, decision type, English prompt context,
-exact `response_original`, English `response_en`, and `user_language`; plan
-and report subjects also require the exact immutable `subject_digest`. A plan
-decision binds only that completed, finalized plan revision. The record may
-supersede a prior decision on the same subject, but it never replaces original
-wording or acts as a bearer approval token.
+`record_user_decision` is the durable record of an ordinary-chat decision. Its
+current form requires `task_ref`, subject type and ID, decision type, English
+prompt context, exact `response_original`, English `response_en`, and
+`user_language`; plan and report subjects also require the exact immutable
+`subject_digest`. A complete, non-mixed legacy plan-decision shape remains a
+compatibility path; partial or mixed forms are rejected. A plan decision binds
+only that completed, finalized plan revision. The record may supersede a prior
+decision on the same subject, but it never replaces original wording or acts as
+a bearer approval token.
 The mutation response is compact: it may include at most a 512-character
 English response excerpt and never returns `response_original`.
 
@@ -189,10 +191,15 @@ review policy without creating a backend gate.
 
 Reading a delegation or report creates no receipt and no lifecycle fact.
 `read_reports` returns at most 20 unique known reports in the exact requested
-order and is the only report body/chunk reader. It returns only complete JSON
+order and is the only report body/chunk reader. A coordinator does not call it
+merely to summarize a completed worker report: the worker must return a concise
+`Summary` and exact `Report ref`. Downstream workers use `read_reports` when
+their declared work genuinely requires the report body. It returns only complete JSON
 chunks that fit its bounded byte budget (at most 65,536 bytes), with a
 selection-scoped cursor for resume; `max_bytes=0` returns metadata only and no
-bodies. Inspection tools use `after_sequence` plus `limit`, return compact
+bodies. Deprecated `byte_budget` is an equivalent alias, but a different
+simultaneous `max_bytes` value is rejected. Inspection tools use
+`after_sequence` plus `limit`, return compact
 references and bounded timeline pages, and expose `next_sequence`/`has_more`.
 
 Private tool-error logs are same-user sensitive data. Inspect only a bounded
