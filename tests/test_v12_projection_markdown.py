@@ -25,8 +25,10 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertNotIn('"pages"', rendered)
         self.assertIn("- **pages**", rendered)
         self.assertIn("pages/1-2.md", rendered)
-        self.assertIn("\\# heading &lt;script&gt;alert('x')&lt;/script&gt;", rendered)
+        self.assertIn("# heading <script>alert('x')</script>", rendered)
+        self.assertNotIn("&lt;script&gt;", rendered)
         self.assertNotIn("pages/1\\-2\\.md", rendered)
+        self.assertNotIn("\\", rendered)
 
     def test_report_content_is_markdown_and_untrusted_text_is_inert(self) -> None:
         class Store:
@@ -46,8 +48,7 @@ class ProjectionMarkdownTests(unittest.TestCase):
 
         self.assertIn("# Report: r_test", rendered)
         self.assertIn("## Content", rendered)
-        self.assertIn("- **summary:** \\- injected list  ", rendered)
-        self.assertIn("\\## injected heading", rendered)
+        self.assertIn("- **summary:** - injected list  \n  ## injected heading", rendered)
         self.assertNotIn("<pre>", rendered)
         self.assertNotIn('"summary"', rendered)
 
@@ -63,6 +64,12 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertIn("**model:** gpt-5.6-luna", rendered)
         self.assertNotIn("delegation\\_id", rendered)
         self.assertNotIn("planner\\_2", rendered)
+
+    def test_multiline_instructions_preserve_readable_markdown(self) -> None:
+        rendered = _inert({"instructions": "Trusted policy:\n- Keep identifiers readable.\n- Do not add slash escapes."})
+
+        self.assertIn("Trusted policy:  \n  - Keep identifiers readable.  \n  - Do not add slash escapes.", rendered)
+        self.assertNotIn("\\- Keep identifiers", rendered)
 
 
 if __name__ == "__main__":

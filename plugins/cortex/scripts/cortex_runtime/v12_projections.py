@@ -10,7 +10,6 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
-import html
 import json
 import os
 import re
@@ -30,41 +29,22 @@ def _digest_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-_INLINE_MARKDOWN_PUNCTUATION = re.compile(r"([\\`*\[\]])")
-
-
 def _markdown_text(value: object) -> str:
-    """Escape untrusted text so it remains readable, inert Markdown prose."""
-    normalized = html.escape(str(value), quote=False).replace("\r\n", "\n").replace("\r", "\n")
+    """Preserve caller-provided text verbatim in a readable Markdown view.
 
-    def render_line(line: str) -> str:
-        escaped = _INLINE_MARKDOWN_PUNCTUATION.sub(r"\\\1", line)
-        # Escape only Markdown syntax that is meaningful at the start of a
-        # line. Ordinary identifiers (``task_id``, ``task-123``) and prose
-        # retain their underscores, hyphens, and dots without visual noise.
-        prefix = re.match(r"^(\s*)", escaped).group(1)
-        body = escaped[len(prefix):]
-        if body.startswith(("#", ">")):
-            return prefix + "\\" + body
-        if re.match(r"[-+*]\s", body):
-            return prefix + "\\" + body
-        ordered = re.match(r"(\d+)([.)])(\s)", body)
-        if ordered is not None:
-            return prefix + ordered.group(1) + "\\" + ordered.group(2) + body[ordered.end(2):]
-        return escaped
-
-    # A user-controlled newline must not be able to create a heading or list.
-    # Hard breaks retain readable multi-line prose in a single list field.
-    return "  \n".join(render_line(line) for line in normalized.split("\n"))
+    Human views are presentation-only and never parsed back into the ledger.
+    They must not add Markdown, HTML, or backslash escaping to caller text.
+    """
+    normalized = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.replace("\n", "  \n")
 
 
 def _markdown_value(value: object, indent: str = "") -> list[str]:
     """Render structured ledger values as ordinary, readable Markdown lists.
 
     This intentionally does not serialize values as JSON.  Keys and all
-    caller-authored strings are escaped before being placed in Markdown, so
-    the projection remains a display-only view even when content contains
-    Markdown or HTML-looking text.
+    caller-authored strings retain their ordinary Markdown punctuation.  The
+    projection remains display-only and is never parsed back into the ledger.
     """
     if isinstance(value, Mapping):
         lines: list[str] = []
@@ -74,7 +54,8 @@ def _markdown_value(value: object, indent: str = "") -> list[str]:
                 lines.append(f"{indent}- **{label}**")
                 lines.extend(_markdown_value(item, indent + "  "))
             else:
-                lines.append(f"{indent}- **{label}:** {_markdown_text(item)}")
+                rendered = _markdown_text(item).replace("\n", "\n" + indent + "  ")
+                lines.append(f"{indent}- **{label}:** {rendered}")
         return lines or [f"{indent}- *(empty)*"]
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         lines = []
@@ -83,13 +64,14 @@ def _markdown_value(value: object, indent: str = "") -> list[str]:
                 lines.append(f"{indent}-")
                 lines.extend(_markdown_value(item, indent + "  "))
             else:
-                lines.append(f"{indent}- {_markdown_text(item)}")
+                rendered = _markdown_text(item).replace("\n", "\n" + indent + "  ")
+                lines.append(f"{indent}- {rendered}")
         return lines or [f"{indent}- *(empty)*"]
     return [f"{indent}{_markdown_text(value)}"]
 
 
 def _inert(value: object) -> str:
-    """Render arbitrary ledger content as escaped, inert Markdown.
+    """Render arbitrary ledger content as readable display-only Markdown.
 
     The historical helper name is retained for callers, but its output is no
     longer an embedded JSON document or an HTML ``<pre>`` block.

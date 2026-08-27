@@ -336,10 +336,11 @@ report ID identifies evidence; a verified absolute Markdown path is a human
 link. They are not interchangeable.
 
 Human views must be ordinary readable Markdown. Render structured ledger data
-as labeled headings, prose, lists, or tables with safe text escaping. Never
-dump a JSON object/array, serialized payload, or script block into a `.md` view;
-JSON belongs in the canonical database. The view is a presentation of that data,
-not a JSON export and never a recovery source.
+as labeled headings, prose, lists, or tables. Preserve task/report content
+verbatim: do not add backslashes, entity-escape HTML, or otherwise rewrite it.
+Never dump a JSON object/array, serialized payload, or script block into a
+`.md` view; JSON belongs in the canonical database. The view is a presentation
+of that data, not a JSON export and never a recovery source.
 
 Never create project-local Cortex state or a project-local `.codex` layout.
 The V12 shard and projections remain host-private, and the separate V11

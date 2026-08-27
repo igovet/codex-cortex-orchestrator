@@ -268,11 +268,12 @@ directories and exposes no ready path.
 
 Every generated `.md` file is readable Markdown intended for direct human
 inspection. The renderer uses labeled headings, paragraphs, lists, and tables
-with safe text escaping; it does not place JSON objects, JSON arrays, script
-blocks, or opaque serialized payloads in the view. Structured values remain in
-the canonical SQLite database and are summarized in Markdown only. This rule
-applies to task, plan, delegation, report, decision, initiative, closure,
-handoff, governance, index, and timeline views.
+with caller content preserved verbatim: it does not add backslashes,
+entity-escape HTML, or otherwise rewrite Markdown text. It does not place JSON
+objects, JSON arrays, script blocks, or opaque serialized payloads in the view.
+Structured values remain in the canonical SQLite database and are summarized in
+Markdown only. This rule applies to task, plan, delegation, report, decision,
+initiative, closure, handoff, governance, index, and timeline views.
 
 ## Operator maintenance boundary
 

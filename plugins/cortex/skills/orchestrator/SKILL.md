@@ -614,9 +614,11 @@ are derived host-private human views, never authority or recovery state. Before
 publishing a projection, require successful current freshness and digest
 verification plus an absolute contained path returned by the active tool.
 Every projection file must remain ordinary readable Markdown: present fields as
-labels, paragraphs, lists, or tables with safe escaping. Do not embed serialized
-JSON objects/arrays, script blocks, or opaque payloads in a view; structured JSON
-is retained in SQLite and only summarized for human reading.
+labels, paragraphs, lists, or tables. Preserve task/report content verbatim:
+do not add backslashes, entity-escape HTML, or otherwise rewrite it. Do not
+embed serialized JSON objects/arrays, script blocks, or opaque payloads in a
+view; structured JSON is retained in SQLite and only summarized for human
+reading.
 Never write a Cortex database, projection, report, decision, or other Cortex
 state into the target project, including a project-local `.codex` directory.
 Never guess a path, reuse stale metadata, publish a bare path/link or raw ID, or
