@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import selectors
 import shutil
 import stat
@@ -17,13 +16,24 @@ from pathlib import Path
 from typing import Any
 
 
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLUGIN_ROOT = ROOT / "plugins/cortex"
 MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-HOOK_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+EXPECTED_BASE_VERSION = "12.0.0"
+EXPECTED_MCP = {"mcpServers": {"cortex": {"command": "python3", "args": ["./scripts/cortex.py"], "cwd": "."}}}
+RETIRED_PLUGIN_PATHS = {
+    Path("hooks"),
+    Path("scripts/cortex_hook.py"),
+    Path("scripts/cortex-launcher"),
+    Path("scripts/cortex_runtime/core"),
+    Path("scripts/cortex_runtime/record_report"),
+}
 PYTHON_PROBE = """
 import json
 import sys
@@ -152,7 +162,7 @@ def load_toml(path: Path, interpreter: Path | None) -> tuple[dict[str, Any] | No
     """Parse one regular config file through the validated host interpreter."""
     if interpreter is None:
         return None, "the selected Cortex Python runtime is unavailable"
-    returncode, stdout, failure = bounded_command([str(interpreter), "-c", TOML_PROBE, str(path)])
+    returncode, stdout, failure = bounded_command([str(interpreter), "-B", "-c", TOML_PROBE, str(path)])
     if failure:
         return None, failure
     if returncode != 0:
@@ -170,14 +180,6 @@ def regular_executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
-def regular_non_symlink_executable(path: Path) -> bool:
-    try:
-        mode = path.lstat().st_mode
-    except OSError:
-        return False
-    return stat.S_ISREG(mode) and bool(mode & stat.S_IXUSR)
-
-
 def regular_non_symlink_file(path: Path) -> bool:
     """Return whether *path* is a regular file without following symlinks."""
     try:
@@ -186,9 +188,27 @@ def regular_non_symlink_file(path: Path) -> bool:
         return False
 
 
+def package_residue(root: Path) -> str | None:
+    """Return a non-sensitive reason when a plugin tree retains retired payload."""
+    try:
+        for path in root.rglob("*"):
+            relative = path.relative_to(root)
+            if path.is_symlink():
+                return "contains a symlinked payload"
+            if any(part == "__pycache__" for part in relative.parts) or path.suffix in {".pyc", ".pyo"}:
+                return "contains Python bytecode residue"
+            if relative in RETIRED_PLUGIN_PATHS or any(retired in relative.parents for retired in RETIRED_PLUGIN_PATHS):
+                return "contains retired V11 hook/control-plane residue"
+    except OSError:
+        return "contains an unreadable payload"
+    return None
+
+
 def package_digest(root: Path) -> str | None:
     """Return a stable digest for comparable plugin files, or ``None`` on read failure."""
     try:
+        if package_residue(root) is not None:
+            return None
         files = []
         for path in sorted(root.rglob("*")):
             # A symlinked payload can point outside the cache while its target
@@ -196,7 +216,7 @@ def package_digest(root: Path) -> str | None:
             # instead of allowing a false same-version match.
             if path.is_symlink():
                 return None
-            if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}:
+            if path.is_file():
                 files.append(path)
         digest = hashlib.sha256()
         for path in files:
@@ -235,32 +255,21 @@ def first_symlinked_path(paths: list[Path]) -> Path | None:
 
 
 def resolve_python() -> tuple[dict[str, Any], Path | None]:
-    explicit = "CORTEX_PYTHON" in os.environ
-    requested = os.environ.get("CORTEX_PYTHON", "python3")
-    if explicit and (not requested or not requested.startswith("/")):
-        return (
-            check(
-                "cortex_python",
-                False,
-                "CORTEX_PYTHON must be an absolute executable path",
-                "Set CORTEX_PYTHON to an absolute Python 3.11+ executable.",
-            ),
-            None,
-        )
-    resolved = Path(requested) if "/" in requested else Path(shutil.which(requested) or "")
+    requested = "python3"
+    resolved = Path(shutil.which(requested) or "")
     if not resolved or not regular_executable(resolved):
         return (
             check(
                 "cortex_python",
                 False,
-                f"CORTEX_PYTHON={requested} is not an executable file",
-                "Install Python 3.11+ and set CORTEX_PYTHON to its absolute executable path.",
+                "python3 is not an executable file on PATH",
+                "Install Python 3.11+ and make python3 available to the Codex host process.",
             ),
             None,
         )
     try:
         probe = subprocess.run(
-            [str(resolved), "-c", PYTHON_PROBE],
+            [str(resolved), "-B", "-c", PYTHON_PROBE],
             capture_output=True,
             check=False,
             text=True,
@@ -284,7 +293,7 @@ def resolve_python() -> tuple[dict[str, Any], Path | None]:
                 "cortex_python",
                 False,
                 f"{requested} is incompatible: {message}",
-                "Use Python 3.11+ with tomllib and set CORTEX_PYTHON for the Codex process.",
+                "Use Python 3.11+ with tomllib as the python3 command available to Codex.",
             ),
             None,
         )
@@ -372,11 +381,21 @@ def inspect_plugin(plugin_root: Path) -> tuple[dict[str, Any], str | None]:
             ),
             None,
         )
+    residue = package_residue(plugin_root)
+    if residue is not None:
+        return (
+            check(
+                "plugin_root",
+                False,
+                f"plugin source {residue}",
+                "Remove generated bytecode and retired V11 payload before packaging Cortex.",
+            ),
+            None,
+        )
     manifest_path = plugin_root / ".codex-plugin/plugin.json"
     mcp_path = plugin_root / ".mcp.json"
-    launcher = plugin_root / "scripts/cortex-launcher"
     entrypoint = plugin_root / "scripts/cortex.py"
-    symlink = first_symlinked_path([manifest_path, mcp_path, launcher, entrypoint])
+    symlink = first_symlinked_path([manifest_path, mcp_path, entrypoint])
     if symlink:
         return (
             check(
@@ -402,11 +421,10 @@ def inspect_plugin(plugin_root: Path) -> tuple[dict[str, Any], str | None]:
         mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return check("plugin_root", False, f"plugin metadata is unreadable: {exc}", "Reinstall Cortex from a trusted checkout."), None
-    expected_mcp = {"mcpServers": {"cortex": {"command": "./scripts/cortex-launcher", "args": ["./scripts/cortex.py"], "cwd": "."}}}
     version = manifest.get("version")
     if not isinstance(version, str) or not version:
         return check("plugin_root", False, "plugin manifest has no version", "Reinstall Cortex from a trusted checkout."), None
-    if not safe_cache_version(version):
+    if not safe_cache_version(version) or version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
         return (
             check(
                 "plugin_root",
@@ -416,13 +434,11 @@ def inspect_plugin(plugin_root: Path) -> tuple[dict[str, Any], str | None]:
             ),
             None,
         )
-    if mcp != expected_mcp:
-        return check("plugin_root", False, "MCP manifest does not route through the bundled launcher", "Reinstall the same-version Cortex plugin."), version
-    if not regular_non_symlink_executable(launcher):
-        return check("plugin_root", False, "bundled Cortex launcher is missing or not executable", "Restore the installed Cortex plugin contents."), version
+    if mcp != EXPECTED_MCP:
+        return check("plugin_root", False, "MCP manifest does not route directly to the V12 Python entrypoint", "Reinstall the same-version Cortex plugin."), version
     if not regular_non_symlink_file(entrypoint):
         return check("plugin_root", False, "bundled Cortex MCP entrypoint is missing or not a regular file", "Restore the installed Cortex plugin contents."), version
-    return check("plugin_root", True, f"Cortex {version} has a valid MCP manifest and executable launcher"), version
+    return check("plugin_root", True, f"Cortex {version} has a valid direct Python MCP entrypoint"), version
 
 
 def inspect_cache(codex_home: Path, version: str | None, source_digest: str | None) -> dict[str, Any]:
@@ -473,11 +489,18 @@ def inspect_cache(codex_home: Path, version: str | None, source_digest: str | No
             detail,
             "Install or update cortex@cortex for this same Codex user, then start a new thread.",
         )
+    residue = package_residue(installed)
+    if residue is not None:
+        return check(
+            "codex_home",
+            False,
+            f"cached Cortex {version} {residue}",
+            "Update Cortex through ./scripts/sync-cortex.sh to replace the cache with the clean staged plugin tree.",
+        )
     manifest_path = installed / ".codex-plugin/plugin.json"
     mcp_path = installed / ".mcp.json"
-    launcher = installed / "scripts/cortex-launcher"
     entrypoint = installed / "scripts/cortex.py"
-    symlink = first_symlinked_path([manifest_path, mcp_path, launcher, entrypoint])
+    symlink = first_symlinked_path([manifest_path, mcp_path, entrypoint])
     if symlink:
         return check(
             "codex_home",
@@ -502,7 +525,6 @@ def inspect_cache(codex_home: Path, version: str | None, source_digest: str | No
             f"cached Cortex {version} metadata is unreadable: {exc}",
             "Reinstall or update cortex@cortex for this same Codex user, then start a new thread.",
         )
-    expected_mcp = {"mcpServers": {"cortex": {"command": "./scripts/cortex-launcher", "args": ["./scripts/cortex.py"], "cwd": "."}}}
     if manifest.get("version") != version:
         return check(
             "codex_home",
@@ -510,11 +532,11 @@ def inspect_cache(codex_home: Path, version: str | None, source_digest: str | No
             f"cached Cortex manifest version does not match the selected {version} plugin",
             "Reinstall or update cortex@cortex for this same Codex user, then start a new thread.",
         )
-    if mcp != expected_mcp or not regular_non_symlink_executable(launcher) or not regular_non_symlink_file(entrypoint):
+    if mcp != EXPECTED_MCP or not regular_non_symlink_file(entrypoint):
         return check(
             "codex_home",
             False,
-            f"cached Cortex {version} has an invalid MCP manifest, launcher, or MCP entrypoint",
+            f"cached Cortex {version} has an invalid direct MCP manifest or entrypoint",
             "Reinstall or update cortex@cortex for this same Codex user, then start a new thread.",
         )
     if source_digest is not None:
@@ -666,179 +688,6 @@ def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, 
     )
 
 
-def codex_hooks_list(codex_path: Path, cwd: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """Read the bounded Codex hooks/list response and stop the app-server."""
-    requests = "\n".join(
-        json.dumps(item, separators=(",", ":"))
-        for item in (
-            {"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "cortex-host-preflight", "version": "1"}, "capabilities": {"experimentalApi": True}}},
-            {"id": 2, "method": "hooks/list", "params": {"cwds": [str(cwd)]}},
-        )
-    ) + "\n"
-    try:
-        process = subprocess.Popen(
-            [str(codex_path), "app-server", "--stdio"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError as exc:
-        return None, f"could not start Codex app-server: {exc}"
-    assert process.stdin is not None and process.stdout is not None
-    try:
-        process.stdin.write(requests.encode("utf-8"))
-        process.stdin.flush()
-    except OSError:
-        process.kill()
-        process.wait()
-        return None, "Codex app-server input failed"
-    output = bytearray()
-    buffer = b""
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
-    response: dict[str, Any] | None = None
-    try:
-        while time.monotonic() < deadline and selector.get_map():
-            events = selector.select(min(0.25, max(0.01, deadline - time.monotonic())))
-            if not events:
-                continue
-            for key, _ in events:
-                try:
-                    chunk = os.read(key.fd, 8192)
-                except OSError:
-                    chunk = b""
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                output.extend(chunk)
-                if len(output) > MAX_COMMAND_OUTPUT_BYTES:
-                    return None, f"Codex hooks/list output exceeded the {MAX_COMMAND_OUTPUT_BYTES}-byte limit"
-                buffer += chunk
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    try:
-                        item = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if isinstance(item, dict) and item.get("id") == 2:
-                        response = item
-                        break
-                if response is not None:
-                    break
-            if response is not None:
-                break
-    finally:
-        selector.close()
-        try:
-            process.terminate()
-        except OSError:
-            pass
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-    if response is None:
-        return None, "Codex hooks/list timed out or returned no response"
-    if "error" in response:
-        return None, "Codex hooks/list returned an error"
-    result = response.get("result")
-    rows = result.get("data") if isinstance(result, dict) else None
-    if not isinstance(rows, list):
-        return None, "Codex hooks/list returned no workspace data"
-    workspace = next((row for row in rows if isinstance(row, dict) and row.get("cwd") == str(cwd)), None)
-    if not isinstance(workspace, dict):
-        return None, "Codex hooks/list returned no matching workspace"
-    if workspace.get("errors"):
-        return None, "Codex hooks/list reported workspace errors"
-    hooks = workspace.get("hooks")
-    if not isinstance(hooks, list):
-        return None, "Codex hooks/list returned no hook table"
-    return [row for row in hooks if isinstance(row, dict)], None
-
-
-def inspect_hook_trust(
-    codex_path: Path | None,
-    installed_root: Path | None,
-    codex_home: Path,
-    interpreter: Path | None,
-) -> dict[str, Any]:
-    """Require exactly the enabled hooks declared by the installed manifest."""
-    if codex_path is None or not regular_executable(codex_path):
-        return check(
-            "cortex_hook_trust",
-            False,
-            "Cortex hook trust cannot be queried because the Codex CLI is unavailable",
-            "Install the Codex CLI for this same user, then rerun the preflight.",
-        )
-    if installed_root is None or not installed_root.is_dir():
-        return check(
-            "cortex_hook_trust",
-            False,
-            "Cortex hook trust cannot be checked without the matching same-user cache",
-            "Install or update cortex@cortex for this same Codex user, then rerun the preflight.",
-        )
-    hooks_path = installed_root / "hooks/hooks.json"
-    launcher = installed_root / "scripts/cortex-launcher"
-    hook_script = installed_root / "scripts/cortex_hook.py"
-    symlink = first_symlinked_path([hooks_path, launcher, hook_script])
-    if symlink or not regular_non_symlink_file(hooks_path) or not regular_non_symlink_file(hook_script) or not regular_non_symlink_executable(launcher):
-        return check(
-            "cortex_hook_trust",
-            False,
-            "cached Cortex lifecycle hook files are missing, symlinked, or not executable",
-            "Reinstall or update cortex@cortex for this same Codex user, then rerun the preflight.",
-        )
-    try:
-        manifest = json.loads(hooks_path.read_text(encoding="utf-8"))
-        manifest_hooks = manifest.get("hooks") if isinstance(manifest, dict) else None
-        if not isinstance(manifest_hooks, dict) or not manifest_hooks:
-            raise ValueError("hooks manifest has no hook registrations")
-        expected_hook_keys = {
-            f"{CORTEX_PLUGIN_ID}:hooks/hooks.json:{re.sub(r'(?<!^)(?=[A-Z])', '_', event).lower()}:0:0"
-            for event in manifest_hooks
-        }
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        return check("cortex_hook_trust", False, f"installed Cortex hook manifest is invalid: {exc}", "Run the approved Cortex installer, then rerun the preflight.")
-    hooks, failure = codex_hooks_list(codex_path, ROOT)
-    if failure or hooks is None:
-        return check("cortex_hook_trust", False, f"Cortex hook trust evidence is unavailable: {failure or 'unknown failure'}", "Run the approved Cortex installer and rerun the preflight.")
-    cortex_hooks = [row for row in hooks if row.get("pluginId") == CORTEX_PLUGIN_ID]
-    keys = [str(row.get("key") or "") for row in cortex_hooks]
-    if len(cortex_hooks) != len(set(keys)) or set(keys) != expected_hook_keys:
-        return check("cortex_hook_trust", False, "same-user Cortex lifecycle hook registration is incomplete or duplicated", "Run the approved Cortex installer to refresh the hooks declared by the installed manifest, then rerun the preflight.")
-    expected_source = str(hooks_path.absolute())
-    expected_launcher = str(launcher.absolute())
-    expected_script = str(hook_script.absolute())
-    current_hashes: dict[str, str] = {}
-    for row in cortex_hooks:
-        key = str(row.get("key"))
-        digest = row.get("currentHash")
-        command = row.get("command")
-        if row.get("enabled") is not True:
-            return check("cortex_hook_trust", False, f"same-user Cortex hook {key} is disabled", "Run the approved Cortex installer to enable trusted hooks, then rerun the preflight.")
-        if row.get("trustStatus") != "trusted":
-            return check("cortex_hook_trust", False, f"same-user Cortex hook {key} is not trusted", "Run the approved Cortex installer to refresh hook trust, then rerun the preflight.")
-        if row.get("sourcePath") != expected_source or not isinstance(command, str) or expected_launcher not in command or expected_script not in command:
-            return check("cortex_hook_trust", False, f"same-user Cortex hook {key} does not use the matching cache paths", "Run the approved Cortex installer to refresh the installed hook set, then rerun the preflight.")
-        if not isinstance(digest, str) or not HOOK_HASH_RE.fullmatch(digest):
-            return check("cortex_hook_trust", False, f"same-user Cortex hook {key} has an invalid trust hash", "Run the approved Cortex installer to refresh hook trust, then rerun the preflight.")
-        current_hashes[key] = digest
-    config_path = codex_home / "config.toml"
-    payload, parse_failure = load_toml(config_path, interpreter)
-    if parse_failure or payload is None:
-        return check("cortex_hook_trust", False, "same-user Codex hook trust configuration is unreadable", "Repair the same-user Codex configuration, then rerun the preflight.")
-    state = payload.get("hooks", {}).get("state") if isinstance(payload.get("hooks"), dict) else None
-    if not isinstance(state, dict):
-        return check("cortex_hook_trust", False, "same-user Codex hook trust table is missing", "Run the approved Cortex installer to persist trusted hook hashes, then rerun the preflight.")
-    for key, digest in current_hashes.items():
-        record = state.get(key)
-        if not isinstance(record, dict) or record.get("trusted_hash") != digest:
-            return check("cortex_hook_trust", False, f"same-user Cortex hook trust hash is missing or stale for {key}", "Run the approved Cortex installer to refresh hook trust, then rerun the preflight.")
-    return check("cortex_hook_trust", True, "all declared same-user Cortex lifecycle hooks are enabled, trusted, and hash-matched")
-
-
 def summarize_mcp(checks: list[dict[str, Any]]) -> dict[str, Any]:
     """Explain whether the checked host can expose Cortex MCP/orchestration."""
     blocking_checks = [item["name"] for item in checks if item["status"] != "PASS"]
@@ -852,7 +701,7 @@ def summarize_mcp(checks: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "status": "READY",
         "blocking_checks": [],
-        "detail": "Cortex MCP host prerequisites, same-user registration, approval configuration, and hook trust passed; start a new Codex thread after installation or update.",
+        "detail": "Cortex MCP host prerequisites, same-user registration, approval configuration, and Luna default configuration passed; start a new Codex thread after installation or update.",
     }
 
 
@@ -879,11 +728,9 @@ def main() -> int:
     codex_home_value = os.environ.get("CODEX_HOME") or str(Path(os.environ.get("HOME", "~")) / ".codex")
     codex_home = Path(codex_home_value).expanduser()
     cache_result = inspect_cache(codex_home, version, source_digest)
-    installed_root = codex_home / "plugins/cache/cortex/cortex" / version if version else None
     registration_result = inspect_registration(codex_path, version)
     config_result = inspect_mcp_config(codex_home, cortex_python)
-    hook_result = inspect_hook_trust(codex_path, installed_root, codex_home, cortex_python)
-    checks = [codex_result, python_result, plugin_result, cache_result, registration_result, config_result, hook_result]
+    checks = [codex_result, python_result, plugin_result, cache_result, registration_result, config_result]
     payload = {
         "ok": all(item["status"] == "PASS" for item in checks),
         "checks": checks,

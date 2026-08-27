@@ -1,5 +1,88 @@
 # Changelog
 
+## [12.0.0] - 2026-08-27
+
+### Changed
+
+- Replace the V11 control plane with an opt-in, durable, nonblocking V12
+  coordination ledger. The coordinator model owns orchestration, governance,
+  rework, verification depth, documentation impact, closure, and final
+  synthesis; the backend enforces only schema/size, references, project
+  isolation, idempotency, and SQLite integrity. V12 ships no lifecycle hooks,
+  workflow gates, waves, receipts, host binding, or server recovery state
+  machine.
+- Make the root coordinator orchestration-only. All source/project discovery,
+  substantive domain analysis, implementation, commands, testing, and direct
+  verification belong to workers. The sole read exception is the bounded
+  orchestrator-owned route through applicable repository instructions and
+  indexed task-relevant knowledge pages, used to compile a six-part semantic
+  contract per delegation. That exception now requires non-shell direct reads
+  of already-known exact paths and grants no shell/search/graph discovery;
+  project-root discovery and project-local state/artifact checks, including
+  absence/unchanged verification and `.codex`, remain worker-owned.
+- Expose one uniform closed catalog of exactly eleven public tools:
+  `create_task`, `inspect_task`, `create_delegation`, `read_delegation`,
+  `submit_report`, `read_reports`, `set_governance_mode`, `record_initiative`,
+  `inspect_governance`, `submit_governance_closure`, and
+  `record_user_decision`.
+- Make `create_task` the only explicit `project_root` boundary. Its versioned
+  task contract keeps an English objective and bounded result requirements
+  beside the exact original request and user language. Every later public call
+  uses the returned opaque `task_id`; direct worker briefs carry the canonical
+  root for native working context.
+- Require delegation `scope` to be a non-empty textual ownership boundary and
+  require the coordinator to choose an exact model/effort for every worker.
+  Luna remains the default and omits a native model override; Terra and Sol
+  pass exact overrides; all preserve `low`, `medium`, `high`, `xhigh`, or
+  `max` effort with `fork_turns="none"`.
+- Add immutable single and chunked report submission. A stable report ID can
+  move through `begin`, ordered labeled `append`, exact-manifest `finalize`, or
+  `abort`; bounded `read_reports` returns only whole selected JSON chunks and
+  metadata within cursor and byte limits. Task/delegation inspections expose
+  compact report references only.
+- Add `plan` reports with informational or coordinator-owned required review,
+  plus append-only `record_user_decision` evidence bound to exact subject IDs
+  and plan/report digests. Original user responses are retained beside English
+  normalization. Decisions are coordinator-attributed evidence, not
+  authentication, cryptographic attestation, bearer approval, or backend
+  permission.
+- Store model-owned `minimal`, `light`, and `full` assessments, append-only
+  initiative revisions and project-scoped links, dependency warnings, and
+  advisory `ready`, `ready_with_risks`, or `not_ready` closures. User mode
+  overrides remain effective across later model assessments; no advisory state
+  can prohibit a safe next step or final answer.
+- Add owner-only, host-private Markdown task views beside the canonical V12
+  database. Task, plan, delegation, report, decision, and paged-timeline views
+  are disposable projections with atomic best-effort materialization, tamper
+  conflict preservation, source-sequence/digest verification, and dynamic
+  `ready`, `stale`, `conflict`, `unavailable`, or `disabled` status. Cortex
+  writes no generated file or directory under `project_root`.
+- Add a task-ID-anchored host-private operator CLI outside MCP for health,
+  sealed whole-project-shard backup, checkpoint, optimize, vacuum, strictly
+  offline restore, derived-projection prune/regeneration, and explicit backup
+  retention. Mutations require exact confirmation strings; prune/retention
+  default to dry-run; restore requires verified MCP quiescence plus exact
+  `RESTORE`, task/shard, backup, and `MCP_STOPPED` acknowledgement.
+- Keep inter-agent messages and durable operational content in English while
+  preserving user-authored original fields and localizing coordinator-to-user
+  communication. Verified ready absolute view links are always paired with a
+  localized summary; unavailable views fall back to an inline canonical-ledger
+  summary without blocking work.
+- Make the final documentation-impact decision conditional but mandatory:
+  material verified changes receive a documentation-sync worker and separate
+  verifier, while no-impact work records a report-grounded
+  `documentation not required` rationale without meaningless edits.
+
+### Compatibility
+
+- Start a new host-private V12 database family at
+  `~/.codex/cortex/v12/projects/p-<hash>/cortex.db` with additive schema-v1
+  migration history and owner-only permissions. The single pre-release V12
+  expansion preserves tasks and converts each legacy report body to one
+  finalized canonical chunk. V12 never opens, migrates,
+  deletes, or modifies V11 databases or legacy project-local state. V11 tools
+  and unfinished V11 tasks are intentionally incompatible with V12.
+
 ## [11.0.1] - 2026-08-24
 
 ### Fixed

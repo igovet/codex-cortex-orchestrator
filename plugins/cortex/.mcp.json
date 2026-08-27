@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "cortex": {
-      "command": "./scripts/cortex-launcher",
+      "command": "python3",
       "args": ["./scripts/cortex.py"],
       "cwd": "."
     }

@@ -1,67 +1,89 @@
 ---
 name: context-compaction
-description: Internal Cortex v11 recovery overlay. Load only for an explicitly activated Cortex task after compaction, reset, or a required bounded handoff; never select for ordinary work.
+description: Internal Cortex v12 recovery overlay. Load only for an explicitly activated Cortex task after compaction, reset, or a required bounded handoff.
 ---
 
-# Context Handoff
+# Durable Context Recovery
 
-Do not pass raw transcripts by default. A bounded private handoff contains
-only the current goal and acceptance criteria, verified repository facts and
-source references, decisions, changed files, commands and decisive outputs,
-open task questions, and the next server-derived action. Never summarize
-secrets, credentials, raw worker reports, private logs, or raw tool streams.
+Do not preserve raw transcripts by default. A bounded handoff should retain the
+current outcome and acceptance criteria, verified project facts and source
+references, material decisions, changed files, decisive checks, open user
+questions, and the next evidence-backed action. Never include secrets,
+credentials, personal data, private logs, or raw tool streams.
 
-Compactness is prompt guidance, not a data limit. Preserve material task,
-result, question, answer, and artifact content through the authorized public
-reference when it cannot fit safely in a concise handoff.
+For an active Cortex task, preserve `task_ref` as the mandatory ledger-recovery
+anchor, plus the absolute project root, governance mode, applicable knowledge
+paths and constraints, exact task/result contract, current plan/report digest,
+and known initiative, delegation, report, and user-decision IDs. Preserve each
+decision's subject type, subject ID, subject digest, supersession, and effect on
+the orchestration DAG revision. Preserve incomplete report assembly state: report ID, state,
+next chunk index, expected count/digest when known, and completed section
+manifest. Preserve verified projection paths with their source sequence or
+revision and digest, but treat them as publishable only after fresh
+reverification. These are references, not bearer capabilities.
 
-## Cortex v11 compaction rule
+Preserve every ID, digest, and cursor byte-for-byte as opaque immutable return
+data. Never recover one by parsing, concatenating, normalizing, reconstructing,
+or appending a remembered suffix; copy it from a successful retained response
+or fresh inspection.
 
-After a coordinator compaction, clear, or reset in the same authenticated host
-incarnation, call `inspect_orchestration` before any wait, replay, follow-up,
-continuation, resume, or child creation. Consume every returned page in order
-until `complete=true`; no earlier page authorizes an action. If another context
-boundary invalidates the cursor, restart that inspection from its first page.
+Also retain known live native child handles, task names, mutation scopes, and
+last observed host status as bounded private host context. They are not ledger
+rows, must not enter durable reports or user-facing links, and do not prove
+that a worker is still running. Preserve an unconsumed returned native-dispatch
+payload byte-for-byte with its exact delegation association and whether its one
+allowed host spawn was attempted; never reconstruct or redispatch it from
+memory. After compaction:
 
-For an active coordinator task, the private handoff must preserve the exact
-opaque coordinator authority returned when the task starts. Keep that authority
-together only in the coordinator's bounded private handoff. Do
-not write the raw capability to durable task state, a result, worker bootstrap,
-event, diagnostic, path, artifact, tool argument, or user-facing text. Also
-retain only already-bound native workers, canonical result references, and the
-most recent server-derived step without exposing host identity.
+1. Use `inspect_task` with the known preserved `task_ref` to recover the task
+   header and chronological frontier.
+2. Use `inspect_governance` when mode history, initiative links, dependencies,
+   or closure history affects the next decision.
+3. Use `read_delegation` or `read_reports` only for the specific details,
+   selected sections, and evidence needed next. Resume paginated reads with the
+   returned cursor. Resume an assembling report from its recorded
+   `next_chunk_index`; never restart or finalize from a guessed count/digest.
+4. Reverify any projection's containment, freshness, and digest before
+   publishing it. A stored path alone is never sufficient.
+5. Recover the current orchestration DAG from the exact task contract, persisted
+   initiative revision, immutable planner plan revision/digest, decisions, and
+   report evidence; then continue safe work. Never reconstruct or author the
+   project solution plan—the planner report remains its sole authority.
 
-If the authority survives, a coordinator may use the current public lifecycle
-operation to obtain the server-derived state. Follow only returned native
-dispatches, generic timeout-bounded waits, durable question paths, canonical
-result reads, continuations, or terminal outcomes. Do not replay a completed
-dispatch, infer an identity, or use any collaboration operation outside the
-native lifecycle.
+Only `create_task` receives `project_root`. Recovery calls use the preserved
+`task_ref`; do not resend the root as an MCP argument. Keep the root only for
+native worker working-directory context and a self-contained fallback brief.
 
-If coordinator authority is absent, fail closed. Do not
-inspect, recover, query a ledger, bind a session, scan an environment, infer a
-task from an active worker, construct a result, synthesize a replacement, or
-start a task merely because an older task is visible. Obtain fresh user
-direction and fresh route activation before starting a new task.
+For the coordinator, recovery remains coordination-only: do not reopen target
+project files, search the repository, rerun commands, or reconstruct technical
+facts through direct analysis. Delegate any missing project discovery,
+implementation, or project verification and recover its evidence through a
+report ID.
 
-Workers do not preserve coordinator authority. Their initial native dispatch
-and complete briefing read establish one exact child authority. Only that
-already-established child may later use the no-identity context refresh after
-its own compaction; refresh never discovers a task, scans siblings, or mints
-authority. Predecessor access remains limited by the active schema. Loss or
-mismatch fails closed and is reported as a neutral limitation to the
-coordinator. Model-visible hook output is telemetry only; the
-trusted local lifecycle observer suite never rehydrates worker authority,
-briefing paths, ledger paths, or bearers and is not a model-visible recovery
-surface.
+Recovery never permits root discovery or project-local artifact/state probes.
+Git, manifests, caches, worktrees, existence/absence or unchanged-state, and
+project-local `.codex` must be checked by a worker and returned as evidence.
 
-Before any Cortex/project call, an initial native child whose first operation
-reports pending trusted spawn observation retries only that operation with
-bounded backoff until a finite deadline and makes zero project calls. It never
-switches operations or spawns a replacement. An exact successful retry
-automatically clears the transient observer failure. At the deadline, or when dispatch
-authority is otherwise absent, it follows only public fail-closed recovery. The
-coordinator may use `followup_task` only when the server explicitly permits
-same-worker recovery. It never reconstructs an authority value from compaction,
-session, environment, thread, path, database, or hook state. A rejected or
-missing recovery route is terminal and fail-closed.
+Do not promise ID-less enumeration. If `task_ref` was not preserved, do not
+claim that the ledger can rediscover the task from project root, filesystem,
+session, or other task content. Continue from safely preserved native evidence
+and self-contained worker briefs when possible, or disclose the ledger context
+loss. Never invent an ID or create a duplicate task merely to simulate
+recovery.
+
+If a native child was known live before compaction, reconcile that exact handle
+through ordinary host coordination. Continue or follow it up only when the
+handle and ownership scope remain known and safe. When its state is unknown,
+do not overlap mutation ownership; wait for bounded host evidence when useful,
+or create a `parent_delegation_id`-linked replacement after containing the
+scope. A durable delegation with no report does not reveal whether the native
+child never started, is running, stopped, or was abandoned.
+
+If the ledger, selected report read, or projection service is unavailable,
+retain sanitized native evidence and continue through a complete self-contained
+worker brief when safe. Disclose the durability or human-view limitation and
+never invent recovered rows, report content, decisions, or links.
+
+Missing closure, partial or unavailable reports, unfinished linked work, and
+unresolved dependencies remain advisory context; none prevents native
+delegation or an honest final answer.
