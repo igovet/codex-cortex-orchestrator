@@ -158,6 +158,33 @@ LEGACY_LABEL = re.compile(
     r"(?im)^(?:knowledge contract|role and mission|operating workflow|quality bar|conclude with)\s*:"
 )
 
+# Packaged prose owns orchestration semantics only. Exact MCP invocation shapes
+# belong to the live registry and must not be mirrored in the two bundled
+# skills or an advisory profile. Keep this detector deliberately structural so
+# semantic tool names, purpose descriptions, and ordinary policy remain valid.
+PROMPT_SCHEMA_PATTERNS = (
+    ("embedded JSON request example", re.compile(r"```\s*json\b", re.I)),
+    ("JSON request property definition", re.compile(r'"(?:project_root|task_contract_version|user_request_original|acceptance_criteria|verification_plan)"\s*:', re.I)),
+    ("inline MCP request object", re.compile(r"\b(?:create_task|create_delegation|read_delegation|submit_report|read_reports|record_user_decision|submit_governance_closure)\s*\(\s*\{")),
+    ("closed MCP field inventory", re.compile(r"\b(?:closed\s+(?:canonical\s+)?field\s+set|complete\s+(?:first[- ]call|call)\s+shape|canonical\s+first\s+`?create_task\s+call)\b", re.I)),
+    ("invocation parameter assignment", re.compile(r"\b(?:mode|report_type|reader_kind|consumer_delegation_ref|approval_decision_ref|subject_type|subject_ref|chunk_index|after_sequence|input_report_refs|input_decision_refs)\s*=\s*(?:\"[^\"]+\"|'[^']+'|`[^`]+`|\[|\{|[a-z_]+\b)", re.I)),
+    ("MCP schema vocabulary", re.compile(r"\b(?:inputSchema|outputSchema|JSON\s+Schema)\b", re.I)),
+)
+
+PROMPT_SCHEMA_TARGETS = (ORCHESTRATOR, CONTROL, AGENTS / "planner.toml")
+
+PROMPT_SCHEMA_FIXTURES = (
+    ("embedded JSON request example", '```json\n{"project_root":"/tmp"}\n```'),
+    ("inline MCP request object", 'submit_report({"mode":"single"})'),
+    ("invocation parameter assignment", 'read_reports(reader_kind="worker")'),
+)
+
+PROMPT_SCHEMA_SAFE_FIXTURES = (
+    "Use the active MCP registry for exact fields, types, and response shapes.",
+    "The report reader enforces declared same-task evidence inputs.",
+    "Tool names and semantic purpose descriptions remain in the catalog.",
+)
+
 COORDINATOR_AUTHORITY_PATTERNS = (
     (
         "shell/search/graph authority for knowledge routing",
@@ -566,6 +593,40 @@ def lint_protocol_mutation_detector(issues: list[str]) -> None:
             )
 
 
+def prompt_schema_violations(text: str) -> list[str]:
+    """Find invocation-shape duplication in packaged prompt surfaces."""
+    return [label for label, pattern in PROMPT_SCHEMA_PATTERNS if pattern.search(text)]
+
+
+def lint_prompt_schema_ownership(issues: list[str]) -> None:
+    """Keep exact MCP call shapes in the live registry, not prompt prose."""
+    for expected, fixture in PROMPT_SCHEMA_FIXTURES:
+        detected = prompt_schema_violations(fixture)
+        if expected not in detected:
+            issues.append(
+                f"prompt schema detector missed {expected!r}: {fixture!r}; detected={detected!r}"
+            )
+    for fixture in PROMPT_SCHEMA_SAFE_FIXTURES:
+        detected = prompt_schema_violations(fixture)
+        if detected:
+            issues.append(
+                f"prompt schema detector rejected semantic-only guidance: {fixture!r}; "
+                f"detected={detected!r}"
+            )
+    for path in PROMPT_SCHEMA_TARGETS:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            issues.append(f"{path.relative_to(ROOT)} is unreadable for prompt schema lint: {exc}")
+            continue
+        violations = prompt_schema_violations(text)
+        if violations:
+            issues.append(
+                f"{path.relative_to(ROOT)} duplicates MCP invocation shapes: "
+                + ", ".join(violations)
+            )
+
+
 def load_profiles(issues: list[str]) -> dict[str, Any]:
     try:
         value = json.loads(PROFILES.read_text(encoding="utf-8"))
@@ -892,11 +953,11 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         section(orchestrator, "Exact task and result contract"),
         ORCHESTRATOR,
         "lossless versioned task/result construction",
-        tuple((name,) for name in (
-            "user_request_original", "user_language", "objective", "requirements",
-            "constraints", "acceptance_criteria", "verification_plan",
-            "task_contract_version",
-        )),
+        (
+            ("exact arbitrary-Unicode request",), ("language",),
+            ("English normalization",), ("requirements",), ("constraints",),
+            ("acceptance",), ("verification",), ("versioned",),
+        ),
         issues,
     )
     require_concepts(
@@ -933,13 +994,12 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("advisory",),
             ("single authoritative",),
             ("trusted/untrusted",),
-            ("JSON-serialized",),
+            ("task contract",),
             ("cannot override trusted policy",),
-            ("developer_instructions",),
+            ("complete guidance",),
             ("loaded",),
             ("included", "consumed"),
-            ("exact packaged profile name",),
-            ("profile_name",),
+            ("packaged advisory profile",),
             ("free-form job label", "free-form `role`"),
             ("profile_state=unavailable",),
             ("complete explicit role contract",),
@@ -1058,7 +1118,7 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("not a backend gate",),
             ("silence",),
             ("not approval",),
-            ("exact returned plan `report_ref`",),
+            ("exact immutable plan evidence",),
             ("digest",),
             ("approve/revise/cancel",),
             ("end the turn",),
@@ -1075,11 +1135,10 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         ORCHESTRATOR,
         "chunked report assembly and bounded resumable reads",
         (
-            ("`begin`",), ("`append`",), ("`finalize`",), ("`abort`",),
-            ("next exact chunk index", "next_chunk_index"),
-            ("expected chunk count",), ("complete content digest",),
-            ("cursor",), ("section",), ("byte budget",),
-            ("only full-body read path",),
+            ("assembly operations",), ("chunks",), ("finalize",), ("abort",),
+            ("continuation metadata", "continuation state"),
+            ("complete content digest",), ("cursor",), ("section",),
+            ("byte budget",), ("only full-body path",),
             ("same-project initiative lineage",),
             ("never cross a project shard",),
         ),
@@ -1105,10 +1164,10 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         ORCHESTRATOR,
         "task anchoring and honest nonblocking degradation",
         (
-            ("Only `create_task`", "only that call receiving `project_root`"),
-            ("Task-anchored creation and governance",),
-            ("read_delegation` derives its task",),
-            ("entity-derived public calls accept neither `task_ref`",),
+            ("task-creation operation",),
+            ("task-scoped",),
+            ("entity-scoped",),
+            ("active MCP registry",),
             ("preferred durable evidence",),
             ("not permission to start", "not prerequisites"),
             ("at most once",),
@@ -1153,16 +1212,16 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("finalized report refs", "every finalized report"),
             ("task relationship",),
             ("report-only final initiative",),
-            ("subject_type=initiative",),
+            ("initiative closure",),
             ("task-scoped", "task scope"),
             ("initiative-scoped", "initiative scope"),
             ("inspect_governance", "inspect governance"),
             ("returned `next_action`",),
-            ("subject_type=task",),
+            ("task-subject closure",),
             ("task closure succeeds",),
             ("task_closed",),
             ("initiative-only",),
-            ("no subject-digest", "do not invent a closure digest"),
+            ("no subject-digest", "never invent a closure digest", "not invent a closure digest"),
             ("never claim that `ready`", "`ready` claim is durable only"),
             ("closure write",),
             ("inspection",),
@@ -1385,7 +1444,7 @@ def lint_profiles(profiles: dict[str, Any], issues: list[str]) -> None:
         evidence_missing = missing_concepts(
             evidence,
             (
-                ("consumed predecessor ids",),
+                ("consumed predecessor",),
                 ("path",),
                 ("command",),
                 ("cwd",),
@@ -1459,6 +1518,7 @@ def lint_profiles(profiles: dict[str, Any], issues: list[str]) -> None:
 def main() -> int:
     issues: list[str] = []
     lint_protocol_mutation_detector(issues)
+    lint_prompt_schema_ownership(issues)
     tools = load_public_tools(issues)
     profiles = lint_skills(issues, tools)
     lint_worker_renderer(profiles, issues)

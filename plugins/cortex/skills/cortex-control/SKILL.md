@@ -72,48 +72,22 @@ immutable evidence and retain their normal project/reference validation.
 
 ## Root, task, and exact contract identity
 
-Only `create_task` accepts the canonical absolute `project_root`. It preserves
-the exact original user request separately from the English-normalized
-objective, plus language, version, requirements, constraints, acceptance
-criteria, verification plan, and bounded context. It returns `task_ref` for
-task-anchored calls and canonical `task_id` for durable evidence.
+Only the task-creation operation accepts the user-selected canonical project
+root. It preserves the exact original request separately from its English
+normalization, together with language, version, requirements, constraints,
+acceptance criteria, verification evidence, and bounded context. It returns a
+compact task reference for later task-scoped work and a durable task identity
+for evidence. Consult the active MCP registry for the current contract shape;
+this skill supplies the meaning and ordering of the information, not a request
+template or field schema.
 
-### Canonical first `create_task` call
-
-This is the complete first-call shape. Replace the illustrative values while
-keeping their roles: `project_root` is the user-selected absolute canonical cwd
-or webhook root, `user_request_original` is exact user text, `user_language`
-is a BCP-47 tag such as `ru` rather than `Russian`, and all internal contract
-prose is English.
-
-```json
-{
-  "task_contract_version": "cortex/task-contract/v1",
-  "project_root": "/absolute/canonical/user-selected-cwd-or-webhook-root",
-  "user_request_original": "Точный исходный текст запроса пользователя",
-  "user_language": "ru",
-  "objective": "English normalization of the requested observable outcome.",
-  "requirements": [
-    "Deliver the user-requested outcome."
-  ],
-  "constraints": [
-    "forbidden_actions: Do not perform destructive, external, privileged, or scope-expanding actions without ordinary user authorization."
-  ],
-  "acceptance_criteria": [
-    "The observable requested outcome is complete."
-  ],
-  "verification_plan": [
-    "Return proportional evidence that each acceptance criterion is met."
-  ]
-}
-```
-
-`forbidden_actions` is text within `constraints`, never an extra public field.
-The public input object is closed: do not add wrappers, aliases, or optional
-fields to this first call. Free-text contract fields are opaque bounded text,
-not semantically validated instructions. On success, retain the emitted
-`task_ref`; every later public tool call omits `project_root`. Task-anchored
-calls use that exact `task_ref`; entity-derived calls use their emitted IDs.
+The task/result contract must be complete before task creation. Keep the four
+required dimensions meaningful and in English, preserve user wording without
+silently changing intent, and express uncertainty as an explicit assumption
+plus a verification item. Free-text contract content is bounded data rather
+than an executable instruction. After successful creation, use only the exact
+compact references returned by the active tool for subsequent work. Do not add
+wrappers, aliases, guessed fields, or values copied from durable evidence.
 
 Before that call, the four task/result arrays—requirements, constraints,
 acceptance criteria, and verification plan—must each contain meaningful English
@@ -126,23 +100,18 @@ documentation state, and any bounded further discovery. That desired structure
 is advisory; runtime does not parse heading, section, Markdown, ordering,
 language, or placeholder wording as a rejection rule.
 
-All later task-anchored creation and governance calls use `task_ref`; never copy
-a UI-rendered `task_id` into a task call or pass
-`project_root` to them. `read_delegation` resolves its task from
-`delegation_ref`, while `submit_report` resolves it from `delegation_ref` and
-`read_reports` resolves it from its `report_refs`. Those entity-derived public
-calls accept neither `task_ref` nor `task_id`; no direct-ID, alias, or mixed
-request shape is accepted by the public schema. A native worker message includes the saved root only for
-working-directory and project context. V11 ledgers remain a separate untouched
-namespace.
+Task-scoped operations use the task reference returned by task creation;
+entity-scoped operations use the compact reference returned by the operation
+that produced that entity. The active MCP schema determines which reference is
+accepted for each operation. A native worker message may carry the saved root
+only as working-directory and project context. V11 ledgers remain a separate
+untouched namespace.
 
-Construct a task-anchored mutation only after a successful `structuredContent`
-result supplied that exact `handles.task_ref`; copy it byte-for-byte into the
-next call. Do not dispatch a partially reconstructed request, retry by
-renaming fields, or substitute an internal ID. For `record_user_decision` with
-`decision_type="approve"`, copy the complete exact ready `approval_view`
-relation returned together by Cortex: `report_ref`, `report_content_digest`,
-`approval_handle`, `content_digest`, and `source_sequence`.
+Build every later mutation only from the exact successful tool result that
+returned its compact handle or approval relation. Never dispatch a partially
+reconstructed request, substitute a durable ID, or repair an identifier by
+renaming fields. Approval is valid only when the active tool returns one complete
+ready-view relation and the coordinator preserves that relation unchanged.
 
 Task, delegation, report, initiative, decision, and closure IDs, digests, and
 cursors are opaque immutable return data for every model caller. Copy them
@@ -184,13 +153,12 @@ additional siblings of that profile; copy it
 byte-for-byte into `spawn_agent.task_name`, never invent, sanitize, replace, or
 transform it.
 
-For every Cortex next call, use only `structuredContent.handles.*` from the
+For every Cortex next call, use only the exact callable handles returned by the
 last successful result. Copy each value byte-for-byte; never use a UI ellipsis,
-prose, parsed Markdown path, inferred ID, or constructed path. A correctable
-ID error means do not retry the shortened display—reuse the exact handle.
-`handles.next_sequence` is an integer for `after_sequence` only. `handles.cursor`
-is an opaque string for `read_reports` only; never convert, append, or exchange
-the two values.
+prose, parsed Markdown path, inferred ID, or constructed path. A correctable ID
+error means do not retry the shortened display—reuse the exact handle. Keep
+timeline continuation and report pagination handles distinct as directed by
+the active registry.
 
 Each successful `create_delegation` returns root-level `native_dispatch` and
 `renderer` proof. The complete rendered message occurs only once at
@@ -207,14 +175,12 @@ Terra and Sol carry it explicitly. Wait for that exact worker's own report
 before consuming the delegation result. An ambiguous spawn outcome is
 reconciled by exact native handle, not duplicated blindly.
 
-`create_delegation` is creation-only: never pass a `delegation_ref` to retrieve
-or replay work. For an exact idempotent mutation retry, reuse the original
-complete creation payload and its returned retry handle. Otherwise retrieve the
-existing delegation's verbose recovery brief and trusted native-dispatch payload with exactly
-`read_delegation({delegation_ref, after_sequence})`, using the emitted compact reference
-and the durable sequence (or `0` for the first page). Healthy creation does not
-need this read; use it only to recover an ambiguous or interrupted spawn after
-host reconciliation.
+Delegation creation is distinct from delegation recovery. For an exact
+idempotent retry, reuse the original arguments and the returned retry handle.
+Otherwise use the active recovery operation with the emitted delegation handle
+and continuation value only when host reconciliation shows that an ambiguous
+or interrupted spawn needs recovery. Healthy creation does not need a second
+read.
 
 The orchestrator's project-read exception is a closed direct-read allowlist,
 not tool or discovery authority. The coordinator may read only an already-known
@@ -230,10 +196,12 @@ must become a delegation rather than coordinator access.
 
 ## Reports and bounded reads
 
-A small report may be submitted atomically. A large report uses one exact emitted `report_ref`:
-`begin`, sequential `append` calls with exact chunk indexes and stable section
-names, then `finalize` with expected count and whole-report digest. Use `abort`
-with a sanitized English reason when the assembly cannot be completed safely.
+Small reports may be submitted atomically. Large reports use the active report
+assembly operations in their returned order, with non-overlapping chunks,
+stable section labels, and a complete content digest before they become
+immutable. Abort an assembly with a sanitized English reason when safe
+completion is impossible. The active MCP registry owns the operation fields,
+types, limits, and response shapes.
 Finalized/aborted reports cannot be appended, and a replacement explicitly
 supersedes rather than mutates an earlier report.
 
@@ -243,14 +211,13 @@ The coordinator never calls `submit_report` and no worker submits for another
 delegation. A reportless delegation leads to bounded follow-up, rework, or a
 parent-linked replacement, never coordinator-authored evidence.
 
-Omit `idempotency_key` for a new mutation. Retain and reuse only its returned
-opaque `retry_handle` for an exact retry with byte-identical arguments; Cortex
-does not parse client token text. Recover an interrupted assembly
-from its manifest and `next_chunk_index`; never guess or restart it. `read_reports`
-is the full-body reader. Select exact report refs and optional sections, honor the integer byte
-budget, and pass the returned cursor unchanged until the needed selection is
-complete. Metadata-only recovery may read manifests without bodies. Inspection
-tools return compact references and must not be treated as complete report
+For a new mutation, omit retry metadata unless the active tool requires it.
+Reuse only a returned opaque retry handle for an exact retry with byte-identical
+arguments. Recover an interrupted assembly from its returned manifest and
+continuation state; never guess or restart it. The report reader is the only
+full-body path for downstream evidence. Select only declared finalized material,
+honor the active byte budget and continuation cursor, and continue until the
+selection is complete. Metadata-only inspection does not provide report body
 content.
 
 Exact report refs are immutable public evidence references, not human-readable artifacts,
@@ -259,13 +226,11 @@ is complete. A worker completion handoff must return a concise English
 `Summary` and the exact server-returned `Report ref`/manifest digest. The
 coordinator consumes that handoff and does not reread the completed report body
 merely to summarize it. A downstream handoff names only finalized reports and
-carries each exact manifest digest. The downstream worker must call `read_reports` with
-`reader_kind="worker"` and its own exact `consumer_delegation_ref`; the server verifies
-that every named report is a declared same-task delegation input and records
-immutable page receipts (digest, chunk indexes, byte count, and cursor chain).
-Coordinator-classified reads are useful only for exceptional reconciliation
-and are never worker-read proof. A downstream worker may read the body when its
-declared work genuinely requires it.
+carries each exact manifest digest. A downstream worker reads evidence through
+the active report reader using its own declared consuming delegation; the server
+verifies same-task inputs and records immutable page receipts. Exceptional
+coordinator reads are never proof of worker consumption. A downstream worker
+may read the body only when its declared work genuinely requires it.
 
 The concise handoff summary carries the variables required for downstream
 coordination: current stage/state, outcome, next owner/action, pipeline or gate
@@ -286,14 +251,12 @@ same-task delegation with the exact report reference, then continue safely.
 ## User decisions
 
 Only coordinator policy may assert that ordinary-chat text is a direct user
-decision. `record_user_decision` accepts one closed canonical field set:
-`task_ref`, `subject_type`, `subject_ref`, `subject_digest`, `decision_type`,
-`prompt_en`, exact `response_original`, English `response_en`, and
-`user_language`. It stores the exact arbitrary-Unicode response, separate
-English normalization and prompt context, user language, subject type and exact
-compact subject ref, immutable subject digest when applicable, supersession,
-attribution, and chronology. The backend verifies binding and project/task scope but does
-not authenticate the user or interpret the row as authorization.
+decision. The decision tool stores the exact arbitrary-Unicode response,
+separate English normalization and prompt context, user language, subject
+binding, immutable digest when applicable, supersession, attribution, and
+chronology. The backend verifies binding and project/task scope but does not
+authenticate the user or interpret the row as authorization. Consult the active
+registry for the current decision shape and supported decision types.
 
 Plan `approve` binds only the exact immutable plan revision and digest and also
 requires the complete current ready approval-view relation: its opaque handle,
@@ -308,22 +271,15 @@ override, and authorization decisions use the closest active decision type
 without replacing exact original wording. A stored authorization assertion is
 never a bearer token; ordinary live approval requirements remain in force.
 
-For a requested or necessary main plan, present the exact server-provided
-`approval_view.markdown_link` and request
-explicit approve/revise/reject/cancel input in the user's language, then wait
-for a new response. For `approve`, use the existing bounded plan read or
-inspection until its explicit `approval_view` is `ready`; copy its exact
-`markdown_link`, `report_ref`, `delegation_ref`, path, report digest, view digest,
-source sequence, and server-issued approval handle byte-for-byte from the MCP
-response. Never
-construct, concatenate, shorten, substitute `native_task_name`, or infer a view
-path. Record `approve` only
-with that exact plan `report_ref`/digest, view digest/sequence, and approval
-handle via `record_user_decision`. Record `request_revision` or `cancel` against
-the exact plan `report_ref`/digest and response without a view binding; the
-original task request, implicit instruction,
-silence, or inferred consent cannot satisfy review. The handle proves the
-ready-view relation only; MCP provides no host-authenticated user-turn receipt.
+For a requested or necessary main plan, present only the exact server-provided
+verified view link and request explicit approve/revise/reject/cancel input in
+the user's language, then wait for a new response. Preserve the complete
+ready-view relation unchanged when recording approval; revision and
+cancellation preserve the finalized plan evidence without a volatile view
+binding. The original task request, implicit instruction, silence, or inferred
+consent cannot satisfy review. The returned relation proves only that the
+ready view existed before the decision write; MCP provides no host-authenticated
+user-turn receipt.
 When the work is plan-dependent, implementation or research beyond necessary
 discovery/planning may be delegated after that decision ref appears in
 `input_decision_refs`; this is coordinator-owned predecessor evidence, not a
@@ -452,14 +408,11 @@ inside the link destination.
 
 ## Closure field and ordering contract
 
-Use the active input schema exactly. A task closure is valid only when `task` is
-a supported subject type, `subject_ref` is the exact anchored `task_ref`, and
-initiative-only `initiative_status` is omitted. Bounded opaque
-`completion_notes` are valid for either a task or initiative closure and are
-stored without semantic interpretation. An initiative closure uses
-`subject_type=initiative`, the exact returned `initiative_ref`, and may use
-`initiative_status`. The closure schema has no
-subject-digest argument; never construct one.
+Use the active closure contract exactly. A task closure refers to the exact
+anchored task; an initiative closure refers to the exact initiative returned by
+the ledger and may include its supported initiative status. Opaque completion
+notes remain unmodified. Consult the active MCP registry for supported subject
+types, fields, and response shapes; never invent a digest or closure property.
 
 For a final `documentation not required` path, first obtain a finalized
 worker-owned report with an explicit English documentation-impact section and

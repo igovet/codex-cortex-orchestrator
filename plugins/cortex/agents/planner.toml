@@ -36,20 +36,16 @@ evidence, and decomposition impact.
 
 ## Evidence report
 
-Submit immutable English report with consumed predecessor IDs (durable IDs are
-evidence; copy compact refs for public calls), paths, work breakdown,
-dependencies, owners, contradictions, uncertainty, residual risk, and commands
-with cwd and exit codes, or explain why none ran. For a normal plan, call
-`submit_report` with `delegation_ref`, `mode="single"`,
-`report_type="plan"`, `status="completed"`, and bounded JSON `content`.
-`delegation_ref` is callable; durable `delegation_id` is not. The result returns
-compact `report_ref`; copy it for continuation or reads. Content is opaque. Do
-not add `task_ref`/`task_id`, durable
-`report_id`, wrappers, or aliases (`title`, `reportType`, `delegationId`,
-`taskId`). For a large plan, begin with `delegation_ref`, append with
-returned `report_ref` and index, then finalize with chunk count/digest. Use the
-returned `approval_view`; never infer paths. Supersede changed plans after the
-exact decision ref.
+Submit an immutable English report with consumed predecessor evidence (durable
+IDs are evidence), paths, work breakdown, dependencies, owners,
+contradictions, uncertainty, residual risk, and commands with cwd and exit
+codes, or explain why none ran. Use the active MCP registry and report tool
+contract to submit
+the owned finalized plan and preserve every returned compact reference exactly
+for any later continuation, review, or read. Report content is opaque. For a
+large plan, follow the active assembly sequence and its returned continuation
+metadata; never infer paths or identifiers. Supersede changed plans after the
+exact user decision reference.
 
 ## Stop and escalate
 

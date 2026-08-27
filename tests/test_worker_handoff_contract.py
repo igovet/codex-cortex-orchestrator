@@ -84,6 +84,28 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("Do not retry that read", contracts[1])
         self.assertIn("must not call it merely to", contracts[0])
 
+    def test_packaged_prompts_delegate_mcp_shapes_to_live_registry(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        prompt_paths = (
+            repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md",
+            repository / "plugins" / "cortex" / "skills" / "cortex-control" / "SKILL.md",
+            repository / "plugins" / "cortex" / "agents" / "planner.toml",
+        )
+        forbidden = (
+            "```json",
+            "inputSchema",
+            "outputSchema",
+            "closed canonical field set",
+            "complete first-call shape",
+            'reader_kind="worker"',
+            'mode="single"',
+        )
+        for path in prompt_paths:
+            text = path.read_text(encoding="utf-8")
+            for marker in forbidden:
+                self.assertNotIn(marker, text, f"{path} still embeds MCP shape {marker!r}")
+            self.assertIn("active MCP registry", text)
+
     def test_packaged_guidance_covers_pipeline_todo_routing_tone_and_tmux(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         orchestrator = (repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md").read_text(encoding="utf-8")
