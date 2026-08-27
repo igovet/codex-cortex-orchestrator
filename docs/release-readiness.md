@@ -289,9 +289,11 @@ and assets. It must not ship lifecycle hooks or lifecycle hook code.
 The package and repository metadata must consistently identify Cortex 12.0.0,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the exact eleven-tool catalog. Stale claims about waves, gates, capabilities,
-plan authority, host epochs, read receipts, required wait/read order, lifecycle
-HMAC, repair escrow, closure breakers, resource locks, required governance
-workers, or server-owned recovery are release defects.
+plan authority, host epochs, receipt-gated lifecycle, required wait/read order,
+lifecycle HMAC, repair escrow, closure breakers, resource locks, required
+governance workers, or server-owned recovery are release defects. Worker
+handoff delivery receipts are valid evidence but must not be described as host
+lifecycle authority.
 
 V11 state is a historical compatibility boundary only. V12 must not open,
 migrate, delete, or modify V11 databases. V11 tools and unfinished V11 tasks

@@ -90,8 +90,9 @@
 - Call `submit_governance_closure` with required `subject_type`, the exact
   existing compact `subject_ref`, one `verdict`, and bounded opaque JSON
   `evidence`. A task subject uses the exact anchored `task_ref` as
-  `subject_ref` and omits initiative-only status/completion fields; an
-  initiative subject uses the exact returned `initiative_ref` as `subject_ref`.
+  `subject_ref` and omits initiative-only `initiative_status`; opaque
+  `completion_notes` are valid for either subject. An initiative subject uses
+  the exact returned `initiative_ref` as `subject_ref`.
   Durable `subject_id` values are evidence only. Never invent a closure digest
   field.
 - Reuse returned compact task/entity refs and every digest/cursor byte-for-byte.
@@ -181,14 +182,15 @@
   dispatch twice, or reuse one worker for multiple delegations. Reconcile an
   ambiguous host result by exact native handle before replacement.
 - Keep the standard Codex To-Do projection limited to current pipeline stages
-  and gate state. Refresh it whenever either changes; never use it for worker
+  and review state. Refresh it whenever either changes; never use it for worker
   subtasks, implementation checklists, or report-body copies. Concise handoff
   summaries carry current stage/state, outcome, next owner/action, pipeline or
-  gate delta, changed/verified surface, exact report ref/digest, and residual
+  review delta, changed/verified surface, exact report ref/digest, and residual
   risk or unrun checks so routine coordinator body reads are unnecessary.
 - Do not add a server-owned model fallback, worker recovery route, wave/gate
-  state machine, plan approval, receipt protocol, host binding, or lifecycle
-  authorization.
+  state machine, plan-approval gate, receipt-gated lifecycle, host binding, or
+  lifecycle authorization. Coordinator-owned plan review and worker handoff
+  delivery receipts remain valid advisory/evidence practices.
 - V12 ships no lifecycle hooks. Native spawn/wait/stop state is outside
   the ledger and never a prerequisite for report access or completion.
 - Keep every native worker commentary/update, inter-worker message, final

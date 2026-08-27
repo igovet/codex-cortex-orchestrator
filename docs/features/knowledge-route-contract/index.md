@@ -86,9 +86,10 @@ bounded worker instructions from unquoted user-authored content without
 rejecting non-English paths, proper nouns, code, or task-required product text.
 
 Knowledge work follows the same V12 ledger contract as every other task. It has
-no required wave ordering, planner gate, read receipt, lifecycle hook, profile
-capability, or backend completion rule. Missing baseline documentation cannot
-block a feature task or final answer.
+no required wave ordering, planner gate, receipt-gated lifecycle, lifecycle
+hook, profile capability, or backend completion rule. Worker handoff receipts
+are delivery evidence only. Missing baseline documentation cannot block a
+feature task or final answer.
 
 Documentation must preserve user-authored content outside generated sections
 when the route contract requires it, keep facts grounded in current source, and

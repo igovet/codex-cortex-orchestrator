@@ -132,10 +132,14 @@ object-shaped scope is invalid. Delegation `model` and `reasoning_effort` are
 required together and retained exactly. `profile_name` is an exact packaged
 enum distinct from the bounded human-readable `role`, and its renderer proof
 must be loaded. The returned native arguments preserve the exact rendered
-message and selection for one matching host spawn. `submit_governance_closure` requires
-both `subject_type` and the matching compact task or initiative `subject_ref`.
-When a task has relevant initiatives, close each initiative first, then record
-the distinct task-subject closure that alone marks the task closed.
+message and selection for one matching host spawn. Normal spawning consumes
+that receipt directly; recovery uses `inspect_task` continuation data only
+after host reconciliation. Continuations never attest lifecycle, and native
+commentary alone is never durable progression: a recovered child needs a
+finalized report, explicit blocked/partial handoff, or parent-linked
+replacement. `submit_governance_closure` requires both `subject_type` and the
+matching compact task or initiative `subject_ref`; it records advisory evidence
+and does not gate safe work or a truthful user-facing answer.
 
 `record_user_decision` is the durable record of an ordinary-chat decision. It
 requires one canonical field set: `task_ref`, subject type/ref/digest, decision
@@ -190,12 +194,16 @@ its predecessor. The types are `progress`, `result`, `synthesis`, and `plan`;
 a `plan` report can declare `informational` or coordinator-owned `required`
 review policy without creating a backend gate.
 
-Reading a delegation or report creates no receipt and no lifecycle fact.
+Ordinary delegation/task inspection creates no receipt or lifecycle fact.
 `read_reports` returns at most 20 unique known reports in the exact requested
-order and is the only report body/chunk reader. A coordinator does not call it
-merely to summarize a completed worker report: the worker must return a concise
-`Summary` and exact `Report ref`. Downstream workers use `read_reports` when
-their declared work genuinely requires the report body. It returns only complete JSON
+order and is the only report body/chunk reader. A worker handoff read made with
+`reader_kind="worker"` and its exact consuming delegation creates an immutable
+page receipt (digest, chunk indexes, byte count, and cursor chain); a
+coordinator-classified read does not substitute for that evidence. A
+coordinator does not call it merely to summarize a completed worker report: the
+worker must return a concise `Summary` and exact `Report ref`. Downstream
+workers use `read_reports` when their declared work genuinely requires the
+report body. It returns only complete JSON
 chunks that fit its bounded integer `max_bytes` budget (at most 65,536 bytes), with a
 selection-scoped cursor for resume; `max_bytes=0` returns metadata only and no
 bodies. Inspection tools use

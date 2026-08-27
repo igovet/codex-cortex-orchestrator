@@ -50,18 +50,16 @@ audience filtering, capability matrix, lifecycle authority, or profile-based
 capability admission; exact packaged `profile_name` validation is only a prompt
 integrity boundary.
 
-For light/full, call `set_governance_mode` before project delegation and retain
-its closed `governance_gate`. It permits only `planner` initially; a preapproval
-`explorer` must be parent-linked to that planner with its finalized
-partial/blocked plan handoff. After `record_user_decision(decision_type=approve)`
-binds the exact finalized plan report/digest, downstream delegation requires
-both returned compact references in `input_report_refs`/`input_decision_refs`. This validates
-opaque relationships only, never models, stages, or free text.
+Use `set_governance_mode` to retain an advisory assessment when useful.
+Light/full assessments, plans, user decisions, documentation evidence, and
+closures inform model judgment but never admit, reject, order, or close
+ordinary safe ledger work. Exact report/decision links remain available as
+immutable evidence and retain their normal project/reference validation.
 
 | Tool | Semantic purpose |
 | --- | --- |
 | `create_task` | Create one exact task/result contract from its explicit root and return preferred `task_ref` plus canonical durable task ID. |
-| `inspect_task` | Read the task header and bounded chronological summaries for recovery. |
+| `inspect_task` | Read the task header, bounded chronology, and exact persisted continuation dispatches. A continuation is `ledger_unknown` for host lifecycle and must end in a finalized report, explicit blocked/partial handoff, or parent-linked replacement; native commentary alone is not a predecessor. |
 | `create_delegation` | Record bounded work, separate human role, exact packaged profile, model/effort, and relevant report/decision inputs; return the rendered worker brief and native-dispatch payload. |
 | `read_delegation` | Read one complete delegation contract and bounded compact chronology. |
 | `submit_report` | Create, chunk, finalize, or abort an immutable progress, result, synthesis, or plan report. |
@@ -320,9 +318,10 @@ the exact plan `report_ref`/digest and response without a view binding; the
 original task request, implicit instruction,
 silence, or inferred consent cannot satisfy review. The handle proves the
 ready-view relation only; MCP provides no host-authenticated user-turn receipt.
-No
-implementation or research beyond necessary discovery/planning may be delegated
-until that decision ref appears in `input_decision_refs`. A revision/rejection
+When the work is plan-dependent, implementation or research beyond necessary
+discovery/planning may be delegated after that decision ref appears in
+`input_decision_refs`; this is coordinator-owned predecessor evidence, not a
+backend admission rule. A revision/rejection
 follows up the same live planner with that decision ref to create a superseding
 plan and repeat review, or uses a parent-linked planner replacement only when
 same-worker continuation is unavailable. A C1 plan may be skipped only when the
@@ -386,7 +385,7 @@ retry, or parent-link rework stages; completed reports stay immutable. Load the
 validation/documentation/harvest overlay only when its trigger applies.
 
 The coordinator keeps the standard Codex To-Do projection aligned with this
-model-owned pipeline. It contains only current stages and gate state, such as
+model-owned pipeline. It contains only current stages and review state, such as
 discovery, plan approval, implementation, verification, and documentation
 impact. It is not a worker task list. To-Do entries are never worker subtasks,
 implementation checklists, or report bodies. Refresh it whenever a stage or gate changes, and
@@ -460,14 +459,14 @@ For a final `documentation not required` path, first obtain a finalized
 worker-owned report with an explicit English documentation-impact section and
 material/no-impact rationale. An existing finalized report qualifies only when
 it contains that explicit section; otherwise dispatch the bounded synthesis
-worker. For an approved-plan task, that documentation-impact delegation includes
+worker. For an approved-plan task, the documentation-impact delegation is still
+an ordinary post-approval delegation: it may include
 the finalized plan `r_…` plus every relevant finalized implementation or
 verification `r_…` in `input_report_refs`, and the exact approved-plan `u_…` in
-`approval_decision_ref`. These compact relations are mandatory durable evidence
-for an ordinary post-approval delegation; never replace a failed creation with a
-degraded native fallback. Light/full closure rejects coordinator-authored prose
-or a missing worker handoff as a substitute; the coordinator must consume the
-worker's concise summary and exact report reference first. An initiative may be recorded before the assessment when
+`approval_decision_ref` as declared inputs when that evidence is relevant. These
+compact relations are evidence, not an admission gate; never replace a failed
+creation with a degraded native fallback. The coordinator consumes the worker's
+concise summary and exact report reference first. An initiative may be recorded before the assessment when
 useful, but it cannot substitute for it. After all required evidence settles, create or update an initiative
 linking the exact task, the exact documentation-impact report ref, and all other
 required finalized report refs. Close that exact initiative with closure
@@ -477,12 +476,12 @@ governance scoped to the same task and initiative. A self-asserted
 invalid. A `ready` claim is durable only when that inspection shows the expected
 links and latest closure. Inspect both task scope and initiative scope; each
 must surface the exact task relationship, every required report link, and the
-closure. The returned next_action then requires a distinct task closure with
-subject_type=task and subject_ref exactly equal to task_ref; initiative closure
-alone leaves the task open. Do not give a final response until task-scoped
-inspection confirms task_closed with the recorded task closure verdict. Never
-create a report-only final initiative. A failed write or inspection remains an
-honest advisory limitation and never authorizes a premature task-subject retry.
+closure. The returned `next_action` may provide exact arguments for a distinct
+task closure; when that verdict is useful, confirm the task closure succeeds
+and inspect its task-scoped evidence. Neither closure is required for an honest
+final response. Never create a report-only final initiative. A failed write or
+inspection remains an honest advisory limitation and never authorizes a
+premature task-subject retry.
 
 ## Coordination, failure, and nonblocking governance
 
@@ -520,6 +519,6 @@ remediated.
 
 Missing closure, `not_ready`, an open or cyclic initiative, unresolved
 dependencies, an assembling/aborted/missing report, a reportless worker, or any
-ledger/projection outage must never disable coordination, but must prevent a
-completion final until the required distinct task closure is confirmed. Do not
-invent IDs, evidence, links, approvals, or successful records.
+ledger/projection outage must never disable coordination or an honest final
+answer. Disclose material evidence gaps and do not invent IDs, evidence, links,
+approvals, or successful records.

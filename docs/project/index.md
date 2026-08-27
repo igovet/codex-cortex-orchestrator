@@ -90,9 +90,11 @@ including when the user asks the coordinator to perform one.
 
 The sidecar enforces strict schemas, reference existence, project isolation,
 idempotency, transactions, uniqueness, and SQLite integrity. It does not
-enforce waves, gates, plan authority, capabilities, receipts, host lifecycle,
-profile-based capability admission, governance promotion, or a recovery state
-machine. Exact packaged `profile_name` validation is a prompt-integrity check.
+enforce waves, gates, plan authority, capabilities, receipt-gated lifecycle,
+host lifecycle, profile-based capability admission, governance promotion, or a
+recovery state machine. Worker handoff reads may still emit immutable delivery
+receipts; those receipts are evidence, not enforcement. Exact packaged
+`profile_name` validation is a prompt-integrity check.
 
 ## Stack and entry points
 
@@ -160,7 +162,9 @@ callable public locators, while durable IDs are non-callable evidence.
 known report refs in request order and resumes bounded section reads using its returned
 cursor. Large reports are never returned as one unbounded body.
 Inspection reads use `after_sequence` plus `limit`, expose compact references,
-and return `next_sequence` with `has_more`; reads create no receipts.
+and return `next_sequence` with `has_more`; these inspections create no
+receipts. A worker handoff `read_reports` read may create an immutable page
+receipt for the exact consuming delegation.
 
 `record_user_decision` appends coordinator-asserted ordinary-chat evidence, not
 backend authority. Its one canonical request preserves an exact `*_original` response alongside English

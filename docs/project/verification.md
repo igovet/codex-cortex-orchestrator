@@ -80,7 +80,9 @@ The V12 protocol evidence must prove:
   return `timeline`, `next_sequence`, and `has_more`, and expose only compact
   report references; `read_reports` is
   the only bounded report body/chunk reader;
-- reads create no receipt and no native lifecycle evidence;
+- ordinary inspection reads create no receipt and no native lifecycle evidence;
+  worker handoff `read_reports` reads create immutable delivery receipts, which
+  are not native lifecycle evidence;
 - `record_user_decision` accepts only an existing in-scope task, delegation,
   plan, report, or same-project initiative subject; preserves exact
   `response_original`, English `response_en`, `prompt_en`, language, attribution,
@@ -395,10 +397,10 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     parent-link rework unstarted stages while completed evidence remains
     immutable.
 24. The coordinator's standard Codex To-Do projection contains only current
-    pipeline stages and gate state, is refreshed whenever either changes, and
+    pipeline stages and review state, is refreshed whenever either changes, and
     never becomes a worker-subtask checklist or report-body mirror. The concise
     worker handoff includes current stage/state, outcome, next owner/action,
-    pipeline/gate delta, changed or verified surface, exact report ref/digest,
+    pipeline/review delta, changed or verified surface, exact report ref/digest,
     and residual risk or unrun checks so routine coordinator report-body reads
     are unnecessary.
 25. Russian coordinator-to-user updates lead with result, impact, and next
@@ -454,8 +456,8 @@ configuration. Check:
   internals, progressive detail, English durable-worker content, and safe
   optional humor without any A/B or model-quality claim;
 - historical V11 mentions only at the untouched/incompatible boundary;
-- absence of active lifecycle telemetry, hooks, waves, gates, receipts,
-  capabilities, and server recovery claims;
+- absence of active lifecycle telemetry, hooks, waves, gates, receipt-gated
+  lifecycle, capabilities, and server recovery claims;
 - coordinator-only orchestration, worker-owned project action/analysis, and the
   conditional report-grounded documentation stage before closure;
 - opaque byte-for-byte compact refs, durable evidence IDs, digests/cursors,

@@ -58,14 +58,12 @@ and normally `full`. Evidence and direct user preference can revise either
 classification or mode. Neither label creates a backend wave, mandatory stage,
 model escalation, or user-approval gate.
 
-Light/full additionally create a closed durable governance relation gate. It
-allows `planner` first, narrowly permits an `explorer` only through a
-planner-parented finalized partial/blocked plan handoff, and requires the exact
-finalized planner `report_ref` plus approval `decision_ref` values in the
-downstream delegation's `input_report_refs` and `input_decision_refs` arrays.
-Durable `report_id`/`decision_id` values are evidence only and are not public
-inputs. It validates compact references and immutable digest bindings only; it
-does not choose stages, profiles, models, or free-text work.
+Light/full create advisory assessments only. They may guide the coordinator to
+seek planning, review, or additional verification, but never create a backend
+admission, profile, approval, stage, or closure gate. Finalized plan reports
+and user decisions can still be linked to a downstream delegation as immutable
+evidence when its declared work needs them; normal compact-reference, digest,
+and project-isolation validation remains strict.
 
 ## Project-level initiatives
 
@@ -149,9 +147,10 @@ coordinator must present the finalized plan through a fresh verified host-privat
 Markdown link and request explicit approve/revise/reject/cancel input. Only an
 `approve` response requires the current ready approval view and opaque handle;
 `request_revision` and `cancel` retain the exact plan report/digest and response
-without volatile view binding. No implementation or research
-beyond discovery/planning starts until that compact decision ref is included in
-the plan-dependent delegation's `input_decision_refs` array. Rejection/revision
+without volatile view binding. When the work is plan-dependent, implementation
+or research may use that compact decision ref in a plan-dependent delegation's
+`input_decision_refs` array; this is coordinator-owned predecessor evidence, not
+a backend admission rule. Rejection/revision
 follows up the same live planner with that decision ref for a superseding plan,
 or uses a parent-linked replacement
 only when same-worker continuation is unavailable. A C1 task skips planning only
@@ -171,10 +170,10 @@ within its size bound. The verdict is one of:
 
 The subjects are not interchangeable. A supported task closure uses the exact
 anchored `task_ref` as `subject_ref` and omits initiative-only
-`initiative_status` and `completion_notes`. An initiative closure uses the
-exact returned compact `initiative_ref` as `subject_ref` and may include those
-fields. Durable `task_id`/`initiative_id` values are evidence only and are not
-callable closure inputs. `unresolved_risks`
+`initiative_status`; it may include opaque `completion_notes`. An initiative
+closure uses the exact returned compact `initiative_ref` as `subject_ref` and
+may include its supported initiative fields. Durable `task_id`/`initiative_id`
+values are evidence only and are not callable closure inputs. `unresolved_risks`
 and `follow_ups` are optional and default to empty lists. The closure call has
 no subject digest argument. Required reports must be finalized and read before
 a ready closure is attempted.

@@ -407,9 +407,9 @@ model-owned orchestration: the coordinator delegates every source/code/config
 read, analysis, documentation edit, and verification to workers, while its
 bounded index route only selects the knowledge contract for those delegations.
 Their reports inform later delegations. Cortex does not impose a universal phase
-order, but the active `light`/`full` relation preserves the exact required
-planner, approval, and post-approval documentation-evidence lineage before
-downstream work or closure.
+order or a governance admission relation. When a plan or decision is relevant,
+the coordinator preserves its exact lineage as declared worker evidence; it
+does not make unrelated downstream work or closure unavailable.
 
 #### Documentation impact is assessed after verified tasks
 
@@ -533,7 +533,7 @@ flowchart TB
 
         PLANDEL["Coordinator creates planner delegation"] --> PW["Planner worker<br/>English project solution plan report"]
         PW --> PLANWRITE["submit_report type=plan<br/>single or begin · append · finalize<br/>stable ID · immutable manifest digest"]
-        PLANWRITE --> PLANPOLICY{"review_policy + governance relation<br/>informational · required<br/>light/full requires exact plan approval"}
+        PLANWRITE --> PLANPOLICY{"review_policy + coordinator policy<br/>informational · required<br/>required review pauses only plan-dependent work"}
 
         DOCDEL["Coordinator creates documentation-sync delegation"] --> DW["Technical-writer worker<br/>update project + feature knowledge"]
         DW --> DOCWORK["Document material behavior · architecture · interfaces<br/>commands · verification · conventions · ownership"]
@@ -542,7 +542,7 @@ flowchart TB
         DV --> DVCHECK["Check source grounding · links · commands<br/>Mermaid · scope · preserved user content"]
         DVCHECK --> DVP["submit_report<br/>documentation verification evidence"]
 
-        NODOCDEL["Coordinator creates bounded no-doc<br/>evidence-synthesis/technical-writer delegation<br/>when a final documentation-impact report is needed"] --> NODOCW["Worker-owned English documentation-impact rationale<br/>post-approval technical-writer evidence for light/full"]
+        NODOCDEL["Coordinator creates bounded no-doc<br/>evidence-synthesis/technical-writer delegation<br/>when a final documentation-impact report is needed"] --> NODOCW["Worker-owned English documentation-impact rationale<br/>report-grounded evidence when useful"]
         NODOCW --> NODOCP["submit_report<br/>finalized documentation not required evidence"]
     end
 
@@ -601,12 +601,10 @@ flowchart TB
     DOCREADY --> CLOSE{"Model-authored advisory verdict<br/>ready · ready_with_risks · not_ready"}
     NODOC --> NODOCINIT["record_initiative<br/>exact task + documentation-impact report<br/>+ every other finalized evidence report"]
     NODOCINIT --> CLOSE
-    CLOSE -. "best effort after evidence settles" .-> RECORD["submit_governance_closure<br/>close every related initiative first<br/>evidence cites exact report refs + digests"]
-    RECORD -- "initiative closure returns next_action" --> TASKCLOSE["submit_governance_closure again<br/>distinct subject_type=task, subject_ref=task_ref<br/>only this marks the task closed"]
-    TASKCLOSE -- "write succeeds" --> VERIFYCLOSE["inspect_governance<br/>task and initiative scopes with pagination<br/>verify links · subject · verdict"]
-    VERIFYCLOSE -- "verified" --> FINAL(["User-facing final answer"])
+    CLOSE -. "best effort after evidence settles" .-> RECORD["submit_governance_closure<br/>advisory task or initiative evidence<br/>cite exact report refs + digests"]
+    RECORD -- "optional follow-up evidence" --> VERIFYCLOSE["inspect_governance<br/>bounded task or initiative view<br/>verify links · subject · verdict"]
+    VERIFYCLOSE -- "verified or disclosed limitation" --> FINAL(["User-facing final answer"])
     RECORD -. "closure write unavailable<br/>honest advisory limitation" .-> FINAL
-    VERIFYCLOSE -. "inspection fails or disagrees<br/>never claim durable ready" .-> FINAL
 
     subgraph INIT["Project-level initiatives — model-owned program view"]
         direction LR
@@ -652,8 +650,7 @@ flowchart TB
     P3 -. "immutable report" .-> TL
     DP -. "immutable report" .-> TL
     DVP -. "immutable report" .-> TL
-    RECORD -. "append-only initiative closure" .-> TL
-    TASKCLOSE -. "append-only task closure" .-> TL
+    RECORD -. "append-only task or initiative closure" .-> TL
     DECISION -. "append-only user evidence" .-> TL
     IR -. "revision history" .-> TL
     NOGATE -. "cannot prohibit safe next step" .-> C0
@@ -673,7 +670,7 @@ flowchart TB
     class ACT,C0,BOUNDARY,SPLIT,ROUTE,KC,D1,D2,DN,SCOPE,LANG,PROFILE,R1,R2,RN,X1,X2,XN,REWORK,ASK,QUESTION,SAMEWORKER,RESUME,VDELEGATE,PLANDEL,PLANLINK,DOCDEL,DOCVERIFY,DOCIMPACT,DOCREADY,NODOC,NODOCDEL,NODOCINIT model;
     class W1,W2,WN,A1,A2,AN,P1,P2,P3,MISS,VW,VCHECK,VP,PW,PLANWRITE,DW,DOCWORK,DP,DV,DVCHECK,DVP,NODOCW,NODOCP worker;
     class FILES,CMDS,DOMAIN,NOWRITE,EVIDENCE,REVIEW evidence;
-    class MODE,START,REVISE,PLANPOLICY,UDEC,DECISION,CLOSE,RECORD,TASKCLOSE,VERIFYCLOSE,I0,IR,IL,IW,IC governance;
+    class MODE,START,REVISE,PLANPOLICY,UDEC,DECISION,CLOSE,RECORD,VERIFYCLOSE,I0,IR,IL,IW,IC governance;
     class ROOT,ANCHOR,DB,TL,SAFE,NOGATE,MAINT,VIEWROOT,JOBS,VIEWSTATE,VERIFYVIEW,FALLBACK,ERROR ledger;
 ```
 
@@ -753,9 +750,9 @@ apply.
    independent scopes concurrently when beneficial. Planning is an optional
    `planner` stage whose immutable plan report is the predecessor for
    plan-dependent work. There is no universal wave, phase, or planner-first
-   order. Once `light`/`full` selects a plan-review relation, however, the
-   exact completed plan and explicit approval are a monotonic prerequisite for
-   downstream project delegations.
+   order. A requested or necessary plan can create a coordinator-owned review
+   hold for plan-dependent work, but `light`/`full` never create a backend
+   admission gate or make unrelated safe delegations unavailable.
 4. **Precise dispatch.** The coordinator provides rich six-part knowledge
    guidance for each delegation in `instructions` and the native brief. It is
    advisory worker context, not server-parsed output grammar.
@@ -778,9 +775,10 @@ apply.
    and host-private Markdown link with localized approve/revise/reject/cancel
    input. The coordinator records the exact-revision approval through
    `record_user_decision`; implementation or research beyond discovery/planning
-   receives that decision ref before dispatch. For `light`/`full`, Cortex
-   validates that exact plan-to-approval relation without interpreting plan
-   prose; a revised plan gets a new digest and never inherits approval.
+   receives that decision ref before dispatch when the work is plan-dependent.
+   The ready-view relation is validated for the specific approval request, but
+   governance mode never creates a backend admission gate; a revised plan gets
+   a new digest and never inherits approval.
 6. **Immutable evidence with strict ownership.** Workers alone call
    `submit_report` for their own `progress`, `result`, `synthesis`, `plan`,
    verification, and documentation-impact reports. The coordinator creates the
@@ -802,9 +800,9 @@ apply.
    graph; completed reports remain immutable. It never reopens project
    artifacts, reruns checks, or writes the project plan.
    The standard Codex To-Do projection mirrors only current pipeline stages and
-   gate state; it is refreshed whenever either changes and never becomes a
+   review state; it is refreshed whenever either changes and never becomes a
    worker-subtask checklist or report-body mirror. Worker handoff summaries
-   carry the current stage/state, outcome, next owner/action, pipeline/gate
+   carry the current stage/state, outcome, next owner/action, pipeline/review
    delta, changed or verified surface, exact report ref/digest, and residual
    risk or unrun checks, so routine coordinator report-body reads are not
    needed.
@@ -825,19 +823,18 @@ apply.
    report. The coordinator may use its bounded routing reads to identify owned
    knowledge paths, but never edits or verifies the documentation itself and
    never calls `submit_report`.
-10. **Advisory close and active publication.** Only after that conditional
+10. **Advisory close and active publication.** After that conditional
    documentation stage and settled finalized evidence, the model makes a best
-   effort to store a supported exact-subject closure. The no-impact route first
-   creates or updates an initiative with the exact task relationship, the exact
-   documentation-impact report ref, and every other required report link; cites
-   those refs and returned digests in closure evidence; closes that exact
-   initiative, then records the distinct task closure; and verifies both
-   task-scoped and initiative-scoped governance. It claims durable `ready` only
-   after the write and inspection agree, then gives the user a localized final
-   answer with verified host-private links and concise summaries. Missing or
-   failed closure evidence and a non-ready human view never become lifecycle
-   blockers; the coordinator states the actual limitation and summarizes
-   canonical SQLite evidence inline.
+   effort to store a supported exact-subject closure. The no-impact route can
+   create or update an initiative with the exact task relationship, the exact
+   documentation-impact report ref, and every other required report link; cite
+   those refs and returned digests in closure evidence; and inspect task and
+   initiative governance when useful. A separate task closure may be recorded
+   when a distinct task verdict helps, but neither closure is a lifecycle gate.
+   The model claims durable `ready` only after the relevant write and inspection
+   agree; otherwise it gives the user a localized final answer with verified
+   host-private links and concise summaries, disclosing any closure or
+   projection limitation and summarizing canonical SQLite evidence inline.
 
 ### V12 delegation and report protocol
 
@@ -853,8 +850,10 @@ contract plus explicit disclosure. A worker can call
 `read_delegation`, perform its bounded work, and submit one or more immutable
 reports for that same delegation. The worker owns every `submit_report` call;
 the coordinator never submits plan, result, verification, synthesis, or
-documentation-impact evidence on its behalf. Reading creates no receipt;
-submitting a report does not prove native termination or acceptance.
+documentation-impact evidence on its behalf. Ordinary inspection creates no
+receipt; a worker handoff `read_reports` call creates an immutable page
+receipt for the exact consuming delegation. Neither receipt proves native
+termination or acceptance.
 
 Every task, delegation, report, initiative, decision, and closure ID, digest,
 and cursor is opaque immutable return data for model callers. Copy the exact
@@ -1118,11 +1117,11 @@ Reusing it with a different payload returns a non-mutating
 `idempotency_conflict`.
 
 Core coordination calls validate shapes, sizes, enumerations, compact-reference
-existence, and project isolation. Initiative status, dependency warnings, and
-closure verdict never choose the next safe operation. The sole governance
-admission relation is the documented `light`/`full` completed-plan plus exact
-approval lineage for downstream delegation, followed by the documented
-post-approval documentation evidence for closure.
+existence, and project isolation. Initiative status, dependency warnings,
+closure verdict, and missing governance records never choose or prohibit the
+next safe operation. Plan review and documentation evidence remain
+coordinator-owned advisory practices; report/decision lineage is validated only
+when a caller explicitly supplies those references for declared work.
 
 ### V12 public API and audience boundary
 
@@ -1138,20 +1137,22 @@ from host metadata, thread identity, or process working directory.
 | Tool | Contract |
 | --- | --- |
 | `create_task` | Create one durable project-scoped task from explicit `project_root`, exact original request and concrete language, English objective, and four non-empty meaningful result-contract arrays; return compact `task_ref`. |
-| `inspect_task` | Use `task_ref` to read compact task history after `after_sequence`, bounded by `limit`. |
-| `create_delegation` | Use `task_ref` to persist bounded work with separate human `role`, exact packaged `profile_name`, required textual `scope`, exact model/effort, and selected report/decision inputs; return an attested worker brief and exact native-dispatch payload carrying the saved root. |
+| `inspect_task` | Use `task_ref` to read compact task history after `after_sequence`, bounded by `limit`, and exact persisted continuation dispatches. Continuations are lifecycle-unknown: reconcile the exact native identity with the host and obtain a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
+| `create_delegation` | Use `task_ref` to persist bounded work with separate human `role`, exact packaged `profile_name`, required textual `scope`, exact model/effort, and selected report/decision inputs; return an attested worker brief and exact native-dispatch payload carrying the saved root. Use this receipt directly for normal spawning; do not create then immediately read. |
 | `read_delegation` | Use `delegation_ref` plus `after_sequence` to resolve and read compact history without a receipt; do not supply `task_ref` or `task_id`. |
 | `submit_report` | Use `delegation_ref` for a single body or stable-reference `begin`/`append`/`finalize`/`abort` report: `progress`, `result`, `synthesis`, or `plan`; do not supply `task_ref` or `task_id`. |
 | `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and integer `max_bytes` budget. Do not supply `task_ref` or `task_id`. Worker handoff reads additionally name the exact consuming delegation reference and leave immutable page receipts. |
 | `set_governance_mode` | Use `task_ref` to append a `minimal`, `light`, or `full` assessment. |
 | `record_initiative` | Use `task_ref` as the project anchor and only `dependency_refs`, `linked_task_refs`, `linked_delegation_refs`, `linked_report_refs`, and `linked_decision_refs` for initiative relationships. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative governance history. |
-| `submit_governance_closure` | Use `task_ref` to append an advisory closure with required `subject_type` and matching compact `subject_ref`. Close relevant initiatives first, then record the distinct task-subject closure before a completion final. |
+| `submit_governance_closure` | Use `task_ref` to append an advisory closure with required `subject_type` and matching compact `subject_ref`. It records evidence but never gates safe work or a truthful user-facing answer. |
 | `record_user_decision` | Use the complete canonical `task_ref`/subject-ref/digest/decision/response field set to append coordinator-attributed original/English evidence. For `approve`, also copy the complete exact ready approval-view relation: report ref/digest, opaque handle, view digest, and source sequence. |
 
 There is no coordinator/worker audience filtering, capability matrix,
-host-bound authority, read receipt, profile-based lifecycle admission, action
-multiplexer, or tool-name alias. The server validates the exact packaged
+host-bound lifecycle authority, receipt-gated lifecycle admission, action
+multiplexer, or tool-name alias. Worker handoff reads can create immutable
+consumption receipts, but those receipts are delivery evidence rather than
+host authority. The server validates the exact packaged
 `profile_name` and projects native arguments statelessly, but never spawns,
 binds, or authorizes the native worker.
 
@@ -1229,9 +1230,9 @@ happens next.
 - **Evidence is explicit.** Later workers receive stable immutable report refs,
   and reads preserve the coordinator's requested order.
 - **Governance improves judgment without inventing a workflow engine.** Risks,
-  mode history, warnings, and closure recommendations inform reasoning. The
-  only enforced relation is the documented light/full plan approval and
-  closure-evidence lineage; it never selects the next worker or solution.
+  mode history, warnings, plan-review evidence, and closure recommendations
+  inform reasoning. Exact references remain strict when supplied, but no
+  governance relation admits work or selects the next worker or solution.
 - **The coordinator can adapt without becoming a worker.** It can revise mode,
   create rework, delegate independent verification, replace a worker, ask the
   user, or finish with disclosed risk without a server-owned recovery ceremony
@@ -1511,9 +1512,9 @@ compatible with V12.
 - Keep restore strictly offline. `RESTORE`, exact task/shard, backup ID, and
   `MCP_STOPPED` record deliberate operator intent but never substitute for
   actually stopping every normal MCP process using the shard.
-- Never add initiative status, dependency warnings, or closure verdict to
-  core-operation admission checks; governance mode may enforce only the
-  documented light/full plan-approval relation.
+- Never add initiative status, dependency warnings, closure verdict, or
+  governance mode to core-operation admission checks. Plan review and report
+  lineage are coordinator-owned evidence practices, not backend gates.
 - After worker-reported project verification, make the report-grounded
   documentation-impact decision before closure. Material changes require a
   documentation-sync worker plus a separate verifier for `docs/project/` and

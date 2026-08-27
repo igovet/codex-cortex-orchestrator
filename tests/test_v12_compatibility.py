@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -104,6 +105,31 @@ class V12CompatibilityTests(unittest.TestCase):
         self.assertNotIn("structuredContent", result)
         return result
 
+    def test_fresh_schema_records_advisory_migration_without_retired_gate_table(self) -> None:
+        store = V12Store(self.project)
+        with sqlite3.connect(store.database_path) as connection:
+            migrations = connection.execute(
+                "SELECT version,name FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            retired_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='governance_gates'"
+            ).fetchone()
+            retired_index = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='governance_gates_assessment'"
+            ).fetchone()
+        self.assertEqual(migrations[-1], (8, "v12-advisory-governance"))
+        self.assertIsNone(retired_table)
+        self.assertIsNone(retired_index)
+
+    def test_advisory_closure_contract_does_not_require_initiative_order(self) -> None:
+        contracts = build_public_contracts()
+        closure_description = contracts["submit_governance_closure"]["description"]
+        self.assertIn("never block a safe operation", closure_description)
+        self.assertIn("neither that follow-up nor any initiative-first order is required", closure_description)
+        self.assertNotIn("first requires a finalized", closure_description)
+        next_action = contracts["submit_governance_closure"]["outputSchema"]["properties"]["next_action"]
+        self.assertIn("never requires that closure", next_action["description"])
+
     def test_schema_failures_name_output_only_and_approval_relation_fields(self) -> None:
         task = self._successful_tool("create_task", {
             "project_root": str(self.project),
@@ -126,7 +152,7 @@ class V12CompatibilityTests(unittest.TestCase):
             "governance_gate": {},
         })
         gate_text = rejected_gate["content"][0]["text"]
-        self.assertIn("governance_gate is an output-only durable relation", gate_text)
+        self.assertIn("governance_gate is a removed workflow projection", gate_text)
         self.assertIn("Location: $.", gate_text)
         after_rejection = self._successful_tool("inspect_task", {"task_ref": task_ref})
         self.assertEqual(after_rejection["timeline"], before["timeline"])
@@ -135,7 +161,7 @@ class V12CompatibilityTests(unittest.TestCase):
             "task_ref": task_ref,
             "mode": "minimal",
         })
-        self.assertIn("governance_gate", accepted)
+        self.assertNotIn("governance_gate", accepted)
 
         rejected_approval = self._rejected_tool("record_user_decision", {
             "task_ref": task_ref,
@@ -190,7 +216,13 @@ class V12CompatibilityTests(unittest.TestCase):
             "status": "completed",
             "content": {"steps": ["Use only canonical public fields."]},
         })
-        approval_view = plan.get("approval_view")
+        # Context recovery must accept the same complete, server-issued
+        # relation shape returned from a bounded plan read, not only the
+        # original submission receipt.
+        recovered = self._successful_tool("read_reports", {
+            "report_refs": [plan["handles"]["report_ref"]],
+        })
+        approval_view = recovered.get("approval_view")
         self.assertIsInstance(approval_view, dict)
         self.assertEqual(approval_view.get("status"), "ready")
         valid = {
@@ -249,6 +281,75 @@ class V12CompatibilityTests(unittest.TestCase):
             self._rejected_tool("record_user_decision", arguments)
         after = self._successful_tool("inspect_task", {"task_ref": task_ref})
         self.assertEqual(len(after["decisions"]), before_count)
+
+    def test_advisory_governance_never_gates_dispatch_reports_or_closure(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project), "objective": "Advisory governance only.",
+            "user_request_original": "Advisory governance only.", "user_language": "en",
+            "task_contract_version": "cortex/task-contract/v1", "requirements": ["Keep modes advisory."],
+            "constraints": ["Do not weaken reference validation."],
+            "acceptance_criteria": ["Safe work continues without a workflow gate."],
+            "verification_plan": ["Exercise a light-mode non-planner delegation."],
+        })
+        task_ref_value = task["handles"]["task_ref"]
+        self._successful_tool("set_governance_mode", {"task_ref": task_ref_value, "mode": "full"})
+        delegation = self._successful_tool("create_delegation", {
+            "task_ref": task_ref_value, "objective": "Write non-planner plan evidence.",
+            "role": "writer", "profile_name": "technical_writer", "scope": "One advisory report.",
+            "instructions": "Submit a bounded plan report.", "model": "gpt-5.6-luna", "reasoning_effort": "high",
+        })
+        self._successful_tool("submit_report", {
+            "delegation_ref": delegation["handles"]["delegation_ref"], "report_type": "plan",
+            "status": "completed", "content": {"advisory": True},
+        })
+        closure = self._successful_tool("submit_governance_closure", {
+            "task_ref": task_ref_value, "subject_type": "task", "subject_ref": task_ref_value,
+            "verdict": "ready", "evidence": {"checked": "advisory"}, "unresolved_risks": [], "follow_ups": [],
+        })
+        self.assertEqual(closure["closure"]["verdict"], "ready")
+
+    def test_inspect_task_exposes_exact_recovery_dispatch_without_lifecycle_claim(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project), "objective": "Recover an open delegation.",
+            "user_request_original": "Recover an open delegation.", "user_language": "en",
+            "task_contract_version": "cortex/task-contract/v1", "requirements": ["Recover exact dispatch data."],
+            "constraints": ["Never duplicate host work."],
+            "acceptance_criteria": ["Recovered data is byte-identical."],
+            "verification_plan": ["Compare create and inspect receipts."],
+        })
+        created = self._successful_tool("create_delegation", {
+            "task_ref": task["handles"]["task_ref"], "objective": "Remediate PII logging.",
+            "role": "implementer", "profile_name": "backend_dev", "scope": "PII remediation only.",
+            "instructions": "Preserve exact recovery identity.", "model": "gpt-5.6-luna", "reasoning_effort": "high",
+        })
+        inspected = self._successful_tool("inspect_task", {"task_ref": task["handles"]["task_ref"]})
+        continuation = next(item for item in inspected["continuations"] if item["delegation"]["delegation_id"] == created["delegation"]["delegation_id"])
+        self.assertEqual(continuation["dispatch_state"], "ledger_unknown")
+        self.assertEqual(continuation["handoff_state"], "report_required")
+        self.assertEqual(continuation["recovery_requirement"], "finalized_report_or_explicit_handoff_or_parent_linked_replacement")
+        recovered = self._successful_tool("read_delegation", {
+            "delegation_ref": created["handles"]["delegation_ref"], "after_sequence": 0,
+        })
+        self.assertEqual(recovered["worker_brief"]["native_dispatch"], created["worker_brief"]["native_dispatch"])
+
+    def test_storage_unavailable_preserves_pending_decision_and_mutates_nothing(self) -> None:
+        store = V12Store(self.project)
+        task_id, report_id = self._plan(store, "Unavailable decision")
+        report = store._read(lambda connection: store._report(connection, report_id, task_id=task_id))
+        before = store.inspect_task(task_id=task_id, after_sequence=0)["decisions"]
+        pending = {
+            "task_ref": task_ref(task_id), "subject_type": "plan", "subject_ref": record_ref(report_id),
+            "subject_digest": report["content_digest"], "decision_type": "approve", "prompt_en": "Approve?",
+            "response_original": "Approve.", "response_en": "I approve.", "user_language": "en",
+            "approval_handle": "approval-unavailable", "approval_view_content_digest": "sha256:" + "0" * 64,
+            "approval_view_source_sequence": 0,
+        }
+        with mock.patch("cortex_runtime.v12_service._task_store", side_effect=V12ServiceError("V12 storage is unavailable", code="storage_unavailable")):
+            with self.assertRaises(V12ServiceError) as unavailable:
+                record_user_decision(**pending)
+        self.assertEqual(unavailable.exception.code, "storage_unavailable")
+        self.assertEqual(pending["response_original"], "Approve.")
+        self.assertEqual(store.inspect_task(task_id=task_id, after_sequence=0)["decisions"], before)
 
     def test_canonical_schemas_reject_removed_aliases_and_string_budget(self) -> None:
         contracts = build_public_contracts()

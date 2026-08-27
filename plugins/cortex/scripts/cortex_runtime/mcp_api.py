@@ -45,12 +45,7 @@ _RECOVERY_ACTIONS = {
     "report_exists": "Create a distinct report operation or reuse only the exact returned retry handle for the original mutation.",
     "invalid_model_selection": "Select one advertised model and one advertised reasoning_effort as the required atomic pair.",
     "profile_unavailable": "Select an advertised packaged profile after the plugin profile catalogue is available; do not substitute the free-form role.",
-    "governance_gate_preapproval": "Before plan approval, use only the allowed planner path or the explicitly parent-linked discovery path with its finalized planner handoff.",
-    "governance_gate_links_required": "For a post-approval delegation, include the finalized plan in input_report_refs and the exact approved decision in approval_decision_ref. Keep any additional finalized evidence reports in input_report_refs.",
-    "governance_gate_evidence_mismatch": "Refresh the finalized plan and approval decision, then reuse their current compact refs; do not construct or substitute approval evidence.",
-    "documentation_impact_required": "Before closure, create a post-approval technical_writer delegation with the approved plan in input_report_refs, approval_decision_ref, and every relevant finalized result report; then have its worker submit a finalized result.",
-    "documentation_impact_evidence_missing": "Use the technical_writer worker's concise Summary and exact Report ref from its completed handoff; do not reread the report body as coordinator. Ensure the technical_writer delegation durably links the approved plan, exact approval decision, and every required finalized predecessor report, then retry closure.",
-    "initiative_closure_required": "Close every initiative related to the task first. Then submit_governance_closure with subject_type=task and subject_ref exactly equal to task_ref.",
+    "storage_unavailable": "Preserve the exact pending decision or mutation payload without reconstructing any authorization. Make no migration, rollback, deletion, or external action. After service state is restored, retry the identical bounded request once with the same idempotency_key; otherwise recover from the last exact emitted handles.",
     "invalid_report": "Use report metadata allowed by the selected mode and report_type; plan-only metadata requires a plan creation.",
     "invalid_report_operation": "Use exactly the fields required by the selected report mode and omit fields belonging to other modes.",
     "report_chunk_too_large": "Reduce this content chunk to the advertised report chunk bound and retry the same next chunk index.",
@@ -504,9 +499,8 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
         )
     elif tool_name == "set_governance_mode" and "governance_gate" in arguments:
         action = (
-            "governance_gate is an output-only durable relation. Omit it from "
-            "set_governance_mode and use only its advertised input fields; a "
-            "successful receipt returns the gate for later evidence handling."
+            "governance_gate is a removed workflow projection. Omit it from "
+            "set_governance_mode and use only its advertised advisory assessment fields."
         )
     elif tool_name == "record_user_decision" and arguments.get("decision_type") == "approve":
         required = (
@@ -664,7 +658,7 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
     structured = _project_public_views(value)
     compact_handles = json.dumps({"handles": structured["handles"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return {
-        "content": [{"type": "text", "text": compact_handles + "\nCopy only structuredContent.handles compact typed refs and server-issued opaque tokens byte-for-byte; canonical durable IDs in any rendered evidence are non-callable. Task-anchored calls use task_ref. Entity-derived calls use delegation_ref, report_ref/report_refs, decision_ref, or initiative_ref as advertised. If structuredContent.next_action is present, it is the exact required next call and its task_ref must be copied byte-for-byte. Delegation recovery: create_delegation is creation-only; retrieve an existing delegation with read_delegation({delegation_ref, after_sequence}) exactly. Read all result data from structuredContent; it is not duplicated into TextContent so bounded 200-event pages remain one valid JSONL frame."}],
+        "content": [{"type": "text", "text": compact_handles + "\nCopy only structuredContent.handles compact typed refs and server-issued opaque tokens byte-for-byte; canonical durable IDs in any rendered evidence are non-callable. Task-anchored calls use task_ref. Entity-derived calls use delegation_ref, report_ref/report_refs, decision_ref, or initiative_ref as advertised. Use successful creation receipts directly for normal next steps. Recovery: inspect_task continuations retain exact delegation/native-dispatch data but lifecycle is ledger-unknown; reconcile with the host, resume or wait if present, and spawn only after absence is proven. Read all result data from structuredContent; it is not duplicated into TextContent so bounded 200-event pages remain one valid JSONL frame."}],
         "structuredContent": structured,
         "isError": False,
     }

@@ -222,7 +222,7 @@ _PROPERTY_DESCRIPTIONS: dict[str, str] = {
     "max_bytes": "Maximum encoded report body bytes for this page. Zero returns metadata only and never consumes a cursor page.",
     "rationale": "Optional bounded advisory governance rationale. It records model or user evidence and never blocks coordination.",
     "risk_factors": "Optional bounded advisory risk labels for this governance assessment.",
-    "source": "Author of the advisory assessment: model evidence or an explicit user override asserted by the coordinator. A model assessment cannot clear an existing plan/approval obligation. Lowering one requires source=user_override plus a later durable task-scoped user cancel or override decision.",
+    "source": "Author of the advisory assessment: model evidence or an explicit user override asserted by the coordinator. The assessment is evidence only and does not create or retain a backend plan or approval obligation.",
     "goal": "Required bounded initiative goal retained in immutable revision history.",
     "risk": "Optional bounded initiative risk summary retained in its next revision.",
     "status": "Semantic status for the selected record type. Use only one of this tool's advertised enum values.",
@@ -433,17 +433,21 @@ _RESULT_PROPERTY_SCHEMAS: dict[str, dict[str, Any]] = {
     "assessment": _result_object("New advisory governance assessment; it never blocks another operation.", {
         "assessment_id": _opaque_record_id("Opaque durable assessment handle."), "task_id": _opaque_task_id("Anchored task handle."),
     }),
-    "governance_gate": _result_object("Closed durable governance relation gate. It validates exact report/decision links only; it never selects stages, profiles, models, or free-text work.", {
-        "task_id": _opaque_task_id("Anchored task handle."),
-        "assessment_id": _opaque_record_id("Assessment that created this gate."),
-        "mode": _string(enum=GOVERNANCE_MODES, maximum=16),
-        "plan_required": {"type": "boolean"},
-        "user_approval_required": {"type": "boolean"},
-        "allowed_preapproval_profiles": _result_array("Only profiles directly permitted before approval.", _string(maximum=ROLE_MAX_LENGTH)),
-        "plan_report_id": _opaque_record_id("Approved finalized planner report, or null.") | {"type": ["string", "null"]},
-        "plan_digest": _opaque_digest("Approved plan manifest digest, or null.", nullable=True),
-        "approval_decision_id": _opaque_record_id("Exact approving decision, or null.") | {"type": ["string", "null"]},
-    }),
+    "continuations": _result_array("Compact persisted delegation recovery status. It is ledger evidence only: reconcile the exact native name with the host before any spawn, never infer lifecycle from this result, and do not spawn while host state is ambiguous. Read the selected delegation for its exact worker brief/native dispatch. Native commentary alone cannot advance a durable successor: recovery must end in a finalized report, explicit blocked/partial handoff, or a parent-linked replacement.", _result_object("One recoverable delegation status.", {
+        "delegation": _result_object("Exact durable delegation selected for recovery.", {
+            "delegation_id": _opaque_record_id("Opaque durable delegation handle."),
+            "task_id": _opaque_task_id("Owning task handle."),
+            "native_task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$"),
+            "profile_name": _string(maximum=ROLE_MAX_LENGTH),
+            "model": _string(enum=NATIVE_MODELS, maximum=64),
+            "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16),
+        }),
+        "dispatch_state": _string(enum=("ledger_unknown",), maximum=32),
+        "handoff_state": _string(enum=("report_required", "report_assembling", "report_finalized", "explicit_handoff"), maximum=32),
+        "reports": _result_array("Immutable report evidence currently owned by this delegation.", _COMPACT_REPORT_SCHEMA),
+        "recovery_requirement": _string(enum=("finalized_report_or_explicit_handoff_or_parent_linked_replacement",), maximum=96),
+        "continuation_sequence": {"type": "integer", "minimum": 0},
+    })),
     "assessments": _result_array("Advisory governance assessments selected by the returned chronology page.", _result_object("Advisory governance assessment record.", {
         "assessment_id": _opaque_record_id("Opaque durable assessment handle."), "task_id": _opaque_task_id("Anchored task handle."),
     })),
@@ -461,11 +465,11 @@ _RESULT_PROPERTY_SCHEMAS: dict[str, dict[str, Any]] = {
         "closure_id": _opaque_record_id("Opaque durable closure handle."), "task_id": _opaque_task_id("Anchored task handle."),
         "subject_id": _opaque_record_id("Closed durable subject handle."),
     }),
-    "next_action": _result_object("Exact coordinator next action after closure. For an initiative closure, copy arguments exactly into submit_governance_closure: subject_type=task and subject_ref=task_ref. It contains compact callable refs only.", {
+    "next_action": _result_object("Optional exact closure follow-up. After an initiative closure, it may offer compact arguments for a separate task closure; it never requires that closure or orders safe coordination.", {
         "tool": _string(enum=("submit_governance_closure",), maximum=32),
         "state": _string(enum=("task_closed",), maximum=16),
-        "task_ref": _opaque_task_ref("Exact anchored task reference for the required task closure."),
-        "arguments": _result_object("Exact compact task-closure subject relation.", {
+        "task_ref": _opaque_task_ref("Exact anchored task reference echoed after closure or offered for an optional task closure."),
+        "arguments": _result_object("Exact compact suggested task-closure subject relation.", {
             "task_ref": _opaque_task_ref("Exact anchored task reference."),
             "subject_type": _string(enum=("task",), maximum=16),
             "subject_ref": _opaque_task_ref("Exact task subject reference."),
@@ -485,7 +489,6 @@ _RESULT_PROPERTY_SCHEMAS: dict[str, dict[str, Any]] = {
     "projection": _result_object("Effective advisory governance projection retaining latest model, user override, and closure evidence.", {
         "effective_mode": {"type": ["string", "null"], "enum": [*GOVERNANCE_MODES, None], "description": "Current effective advisory governance mode, or null when no assessment exists."},
         "override_active": {"type": "boolean", "description": "Whether a user override currently supersedes model assessment evidence."},
-        "governance_gate": {"type": ["object", "null"], "description": "Current closed durable governance relation gate, or null before governance is set."},
     }),
     "timeline": _result_array("Chronological cursor-scoped durable event metadata.", _result_object("One immutable timeline event.", {
         "sequence": {"type": "integer", "minimum": 0, "description": "Opaque chronological sequence cursor; retain it exactly for the next page."},
@@ -645,12 +648,12 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "outputSchema": _tool_output_schema("task", "replayed", optional_success_fields=("human_view",)),
         },
         "inspect_task": {
-            "description": "Read one task header and a bounded task-scoped chronology using task_ref. Report entries are compact references; use read_reports for bodies.",
+            "description": "Read one task header and a bounded task-scoped chronology using task_ref. Report entries are compact references; use read_reports for bodies. continuations return compact persisted recovery status only; use read_delegation for an exact worker brief/native dispatch after selecting its emitted delegation reference. Neither surface proves native lifecycle or authorizes a duplicate spawn.",
             "inputSchema": _closed({"task_ref": task_ref, **_page_arguments()}, ("task_ref",)),
-            "outputSchema": _tool_output_schema("task", "delegations", "reports", "decisions", "consumption_receipts", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
+            "outputSchema": _tool_output_schema("task", "delegations", "continuations", "reports", "decisions", "consumption_receipts", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
         },
         "create_delegation": {
-            "description": "Create one new model-authored delegation and return its durable worker brief and native-dispatch payload. This creation-only tool never retrieves or replays an existing delegation: reuse the original complete payload only for an exact idempotent retry, or retrieve an existing delegation with read_delegation({delegation_ref, after_sequence}). A durable governance gate validates only required compact plan/approval relations; it never selects a stage, profile, model, or free-text work.",
+            "description": "Create one new model-authored delegation and return its durable worker brief and native-dispatch payload. This creation-only tool never retrieves or replays an existing delegation: reuse the original complete payload only for an exact idempotent retry. Normal dispatch uses this receipt directly. For recovery, inspect_task returns the exact persisted delegation_ref and worker/native dispatch; reconcile that identity with the host, resume or wait if present, and spawn once only after absence is proven.",
             "inputSchema": _closed(
                 {
                     "task_ref": task_ref,
@@ -662,7 +665,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                     "parent_delegation_ref": delegation_id,
                     "input_report_refs": _entity_ref_array("report", maximum=MAX_REPORT_IDS) | {"description": "Optional unique predecessor report refs. Every value must be copied byte-for-byte from an emitted handle."},
                     "input_decision_refs": _entity_ref_array("decision", maximum=MAX_DECISION_IDS) | {"description": "Optional unique predecessor decision refs. Every value must be copied byte-for-byte from an emitted handle."},
-                    "approval_decision_ref": decision_id | {"description": "Exact approved decision required by the advisory gate when applicable. Copy it byte-for-byte from its emitted handle."},
+                    "approval_decision_ref": decision_id | {"description": "Optional exact approval decision evidence. Copy it byte-for-byte from its emitted handle when relevant to the delegated work."},
                     "model": _string(enum=NATIVE_MODELS, maximum=64, description="Exact logical coordinator-selected model. Luna remains explicit in durable data."),
                     "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact coordinator-selected effort, preserved unchanged by native serialization."),
                     "idempotency_key": idempotency_key,
@@ -712,7 +715,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "outputSchema": _tool_output_schema("reports", "returned_content_bytes", "next_cursor", "has_more", "consumption_receipts", optional_success_fields=("human_view", "approval_view")),
         },
         "set_governance_mode": {
-            "description": "Append a governance assessment and return its closed durable plan/approval relation gate. Use canonical rationale when recording context. Light/full require planner evidence and an exact approval decision before downstream delegation. The advisory mode label may change, but an existing plan/approval obligation is monotonic: report failure or a model downgrade cannot clear it or its linked evidence. Only source=user_override with a later durable task-scoped user cancel/override decision may lower it.",
+            "description": "Append an advisory governance assessment. Mode, planning, readiness, documentation evidence, and closure inform coordinator reasoning but never block another safe ledger operation.",
             "inputSchema": _closed(
                 {
                     "task_ref": task_ref,
@@ -725,7 +728,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                 },
                 ("task_ref", "mode"),
             ),
-            "outputSchema": _tool_output_schema("assessment", "governance_gate", "replayed"),
+            "outputSchema": _tool_output_schema("assessment", "replayed"),
         },
         "record_initiative": {
             "description": "Create or append an advisory project-level initiative revision in the ledger anchored by task_ref.",
@@ -755,7 +758,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "outputSchema": _tool_output_schema("initiatives", "assessments", "closures", "initiative_revisions", "links", "warnings", "projection", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
         },
         "submit_governance_closure": {
-            "description": "Append one advisory closure anchored by task_ref. For light/full governance, Cortex first requires a finalized worker-owned result from a post-approval technical_writer delegation whose compact inputs include the approved plan report, approval decision, and every relevant earlier finalized result report; the worker handoff Summary and exact Report ref are sufficient, and coordinator report-body rereading is not required. Report prose and closure evidence remain opaque. When relevant initiatives exist, close each initiative first, then copy its returned next_action arguments into one distinct task closure with subject_type=task and subject_ref exactly equal to task_ref; only that task closure marks the task closed. unresolved_risks, follow_ups, and opaque completion_notes are optional for either subject; initiative_status is optional only for initiative subjects.",
+            "description": "Append one advisory closure anchored by task_ref. Closure evidence is opaque, and governance mode, plans, documentation evidence, initiatives, and closure records never block a safe operation or an honest answer. A task or initiative closure may be recorded whenever its evidence is useful. An initiative closure may return exact compact next_action arguments for a separate task closure, but neither that follow-up nor any initiative-first order is required. unresolved_risks, follow_ups, and opaque completion_notes are optional for either subject; initiative_status is optional only for initiative subjects.",
             "inputSchema": _closed(
                 {
                     "task_ref": task_ref,

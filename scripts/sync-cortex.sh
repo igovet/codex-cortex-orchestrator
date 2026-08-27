@@ -208,6 +208,46 @@ sync_model_routing_catalog() {
   fi
 }
 
+refresh_plugin_cache_version() {
+  # An install must land in a fresh Codex cache directory even when the
+  # semantic release version is unchanged.  Check and dry-run are strictly
+  # read-only, so they deliberately validate the manifest as it stands.
+  [[ "${mode}" == "install" ]] || return 0
+  "${cortex_python}" -B - "${plugin_source}/.codex-plugin/plugin.json" <<'PY'
+import json
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+version = payload.get("version")
+match = re.fullmatch(r"(12\.0\.0\+codex\.)(\d{14})", version if isinstance(version, str) else "")
+if match is None:
+    raise SystemExit("error: plugin manifest version must be 12.0.0+codex.YYYYMMDDHHMMSS")
+previous = datetime.strptime(match.group(2), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+now = datetime.now(timezone.utc).replace(microsecond=0)
+next_value = max(now, previous + timedelta(seconds=1))
+payload["version"] = match.group(1) + next_value.strftime("%Y%m%d%H%M%S")
+encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+descriptor, temporary = tempfile.mkstemp(prefix=".plugin.json.", dir=path.parent)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, path.stat().st_mode & 0o777)
+    os.replace(temporary, path)
+    print(f"refreshed Cortex cache version: {payload['version']}")
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+}
+
 prepare_backup_directory() {
   local backup_dir="$1"
   validate_cleanup_target "${codex_home}" "backups/${plugin_name}-upgrade" "${backup_dir}" || return 1
@@ -816,6 +856,7 @@ validate_roots
 validate_global_config_path
 clean_plugin_bytecode
 sync_model_routing_catalog
+refresh_plugin_cache_version
 validate_sources
 status=0
 install_or_check || status=1

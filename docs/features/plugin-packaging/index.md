@@ -177,9 +177,10 @@ credentials, personal data, raw prompts, host identities, and private diagnostic
 must not enter package logs, fixtures, docs, issues, or release evidence.
 
 Package metadata must not claim waves, gates, plan authority, capability
-handoff, host lifecycle binding, read receipts, profile enforcement, governance
-promotion, closure authority, repair/rework waves, resource locks, or
-server-owned recovery.
+handoff, host lifecycle binding, receipt-gated lifecycle, profile enforcement,
+governance promotion, closure authority, repair/rework waves, resource locks,
+or server-owned recovery. Delivery receipts from worker handoff reads are
+evidence only and never host authority.
 
 It also must not imply that the coordinator may inspect source or operate on
 the target project, directly verify worker work, infer `project_root`, accept

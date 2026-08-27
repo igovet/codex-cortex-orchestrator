@@ -54,6 +54,8 @@ _GOVERNANCE_GATE_MIGRATION_VERSION = 6
 _GOVERNANCE_GATE_MIGRATION_NAME = "v12-durable-governance-gate"
 _APPROVAL_HANDLE_MIGRATION_VERSION = 7
 _APPROVAL_HANDLE_MIGRATION_NAME = "v12-ready-approval-handles"
+_ADVISORY_GOVERNANCE_MIGRATION_VERSION = 8
+_ADVISORY_GOVERNANCE_MIGRATION_NAME = "v12-advisory-governance"
 _APPLICATION_ID = 0x43563132
 _TIMELINE_BACKFILL_METADATA_KEY = "timeline_backfill_v1"
 _TIMELINE_BACKFILL_VERSION = "cortex/v12-timeline-backfill/v1"
@@ -654,6 +656,7 @@ class V12Store:
                         self._migrate_report_consumption_receipts(connection)
                         self._migrate_durable_governance_gate(connection)
                         self._migrate_ready_approval_handles(connection)
+                        self._migrate_advisory_governance(connection)
                         self._validate_existing(connection)
                         self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                     except BaseException:
@@ -672,6 +675,7 @@ class V12Store:
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_hash', ?)", (self.project_hash,))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_root_digest', ?)", (hashlib.sha256(str(self.project_root).encode("utf-8")).hexdigest(),))
                     except BaseException:
@@ -992,6 +996,43 @@ class V12Store:
         except sqlite3.DatabaseError as exc:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
 
+    def _migrate_advisory_governance(self, connection: sqlite3.Connection) -> None:
+        """Retire the legacy gate projection without rewriting durable evidence.
+
+        Assessments, reports, decisions, initiatives, and closures remain
+        authoritative append-only evidence.  The former gate was only a
+        derived workflow projection, so it is intentionally removed rather
+        than migrated into another admission mechanism.
+        """
+        migration = connection.execute(
+            "SELECT name FROM schema_migrations WHERE version=?",
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION,),
+        ).fetchone()
+        if migration is not None:
+            if str(migration[0]) != _ADVISORY_GOVERNANCE_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        expected = [
+            (SCHEMA_VERSION, MIGRATION_NAME),
+            (_EXPANSION_MIGRATION_VERSION, _EXPANSION_MIGRATION_NAME),
+            (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
+            (_NATIVE_TASK_NAME_MIGRATION_VERSION, _NATIVE_TASK_NAME_MIGRATION_NAME),
+            (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
+            (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
+            (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+        ]
+        migrations = [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()]
+        if migrations != expected:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            connection.execute("DROP TABLE IF EXISTS governance_gates")
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)",
+                (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME, _now()),
+            )
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
     def _validate_existing(self, connection: sqlite3.Connection) -> None:
         if int(connection.execute("PRAGMA application_id").fetchone()[0]) != _APPLICATION_ID or int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
@@ -1005,6 +1046,7 @@ class V12Store:
             (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
             (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
             (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
         ] or metadata is None or str(metadata[0]) != self.project_hash:
             raise V12StoreError("reference belongs to another project", code="cross_project_reference")
         required_columns = {
@@ -1018,7 +1060,6 @@ class V12Store:
             "projection_jobs": {"job_id", "task_id", "source_sequence", "status"},
             "projection_files": {"task_id", "relative_path", "content_digest", "status"},
             "report_consumption_receipts": {"task_id", "consumer_delegation_id", "reader_kind", "report_id", "observed_content_digest", "sections_json", "input_cursor", "output_cursor", "chunk_indexes_json", "returned_content_bytes", "has_more", "created_sequence"},
-            "governance_gates": {"task_id", "assessment_id", "mode", "plan_required", "user_approval_required", "allowed_preapproval_profiles_json", "plan_report_id", "plan_digest", "approval_decision_id", "created_sequence", "updated_sequence"},
             "approval_handles": {"approval_handle", "task_id", "report_id", "report_content_digest", "view_relative_path", "view_content_digest", "view_source_sequence", "request_digest", "created_sequence", "consumed_decision_id"},
         }
         for table, columns in required_columns.items():
@@ -1039,7 +1080,7 @@ class V12Store:
                 raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
             seen_native_names.add(native_key)
         objects = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('index','trigger')")}
-        if not {"reports_terminal_no_update", "reports_no_delete", "report_chunks_no_update", "report_chunks_no_delete", "decisions_no_update", "decisions_no_delete", "decisions_task_created", "report_chunks_report_order", "timeline_decision_sequence", "projection_jobs_pending", "consumption_task_sequence", "consumption_delegation_report", "governance_gates_assessment", "approval_handles_task_report"}.issubset(objects):
+        if not {"reports_terminal_no_update", "reports_no_delete", "report_chunks_no_update", "report_chunks_no_delete", "decisions_no_update", "decisions_no_delete", "decisions_task_created", "report_chunks_report_order", "timeline_decision_sequence", "projection_jobs_pending", "consumption_task_sequence", "consumption_delegation_report", "approval_handles_task_report"}.issubset(objects):
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
         if self.project_root is not None:
             canonical = str(self.project_root)
@@ -1510,6 +1551,7 @@ class V12Store:
                     self._migrate_report_consumption_receipts(connection)
                     self._migrate_durable_governance_gate(connection)
                     self._migrate_ready_approval_handles(connection)
+                    self._migrate_advisory_governance(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1554,6 +1596,7 @@ class V12Store:
                     self._migrate_report_consumption_receipts(connection)
                     self._migrate_durable_governance_gate(connection)
                     self._migrate_ready_approval_handles(connection)
+                    self._migrate_advisory_governance(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1593,7 +1636,6 @@ class V12Store:
         CREATE TABLE report_consumption_receipts(receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),consumer_delegation_id TEXT REFERENCES delegations(delegation_id),reader_kind TEXT NOT NULL,report_id TEXT NOT NULL REFERENCES reports(report_id),observed_content_digest TEXT NOT NULL,sections_json TEXT NOT NULL,input_cursor TEXT,output_cursor TEXT,chunk_indexes_json TEXT NOT NULL,returned_content_bytes INTEGER NOT NULL,has_more INTEGER NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
         CREATE TABLE report_usage(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),total_retained_bytes INTEGER NOT NULL,assembling_bytes INTEGER NOT NULL,assembling_reports INTEGER NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE governance_assessments(assessment_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),initiative_id TEXT,mode TEXT NOT NULL,source TEXT NOT NULL,rationale TEXT,risk_factors_json TEXT NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
-        CREATE TABLE governance_gates(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),assessment_id TEXT NOT NULL REFERENCES governance_assessments(assessment_id),mode TEXT NOT NULL,plan_required INTEGER NOT NULL,user_approval_required INTEGER NOT NULL,allowed_preapproval_profiles_json TEXT NOT NULL,plan_report_id TEXT REFERENCES reports(report_id),plan_digest TEXT,approval_decision_id TEXT REFERENCES user_decisions(decision_id),created_sequence INTEGER NOT NULL,updated_sequence INTEGER NOT NULL);
         CREATE TABLE initiatives(initiative_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,goal TEXT NOT NULL,risk TEXT,status TEXT NOT NULL,notes_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,latest_revision INTEGER NOT NULL,created_sequence INTEGER NOT NULL,updated_sequence INTEGER NOT NULL);
         CREATE TABLE initiative_revisions(revision_id INTEGER PRIMARY KEY AUTOINCREMENT,initiative_id TEXT NOT NULL REFERENCES initiatives(initiative_id),revision_number INTEGER NOT NULL,project_hash TEXT NOT NULL,occurred_at TEXT NOT NULL,sequence INTEGER NOT NULL,payload_json TEXT NOT NULL,UNIQUE(initiative_id,revision_number));
         CREATE TABLE initiative_links(link_id INTEGER PRIMARY KEY AUTOINCREMENT,initiative_id TEXT NOT NULL REFERENCES initiatives(initiative_id),project_hash TEXT NOT NULL,relationship TEXT NOT NULL,target_id TEXT NOT NULL,is_resolved INTEGER NOT NULL,warnings_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(initiative_id,relationship,target_id));
@@ -1612,7 +1654,6 @@ class V12Store:
         CREATE INDEX consumption_task_sequence ON report_consumption_receipts(task_id,created_sequence);
         CREATE INDEX consumption_delegation_report ON report_consumption_receipts(consumer_delegation_id,report_id,created_sequence);
         CREATE INDEX assessments_task_created ON governance_assessments(task_id,created_sequence);
-        CREATE INDEX governance_gates_assessment ON governance_gates(assessment_id);
         CREATE INDEX initiative_links_source ON initiative_links(initiative_id,relationship);
         CREATE INDEX decisions_task_created ON user_decisions(task_id,created_sequence);
         CREATE INDEX approval_handles_task_report ON approval_handles(task_id,report_id,created_sequence);
@@ -1958,15 +1999,6 @@ class V12Store:
         found["risk_factors"] = _load_json(str(found.pop("risk_factors_json")), label="assessment risks")
         return found
 
-    def _governance_gate(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
-        found = _row(connection.execute("SELECT * FROM governance_gates WHERE task_id=?", (task_id,)).fetchone())
-        if found is None:
-            return None
-        found["allowed_preapproval_profiles"] = _load_json(str(found.pop("allowed_preapproval_profiles_json")), label="governance gate profiles")
-        found["plan_required"] = bool(found["plan_required"])
-        found["user_approval_required"] = bool(found["user_approval_required"])
-        return found
-
     def _closure(self, connection: sqlite3.Connection, closure_id: str) -> dict[str, Any]:
         found = _row(connection.execute("SELECT * FROM governance_closures WHERE closure_id=? AND project_hash=?", (closure_id, self.project_hash)).fetchone())
         if found is None:
@@ -2064,28 +2096,6 @@ class V12Store:
                     raise V12StoreError("input handoff report is not finalized", code="report_state_conflict")
             for decision_id in payload["input_decision_ids"]:
                 self._decision(connection, decision_id, task_id=task["task_id"])
-            gate = self._governance_gate(connection, str(task["task_id"]))
-            if gate is not None and gate["plan_required"]:
-                allowed = set(gate["allowed_preapproval_profiles"])
-                if gate["approval_decision_id"] is None:
-                    if payload["profile_name"] == "explorer":
-                        if payload["parent_delegation_id"] is None:
-                            raise V12StoreError("preapproval discovery requires a planner parent", code="governance_gate_preapproval")
-                        parent = self._delegation(connection, payload["parent_delegation_id"], task_id=task["task_id"])
-                        if parent["profile_name"] != "planner":
-                            raise V12StoreError("preapproval discovery requires a planner parent", code="governance_gate_preapproval")
-                        handoffs = [self._report(connection, report_id, task_id=task["task_id"]) for report_id in payload["input_report_ids"]]
-                        if not any(item["delegation_id"] == parent["delegation_id"] and item["report_type"] == "plan" and item["assembly_state"] == "finalized" and item["status"] in {"partial", "blocked"} for item in handoffs):
-                            raise V12StoreError("preapproval discovery requires a finalized planner handoff", code="governance_gate_preapproval")
-                    elif payload["profile_name"] not in allowed:
-                        raise V12StoreError("governance gate permits only planner before approval", code="governance_gate_preapproval")
-                elif payload["profile_name"] not in {"planner", "explorer"}:
-                    if gate["plan_report_id"] not in payload["input_report_ids"] or gate["approval_decision_id"] not in payload["input_decision_ids"]:
-                        raise V12StoreError("governance gate requires linked approved plan evidence", code="governance_gate_links_required")
-                    plan = self._report(connection, str(gate["plan_report_id"]), task_id=task["task_id"])
-                    approval = self._decision(connection, str(gate["approval_decision_id"]), task_id=task["task_id"])
-                    if (plan["report_type"] != "plan" or plan["assembly_state"] != "finalized" or plan["status"] != "completed" or plan["content_digest"] != gate["plan_digest"] or approval["decision_type"] != "approve" or approval["subject_type"] != "plan" or approval["subject_id"] != gate["plan_report_id"] or approval["subject_digest"] != gate["plan_digest"]):
-                        raise V12StoreError("governance gate approval evidence is inconsistent", code="governance_gate_evidence_mismatch")
             identifier = str(payload["delegation_id"] or new_sharded_id("delegation", self.project_hash))
             if connection.execute("SELECT 1 FROM delegations WHERE delegation_id=?", (identifier,)).fetchone() is not None:
                 raise V12StoreError("delegation_id already exists", code="delegation_exists")
@@ -2300,8 +2310,6 @@ class V12Store:
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
             owner = self._delegation(connection, delegation, task_id=task["task_id"])
-            if mode_value in {"single", "begin"} and type_value == "plan" and owner["profile_name"] != "planner":
-                raise V12StoreError("only the planner profile may submit a plan report", code="governance_gate_plan_owner")
             state = usage(connection, str(task["task_id"]))
             if mode_value in {"single", "begin"}:
                 value = str(identifier or new_sharded_id("report", self.project_hash))
@@ -2485,10 +2493,6 @@ class V12Store:
                 # that relation when the same view content remains ready.
                 if view is None or str(view["status"]) != "ready" or str(view["content_digest"]) != payload["approval_view_content_digest"]:
                     raise V12StoreError("approval view is no longer ready", code="approval_view_not_ready")
-            gate = self._governance_gate(connection, anchor)
-            if kind == "plan" and gate is not None and gate["plan_required"]:
-                if decision not in {"approve", "request_revision", "cancel"}:
-                    raise V12StoreError("governance plan decision is invalid", code="governance_gate_decision_kind")
             if payload["supersedes_decision_id"] is not None:
                 prior = self._decision(connection, payload["supersedes_decision_id"], task_id=anchor)
                 if prior["subject_type"] != kind or prior["subject_id"] != subject:
@@ -2500,8 +2504,6 @@ class V12Store:
                 cursor = connection.execute("UPDATE approval_handles SET consumed_decision_id=? WHERE approval_handle=? AND consumed_decision_id IS NULL", (identifier, payload["approval_handle"]))
                 if cursor.rowcount != 1:
                     raise V12StoreError("approval handle has already been used", code="approval_handle_consumed")
-            if kind == "plan" and decision == "approve" and gate is not None and gate["plan_required"]:
-                connection.execute("UPDATE governance_gates SET plan_report_id=?,plan_digest=?,approval_decision_id=?,updated_sequence=? WHERE task_id=?", (subject, bound_digest, identifier, sequence, anchor))
             return {"decision": self._compact_decision(self._decision(connection, identifier, task_id=anchor))}
         return self._mutation("record_user_decision", payload, idempotency_key, write)
 
@@ -2514,37 +2516,10 @@ class V12Store:
             task = self._task(connection, payload["task_id"])
             if payload["initiative_id"] is not None:
                 self._initiative(connection, payload["initiative_id"])
-            prior_gate = self._governance_gate(connection, str(task["task_id"]))
-            requested_required = mode_value in {"light", "full"}
-            prior_required = bool(
-                prior_gate is not None
-                and (prior_gate["plan_required"] or prior_gate["user_approval_required"])
-            )
-            # A model reassessment may change the advisory mode label, but it
-            # must never clear a task's already-persisted plan/approval
-            # obligation.  The only lowering path is an explicit, durable
-            # task-scoped user cancellation or override recorded after the
-            # prior gate, then asserted as a user override by the coordinator.
-            explicit_user_revision = False
-            if prior_required and not requested_required and source_value == "user_override":
-                revision = connection.execute(
-                    "SELECT 1 FROM user_decisions "
-                    "WHERE task_id=? AND subject_type='task' AND subject_id=? "
-                    "AND decision_type IN ('cancel','override') AND created_sequence>? "
-                    "ORDER BY created_sequence DESC LIMIT 1",
-                    (task["task_id"], task["task_id"], int(prior_gate["updated_sequence"])),
-                ).fetchone()
-                explicit_user_revision = revision is not None
-            required = requested_required or (prior_required and not explicit_user_revision)
-            retain_evidence = required and prior_required and prior_gate is not None
-            prior_plan_report_id = prior_gate["plan_report_id"] if retain_evidence else None
-            prior_plan_digest = prior_gate["plan_digest"] if retain_evidence else None
-            prior_approval_decision_id = prior_gate["approval_decision_id"] if retain_evidence else None
             identifier = f"assessment-{uuid.uuid4().hex}"
             sequence = self._timeline(connection, event_type="governance_mode_set", entity_type="governance_assessment", entity_id=identifier, payload={"assessment_id": identifier, "task_id": task["task_id"], "mode": mode_value}, task_id=task["task_id"], initiative_id=payload["initiative_id"], assessment_id=identifier)
             connection.execute("INSERT INTO governance_assessments(assessment_id,project_hash,task_id,initiative_id,mode,source,rationale,risk_factors_json,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, task["task_id"], payload["initiative_id"], mode_value, source_value, payload["rationale"], _canonical_json(payload["risk_factors"], label="risk_factors"), _now(), sequence))
-            connection.execute("INSERT INTO governance_gates(task_id,assessment_id,mode,plan_required,user_approval_required,allowed_preapproval_profiles_json,plan_report_id,plan_digest,approval_decision_id,created_sequence,updated_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET assessment_id=excluded.assessment_id,mode=excluded.mode,plan_required=excluded.plan_required,user_approval_required=excluded.user_approval_required,allowed_preapproval_profiles_json=excluded.allowed_preapproval_profiles_json,plan_report_id=excluded.plan_report_id,plan_digest=excluded.plan_digest,approval_decision_id=excluded.approval_decision_id,updated_sequence=excluded.updated_sequence", (task["task_id"], identifier, mode_value, int(required), int(required), _canonical_json(["planner"], label="governance gate profiles"), prior_plan_report_id, prior_plan_digest, prior_approval_decision_id, sequence, sequence))
-            return {"assessment": self._assessment(connection, identifier), "governance_gate": self._governance_gate(connection, str(task["task_id"]))}
+            return {"assessment": self._assessment(connection, identifier)}
         return self._mutation("set_governance_mode", payload, idempotency_key, write)
 
     def record_initiative(self, *, task_id: Any, goal: Any, initiative_id: Any, parent_initiative_id: Any, risk: Any, status: Any, dependencies: Any, linked_task_ids: Any, linked_delegation_ids: Any = None, linked_report_ids: Any = None, linked_decision_ids: Any = None, notes: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
@@ -2745,9 +2720,7 @@ class V12Store:
         payload = {"task_id": anchor, "subject_type": kind, "subject_id": subject, "verdict": decision, "evidence": _strict_json(evidence, label="evidence"), "unresolved_risks": _text_list(unresolved_risks, label="unresolved_risks"), "follow_ups": _text_list(follow_ups, label="follow_ups"), "initiative_status": status_value, "completion_notes": None if completion_notes is None else _strict_json(completion_notes, label="completion_notes")}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             self._task(connection, anchor)
-            self._require_documentation_impact_report(connection, anchor)
             if kind == "task":
-                self._require_initiative_closures(connection, anchor)
                 existing = self._task_closure(connection, anchor)
                 if existing is not None:
                     return {
@@ -2885,10 +2858,44 @@ class V12Store:
             task = self._task(connection, anchor)
             timeline, next_sequence, has_more = self._timeline_page(connection, after=after, limit=page, clause="task_id=?", values=[anchor])
             delegations = [self._compact_delegation(self._delegation(connection, item, task_id=anchor)) for item in self._ids(timeline, "delegation_id")]
+            # Recovery is a read-only ledger projection.  It intentionally
+            # says nothing about host lifecycle: the coordinator reconciles
+            # the exact native name with the host, resumes/waits if present,
+            # and may spawn only after absence is independently proven.
+            continuation_rows = connection.execute(
+                "SELECT delegation_id FROM delegations WHERE task_id=? AND project_hash=? ORDER BY created_sequence,delegation_id",
+                (anchor, self.project_hash),
+            ).fetchall()
+            continuations = []
+            for row in continuation_rows:
+                delegation = self._delegation(connection, str(row["delegation_id"]), task_id=anchor)
+                handoff_reports = [
+                    self._compact_report(self._report(connection, str(report["report_id"]), task_id=anchor))
+                    for report in connection.execute(
+                        "SELECT report_id FROM reports WHERE delegation_id=? AND project_hash=? ORDER BY created_sequence,report_id",
+                        (delegation["delegation_id"], self.project_hash),
+                    ).fetchall()
+                ]
+                if any(item["assembly_state"] == "assembling" for item in handoff_reports):
+                    handoff_state = "report_assembling"
+                elif any(item["assembly_state"] == "finalized" and item.get("status") == "completed" for item in handoff_reports):
+                    handoff_state = "report_finalized"
+                elif any(item["assembly_state"] == "finalized" and item.get("status") in {"partial", "blocked", "failed"} for item in handoff_reports):
+                    handoff_state = "explicit_handoff"
+                else:
+                    handoff_state = "report_required"
+                continuations.append({
+                    "delegation": self._compact_delegation(delegation),
+                    "dispatch_state": "ledger_unknown",
+                    "handoff_state": handoff_state,
+                    "reports": handoff_reports,
+                    "recovery_requirement": "finalized_report_or_explicit_handoff_or_parent_linked_replacement",
+                    "continuation_sequence": int(delegation["created_sequence"]),
+                })
             reports = [self._compact_report(self._report(connection, item, task_id=anchor)) for item in self._ids(timeline, "report_id")]
             decisions = [self._compact_decision(self._decision(connection, item, task_id=anchor)) for item in self._ids(timeline, "decision_id")]
             receipts = self._consumption_receipts(connection, task_id=anchor, sequences=[int(item["sequence"]) for item in timeline])
-            return {"task": task, "delegations": delegations, "reports": reports, "decisions": decisions, "consumption_receipts": receipts, "timeline": timeline, "next_sequence": next_sequence, "has_more": has_more}
+            return {"task": task, "delegations": delegations, "continuations": continuations, "reports": reports, "decisions": decisions, "consumption_receipts": receipts, "timeline": timeline, "next_sequence": next_sequence, "has_more": has_more}
         return self._read(read)
 
     def read_delegation(self, *, delegation_id: Any, after_sequence: Any, limit: Any = DEFAULT_PAGE_LIMIT, task_id: Any = None) -> dict[str, Any]:
@@ -3098,7 +3105,7 @@ class V12Store:
             closure_values.append(task_id)
         row = connection.execute(f"SELECT closure_id FROM governance_closures WHERE {' AND '.join(closure_clauses)} ORDER BY created_sequence DESC LIMIT 1", closure_values).fetchone()
         effective = override or model
-        return {"effective_mode": None if effective is None else effective["mode"], "effective_assessment": effective, "override_active": override is not None, "latest_user_override": override, "latest_model_assessment": model, "latest_closure": None if row is None else self._closure(connection, str(row[0])), "governance_gate": None if task_id is None else self._governance_gate(connection, task_id)}
+        return {"effective_mode": None if effective is None else effective["mode"], "effective_assessment": effective, "override_active": override is not None, "latest_user_override": override, "latest_model_assessment": model, "latest_closure": None if row is None else self._closure(connection, str(row[0]))}
 
     def _revisions(self, connection: sqlite3.Connection, initiatives: Sequence[str], sequences: Sequence[int]) -> list[dict[str, Any]]:
         if not initiatives or not sequences:

@@ -2523,7 +2523,8 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             (5, "v12-report-consumption-receipts"),
             (6, "v12-durable-governance-gate"),
             (7, "v12-ready-approval-handles"),
-        ],
+            (8, "v12-advisory-governance"),
+            ],
         "legacy V12 shard records each additive V12 migration exactly once",
     )
     require(schema_version == (1,), "additive human-view migration preserves the public V12 schema-version value")
@@ -2592,6 +2593,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             (5, "v12-report-consumption-receipts"),
             (6, "v12-durable-governance-gate"),
             (7, "v12-ready-approval-handles"),
+            (8, "v12-advisory-governance"),
         ]
         and concurrent_task_count == (3,)
         and concurrent_integrity == ("ok",)

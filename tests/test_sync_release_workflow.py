@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -94,6 +95,9 @@ exit 0
     # complete install path while all resulting state remains in tmp_path.
     fake_codex.rename(tmp_path / "codex")
 
+    manifest = ROOT / "plugins/cortex/.codex-plugin/plugin.json"
+    original_manifest = manifest.read_text(encoding="utf-8")
+    before_version = json.loads(original_manifest)["version"]
     try:
         completed = subprocess.run(
             ["bash", "scripts/sync-cortex.sh"],
@@ -106,9 +110,16 @@ exit 0
         )
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
+        after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
+        assert re.fullmatch(r"12\.0\.0\+codex\.\d{14}", after_version)
+        assert after_version > before_version
+        assert (codex_home / "plugins/cache/cortex/cortex" / after_version).is_dir()
         assert not bytecode.exists()
         assert not list((ROOT / "plugins/cortex").rglob("*.pyc"))
     finally:
+        # The workflow intentionally refreshes cache metadata in normal mode;
+        # restore this shared-checkout fixture after asserting the behavior.
+        manifest.write_text(original_manifest, encoding="utf-8")
         # The test's fixture is generated state, and cleanup is limited to
         # this exact path in the shared checkout.
         if bytecode.exists():

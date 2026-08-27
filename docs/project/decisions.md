@@ -14,8 +14,9 @@ transactions, idempotency, reference integrity, ordered history, bounded report
 assembly/read recovery, and project isolation.
 
 No server-owned waves, gates, mandatory ordering, plan authority, lifecycle
-capabilities, receipts, repair routes, closure breakers, or recovery escalation
-remain in the active V12 contract.
+capabilities, receipt-gated lifecycle, repair routes, closure breakers, or
+recovery escalation remain in the active V12 contract. Worker handoff reads may
+emit immutable delivery receipts, but they are evidence rather than authority.
 
 The coordinator maintains and persists only a model-owned DAG of optional
 worker-owned stages through existing task-linked initiative revisions and the
@@ -117,8 +118,9 @@ limited to 65,536 bytes; an appended chunk to 32,768 bytes; a report to 256
 chunks and 8 MiB. A failed or interrupted assembly resumes from its stored
 manifest and next index. It is never restarted at zero, overwritten, or treated
 as finalized; a replacement explicitly supersedes its predecessor. Report IDs
-can be passed to later delegations. Reading creates no receipt; report status is
-not backend acceptance or native lifecycle evidence.
+can be passed to later delegations. Ordinary inspection creates no receipt;
+worker handoff reads create immutable delivery receipts. Report status and
+receipt presence are not backend acceptance or native lifecycle evidence.
 
 `read_reports` preserves the requested order for at most 20 unique known IDs
 and is the only report body/chunk reader. It accepts an optional named-section

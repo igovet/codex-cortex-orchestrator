@@ -89,8 +89,8 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | Tool | Semantic contract |
 | --- | --- |
 | `create_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful `cortex/task-contract/v1` result fields; return preferred `task_ref` and canonical `task_id`. |
-| `inspect_task` | Use `task_ref` to return compact task history after `after_sequence`, bounded by `limit`. |
-| `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return a direct worker brief carrying the saved root. |
+| `inspect_task` | Use `task_ref` to return compact task history after `after_sequence`, bounded by `limit`, plus exact persisted continuation dispatches for host reconciliation. Continuations are lifecycle-unknown and require a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
+| `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return a direct worker brief carrying the saved root. Normal spawn uses that receipt directly; no immediate read is needed. |
 | `read_delegation` | Use the exact emitted `delegation_ref` plus `after_sequence` to resolve its owner task and return compact local history without a receipt. Do not supply `task_ref` or `task_id`; no legacy or direct-ID public shape is accepted. |
 | `submit_report` | Use the exact emitted `delegation_ref` for single or stable-reference `begin`/`append`/`finalize`/`abort` progress, result, synthesis, or plan evidence. It resolves the owner task; do not supply `task_ref` or `task_id`. |
 | `read_reports` | Use exact `report_refs` to resolve their owner task and read metadata or whole JSON chunks for 1–20 known reports in requested order, with section/cursor/integer-byte bounds. Do not supply `task_ref` or `task_id`. |
@@ -101,8 +101,9 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | `record_user_decision` | Use one canonical task-ref/subject-ref/digest/decision/response field set to append coordinator-attributed original/English evidence. For `approve`, include the complete exact ready approval-view relation: report ref/digest, handle, view digest, and source sequence. |
 
 The catalog is identical for coordinators and workers. There is no audience
-filter, capability matrix, host-bound authority, read receipt, selector,
-tool-name alias, or profile admission rule.
+filter, capability matrix, host-bound lifecycle authority, receipt-gated
+selector, tool-name alias, or profile admission rule. Worker handoff reads may
+emit immutable delivery receipts, but those receipts are not authority.
 
 Returned task IDs use `task-<64-lowercase-hex-project-shard>-<32-lowercase-hex-record>`
 so the runtime can resolve a ledger without scanning project directories. Callers
