@@ -1,859 +1,832 @@
-"""Canonical model-facing MCP contracts.
-
-Every object returned by :func:`build_public_contracts` is the exact object
-advertised through ``tools/list``.  Runtime transport validation consumes that
-same ``inputSchema`` object; there is no parallel required/allowed-field table.
-Private routing metadata only selects an existing backend operation and any
-server-owned discriminator that must be injected after validation.
-"""
+"""The complete uniform public contract for the Cortex V12 ledger."""
 from __future__ import annotations
 
-import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
-from cortex_runtime.pagination import CURSOR_PATTERN
-from cortex_runtime.finding_severity import PUBLIC_FINDING_SEVERITIES
-from cortex_runtime.model_routing import (
-    model_effort_pair_text,
-    model_effort_registry,
-    supported_effort_sequence,
+from cortex_runtime.model_routing import NATIVE_MODELS, NATIVE_REASONING_EFFORTS
+from cortex_runtime.worker_message import packaged_profile_names
+from cortex_runtime.v12_contract import (
+    CLOSURE_SUBJECTS, DECISION_SUBJECTS, DECISION_TYPES, DIGEST_PATTERN,
+    CLOSURE_VERDICTS,
+    DEFAULT_PAGE_LIMIT,
+    GOVERNANCE_MODES,
+    GOVERNANCE_SOURCES,
+    IDEMPOTENCY_KEY_MAX_LENGTH,
+    IDENTIFIER_MAX_LENGTH,
+    IDENTIFIER_PATTERN,
+    INITIATIVE_STATUSES,
+    JSON_MAX_BYTES,
+    MAX_DECISION_IDS, MAX_LINKS,
+    MAX_PAGE_LIMIT,
+    MAX_REPORT_IDS,
+    PROJECT_ROOT_MAX_LENGTH,
+    PLAN_REVIEW_POLICIES, REPORT_MODES, REPORT_READ_MAX_BYTES,
+    REPORT_SECTION_MAX_LENGTH, REPORT_SECTION_PATTERN, REPORT_STATUSES,
+    REPORT_TYPES,
+    ROLE_MAX_LENGTH, LANGUAGE_TAG_MAX_LENGTH, LANGUAGE_TAG_PATTERN, TASK_CONTRACT_ITEM_MAX_LENGTH,
+    TASK_CONTRACT_MAX_ITEMS, TASK_CONTRACT_VERSION,
+    TASK_ID_PATTERN,
+    TASK_REF_PATTERN,
+    RECORD_REF_PATTERNS,
+    TEXT_MAX_LENGTH,
 )
-from cortex_runtime.verification_contract import WORKER_VERIFICATION_KINDS
-from cortex_runtime.v11_submission import (
-    COORDINATOR_REF_PATTERN,
-    DISPATCH_REF_PATTERN,
-    MAX_DIAGNOSTICS,
-    REPAIR_HANDLE_LENGTH,
-    REPAIR_HANDLE_PATTERN,
+
+
+V12_TOOL_NAMES = (
+    "create_task",
+    "inspect_task",
+    "create_delegation",
+    "read_delegation",
+    "submit_report",
+    "read_reports",
+    "set_governance_mode",
+    "record_initiative",
+    "inspect_governance",
+    "submit_governance_closure",
+    "record_user_decision",
 )
-from cortex_runtime.v11_responses import (
-    NATIVE_DISPATCH_WAIT_INSTRUCTION,
-    READ_AFTER_WAIT_INSTRUCTION,
-    SAME_CHILD_WAIT_INSTRUCTION,
-    WAIT_BEFORE_READ_INSTRUCTION,
-)
 
 
-PUBLIC_MAX_WORKERS_PER_WAVE = 8
-PUBLIC_MAX_WAVES = 32
-CANONICAL_COMPLEXITIES = ("C1", "C2", "C3")
-PUBLIC_AUTHORITY_FORMATS = frozenset({
-    "cortex-coordinator-ref",
-    "cortex-dispatch-ref",
-})
-_INTERNAL_QUESTION_CATEGORIES = frozenset({
-    "internal", "cortex", "cortex_internal", "model", "profile", "retry",
-    "dependency", "schema", "runtime_recovery",
-})
-
-
-def is_internal_question_category(value: object) -> bool:
-    """Classify known technical-recovery labels without inspecting question text."""
-    return (
-        isinstance(value, str)
-        and value.strip().casefold().replace("-", "_") in _INTERNAL_QUESTION_CATEGORIES
-    )
-
-# This is the canonical model-facing RFC 6902 item schema.  The public
-# contract deliberately stays flat and combinator-free; operation-specific
-# value presence is enforced by the repair backend against the issued
-# diagnostic rather than encoded as a oneOf branch here.
-PUBLIC_PATCH_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "op": {
-            "type": "string",
-            "enum": ["add", "replace", "remove"],
-            "description": (
-                "Exact RFC6902 operation selected from the matching diagnostic's allowed_ops; "
-                "the property name is op, never operation, patch, or patch_op."
-            ),
-        },
-        "path": {
-            "type": "string",
-            "pattern": r"^(?:/(?:[^~/]|~[01])*)+$",
-            "description": (
-                "Exact RFC6901 semantic path copied from diagnostic repair_pointer; "
-                "the property name is path, never repair_pointer."
-            ),
-        },
-        "value": {
-            "description": (
-                "Required for add and replace and must satisfy the diagnostic field_schema; "
-                "forbidden for remove. Semantic strings may use any language accepted by field_schema."
-            ),
-        },
-    },
-    "required": ["op", "path"],
-}
+# MCP 2025-06-18 transports ordinary JSON Schema documents for both tool
+# inputs and ``structuredContent`` outputs.  Keep the declared dialect on
+# every top-level schema so tools/list consumers do not need to infer it from
+# a transport detail or from a sibling tool.
+_JSON_SCHEMA_DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
+_PACKAGED_PROFILE_COUNT = 22
+HANDLE_COPY_RULE = "Copy only compact typed refs and server-issued opaque tokens from structuredContent.handles byte-for-byte. Canonical durable IDs in rendered evidence are non-callable. Never use UI ellipsis, prose, Markdown parsing, inferred IDs, or constructed paths."
 
 
 def _string(
     *,
-    enum: Sequence[str] | None = None,
-    pattern: str | None = None,
     minimum: int = 1,
-    maximum: int = 65_536,
-    default: str | None = None,
-    format_name: str | None = None,
+    maximum: int = TEXT_MAX_LENGTH,
+    enum: tuple[str, ...] | None = None,
+    pattern: str | None = None,
     description: str | None = None,
 ) -> dict[str, Any]:
-    schema: dict[str, Any] = {
-        "type": "string",
-        "minLength": minimum,
-        "maxLength": maximum,
-    }
+    value: dict[str, Any] = {"type": "string", "minLength": minimum, "maxLength": maximum}
     if enum is not None:
-        schema["enum"] = list(enum)
+        value["enum"] = list(enum)
     if pattern is not None:
-        schema["pattern"] = pattern
-    if default is not None:
-        schema["default"] = default
-    if format_name is not None:
-        schema["format"] = format_name
+        value["pattern"] = pattern
     if description is not None:
-        schema["description"] = description
-    return schema
+        value["description"] = description
+    return value
 
 
-def _strings(
+def _identifier(*, task: bool = False, description: str | None = None) -> dict[str, Any]:
+    return _string(
+        maximum=IDENTIFIER_MAX_LENGTH,
+        pattern=TASK_ID_PATTERN if task else IDENTIFIER_PATTERN,
+        description=description,
+    )
+
+
+def _task_ref(*, description: str | None = None) -> dict[str, Any]:
+    return _string(maximum=14, pattern=TASK_REF_PATTERN, description=description)
+
+
+def _entity_ref(kind: str, *, description: str | None = None) -> dict[str, Any]:
+    return _string(maximum=14, pattern=RECORD_REF_PATTERNS[kind], description=description or f"Compact {kind} locator emitted in handles. Copy byte-for-byte; never reconstruct it.")
+
+
+def _idempotency_key() -> dict[str, Any]:
+    return _string(maximum=IDEMPOTENCY_KEY_MAX_LENGTH, description="Optional bounded opaque client retry token. Cortex does not parse or validate its meaning; omit it for a new mutation, then reuse only the returned retry_handle for an exact retry.")
+
+
+def _closed(
+    properties: Mapping[str, Any],
+    required: tuple[str, ...],
     *,
-    maximum_items: int = 128,
-    item_maximum: int = 8_192,
-    minimum_items: int = 0,
+    description: str = "Closed Cortex V12 public tool input.",
 ) -> dict[str, Any]:
+    """Return one closed, advertised MCP input object schema."""
     return {
-        "type": "array",
-        "minItems": minimum_items,
-        "maxItems": maximum_items,
-        "uniqueItems": True,
-        "items": _string(maximum=item_maximum),
-    }
-
-
-def _closed(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
-    return {
+        "$schema": _JSON_SCHEMA_DRAFT_2020_12,
         "type": "object",
+        "description": description,
         "additionalProperties": False,
         "properties": dict(properties),
         "required": list(required),
     }
 
 
-def _flat_patch_schema() -> dict[str, Any]:
-    """Return the irreducible closed RFC6902 item without combinators."""
-    return copy.deepcopy(PUBLIC_PATCH_SCHEMA)
-
-
-def _contract(
-    description: str,
-    input_schema: dict[str, Any],
-    base_operation: str,
-    *,
-    expose_flat_argument_names: bool = False,
-    **injected_arguments: Any,
-) -> dict[str, Any]:
-    if expose_flat_argument_names:
-        properties = input_schema.get("properties")
-        required = input_schema.get("required")
-        if (
-            input_schema.get("type") != "object"
-            or input_schema.get("additionalProperties") is not False
-            or not isinstance(properties, Mapping)
-            or not isinstance(required, list)
-            or any(not isinstance(name, str) or name not in properties for name in required)
-        ):
-            raise ValueError("flat argument-name projection requires one closed object schema")
-        authority_names = {
-            name for name, field_schema in properties.items()
-            if isinstance(field_schema, Mapping)
-            and field_schema.get("format") in PUBLIC_AUTHORITY_FORMATS
-        }
-        required_names = [f"`{name}`" for name in required if name not in authority_names]
-        optional_names = [
-            f"`{name}`" for name in properties
-            if name not in required and name not in authority_names
-        ]
-        description_parts = [description.rstrip()]
-        if required_names:
-            description_parts.append(
-                "Exact required semantic inputSchema properties: "
-                + ", ".join(required_names)
-                + "."
-            )
-        if optional_names:
-            description_parts.append(
-                "Optional semantic inputSchema properties: "
-                + ", ".join(optional_names)
-                + "."
-            )
-        if required_names or optional_names:
-            description_parts.append(
-                "Use these exact schema-derived semantic names; shortened aliases are invalid."
-            )
-        if authority_names:
-            description_parts.append(
-                "Reuse the exact same server-issued worker authority input used for the successful "
-                "read_dispatch_briefing call; its property name and wire shape remain exclusively "
-                "in the required inputSchema."
-            )
-        description = " ".join(description_parts)
-    audience = "coordinator" if base_operation in {
-        "start_orchestration", "continue_orchestration",
-        "manage_orchestration", "manage_governance",
-    } else "worker"
-    if base_operation == "read_worker_result" and injected_arguments.get("action") == "read_wave":
-        audience = "coordinator"
-    action = injected_arguments.get("action")
-    prerequisite = "coordinator"
-    if base_operation == "start_orchestration":
-        prerequisite = "none"
-    elif audience == "worker":
-        prerequisite = "worker"
-    if base_operation == "worker_question" and action == "poll":
-        prerequisite = "question"
-    elif base_operation == "complete_attempt" and action == "repair":
-        prerequisite = "repair"
-    elif base_operation == "read_worker_result" and action in {"list_reports", "read_predecessor"}:
-        prerequisite = "predecessor"
-    terminal = (
-        (base_operation == "complete_attempt")
-        or action in {"deactivate", "finalize_bootstrap_failure", "finalize_worker_failure"}
-    )
+def _json_value() -> dict[str, Any]:
+    """Advertise the exact encoded JSON bound also enforced by V12 storage."""
     return {
-        "description": description,
-        "inputSchema": input_schema,
-        "base_operation": base_operation,
-        "injected_arguments": dict(injected_arguments),
-        "audience": audience,
-        "execution": {"prerequisite": prerequisite, "terminal": terminal},
+        "description": (
+            "Opaque bounded JSON value. Cortex validates only finite JSON encoding, "
+            f"depth, and the {JSON_MAX_BYTES}-byte bound; it never parses, classifies, "
+            "or semantically validates report prose."
+        ),
+        "maxBytes": JSON_MAX_BYTES,
     }
 
 
-def build_public_contracts(
-    *,
-    agents: Mapping[str, Any],
-    operation_kinds: Mapping[str, Any],
-    model_routing: Mapping[str, Any],
-    available_gates: set[str] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Build the single ordered registry used by discovery and execution."""
-    gates = sorted(set(available_gates or {
-        "scope", "plan", "discover", "architecture", "database_architecture",
-        "implementation", "qa", "security", "performance", "accessibility",
-        "ux", "review", "documentation", "close", "governance_activation",
-        "governance_close",
-    }))
-    profiles = sorted(str(name) for name in agents)
-    canonical_operation_kinds = tuple(
-        str(operation_kind)
-        for operation_kind in operation_kinds
-        if isinstance(operation_kind, str) and operation_kind
-    )
-    if not canonical_operation_kinds:
-        raise ValueError("profiles must publish at least one operation kind")
-    if len(set(canonical_operation_kinds)) != len(canonical_operation_kinds):
-        raise ValueError("profile operation kinds must be unique")
-    model_efforts = model_effort_registry(model_routing)
-    model_effort_guidance = (
-        "The coordinator must select one exact supported model/effort pair: "
-        + model_effort_pair_text(model_routing)
-        + ". Luna uses the attested native default; Terra and Sol require an explicit native model override."
-    )
-    canonical_operation_kind_set = set(canonical_operation_kinds)
-    for profile_name, profile in agents.items():
-        profile_operation_kinds = profile.get("operation_kinds") if isinstance(profile, Mapping) else None
-        if (
-            not isinstance(profile_operation_kinds, list)
-            or not profile_operation_kinds
-            or any(
-                not isinstance(operation_kind, str)
-                or operation_kind not in canonical_operation_kind_set
-                for operation_kind in profile_operation_kinds
-            )
-        ):
-            raise ValueError(f"profile has invalid operation kinds: {profile_name}")
+def _page_arguments() -> dict[str, Any]:
+    return {
+        "after_sequence": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": MAX_PAGE_LIMIT, "default": DEFAULT_PAGE_LIMIT},
+    }
 
-    task_ref = _string(pattern=r"^task-[0-9a-f]{12}$", maximum=17, format_name="cortex-task-ref")
-    coordinator_ref = _string(
-        pattern=COORDINATOR_REF_PATTERN,
-        maximum=64,
-        format_name="cortex-coordinator-ref",
-    )
-    dispatch_ref = _string(
-        pattern=DISPATCH_REF_PATTERN,
-        maximum=33,
-        format_name="cortex-dispatch-ref",
-    )
-    cursor = _string(pattern=CURSOR_PATTERN, maximum=520, format_name="cortex-page-cursor")
-    question_ref = _string(
-        pattern=r"^question-[A-Za-z0-9._:-]{1,160}$",
-        maximum=180,
-        format_name="cortex-question-ref",
-    )
-    attempt_result_ref = _string(
-        pattern=r"^attempt-result-[A-Za-z0-9._:-]{1,160}$",
-        maximum=180,
-        format_name="cortex-attempt-result-ref",
-    )
-    report_ref = _string(
-        pattern=r"^report-v1-[0-9a-f]{64}$",
-        maximum=74,
-        format_name="cortex-worker-report-ref",
-        description=(
-            "Opaque server-issued report reference returned by list_worker_reports. "
-            "It is valid only for the current authorized dispatch."
-        ),
-    )
-    artifact_ref = _string(
-        pattern=r"^artifact-[0-9a-f]{32}$",
-        maximum=41,
-        format_name="cortex-artifact-ref",
-        description=(
-            "Exact durable artifact reference returned by an artifact listing or explicitly by a "
-            "canonical report. AttemptResult evidence references are not artifact references."
-        ),
-    )
-    initiative_ref = _string(
-        pattern=r"^initiative-[A-Za-z0-9_.:-]+$",
-        maximum=180,
-        format_name="cortex-initiative-ref",
-    )
-    record_ref = _string(
-        pattern=r"^record-[A-Za-z0-9_.:-]+$",
-        maximum=180,
-        format_name="cortex-record-ref",
-    )
-    common_coordinator = {"task_ref": task_ref, "coordinator_ref": coordinator_ref}
 
-    worker = _closed({
-        "objective": _string(maximum=16_384, default="Complete the assigned bounded work."),
-        "profile": _string(enum=profiles, maximum=160),
-        "operation_kind": _string(
-            enum=canonical_operation_kinds,
-            maximum=16,
-            description=(
-                "Semantic operation selected by the coordinator. Cortex compiles it against "
-                "the selected profile capability before creating any dispatch."
-            ),
+def _identifier_array(*, maximum: int, minimum: int = 0) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "minItems": minimum,
+        "maxItems": maximum,
+        "uniqueItems": True,
+        "items": _identifier(
+            description="Opaque durable ID. Copy an emitted value byte-for-byte; do not parse, construct, or normalize it."
         ),
-        "model": _string(
-            enum=tuple(model_efforts), maximum=64,
-            description=model_effort_guidance,
+    }
+
+
+def _entity_ref_array(kind: str, *, maximum: int, minimum: int = 0, unique: bool = True) -> dict[str, Any]:
+    return {"type": "array", "minItems": minimum, "maxItems": maximum, "uniqueItems": unique, "items": _entity_ref(kind)}
+
+
+_CALLABLE_DURABLE_NAMES = frozenset({
+    "task_id", "task_ids", "delegation_id", "delegation_ids", "report_id", "report_ids",
+    "decision_id", "decision_ids", "initiative_id", "initiative_ids", "closure_id", "closure_ids",
+    "native_task_name",
+})
+
+
+def _assert_no_callable_durable_properties(schema: Mapping[str, Any], *, path: str) -> None:
+    """Fail catalogue construction if an input/handle can invite ID copying."""
+    properties = schema.get("properties")
+    if isinstance(properties, Mapping):
+        forbidden = sorted(str(key) for key in properties if str(key) in _CALLABLE_DURABLE_NAMES)
+        if forbidden:
+            raise RuntimeError(f"Cortex public callable schema leaks durable fields at {path}: {', '.join(forbidden)}")
+        for key, value in properties.items():
+            if isinstance(value, Mapping):
+                _assert_no_callable_durable_properties(value, path=f"{path}.properties.{key}")
+    for keyword in ("items", "allOf", "anyOf", "oneOf", "not"):
+        value = schema.get(keyword)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, Mapping):
+                _assert_no_callable_durable_properties(item, path=f"{path}.{keyword}")
+
+
+def _text_array(*, maximum: int = TASK_CONTRACT_MAX_ITEMS, minimum: int = 0) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "minItems": minimum,
+        "maxItems": maximum,
+        "items": _string(
+            maximum=TASK_CONTRACT_ITEM_MAX_LENGTH,
+            description="One bounded English task-contract item.",
         ),
-        "reasoning_effort": _string(
-            enum=supported_effort_sequence(model_routing),
-            maximum=16,
-            description=model_effort_guidance,
-        ),
-    }, ["objective", "profile", "operation_kind", "model", "reasoning_effort"])
-    wave = _closed({
-        "phase_kind": _string(
-            enum=gates,
-            maximum=80,
-            description=(
-                "Repeatable semantic phase kind selected by the coordinator, never an identity. "
-                "Cortex assigns every unique phase, wave, and global index reference."
-            ),
-        ),
-        "workers": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": PUBLIC_MAX_WORKERS_PER_WAVE,
-            "items": worker,
+    }
+
+
+_PROPERTY_DESCRIPTIONS: dict[str, str] = {
+    "project_root": "Required only to initialize create_task: the user-selected absolute canonical cwd/webhook root. Cortex resolves and stores it on the task; omit project_root from every later public tool call.",
+    "objective": "Coordinator-authored English-normalized objective for durable internal worker context; it does not replace the exact original user request.",
+    "user_request_original": "Required exact immutable user text in its original language; preserve it verbatim and do not replace it with the English objective.",
+    "user_language": "Required asserted BCP-47 language tag for user_request_original, for example ru (never a language name such as Russian).",
+    "task_contract_version": "Required exact immutable task-contract version: cortex/task-contract/v1.",
+    "requirements": "Required bounded opaque English requirements for workers; this is context, not backend workflow authority.",
+    "constraints": "Required bounded opaque English constraints, including forbidden actions where applicable; this is context, not backend workflow authority.",
+    "acceptance_criteria": "Required bounded opaque English acceptance criteria used by the coordinator when reviewing evidence.",
+    "verification_plan": "Bounded English verification expectations for the coordinator and workers.",
+    "context": "Bounded JSON task context retained with the task; do not include secrets or raw diagnostic logs.",
+    "task_ref": "Preferred compact task locator emitted by create_task. Copy it byte-for-byte for every task-anchored tool; never use a UI-rendered task_id.",
+    "task_id": "Canonical durable task ID retained for evidence and legacy direct-service compatibility. New task-anchored MCP calls use task_ref instead.",
+    "idempotency_key": "Optional bounded opaque client retry token. Omit it for a new mutation; reuse only a returned retry_handle for an exact retry with byte-identical arguments.",
+    "after_sequence": "Exclusive durable timeline cursor. Use the returned next_sequence unchanged for the next page.",
+    "limit": "Maximum scoped timeline events to return in this response (1–200). Values above 200 are rejected; use next_sequence for another page.",
+    "delegation_id": "Opaque delegation ID emitted by create_delegation. Copy it byte-for-byte; it resolves its owner task and verifies any optional legacy task_id.",
+    "role": "Short advisory worker role label selected by the coordinator; it grants no host authority.",
+    "profile_name": "Exact packaged advisory profile selected independently from the human role. It must be copied from this tool's enum and load successfully.",
+    "scope": "Required concise textual boundary of the delegated worker's ownership.",
+    "instructions": "Coordinator-authored bounded non-empty worker instructions, preserved unchanged for durable worker context. Recommended guidance covers: documents to consume first (exact paths and why), applicable requirements, verification contract, ownership constraints, known documentation state, and further documentation discovery. This helpful structure is advisory only: no heading, Markdown, order, language, or section content is parsed as a server admission rule.",
+    "parent_delegation_id": "Optional same-task predecessor delegation reference; it is evidence linkage, never a lifecycle gate.",
+    "input_report_ids": "Optional unique same-task report references the worker may read through read_reports.",
+    "input_decision_ids": "Optional unique same-task user-decision references included as normalized evidence in the worker brief.",
+    "model": "Exact logical model selected by the coordinator. Luna remains explicit in durable data; only native serialization omits its override.",
+    "reasoning_effort": "Exact coordinator-selected reasoning effort paired atomically with model; the runtime never escalates it.",
+    "mode": "Report upload operation. For one bounded report use single (or omit mode); for a large report use begin, then sequential append, then finalize; abort only an assembling report.",
+    "report_type": "Immutable report kind selected only for single or begin: progress, result, synthesis, or plan. It is fixed after begin and omitted for append, finalize, and abort.",
+    "status": "Required only for single or finalize: partial, completed, blocked, or failed. A plan must be finalized with completed before it can receive an approval decision.",
+    "content": "Required only for single or append. Supply one finite bounded JSON value (object, array, string, number, boolean, or null); Cortex never parses or semantically validates its report text. Content is returned publicly only by read_reports.",
+    "report_id": "Opaque report ID emitted by submit_report. Omit it for a new single/begin report; copy it byte-for-byte for append, finalize, abort, and read. It must belong to this exact delegation's resolved task.",
+    "chunk_index": "Zero-based next append index. Use the next_chunk_index acknowledged by the previous append.",
+    "section": "Lowercase bounded chunk section label used to filter a report read.",
+    "expected_chunk_count": "Final manifest chunk count observed after the final append.",
+    "expected_content_digest": "Exact sha256: digest acknowledged by the assembled report; copy it byte-for-byte when finalizing.",
+    "abort_reason_en": "English reason for intentionally ending an incomplete report assembly.",
+    "supersedes_report_id": "Optional prior plan report replaced by this newly created plan; the referenced report must be a same-task plan.",
+    "review_policy": "Optional plan-only review policy, set only on a new single/begin plan. Omit it for every non-plan and for append, finalize, or abort.",
+    "report_ids": "One to twenty unique report IDs in desired return order. They must resolve to one owner task; omit redundant task_id on new reads.",
+    "sections": "Optional unique report section labels. The continuation cursor is valid only for the same ordered IDs and filters.",
+    "cursor": "Opaque read_reports continuation cursor. Copy it byte-for-byte and reuse it only with the exact original report_ids and sections.",
+    "max_bytes": "Maximum encoded report body bytes for this page. Zero returns metadata only and never consumes a cursor page.",
+    "rationale": "Optional bounded advisory governance rationale. It records model or user evidence and never blocks coordination.",
+    "reason": "Compatibility alias for rationale. Prefer rationale; when both are supplied, rationale is retained.",
+    "risk_factors": "Optional bounded advisory risk labels for this governance assessment.",
+    "source": "Author of the advisory assessment: model evidence or an explicit user override asserted by the coordinator. A model assessment cannot clear an existing plan/approval obligation. Lowering one requires source=user_override plus a later durable task-scoped user cancel or override decision.",
+    "initiative_id": "Opaque initiative ID emitted by record_initiative. Copy it byte-for-byte; it is project scoped and must be related where a task operation requires it.",
+    "goal": "Required bounded initiative goal retained in immutable revision history.",
+    "risk": "Optional bounded initiative risk summary retained in its next revision.",
+    "status": "Semantic status for the selected record type. Use only one of this tool's advertised enum values.",
+    "dependencies": "Optional unique initiative dependency IDs. Unknown or cyclic same-project links are stored as advisory warnings.",
+    "linked_task_ids": "Optional unique task IDs to relate to this initiative. Every ID must resolve in the same project shard.",
+    "linked_report_ids": "Optional unique report IDs to relate to this initiative. Every ID must resolve in the same project shard.",
+    "notes": "Optional bounded JSON initiative notes recorded in immutable revision history.",
+    "subject_type": "Existing durable subject kind. Select the matching subject_id and supply only fields permitted for that kind.",
+    "subject_id": "Opaque existing subject ID. Copy it byte-for-byte; a task subject must equal task_id, and all other subjects must resolve in the anchored scope.",
+    "verdict": "Advisory closure verdict. It records evidence and does not permit or prevent later coordination.",
+    "evidence": "Required bounded opaque JSON closure evidence. Cortex validates only JSON encoding and size; do not include raw diagnostic logs or secrets.",
+    "unresolved_risks": "Optional bounded opaque advisory-risk strings. Omit to store an empty list.",
+    "follow_ups": "Optional bounded opaque advisory next-action strings. Omit to store an empty list.",
+    "initiative_status": "Optional next initiative status, permitted only for an initiative closure.",
+    "completion_notes": "Optional bounded opaque JSON completion notes for either a task or initiative closure. Cortex stores them without semantic or Markdown validation.",
+    "subject_digest": "sha256: digest binding a plan or report decision to the exact immutable revision. Copy the digest byte-for-byte from the selected subject.",
+    "decision_type": "Coordinator-asserted ordinary-chat user decision type; it is durable evidence, never backend authority.",
+    "prompt_en": "English prompt or decision context shown by the coordinator to the user.",
+    "response_original": "Exact arbitrary-Unicode user response. It is stored privately and is not copied into compact inspection evidence.",
+    "response_en": "Coordinator-authored English normalization of the user response; it never replaces response_original.",
+    "supersedes_decision_id": "Optional prior decision for the same subject that this decision supersedes.",
+}
+
+
+def _describe_schema_properties(schema: Mapping[str, Any]) -> None:
+    """Populate every advertised property, including conditional branches."""
+    properties = schema.get("properties")
+    if isinstance(properties, Mapping):
+        for name, property_schema in properties.items():
+            if not isinstance(property_schema, dict):
+                continue
+            if not isinstance(property_schema.get("description"), str):
+                property_schema["description"] = _PROPERTY_DESCRIPTIONS.get(
+                    str(name),
+                    "Bounded public field. Use only durable values emitted by Cortex or values stated in this contract.",
+                )
+            _describe_schema_properties(property_schema)
+    items = schema.get("items")
+    if isinstance(items, Mapping):
+        _describe_schema_properties(items)
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        branches = schema.get(keyword)
+        if isinstance(branches, list):
+            for branch in branches:
+                if isinstance(branch, Mapping):
+                    _describe_schema_properties(branch)
+
+
+def _describe_contract_schemas(contracts: Mapping[str, Mapping[str, Any]]) -> None:
+    """Make tools/list self-describing for both input and structured output."""
+    for name, contract in contracts.items():
+        tool_description = str(contract.get("description") or "Cortex V12 public operation.")
+        for key, kind in (("inputSchema", "request"), ("outputSchema", "successful structuredContent")):
+            schema = contract.get(key)
+            if not isinstance(schema, dict):
+                continue
+            schema.setdefault("$schema", _JSON_SCHEMA_DRAFT_2020_12)
+            schema["description"] = f"{name} {kind}. {tool_description}"
+            _describe_schema_properties(schema)
+
+
+def _result_object(description: str, properties: Mapping[str, Any]) -> dict[str, Any]:
+    """Describe stable nested fields without closing evolving ledger records."""
+    return {"type": "object", "description": description, "properties": dict(properties)}
+
+
+def _result_array(description: str, items: Mapping[str, Any]) -> dict[str, Any]:
+    return {"type": "array", "description": description, "items": dict(items)}
+
+
+def _opaque_task_id(description: str) -> dict[str, Any]:
+    return _identifier(task=True, description=description + " Non-callable durable evidence only; public MCP calls use task_ref. " + HANDLE_COPY_RULE)
+
+
+def _opaque_task_ref(description: str) -> dict[str, Any]:
+    return _task_ref(description=description + " " + HANDLE_COPY_RULE)
+
+
+def _opaque_record_id(description: str) -> dict[str, Any]:
+    return _identifier(description=description + " Non-callable durable evidence only; public MCP calls use typed compact refs. " + HANDLE_COPY_RULE)
+
+
+def _opaque_digest(description: str, *, nullable: bool = False) -> dict[str, Any]:
+    value = _string(maximum=71, pattern=DIGEST_PATTERN, description=description + " " + HANDLE_COPY_RULE)
+    if nullable:
+        value["type"] = ["string", "null"]
+    return value
+
+
+_CHUNK_SCHEMA = _result_object("One complete immutable report chunk returned by a bounded report read.", {
+    "chunk_index": {"type": "integer", "minimum": 0, "description": "Zero-based immutable chunk position."},
+    "section": _string(maximum=REPORT_SECTION_MAX_LENGTH, pattern=REPORT_SECTION_PATTERN, description="Bounded lowercase report section label."),
+    "content_digest": _opaque_digest("SHA-256 digest of this exact chunk content."),
+    "content_bytes": {"type": "integer", "minimum": 0, "description": "UTF-8 JSON byte count for this chunk."},
+    "content": {"description": "Complete JSON content for this chunk when it fits the selected read budget."},
+})
+_COMPACT_REPORT_SCHEMA = _result_object("Compact immutable report record; body content is available only from read_reports.", {
+    "report_id": _opaque_record_id("Opaque durable report handle."),
+    "task_id": _opaque_task_id("Owning durable task handle."),
+    "delegation_id": _opaque_record_id("Owning durable delegation handle."),
+    "content_digest": _opaque_digest("SHA-256 digest of the current immutable report manifest.", nullable=True),
+    "assembly_state": _string(enum=("assembling", "finalized", "aborted"), maximum=16, description="Current immutable report assembly state."),
+    "next_chunk_index": {"type": "integer", "minimum": 0, "description": "Next permitted append position for an assembling report."},
+    "chunks": _result_array("Complete returned chunks within the requested bounded report page.", _CHUNK_SCHEMA),
+})
+_REPORT_CONSUMPTION_RECEIPT_SCHEMA = _result_object("Immutable structural evidence that this read returned identified report chunks to a classified caller; it is not evidence of free-text reasoning or native-worker lifecycle.", {
+    "receipt_id": {"type": "integer", "minimum": 1, "description": "Durable receipt sequence within the private V12 shard."},
+    "report_id": _opaque_record_id("Exact report read by this receipt."),
+    "consumer_delegation_id": _string(maximum=IDENTIFIER_MAX_LENGTH, pattern=IDENTIFIER_PATTERN, description="Exact worker delegation that consumed the report, or null for a coordinator-classified read.") | {"type": ["string", "null"]},
+    "reader_kind": _string(enum=("worker", "coordinator"), maximum=16, description="Classified reader; only worker receipts prove a declared downstream handoff read."),
+    "observed_content_digest": _opaque_digest("Exact immutable report manifest digest observed for this read."),
+    "chunk_indexes": _result_array("Exact chunk indexes returned in this page.", {"type": "integer", "minimum": 0}),
+    "input_cursor": {"type": ["string", "null"], "maxLength": 2_048, "description": "Exact prior cursor, or null for the first page."},
+    "output_cursor": {"type": ["string", "null"], "maxLength": 2_048, "description": "Exact returned continuation cursor, or null when this response has no further page."},
+    "returned_content_bytes": {"type": "integer", "minimum": 0},
+    "has_more": {"type": "boolean"},
+    "created_sequence": {"type": "integer", "minimum": 0},
+})
+_HUMAN_VIEW_SCHEMA = _result_object("Volatile host-private derived-view status; it never changes canonical ledger evidence.", {
+    "status": _string(enum=("ready", "stale", "conflict", "unavailable", "disabled"), maximum=16, description="Current derived-view availability state."),
+    "path": {"type": ["string", "null"], "description": "Verified absolute host-private view path only when status is ready; otherwise null."},
+    "source_sequence": {"type": "integer", "minimum": 0, "description": "Timeline sequence used to verify a ready derived view."},
+    "content_digest": _opaque_digest("SHA-256 digest of verified ready view content.", nullable=True),
+})
+_APPROVAL_VIEW_SCHEMA = _result_object("Exact server-verified plan-review view from a completed finalized plan read. Only status=ready with the returned opaque approval_handle can support a later plan decision. Copy every handle, path, and digest byte-for-byte; never construct, concatenate, shorten, substitute native_task_name, or infer a path.", {
+    "report_ref": _entity_ref("report"),
+    "delegation_ref": _entity_ref("delegation"),
+    "report_content_digest": _opaque_digest("Exact immutable plan report manifest digest required by record_user_decision."),
+    "status": _string(enum=("ready", "stale", "conflict", "unavailable", "disabled"), maximum=16, description="Only ready permits presenting the returned path for approval."),
+    "path": {"type": ["string", "null"], "description": "Exact verified host-private plan path when status is ready; otherwise null. Never construct this value."},
+    "source_sequence": {"type": ["integer", "null"], "minimum": 0, "description": "Exact ledger sequence used to verify the returned path, or null when not ready."},
+    "content_digest": _opaque_digest("Exact verified derived-view digest when status is ready; otherwise null.", nullable=True),
+    "approval_handle": _string(maximum=IDENTIFIER_MAX_LENGTH, pattern=IDENTIFIER_PATTERN, description="Server-issued opaque relation for this exact ready report/view/request snapshot; null unless status is ready.") | {"type": ["string", "null"]},
+})
+_HANDLES_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "description": "Exact authoritative next-call values selected from this success result. " + HANDLE_COPY_RULE,
+    "properties": {
+        "task_ref": _opaque_task_ref("Exact preferred compact task locator."),
+        "delegation_ref": _entity_ref("delegation"),
+        "report_ref": _entity_ref("report"),
+        "report_refs": _entity_ref_array("report", maximum=MAX_REPORT_IDS),
+        "initiative_ref": _entity_ref("initiative"),
+        "decision_ref": _entity_ref("decision"),
+        "idempotency_key": _idempotency_key(),
+        "retry_handle": _idempotency_key(),
+        "cursor": _string(maximum=2_048, description="Exact opaque continuation cursor for read_reports only. " + HANDLE_COPY_RULE),
+        "next_sequence": {"type": "integer", "minimum": 0, "description": "Exact durable timeline sequence for inspect_task, read_delegation, or inspect_governance. Copy it only into after_sequence. " + HANDLE_COPY_RULE},
+        "human_view": _HUMAN_VIEW_SCHEMA,
+        "approval_view": _APPROVAL_VIEW_SCHEMA,
+    },
+}
+_WORKER_BRIEF_SCHEMA = _result_object("Coordinator-owned worker brief and renderer proof; it creates no host lifecycle record or dispatch handle.", {
+    "delegation_id": _opaque_record_id("Durable delegation handle for this worker brief."),
+    "task_id": _opaque_task_id("Durable task handle for this worker brief."),
+    "native_task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Persisted exact server-derived native task name; it is not a lifecycle receipt."),
+    "input_report_refs": _result_array("Exact finalized predecessor report references that the worker must read through read_reports before use.", _result_object("One immutable handoff report reference.", {
+        "report_id": _opaque_record_id("Exact predecessor report ID."),
+        "content_digest": _opaque_digest("Exact finalized predecessor report manifest digest."),
+        "assembly_state": _string(enum=("finalized",), maximum=16),
+    })),
+    "renderer": _result_object("Packaged-profile renderer proof.", {
+        "version": _string(maximum=160, description="Exact packaged renderer version."),
+        "profile_name": _string(maximum=ROLE_MAX_LENGTH, description="Exact selected packaged profile name."),
+        "profile_state": _string(maximum=32, description="Renderer profile availability state."),
+        "profile_digest": _opaque_digest("SHA-256 digest of the exact loaded packaged profile.", nullable=True),
+        "common_policy_digest": _opaque_digest("SHA-256 digest of the common trusted renderer policy."),
+    }),
+    "native_dispatch": _result_object("Exact coordinator-selected native spawn projection; it is data, not a host receipt or lifecycle handle.", {
+        "task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Exact server-derived host-safe task_name. Copy native_dispatch.task_name byte-for-byte into spawn_agent; never derive, sanitize, or replace it."),
+        "selection": _result_object("Exact logical model and effort selected by the coordinator.", {
+            "model": _string(enum=NATIVE_MODELS, maximum=64, description="Exact logical model selection; no fallback is inferred."),
+            "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact selected effort; it is never escalated by the ledger."),
+        }),
+        "native_arguments": _result_object("Byte-exact host spawn arguments; Luna omits only its native model override.", {
+            "task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Exact server-derived host-safe task_name, identical to native_dispatch.task_name."),
+            "message": _string(maximum=TEXT_MAX_LENGTH, description="Exact rendered worker message."),
+            "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact native effort argument."),
+            "model": _string(enum=NATIVE_MODELS, maximum=64, description="Native override when supplied; omitted for configured-default Luna."),
+            "fork_turns": _string(enum=("none",), maximum=8, description="Required isolated native spawn setting."),
+        }),
+    }),
+})
+
+
+_RESULT_PROPERTY_SCHEMAS: dict[str, dict[str, Any]] = {
+    "task": _result_object("Durable task header, including canonical V12 project anchor and immutable task contract.", {
+        "task_id": _opaque_task_id("Opaque durable task handle."),
+        "project_hash": _string(maximum=64, pattern=r"^[0-9a-f]{64}$", description="V12 project-shard digest; it is not caller authority."),
+    }),
+    "delegations": _result_array("Compact delegation references selected by the returned task chronology page.", _result_object("Compact durable delegation reference.", {
+        "delegation_id": _opaque_record_id("Opaque durable delegation handle."), "task_id": _opaque_task_id("Owning task handle."), "native_task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Persisted exact server-derived native task name; it is not a lifecycle receipt."),
+    })),
+    "delegation": _result_object("Durable delegation record; full instructions are returned only for the selected delegation.", {
+        "delegation_id": _opaque_record_id("Opaque durable delegation handle."), "task_id": _opaque_task_id("Owning task handle."),
+        "native_task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Persisted exact server-derived native task name; it is not a lifecycle receipt."),
+        "profile_name": _string(maximum=ROLE_MAX_LENGTH, description="Exact packaged advisory profile distinct from role."),
+        "model": _string(enum=NATIVE_MODELS, maximum=64, description="Exact coordinator-selected logical model."),
+        "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact coordinator-selected effort."),
+    }),
+    "worker_brief": _WORKER_BRIEF_SCHEMA,
+    "report": _COMPACT_REPORT_SCHEMA,
+    "reports": _result_array("Requested report records in caller order; report chunks and bodies appear only in read_reports.", _COMPACT_REPORT_SCHEMA),
+    "consumption_receipts": _result_array("Structural report-read receipts created by this call.", _REPORT_CONSUMPTION_RECEIPT_SCHEMA),
+    "decisions": _result_array("Compact user-decision evidence selected by the returned task chronology page.", _result_object("Compact immutable decision record.", {
+        "decision_id": _opaque_record_id("Opaque durable decision handle."), "task_id": _opaque_task_id("Owning task handle."),
+        "subject_id": _opaque_record_id("Opaque selected durable subject handle."), "subject_digest": _opaque_digest("Exact immutable subject digest.", nullable=True),
+    })),
+    "assessment": _result_object("New advisory governance assessment; it never blocks another operation.", {
+        "assessment_id": _opaque_record_id("Opaque durable assessment handle."), "task_id": _opaque_task_id("Anchored task handle."),
+    }),
+    "governance_gate": _result_object("Closed durable governance relation gate. It validates exact report/decision links only; it never selects stages, profiles, models, or free-text work.", {
+        "task_id": _opaque_task_id("Anchored task handle."),
+        "assessment_id": _opaque_record_id("Assessment that created this gate."),
+        "mode": _string(enum=GOVERNANCE_MODES, maximum=16),
+        "plan_required": {"type": "boolean"},
+        "user_approval_required": {"type": "boolean"},
+        "allowed_preapproval_profiles": _result_array("Only profiles directly permitted before approval.", _string(maximum=ROLE_MAX_LENGTH)),
+        "plan_report_id": _opaque_record_id("Approved finalized planner report, or null.") | {"type": ["string", "null"]},
+        "plan_digest": _opaque_digest("Approved plan manifest digest, or null.", nullable=True),
+        "approval_decision_id": _opaque_record_id("Exact approving decision, or null.") | {"type": ["string", "null"]},
+    }),
+    "assessments": _result_array("Advisory governance assessments selected by the returned chronology page.", _result_object("Advisory governance assessment record.", {
+        "assessment_id": _opaque_record_id("Opaque durable assessment handle."), "task_id": _opaque_task_id("Anchored task handle."),
+    })),
+    "initiative": _result_object("Created or revised immutable-current initiative projection.", {
+        "initiative_id": _opaque_record_id("Opaque durable initiative handle."),
+    }),
+    "initiatives": _result_array("Initiatives related to the selected task or selected initiative.", _result_object("Current initiative projection.", {
+        "initiative_id": _opaque_record_id("Opaque durable initiative handle."),
+    })),
+    "closures": _result_array("Advisory governance closures selected by the returned chronology page.", _result_object("Advisory task or initiative closure record.", {
+        "closure_id": _opaque_record_id("Opaque durable closure handle."), "task_id": _opaque_task_id("Anchored task handle."),
+        "subject_id": _opaque_record_id("Closed durable subject handle."),
+    })),
+    "closure": _result_object("Recorded advisory task or initiative closure.", {
+        "closure_id": _opaque_record_id("Opaque durable closure handle."), "task_id": _opaque_task_id("Anchored task handle."),
+        "subject_id": _opaque_record_id("Closed durable subject handle."),
+    }),
+    "next_action": _result_object("Exact coordinator next action after closure. For an initiative closure, copy arguments exactly into submit_governance_closure: subject_type=task and subject_ref=task_ref. It contains compact callable refs only.", {
+        "tool": _string(enum=("submit_governance_closure",), maximum=32),
+        "state": _string(enum=("task_closed",), maximum=16),
+        "task_ref": _opaque_task_ref("Exact anchored task reference for the required task closure."),
+        "arguments": _result_object("Exact compact task-closure subject relation.", {
+            "task_ref": _opaque_task_ref("Exact anchored task reference."),
+            "subject_type": _string(enum=("task",), maximum=16),
+            "subject_ref": _opaque_task_ref("Exact task subject reference."),
+        }),
+    }),
+    "decision": _result_object("Compact immutable user-decision receipt; the original response is not repeated.", {
+        "decision_id": _opaque_record_id("Opaque durable decision handle."), "task_id": _opaque_task_id("Owning task handle."),
+        "subject_digest": _opaque_digest("Exact immutable subject digest.", nullable=True),
+    }),
+    "warnings": _result_array("Advisory unresolved or cyclic initiative-link warnings; these do not gate work.", {"description": "One advisory warning value."}),
+    "links": _result_array("Current initiative links within the selected governance scope.", _result_object("Current initiative relationship.", {
+        "initiative_id": _opaque_record_id("Source initiative handle."), "target_id": _opaque_record_id("Related durable target handle."),
+    })),
+    "initiative_revisions": _result_array("Immutable initiative revisions whose timeline events are in this page.", _result_object("Immutable initiative revision event.", {
+        "initiative_id": _opaque_record_id("Revised initiative handle."), "sequence": {"type": "integer", "minimum": 0, "description": "Immutable revision sequence."},
+    })),
+    "projection": _result_object("Effective advisory governance projection retaining latest model, user override, and closure evidence.", {
+        "effective_mode": {"type": ["string", "null"], "enum": [*GOVERNANCE_MODES, None], "description": "Current effective advisory governance mode, or null when no assessment exists."},
+        "override_active": {"type": "boolean", "description": "Whether a user override currently supersedes model assessment evidence."},
+        "governance_gate": {"type": ["object", "null"], "description": "Current closed durable governance relation gate, or null before governance is set."},
+    }),
+    "timeline": _result_array("Chronological cursor-scoped durable event metadata.", _result_object("One immutable timeline event.", {
+        "sequence": {"type": "integer", "minimum": 0, "description": "Opaque chronological sequence cursor; retain it exactly for the next page."},
+        "entity_id": _opaque_record_id("Affected durable record handle."),
+        "task_id": _opaque_task_id("Owning task handle."),
+    })),
+    "next_sequence": {"type": "integer", "minimum": 0, "description": "Next chronology cursor. Copy it unchanged into after_sequence for the next bounded page."},
+    "has_more": {"type": "boolean", "description": "Whether another chronology or report-content page is available for the same scope."},
+    "returned_content_bytes": {"type": "integer", "minimum": 0, "description": "Encoded byte count of report body content returned in this response."},
+    "next_cursor": {"type": ["string", "null"], "minLength": 1, "maxLength": 2_048, "description": "Opaque read_reports continuation cursor, or null when complete. Copy it byte-for-byte for the identical requested report scope."},
+    "replayed": {"type": "boolean", "description": "Whether a matching idempotency key returned its original durable result."},
+    "idempotency_key": _idempotency_key(),
+    "retry_handle": _idempotency_key(),
+    "human_view": _HUMAN_VIEW_SCHEMA,
+    "approval_view": _APPROVAL_VIEW_SCHEMA,
+    "handles": _HANDLES_SCHEMA,
+    "assembly_state": {"type": "string", "enum": ["assembling", "finalized", "aborted"], "description": "Current immutable report assembly state after this mutation."},
+    "next_chunk_index": {"type": "integer", "minimum": 0, "description": "Next permitted append index; copy it unchanged into the next append."},
+    "accepted_chunk_index": {"type": "integer", "minimum": 0, "description": "Append index accepted by this report receipt."},
+    "chunk_digest": _opaque_digest("SHA-256 digest of the accepted append chunk."),
+    "chunk_bytes": {"type": "integer", "minimum": 0, "description": "Encoded byte length of the accepted append chunk."},
+    "current_content_digest": _opaque_digest("SHA-256 digest of the report manifest after the accepted append."),
+}
+
+
+def _tool_output_schema(
+    *required_success_fields: str,
+    optional_success_fields: tuple[str, ...] = (),
+    success_property_overrides: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Describe the structured success receipt for one public tool.
+
+    Correctable failures deliberately use only actionable MCP ``TextContent``
+    with ``isError: true``.  They therefore are not a second pseudo-success
+    structured shape and do not need to satisfy this success schema.
+    """
+    return {
+        "$schema": _JSON_SCHEMA_DRAFT_2020_12,
+        "type": "object",
+        "description": "Closed successful Cortex V12 structuredContent receipt. " + HANDLE_COPY_RULE + " Correctable failures use MCP TextContent and do not match this schema.",
+        "additionalProperties": False,
+        "properties": {
+            field: dict((success_property_overrides or {}).get(field, _RESULT_PROPERTY_SCHEMAS[field]))
+            for field in dict.fromkeys((*required_success_fields, *optional_success_fields, "idempotency_key", "retry_handle", "handles"))
         },
-    }, ["phase_kind", "workers"])
+        "required": [*required_success_fields, "handles"],
+    }
+
+
+def _forbid_properties(*names: str) -> list[dict[str, Any]]:
+    """Return portable draft-2020-12 guards for mutually exclusive inputs."""
+    return [{"not": {"required": [name]}} for name in names]
+
+
+def _report_operation_schema() -> list[dict[str, Any]]:
+    """Describe the complete report upload state machine before storage opens.
+
+    The root schema still lists every known property so its closed-object
+    boundary remains one source of truth.  These alternatives make a caller
+    select exactly one valid operation and reject fields belonging to another
+    operation at the public MCP boundary.
+    """
+    common = ("delegation_ref",)
+
+    def create_shape(*, mode: str | None, report_types: tuple[str, ...], required: tuple[str, ...], forbidden: tuple[str, ...]) -> dict[str, Any]:
+        properties: dict[str, Any] = {
+            "report_type": {
+                "enum": list(report_types),
+                "description": _PROPERTY_DESCRIPTIONS["report_type"],
+            },
+        }
+        requirements = [*common, *required]
+        guards = _forbid_properties(*forbidden)
+        if mode is None:
+            guards.extend(_forbid_properties("mode"))
+        else:
+            properties["mode"] = {"const": mode, "description": _PROPERTY_DESCRIPTIONS["mode"]}
+            requirements.append("mode")
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": requirements,
+            "allOf": guards,
+        }
+
+    plan_fields = ("review_policy", "supersedes_report_ref")
+    create_tail = ("chunk_index", "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en")
+    alternatives: list[dict[str, Any]] = []
+    for mode in (None, "single"):
+        alternatives.extend((
+            create_shape(mode=mode, report_types=("plan",), required=("report_type", "status", "content"), forbidden=create_tail),
+            create_shape(mode=mode, report_types=("progress", "result", "synthesis"), required=("report_type", "status", "content"), forbidden=(*create_tail, *plan_fields)),
+        ))
+    for report_types, forbidden in (
+        (("plan",), ("content", "status", *create_tail)),
+        (("progress", "result", "synthesis"), ("content", "status", *create_tail, *plan_fields)),
+    ):
+        alternatives.append(create_shape(mode="begin", report_types=report_types, required=("report_type",), forbidden=forbidden))
+    alternatives.extend((
+        {
+            "type": "object",
+            "properties": {"mode": {"const": "append", "description": _PROPERTY_DESCRIPTIONS["mode"]}},
+            "required": [*common, "mode", "report_ref", "chunk_index", "section", "content"],
+            "allOf": _forbid_properties("report_type", "status", "expected_chunk_count", "expected_content_digest", "abort_reason_en", *plan_fields),
+        },
+        {
+            "type": "object",
+            "properties": {"mode": {"const": "finalize", "description": _PROPERTY_DESCRIPTIONS["mode"]}},
+            "required": [*common, "mode", "report_ref", "expected_chunk_count", "expected_content_digest", "status"],
+            "allOf": _forbid_properties("report_type", "content", "chunk_index", "section", "abort_reason_en", *plan_fields),
+        },
+        {
+            "type": "object",
+            "properties": {"mode": {"const": "abort", "description": _PROPERTY_DESCRIPTIONS["mode"]}},
+            "required": [*common, "mode", "report_ref", "abort_reason_en"],
+            "allOf": _forbid_properties("report_type", "status", "content", "chunk_index", "section", "expected_chunk_count", "expected_content_digest", *plan_fields),
+        },
+    ))
+    return alternatives
+
+
+def build_public_contracts() -> dict[str, dict[str, Any]]:
+    """Return the one authoritative V12 MCP catalogue for all callers."""
+    task_ref = _task_ref(description="Preferred compact task locator emitted by create_task. Copy handles.task_ref byte-for-byte for task-anchored calls; never use a UI-rendered task_id.")
+    delegation_id = _entity_ref("delegation")
+    report_id = _entity_ref("report")
+    initiative_id = _entity_ref("initiative")
+    decision_id = _entity_ref("decision")
+    idempotency_key = _idempotency_key()
+    profile_names = packaged_profile_names()
+    if (
+        len(profile_names) != _PACKAGED_PROFILE_COUNT
+        or len(set(profile_names)) != _PACKAGED_PROFILE_COUNT
+        or tuple(sorted(profile_names)) != profile_names
+    ):
+        raise RuntimeError("Cortex v12 packaged profile catalogue is unavailable")
 
     contracts: dict[str, dict[str, Any]] = {
-        "start_orchestration": _contract(
-            "Compile and start one durable task from a coordinator-authored semantic wave plan. Phase kinds may repeat and are never identifiers. The coordinator selects every worker profile, operation kind, model, and effort; Cortex assigns executable identities, derives dependency/context references, validates profile capability, and only then creates dispatches. Returns private coordinator authority and the first lifecycle action. "
-            + NATIVE_DISPATCH_WAIT_INSTRUCTION
-            + " An explicit Terra/Sol model override is mandatory, while Luna deliberately omits the override and uses the verified configured default.",
-            _closed({
-                "user_request": _string(maximum=65_536, default="Complete the requested work."),
-                "acceptance_criteria": {
-                    "type": "array",
-                    "description": (
-                        "Optional coordinator-authored acceptance items. Cortex preserves the "
-                        "normalized non-empty strings in exact order as immutable task authority; "
-                        "server baselines remain separate and never replace these requirements."
-                    ),
-                    "items": _string(minimum=1, maximum=65_536),
+        "create_task": {
+            "description": "Initialize one durable task from its complete task/result contract. project_root is required only in this first call and must be the user-selected absolute canonical cwd/webhook root; Cortex stores the resolved root on the task. Copy the returned task_ref byte-for-byte for later task-anchored calls, and omit project_root from every later public tool call. Internal contract prose is English, while user_request_original stays exact and user_language is a BCP-47 tag such as ru. No undeclared wrapper, alias, or extra field is accepted.",
+            "inputSchema": _closed(
+                {
+                    "project_root": _string(maximum=PROJECT_ROOT_MAX_LENGTH, description=_PROPERTY_DESCRIPTIONS["project_root"]),
+                    "objective": _string(description=_PROPERTY_DESCRIPTIONS["objective"]),
+                    "user_request_original": _string(description=_PROPERTY_DESCRIPTIONS["user_request_original"]),
+                    "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description=_PROPERTY_DESCRIPTIONS["user_language"]),
+                    "task_contract_version": _string(enum=(TASK_CONTRACT_VERSION,), maximum=64, description=_PROPERTY_DESCRIPTIONS["task_contract_version"]),
+                    "requirements": _text_array(minimum=1),
+                    "constraints": _text_array(minimum=1),
+                    "acceptance_criteria": _text_array(minimum=1),
+                    "verification_plan": _text_array(minimum=1),
+                    "context": _json_value(),
+                    "idempotency_key": idempotency_key,
                 },
-                "verification": {
-                    "type": "array",
-                    "description": (
-                        "Optional coordinator-authored verification items. Cortex preserves the "
-                        "normalized non-empty strings in exact order as immutable task authority; "
-                        "server baselines remain separate and never replace these checks."
-                    ),
-                    "items": _string(minimum=1, maximum=65_536),
+                ("project_root", "objective", "user_request_original", "user_language", "task_contract_version", "requirements", "constraints", "acceptance_criteria", "verification_plan"),
+            ),
+            "outputSchema": _tool_output_schema("task", "replayed", optional_success_fields=("human_view",)),
+        },
+        "inspect_task": {
+            "description": "Read one task header and a bounded task-scoped chronology using task_ref. Report entries are compact references; use read_reports for bodies.",
+            "inputSchema": _closed({"task_ref": task_ref, **_page_arguments()}, ("task_ref",)),
+            "outputSchema": _tool_output_schema("task", "delegations", "reports", "decisions", "consumption_receipts", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
+        },
+        "create_delegation": {
+            "description": "Create one new model-authored delegation and return its durable worker brief and native-dispatch payload. This creation-only tool never retrieves or replays an existing delegation: reuse the original complete payload only for an exact idempotent retry, or retrieve an existing delegation with read_delegation({delegation_ref, after_sequence}). A durable governance gate validates only required compact plan/approval relations; it never selects a stage, profile, model, or free-text work.",
+            "inputSchema": _closed(
+                {
+                    "task_ref": task_ref,
+                    "objective": _string(),
+                    "role": _string(maximum=ROLE_MAX_LENGTH),
+                    "profile_name": _string(enum=profile_names, maximum=ROLE_MAX_LENGTH, description="Exact packaged profile. This is distinct from role and must load before a worker brief is returned."),
+                    "scope": _string(description="Required concise textual boundary of the delegated worker's ownership."),
+                    "instructions": _string(description=_PROPERTY_DESCRIPTIONS["instructions"]),
+                    "parent_delegation_ref": delegation_id,
+                    "input_report_refs": _entity_ref_array("report", maximum=MAX_REPORT_IDS, unique=False) | {"description": "Optional predecessor report refs. Exact duplicates are canonicalized and collapsed in first-seen order before validation."},
+                    "input_decision_refs": _entity_ref_array("decision", maximum=MAX_DECISION_IDS, unique=False) | {"description": "Optional predecessor decision refs. Do not repeat approval_decision_ref here; exact duplicates are nevertheless canonicalized and collapsed."},
+                    "approval_decision_ref": decision_id | {"description": "Exact approved decision required by the advisory gate when applicable. Do not repeat it in input_decision_refs; an exact duplicate is accepted and retained once."},
+                    "model": _string(enum=NATIVE_MODELS, maximum=64, description="Exact logical coordinator-selected model. Luna remains explicit in durable data."),
+                    "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact coordinator-selected effort, preserved unchanged by native serialization."),
+                    "idempotency_key": idempotency_key,
                 },
-                "waves": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": PUBLIC_MAX_WAVES,
-                    "items": wave,
+                ("task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"),
+            ),
+            "outputSchema": _tool_output_schema("delegation", "worker_brief", "replayed", optional_success_fields=("human_view",)),
+        },
+        "read_delegation": {
+            "description": "Retrieve a read-only durable delegation, its trusted worker/native-dispatch payload, and bounded delegation-scoped chronology with its exact emitted delegation_ref.",
+            "inputSchema": _closed({"delegation_ref": delegation_id, **_page_arguments()}, ("delegation_ref", "after_sequence")),
+            "outputSchema": _tool_output_schema("delegation", "worker_brief", "reports", "consumption_receipts", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
+        },
+        "submit_report": {
+            "description": "Create, assemble, finalize, or abort one immutable bounded report. The worker alone calls this with its exact emitted delegation_ref, which resolves the authoritative task; never supply task_ref or a canonical ID. Canonical one-call plan: delegation_ref + mode=single (or omit mode) + report_type=plan + status=completed + one bounded opaque JSON content value; review_policy is optional. Submit these as top-level fields only: do not use wrappers or aliases such as report, body, title, reportType, delegationId, or taskId. Large report: begin needs delegation_ref + mode=begin + report_type; each append needs the begin-returned report_ref + exact next_chunk_index + section + content; finalize needs that report_ref + status + exact expected_chunk_count and expected_content_digest returned by append. The schema checks references and operation fields; Cortex never semantically validates report prose.",
+            "inputSchema": _closed(
+                {
+                    "delegation_ref": delegation_id,
+                    "mode": _string(enum=REPORT_MODES, maximum=16),
+                    "report_type": _string(enum=REPORT_TYPES, maximum=16),
+                    "status": _string(enum=REPORT_STATUSES, maximum=16),
+                    "content": _json_value(),
+                    "report_ref": report_id,
+                    "chunk_index": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "section": _string(maximum=REPORT_SECTION_MAX_LENGTH),
+                    "expected_chunk_count": {"type": "integer", "minimum": 1, "maximum": 256},
+                    "expected_content_digest": _string(maximum=71, pattern=DIGEST_PATTERN),
+                    "abort_reason_en": _string(maximum=4_096),
+                    "supersedes_report_ref": report_id,
+                    "review_policy": _string(enum=PLAN_REVIEW_POLICIES, maximum=16),
+                    "idempotency_key": idempotency_key,
                 },
-                "plan_approval": _string(enum=("auto", "required"), maximum=16),
-                "governance_mode": _string(enum=("auto", "required", "minimal"), maximum=16),
-                "complexity": _string(
-                    enum=CANONICAL_COMPLEXITIES,
-                    maximum=2,
-                    description=(
-                        "Canonical task complexity. Copy an explicit C1, C2, or C3 user choice; "
-                        "omit only when no explicit choice exists, in which case Cortex defaults to C2."
-                    ),
-                ),
-            }, ["user_request", "waves"]),
-            "start_orchestration",
-        ),
-        "continue_orchestration": _contract(
-            "Advance the active durable task after its current wave has reached terminal native completion, or exactly once when inspect_orchestration/read_worker_wave returns continue to reconcile an interrupted same-child response delivery. After a same-incarnation compaction boundary, inspect_orchestration must complete first. In that recovery case do not wait, reread, or create a child first. Cortex derives the active step and canonical result references from the task ledger. When it returns dispatches, "
-            + NATIVE_DISPATCH_WAIT_INSTRUCTION
-            + " When it returns read_worker_wave, " + READ_AFTER_WAIT_INSTRUCTION
-            + " An explicit Terra/Sol model override is mandatory, while Luna deliberately omits the override and uses the verified configured default.",
-            _closed({
-                **common_coordinator,
-            }, ["task_ref", "coordinator_ref"]),
-            "continue_orchestration",
-        ),
-    }
-
-    def add_management(
-        name: str,
-        description: str,
-        action: str,
-        properties: Mapping[str, Any] = {},
-        required: Sequence[str] = (),
-    ) -> None:
-        contracts[name] = _contract(
-            description,
-            _closed({**common_coordinator, **properties}, ["task_ref", "coordinator_ref", *required]),
-            "manage_orchestration",
-            action=action,
-        )
-
-    add_management("inspect_orchestration", "Inspect current durable lifecycle state. After a same-incarnation compaction, clear, or reset, call this before any wait, replay, follow-up, continuation, resume, or child creation and consume every returned page until complete is true. Returns content-addressed compact frontier and report-catalog identities. A final action=continue means call continue_orchestration exactly once with the same authority. A final action=resume_orchestration means the authenticated Codex host epoch changed: call resume_orchestration exactly once before any wait, worker-wave read, continuation, or native child creation.", "inspect", {"cursor": cursor})
-    add_management(
-        "inspect_orchestration_recovery",
-        "Observe one ambiguous delivered native dispatch without invoking it again. Consume every page until complete is true. If its exact child still has no trusted start observation, call this same bounded recovery tool again after the observer lease; never fabricate a child id or call wait_agent. Once Cortex proves recovery is required, it returns one exact replacement dispatch to invoke.",
-        "recover_inspect", {"cursor": cursor},
-    )
-    add_management("recover_blocked_orchestration", "Apply coordinator recovery to a blocked task. Returns the resulting lifecycle action.", "recover_blocked", {"text": _string(maximum=65_536)})
-    add_management("resume_orchestration", "Resume an eligible task or reconcile one authenticated dead-host epoch exactly once. Dead prior-epoch native children are never waited or reused; Cortex returns new server-owned replacement dispatches for their exact unfinished assignments.", "resume", {"text": _string(maximum=65_536)})
-    add_management("stop_orchestration", "Deactivate the active task lifecycle. Returns a terminal acknowledgement.", "deactivate", {"text": _string(maximum=65_536)})
-    add_management("show_orchestration_question", "Read one exact arbitrary-Unicode user question page. Returns a continuation cursor when more text remains.", "question_show", {"question_ref": question_ref, "cursor": cursor}, ["question_ref"])
-    add_management(
-        "answer_orchestration_question",
-        "Record one exact arbitrary-Unicode user answer. On success, resume_bound_worker returns one exact native same-child followup_task call. "
-        + SAME_CHILD_WAIT_INSTRUCTION
-        + " Child binding and authorization remain server-side. Never call continue_orchestration before that canonical wave read.",
-        "question_answer",
-        {
-            "question_ref": question_ref,
-            "answer": _string(
-                maximum=65_536,
-                description="Exact arbitrary-Unicode response bound to the durable question.",
+                ("delegation_ref",),
+            ),
+            "outputSchema": _tool_output_schema("report", "replayed", optional_success_fields=("assembly_state", "next_chunk_index", "accepted_chunk_index", "chunk_digest", "chunk_bytes", "current_content_digest", "human_view")),
+        },
+        "read_reports": {
+            "description": "Read bounded complete report chunks in requested report order; report_refs resolve and verify one authoritative task.",
+            "inputSchema": _closed({
+                "report_refs": _entity_ref_array("report", minimum=1, maximum=MAX_REPORT_IDS),
+                "sections": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": _string(maximum=REPORT_SECTION_MAX_LENGTH)},
+                "cursor": _string(maximum=2_048),
+                    "max_bytes": {"type": "integer", "minimum": 0, "maximum": REPORT_READ_MAX_BYTES, "default": REPORT_READ_MAX_BYTES},
+                    "consumer_delegation_ref": delegation_id,
+                    "reader_kind": _string(enum=("worker", "coordinator"), maximum=16, description="Worker reads require the exact consuming delegation; omitted legacy reads are classified as coordinator."),
+                }, ("report_refs",)),
+            "outputSchema": _tool_output_schema("reports", "returned_content_bytes", "next_cursor", "has_more", "consumption_receipts", optional_success_fields=("human_view", "approval_view")),
+        },
+        "set_governance_mode": {
+            "description": "Append a governance assessment and return its closed durable plan/approval relation gate. Prefer rationale; the bounded reason compatibility alias is accepted. Light/full require planner evidence and an exact approval decision before downstream delegation. The advisory mode label may change, but an existing plan/approval obligation is monotonic: report failure or a model downgrade cannot clear it or its linked evidence. Only source=user_override with a later durable task-scoped user cancel/override decision may lower it.",
+            "inputSchema": _closed(
+                {
+                    "task_ref": task_ref,
+                    "mode": _string(enum=GOVERNANCE_MODES, maximum=16),
+                    "rationale": _string(minimum=0),
+                    "reason": _string(minimum=0),
+                    "risk_factors": {"type": "array", "items": _string(), "maxItems": MAX_LINKS},
+                    "source": _string(enum=GOVERNANCE_SOURCES, maximum=32),
+                    "initiative_ref": initiative_id,
+                    "idempotency_key": idempotency_key,
+                },
+                ("task_ref", "mode"),
+            ),
+            "outputSchema": _tool_output_schema("assessment", "governance_gate", "replayed"),
+        },
+        "record_initiative": {
+            "description": "Create or append an advisory project-level initiative revision in the ledger anchored by task_ref.",
+            "inputSchema": _closed(
+                {
+                    "task_ref": task_ref,
+                    "initiative_ref": initiative_id,
+                    "goal": _string(),
+                    "parent_initiative_ref": initiative_id,
+                    "risk": _string(minimum=0),
+                    "status": _string(enum=INITIATIVE_STATUSES, maximum=16),
+                    "dependency_refs": _entity_ref_array("initiative", maximum=MAX_LINKS),
+                    "linked_task_refs": {"type": "array", "minItems": 0, "maxItems": MAX_LINKS, "uniqueItems": True, "items": _opaque_task_ref("Exact compact related task locator.")},
+                    "linked_delegation_refs": _entity_ref_array("delegation", maximum=MAX_LINKS),
+                    "linked_report_refs": _entity_ref_array("report", maximum=MAX_LINKS),
+                    "linked_decision_refs": _entity_ref_array("decision", maximum=MAX_LINKS),
+                    "notes": _json_value(),
+                    "idempotency_key": idempotency_key,
+                },
+                ("task_ref", "goal"),
+            ),
+            "outputSchema": _tool_output_schema("initiative", "warnings", "replayed"),
+        },
+        "inspect_governance": {
+            "description": "Read task governance, or an initiative selected within the ledger anchored by task_ref, with a bounded scoped chronology and effective projection.",
+            "inputSchema": _closed({"task_ref": task_ref, "initiative_ref": initiative_id, **_page_arguments()}, ("task_ref",)),
+            "outputSchema": _tool_output_schema("initiatives", "assessments", "closures", "initiative_revisions", "links", "warnings", "projection", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
+        },
+        "submit_governance_closure": {
+            "description": "Append one advisory closure anchored by task_ref. For light/full governance, Cortex first requires a coordinator-consumed finalized result from a post-approval technical_writer delegation whose compact inputs include the approved plan report, approval decision, and every relevant earlier finalized result report; report prose and closure evidence remain opaque. When relevant initiatives exist, close each initiative first, then copy its returned next_action arguments into one distinct task closure with subject_type=task and subject_ref exactly equal to task_ref; only that task closure marks the task closed. unresolved_risks, follow_ups, and opaque completion_notes are optional for either subject; initiative_status is optional only for initiative subjects.",
+            "inputSchema": _closed(
+                {
+                    "task_ref": task_ref,
+                    "subject_type": _string(enum=CLOSURE_SUBJECTS, maximum=16),
+                    "subject_ref": _string(maximum=14, pattern=r"^(?:t|i)_[0-9a-f]{12}$", description="Exact compact task or initiative subject selected by subject_type."),
+                    "verdict": _string(enum=CLOSURE_VERDICTS, maximum=32),
+                    "evidence": _json_value(),
+                    "unresolved_risks": {"type": "array", "items": _string(minimum=0), "maxItems": MAX_LINKS},
+                    "follow_ups": {"type": "array", "items": _string(minimum=0), "maxItems": MAX_LINKS},
+                    "initiative_status": _string(enum=INITIATIVE_STATUSES, maximum=16),
+                    "completion_notes": _json_value(),
+                    "idempotency_key": idempotency_key,
+                },
+                ("task_ref", "subject_type", "subject_ref", "verdict", "evidence"),
+            ),
+            "outputSchema": _tool_output_schema(
+                "closure", "initiative", "warnings", "next_action", "replayed",
+                success_property_overrides={
+                    "initiative": _RESULT_PROPERTY_SCHEMAS["initiative"] | {
+                        "type": ["object", "null"],
+                        "description": "Updated initiative for an initiative closure, or null for a task closure.",
+                    },
+                },
             ),
         },
-        ["question_ref", "answer"],
-    )
-    add_management("read_plan_approval_prompt", "Read the current plan approval request. Returns a bounded prompt page.", "plan_prompt", {"cursor": cursor})
-    add_management("decide_plan_approval", "Record the user's plan decision. Returns the resulting lifecycle action.", "plan", {
-        "decision": _string(enum=("approve_with_recommendations", "approve_without_recommendations", "cancel"), maximum=32),
-        "request_id": _string(maximum=180, format_name="cortex-request-ref"),
-    }, ["decision", "request_id"])
-    add_management("revise_plan", "Request a plan revision with exact user feedback. Returns the resulting lifecycle action.", "plan_revise", {
-        "request_id": _string(maximum=180, format_name="cortex-request-ref"),
-        "text": _string(maximum=65_536),
-    }, ["request_id", "text"])
-    add_management(
-        "revise_future_pipeline",
-        "Replace only unexecuted future work from completed canonical evidence. This operation never represents rework of completed work. Cortex derives the preserved frontier and assigns every executable phase, wave, dependency, and global index reference. Returns the durable revised route.",
-        "future_pipeline_revise",
-        {
-            "evidence_result_refs": {
-                "type": "array", "minItems": 1, "maxItems": 64,
-                "uniqueItems": True, "items": attempt_result_ref,
-            },
-            "waves": {
-                "type": "array", "minItems": 1, "maxItems": PUBLIC_MAX_WAVES,
-                "items": wave,
-            },
-            "reason": _string(maximum=16_384),
-        },
-        ["evidence_result_refs", "waves", "reason"],
-    )
-    add_management(
-        "append_rework_wave",
-        "Append one evidence-grounded rework lifecycle after a completed canonical result. This is distinct from technical replacement and unexecuted future-tail revision. Cortex atomically assigns all executable identities and context, compiles one mutating implementation assignment, and appends independent verification. Returns the resulting lifecycle action.",
-        "append_rework_wave",
-        {
-            "source_result_ref": attempt_result_ref,
-            "objective": worker["properties"]["objective"],
-            "acceptance": _string(
-                maximum=65_536,
-                description="Exact arbitrary-Unicode acceptance contract for the corrective work.",
+        "record_user_decision": {
+            "description": "Append an ordinary-chat user decision asserted by the coordinator. For a plan, first obtain a returned ready approval_view, ask the user in the user's language to approve, request a revision, or cancel, then submit one new non-empty response with its exact report digest, view digest/sequence, and server-issued approval_handle. Original task text, silence, or inferred consent is invalid. The handle proves only the ready-view relation, not a host-authenticated user turn.",
+            "inputSchema": _closed(
+                {
+                    "task_ref": task_ref,
+                    "subject_type": _string(enum=DECISION_SUBJECTS, maximum=16),
+                    "subject_ref": _string(maximum=14, pattern=r"^[tdriu]_[0-9a-f]{12}$", description="Exact compact reference for the selected subject; task decisions use the anchored task_ref."),
+                    "subject_digest": _string(minimum=0, maximum=71, pattern=DIGEST_PATTERN, description="Required for plan and report subjects; binds the response to an immutable revision."),
+                    "decision_type": _string(enum=DECISION_TYPES, maximum=32),
+                    "prompt_en": _string(minimum=0, description="English prompt or decision context shown by the coordinator."),
+                    "response_original": _string(minimum=0, description="Exact arbitrary-Unicode user response."),
+                    "response_en": _string(minimum=0, description="Coordinator-authored English normalization; it never replaces response_original."),
+                    "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH),
+                    "approval_handle": _identifier(description="Exact opaque approval_view handle. Required for every plan decision; never construct or reuse for a different plan/view."),
+                    "approval_view_content_digest": _string(minimum=0, maximum=71, pattern=DIGEST_PATTERN, description="Exact ready approval_view.content_digest. Required for every plan decision."),
+                    "approval_view_source_sequence": {"type": "integer", "minimum": 0, "description": "Exact ready approval_view.source_sequence. Required for every plan decision."},
+                    "supersedes_decision_ref": decision_id,
+                    "idempotency_key": idempotency_key,
+                },
+                ("task_ref", "subject_type", "subject_ref", "decision_type", "prompt_en", "response_original", "response_en", "user_language"),
             ),
-            "profile": worker["properties"]["profile"],
-            "model": worker["properties"]["model"],
-            "reasoning_effort": worker["properties"]["reasoning_effort"],
+            "outputSchema": _tool_output_schema("decision", "replayed", optional_success_fields=("human_view",)),
         },
-        [
-            "source_result_ref", "objective", "acceptance", "profile", "model",
-            "reasoning_effort",
-        ],
-    )
-    add_management("start_follow_up", "Start one follow-up from the exact user request and a coordinator-authored wave plan. Cortex derives only source context and result references; it never creates worker waves.", "follow_up", {
-        "user_request": _string(maximum=65_536, default="Complete the follow-up request."),
-        "waves": {
-            "type": "array", "minItems": 1, "maxItems": PUBLIC_MAX_WAVES,
-            "items": wave,
-        },
-    }, ["user_request", "waves"])
-    add_management("steer_orchestration", "Apply one exact user steering message to the active task. Returns the resulting lifecycle action.", "steer", {"text": _string(maximum=65_536)}, ["text"])
-    add_management(
-        "start_auxiliary_worker",
-        "Start one distinct bounded worker while the current task is paused on one durable worker question. Cortex derives the active phase and preserves the question-bound worker.",
-        "auxiliary_start",
-        {
-            key: worker["properties"][key]
-            for key in (
-                "objective", "profile", "operation_kind", "model", "reasoning_effort",
-            )
-        },
-        ["objective", "profile", "operation_kind", "model", "reasoning_effort"],
-    )
-    add_management("list_task_artifacts", "List durable task artifacts. Returns one server-sized page.", "artifact_list", {"kind": _string(maximum=160), "cursor": cursor})
-    add_management(
-        "read_task_artifact_metadata",
-        "Read metadata only for an exact artifact-* reference returned by an artifact listing or explicitly by a canonical report. Never pass an attempt-result-* evidence reference. Returns one server-sized page.",
-        "artifact_metadata",
-        {"artifact_ref": artifact_ref, "cursor": cursor},
-        ["artifact_ref"],
-    )
-    add_management(
-        "read_task_artifact",
-        "Read content only for an exact artifact-* reference returned by an artifact listing or explicitly by a canonical report. Never pass an attempt-result-* evidence reference. Returns one server-sized page.",
-        "artifact_read",
-        {"artifact_ref": artifact_ref, "cursor": cursor},
-        ["artifact_ref"],
-    )
-    add_management(
-        "create_orchestration_lane",
-        "Create an isolated orchestration lane from semantic intent. The server generates the lane identity and materialization coordinates.",
-        "lane_create",
-        {
-            "mode": _string(enum=("ephemeral", "persistent"), maximum=16, default="ephemeral"),
-            "text": _string(maximum=65_536, description="Optional human-readable lane purpose."),
-        },
-    )
-    add_management("inspect_orchestration_lane", "Inspect one orchestration lane. Returns a bounded semantic report.", "lane_inspect", {"lane_id": _string(maximum=180), "cursor": cursor}, ["lane_id"])
-    add_management("claim_orchestration_lane", "Claim one server-issued orchestration lane for a bounded run. The server generates the run identity and lease expiry.", "lane_claim", {
-        "lane_id": _string(maximum=180), "reclaim": {"type": "boolean"},
-    }, ["lane_id"])
-    add_management("release_orchestration_lane", "Release one server-issued orchestration lane claim. Returns its durable state.", "lane_release", {"lane_id": _string(maximum=180)}, ["lane_id"])
-    add_management("retire_orchestration_lane", "Retire one orchestration lane after explicit cleanup confirmation. Returns its terminal state.", "lane_retire", {"lane_id": _string(maximum=180), "clean": {"type": "boolean"}, "confirm": {"type": "boolean"}}, ["lane_id", "clean", "confirm"])
-    add_management("bind_orchestration_lane", "Bind one orchestration lane to the current task. Returns the durable binding.", "lane_bind_task", {"lane_id": _string(maximum=180)}, ["lane_id"])
-    add_management("materialize_orchestration_lane", "Materialize one server-described orchestration lane after explicit confirmation. Returns its durable state.", "lane_materialize", {"lane_id": _string(maximum=180), "confirm": {"type": "boolean"}}, ["lane_id", "confirm"])
-    add_management("reconcile_orchestration_lane", "Reconcile one server-described orchestration lane. Returns one server-sized report page.", "lane_reconcile", {"lane_id": _string(maximum=180), "cursor": cursor}, ["lane_id"])
-    for name, description, action in (
-        ("claim_orchestration_resource", "Claim one task resource. Returns the durable claim.", "resource_claim"),
-        ("release_orchestration_resource", "Release one task resource. Returns the durable state.", "resource_release"),
-        ("lock_orchestration_resource", "Acquire one task resource lock. Returns the durable lock state.", "resource_lock"),
-        ("unlock_orchestration_resource", "Release one task resource lock. Returns the durable state.", "resource_unlock"),
-    ):
-        add_management(name, description, action, {"path": _string(maximum=4_096)}, ["path"])
-    add_management("read_orchestration_lifecycle", "Continue a lifecycle report from a server-issued cursor. Returns one server-sized page.", "read_lifecycle_page", {"cursor": cursor}, ["cursor"])
-    add_management("finalize_bootstrap_failure", "Finalize a server-bound nonretryable bootstrap failure. Returns a terminal acknowledgement.", "finalize_bootstrap_failure", {"dispatch_ref": dispatch_ref}, ["dispatch_ref"])
-    add_management("finalize_worker_failure", "Finalize a server-bound nonretryable worker failure. Returns a terminal acknowledgement.", "finalize_worker_failure", {"dispatch_ref": dispatch_ref}, ["dispatch_ref"])
-
-    def add_governance(
-        name: str,
-        description: str,
-        action: str,
-        properties: Mapping[str, Any],
-        required: Sequence[str],
-        **injected: Any,
-    ) -> None:
-        contracts[name] = _contract(
-            description,
-            _closed({**common_coordinator, **properties}, ["task_ref", "coordinator_ref", *required]),
-            "manage_governance",
-            action=action,
-            **injected,
-        )
-
-    add_governance("inspect_governance_initiative", "Inspect one governance initiative. Returns a bounded semantic report.", "inspect_initiative", {"initiative_ref": initiative_ref, "cursor": cursor}, ["initiative_ref"])
-    add_governance("link_governance_task", "Link the current task to one governance initiative. Returns the durable relationship.", "link_task", {
-        "initiative_ref": initiative_ref,
-        "relationship": _string(enum=("milestone", "deliverable", "corrective"), maximum=32),
-        "text": _string(maximum=65_536), "expected_revision": {"type": "integer", "minimum": 1},
-    }, ["initiative_ref"])
-    add_governance("add_governance_dependency", "Add one governance dependency. Returns the durable relationship.", "add_dependency", {
-        "initiative_ref": initiative_ref,
-        "source_type": _string(enum=("initiative", "task"), maximum=16), "source_ref": _string(maximum=180),
-        "target_type": _string(enum=("initiative", "task"), maximum=16), "target_ref": _string(maximum=180),
-        "dependency_type": _string(enum=("blocks", "requires", "relates_to", "follows"), maximum=32),
-    }, ["initiative_ref", "source_type", "source_ref", "target_type", "target_ref", "dependency_type"])
-    add_governance("transition_governance_initiative", "Transition one governance initiative. Returns its durable state.", "transition", {
-        "initiative_ref": initiative_ref,
-        "status": _string(enum=("pending", "active", "approved", "rejected", "superseded", "expired", "proposed", "blocked", "completed", "closed", "cancelled"), maximum=32),
-        "expected_revision": {"type": "integer", "minimum": 1}, "text": _string(maximum=65_536),
-    }, ["initiative_ref", "status"])
-
-    record_properties = {
-        "initiative_ref": initiative_ref,
-        "record_type": _string(enum=("decision", "ruling", "preference", "assumption", "risk", "learning", "reflection", "policy", "exception", "promotion"), maximum=32),
-        "text": _string(maximum=65_536), "supersedes": _string(maximum=180),
-        "expires_at": _string(maximum=80), "content_artifact_ref": _string(maximum=180, format_name="cortex-artifact-ref"),
     }
-    records_properties = {"initiative_ref": initiative_ref, "record_type": record_properties["record_type"], "cursor": cursor}
-    for scope, label, needs_initiative in (
-        ("task", "task", False),
-        ("initiative", "initiative", True),
-        ("initiative_task", "initiative/task", True),
-    ):
-        scoped_record = dict(record_properties)
-        scoped_records = dict(records_properties)
-        if not needs_initiative:
-            scoped_record.pop("initiative_ref")
-            scoped_records.pop("initiative_ref")
-        initiative_required = ["initiative_ref"] if needs_initiative else []
-        add_governance(
-            f"create_{scope}_governance_record",
-            f"Create one {label}-scoped governance record. Returns the durable record.",
-            "create_record", scoped_record,
-            [*initiative_required, "record_type", "text"], scope=scope,
-        )
-        add_governance(
-            f"list_{scope}_governance_records",
-            f"List {label}-scoped governance records. Returns one server-sized page.",
-            "list_records", scoped_records, initiative_required, scope=scope,
-        )
-        add_governance(
-            f"read_{scope}_governance_snapshot",
-            f"Read the {label}-scoped governance snapshot. Returns one server-sized page.",
-            "snapshot", scoped_records, initiative_required, scope=scope,
-        )
-
-    add_governance("evaluate_governance_promotion", "Evaluate one governance promotion candidate. Returns the durable evaluation.", "evaluate_promotion", {"initiative_ref": initiative_ref, "fingerprint": _string(maximum=512)}, ["initiative_ref", "fingerprint"])
-    add_governance("inspect_governance_promotion", "Inspect governance promotion state. Returns one server-sized page.", "promotion_inspect", {"initiative_ref": initiative_ref, "record_ref": record_ref, "cursor": cursor}, ["initiative_ref"])
-
-    contracts.update({
-        "ask_worker_question": _contract(
-            "Persist one exact arbitrary-Unicode question that requires a real user decision. Internal technical recovery is not a user question. Returns the durable reference.",
-            _closed({
-                "dispatch_ref": dispatch_ref,
-                "question_category": _string(
-                    enum=(
-                        "product", "requirement", "scope", "acceptance",
-                        "destructive_authorization", "external_authorization",
-                    ),
-                    maximum=32,
-                    description=(
-                        "Select the semantic user-decision boundary. Internal Cortex, model, profile, retry, "
-                        "dependency, schema, and runtime-recovery conditions are forbidden here and must use "
-                        "the server-owned technical recovery path."
-                    ),
-                ),
-                "question_text": _string(maximum=65_536),
-            }, ["dispatch_ref", "question_category", "question_text"]),
-            "worker_question", action="ask",
-        ),
-        "poll_worker_question": _contract(
-            "Poll one durable worker question. Returns the exact arbitrary-Unicode answer or a continuation action.",
-            _closed({"dispatch_ref": dispatch_ref, "question_ref": question_ref, "cursor": cursor}, ["dispatch_ref", "question_ref"]),
-            "worker_question", action="poll",
-        ),
-        "record_attempt_event": _contract(
-            "Append one semantic checkpoint or worker-attested verification claim. Command, browser, console, network, accessibility, layout, and test facts remain worker-attested because Cortex does not observe those executions. Cortex validates the flat claim and returns only an identity/digest/storage receipt; that receipt never upgrades provenance. Manifest reconciliation is the only server-observed verification kind. Returns a durable acknowledgement.",
-            _closed({
-                "dispatch_ref": dispatch_ref,
-                "event_type": _string(
-                    enum=(
-                        "decision_evidence", "verification_observation", "progress", "note",
-                    ),
-                    maximum=32,
-                    description=(
-                        "Select verification_observation only to attest a check the worker performed; "
-                        "that branch also requires verification_kind and remains worker-attested."
-                    ),
-                ),
-                "verification_kind": _string(
-                    enum=tuple(sorted(WORKER_VERIFICATION_KINDS)),
-                    maximum=64,
-                    description=(
-                        "Required only for verification_observation. manifest_reconciliation is server-only "
-                        "and is never worker-submittable."
-                    ),
-                ),
-                "text": _string(
-                    maximum=65_536,
-                    description=(
-                        "Concise arbitrary-Unicode checkpoint text. For the worker-attested verification branch it must include "
-                        "status=passed and the selected kind's machine fact: functional_browser uses "
-                        "passed_tests=<n> with n>=1; responsive_layout uses viewports=<n> with n>=2; "
-                        "keyboard_accessibility uses keyboard_checks=<n> with n>=1; console_clean uses "
-                        "console_errors=0; local_only_network uses external_requests=0."
-                    ),
-                ),
-            }, ["dispatch_ref", "event_type", "text"]),
-            "record_attempt_event",
-        ),
-        "record_worker_finding": _contract(
-            "Record one review or verification finding before terminal submission. Cortex generates and binds all identity, lineage, workspace, and fingerprint data. Medium, high, and critical findings require rework even when the worker later submits status=completed; low is advisory. An exact duplicate is idempotent. Returns a durable finding receipt.",
-            _closed({
-                "dispatch_ref": dispatch_ref,
-                "severity": _string(enum=PUBLIC_FINDING_SEVERITIES, maximum=16),
-                "summary": _string(
-                    maximum=65_536,
-                    description="Exact arbitrary-Unicode finding text. Describe one independently actionable issue.",
-                ),
-            }, ["dispatch_ref", "severity", "summary"]),
-            "record_worker_finding",
-        ),
-        "submit_attempt": _contract(
-            "Submit one ordinary terminal worker status and semantic report. Use completed whenever the worker completed its assignment protocol, including when product findings or unmet acceptance require rework; record those findings before submission. Use failed or blocked only when technical, infrastructure, environment, dependency, policy, or authorization conditions prevented assignment completion. Report text is arbitrary Unicode semantic evidence and never routing authority. Governance-close workers must use submit_governance_closure instead. Keep the opaque worker authority only in the dedicated inputSchema property; never copy it into the semantic report. An accidental copy of this worker's exact current authority returns a non-mutating same-operation correction limited to replacing the report; foreign authority remains rejected. Returns completion or a server-issued repair action.",
-            _closed({
-                "dispatch_ref": dispatch_ref,
-                "status": _string(enum=("completed", "blocked", "failed"), maximum=16),
-                "report": _string(maximum=65_536),
-            }, ["dispatch_ref", "status", "report"]),
-            "complete_attempt", action="submit",
-        ),
-        "submit_governance_closure": _contract(
-            "Submit the governance-close verdict through its dedicated flat contract. blocking_gaps_text is plain arbitrary-Unicode text: verified requires exactly the empty string; blocked requires non-empty text. A verified verdict also requires a complete current server-derived closure basis. The worker supplies no task, plan, evidence, manifest, or provenance identifiers.",
-            _closed({
-                "dispatch_ref": dispatch_ref,
-                "closure_outcome": _string(enum=("verified", "blocked"), maximum=16),
-                "blocking_gaps_text": _string(
-                    minimum=0,
-                    maximum=65_536,
-                    description=(
-                        "Plain arbitrary-Unicode text. Use exactly the empty string when "
-                        "closure_outcome is verified; use non-empty text when it is blocked."
-                    ),
-                ),
-                "report": _string(maximum=65_536),
-            }, ["dispatch_ref", "closure_outcome", "blocking_gaps_text", "report"]),
-            "complete_attempt", action="governance_closure",
-        ),
-        "repair_attempt": _contract(
-            "Apply one issued atomic patch-only repair. Opaque authority must be copied exactly; only issued paths may change.",
-            _closed({
-                "dispatch_ref": dispatch_ref,
-                "repair_capsule": _string(
-                    minimum=REPAIR_HANDLE_LENGTH,
-                    maximum=REPAIR_HANDLE_LENGTH,
-                    pattern=REPAIR_HANDLE_PATTERN,
-                    format_name="cortex-repair-capsule",
-                ),
-                "base_payload_digest": _string(pattern=r"^sha256:[0-9a-f]{64}$", maximum=71, format_name="cortex-payload-digest"),
-                "patches": {"type": "array", "minItems": 1, "maxItems": MAX_DIAGNOSTICS, "items": _flat_patch_schema()},
-            }, ["dispatch_ref", "repair_capsule", "base_payload_digest", "patches"]),
-            "complete_attempt", action="repair",
-        ),
-        "read_dispatch_briefing": _contract(
-            "Read the authorized immutable dispatch briefing. On the first call supply only the required exact server-issued authority; add cursor only from a returned next_cursor. The public schema and runtime validate the call. Returns one server-sized exact-text page.",
-            _closed({"dispatch_ref": dispatch_ref, "cursor": cursor}, ["dispatch_ref"]),
-            "read_dispatch_briefing",
-        ),
-        "read_worker_wave": _contract(
-            "Read the coordinator's current durable worker wave only after wait_agent has reported every exact bound child terminal. A premature read is forbidden and the backend keeps it non-mutating. Follow the returned action literally: wait_for_bound_workers means "
-            + WAIT_BEFORE_READ_INSTRUCTION
-            + " obtain_user_decision means surface the durable question; resume_bound_worker means "
-            + SAME_CHILD_WAIT_INSTRUCTION
-            + " invoke_dispatches means " + NATIVE_DISPATCH_WAIT_INSTRUCTION
-            + " continue means call continue_orchestration immediately with the same exact coordinator authority; do not wait or reread first. inspect_orchestration means a same-incarnation compaction boundary requires a complete paginated inspection before any wait, reread, continuation, resume, follow-up, or child creation. resume_orchestration means the authenticated host process changed and every unfinished prior-epoch child is unavailable: call resume_orchestration exactly once before any wait, reread, continuation, or child creation. append_rework_wave means invoke that dedicated public operation from the returned canonical finding/result reference; revise_or_continue means the returned report is already complete canonical evidence, so call task-required revise_future_pipeline or continue_orchestration directly. Result references are evidence capabilities, never artifact references. Do not read an artifact unless the canonical report explicitly supplies a distinct artifact-* reference. A trusted result-less Stop may return wait_for_bound_workers only after its one same-child resume instruction was durably issued and that child's exact dispatch-authorized answer poll or result is pending; a follow-up turn need not emit another SubagentStart.",
-            _closed({**common_coordinator, "cursor": cursor}, ["task_ref", "coordinator_ref"]),
-            "read_worker_result", action="read_wave",
-        ),
-        "refresh_worker_context": _contract(
-            "Refresh the current worker's server-owned context after compaction or a bounded context reset. "
-            "The call has no identity or routing arguments: Cortex binds it to the authenticated native worker. "
-            "If a continuation is returned, pass that exact cursor unchanged until complete is true.",
-            _closed({"cursor": cursor}, []),
-            "read_worker_context",
-        ),
-        "list_worker_reports": _contract(
-            "List the canonical predecessor reports authorized for the current dispatch. Returns one "
-            "server-sized text page containing opaque report references, plus next_cursor and complete; "
-            "continue until complete is true before selecting a report.",
-            _closed({"dispatch_ref": dispatch_ref, "cursor": cursor}, ["dispatch_ref"]),
-            "read_worker_result", action="list_reports",
-            expose_flat_argument_names=True,
-        ),
-        "read_predecessor_result": _contract(
-            "Read one canonical predecessor report authorized for the current dispatch by an exact opaque "
-            "report reference returned by list_worker_reports. Returns one server-sized text page, plus "
-            "next_cursor and complete; continue until complete is true before using the report.",
-            _closed({"dispatch_ref": dispatch_ref, "report_ref": report_ref, "cursor": cursor}, ["dispatch_ref", "report_ref"]),
-            "read_worker_result", action="read_predecessor",
-            expose_flat_argument_names=True,
-        ),
-    })
+    if tuple(contracts) != V12_TOOL_NAMES:
+        raise RuntimeError("Cortex v12 public catalogue must contain exactly the eleven canonical tools")
+    for name, contract in contracts.items():
+        _assert_no_callable_durable_properties(contract["inputSchema"], path=f"{name}.inputSchema")
+    _assert_no_callable_durable_properties(_HANDLES_SCHEMA, path="handles")
+    _assert_no_callable_durable_properties(_APPROVAL_VIEW_SCHEMA, path="approval_view")
+    _describe_contract_schemas(contracts)
     return contracts
 
 
-def public_input_schemas(contracts: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Return the canonical schema objects without copying them."""
-    return {
-        str(name): contract["inputSchema"]
-        for name, contract in contracts.items()
-        if isinstance(contract.get("inputSchema"), dict)
-    }
-
-
-def backend_schema_for(
-    contracts: Mapping[str, Mapping[str, Any]],
-    base_operation: str,
-    arguments: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Derive a private adapter schema from canonical public contracts."""
-    matches = [
-        contract for contract in contracts.values()
-        if contract.get("base_operation") == base_operation
-        and isinstance(contract.get("inputSchema"), Mapping)
-    ]
-    if arguments is not None:
-        selected = [
-            contract for contract in matches
-            if all(
-                arguments.get(str(name)) == value
-                for name, value in dict(contract.get("injected_arguments") or {}).items()
-            )
-        ]
-        if len(selected) == 1:
-            matches = selected
-    if not matches:
-        return {"type": "object", "additionalProperties": False, "properties": {}, "required": []}
-
-    materialized: list[dict[str, Any]] = []
-    for contract in matches:
-        schema = copy.deepcopy(contract["inputSchema"])
-        properties = schema.setdefault("properties", {})
-        required = schema.setdefault("required", [])
-        for name, value in dict(contract.get("injected_arguments") or {}).items():
-            properties[str(name)] = {
-                "type": "boolean" if type(value) is bool else "integer" if type(value) is int else "string",
-                "const": value,
-            }
-            if name not in required:
-                required.append(str(name))
-        materialized.append(schema)
-    if len(materialized) == 1:
-        return materialized[0]
-    properties: dict[str, Any] = {}
-    for schema in materialized:
-        properties.update(schema.get("properties") or {})
-    required_sets = [set(schema.get("required") or []) for schema in materialized]
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": properties,
-        "required": sorted(set.intersection(*required_sets)) if required_sets else [],
-    }
+def public_input_schemas(contracts: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+    """Expose the same schemas advertised by the MCP transport."""
+    catalogue = build_public_contracts() if contracts is None else contracts
+    return {str(name): dict(value["inputSchema"]) for name, value in catalogue.items()}

@@ -33,12 +33,18 @@ category, recording counts and representative authoritative paths:
 - tests and fixtures that reveal supported behavior, invariants, negative
   paths, or hidden feature ownership.
 
-Use repository-native file enumeration as a completeness backstop. Use graph,
-architecture, symbol, and trace tools to understand relationships, not as a
-replacement for enumerating the source tree. Generated, vendored, build,
-cache, and dependency directories may be excluded once with a recorded reason.
-Tests are evidence and coverage signals, not separate product features unless
-the repository ships a testing product or framework.
+Use repository-native file enumeration as a completeness backstop. When the
+applicable project instructions provide Codebase Memory, bind it to the exact
+canonical project root and use graph search, path tracing, then exact snippets
+before text search for structural discovery. Check graph coverage for every
+cited path and bounded scope, then confirm consequential claims in current
+source. Use one bounded file/text-search fallback when the graph is unavailable,
+excludes the relevant surface, or is insufficient, and record that limitation.
+Graph evidence helps explain relationships but never replaces source-tree
+enumeration. Generated, vendored, build, cache, and dependency directories may
+be excluded once with a recorded reason. Tests are evidence and coverage
+signals, not separate product features unless the repository ships a testing
+product or framework.
 
 ## Feature boundary rules
 
@@ -83,12 +89,12 @@ additional columns may follow:
 | Source evidence | Key project-relative paths |
 | Documentation | Canonical feature page(s) |
 | Verification | Relevant tests or safe checks |
-| Status | `covered`, `documented`, `verified`, or `excluded` in a final accepted manifest; `partial` or `unknown` is in-progress only and blocks the gate |
+| Status | `covered`, `documented`, `verified`, or `excluded` in a final accepted manifest; `partial` or `unknown` remains in progress and prevents a complete-coverage claim |
 
 Also record totals for inventoried feature-bearing surfaces, mapped surfaces,
 documented features, partial/unknown items, unmapped items, and exclusions.
-The coverage gate passes only with zero unexplained unmapped surfaces. Partial
-or unknown items remain visible and prevent a claim of complete behavioral
+Coverage acceptance requires zero unexplained unmapped surfaces. Partial or
+unknown items remain visible and prevent a claim of complete behavioral
 coverage unless their boundary is explicitly out of scope.
 
 Every non-excluded row must link its `Documentation` cell to a canonical page
@@ -143,6 +149,9 @@ page without repeating repository-wide discovery.
 
 The completeness contract fails when required inventory, coverage, or
 documentation evidence is missing, contradictory, or silently excluded.
+The repository's deterministic census validator may report these conditions as
+advisory verification evidence; it never authorizes work, blocks backend tools,
+or replaces independent source confirmation and the model's readiness judgment.
 
 ## Corrective findings
 
@@ -158,5 +167,5 @@ claiming completion when:
   exclusion;
 - feature pages omit consequential behavior, state, configuration, failure,
   integration, operations, or verification details;
-- documentation claims were copied from AttemptResult projections without source/test checks;
+- documentation claims were copied from delegation reports without source/test checks;
 - refresh lacks an independent post-write census and no-change second pass.

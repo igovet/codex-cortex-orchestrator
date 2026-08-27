@@ -1,94 +1,217 @@
 # Storage classification
 
-Status: v11 implementation contract (task and governance schema v19).
+<!-- GENERATED:START -->
+
+Status: Cortex V12 implementation contract, SQLite schema v1.
 
 ## Decision
 
-cortex.db is the only authoritative mutable store for a new v11 task. The
-default database is host-private at ~/.codex/cortex/projects/p-<sha256>/cortex.db.
-A validated private CORTEX_HOST_STATE_DIR may override that root only when it is
-outside the workspace. SQLite is the transaction boundary.
+The V12 project database is the only authoritative mutable Cortex store:
 
-The canonical worker protocol is AttemptResult plus append-only AttemptEvent.
-The worker supplies semantic facts; the server owns attempt identity, task
-revision, dispatch/profile/phase, timestamps, changed-file calculation,
-workspace observations, manifest reconciliation, native lifecycle, and read
-observations. Semantic command/browser/console/network/test checks remain
-worker-attested even when their storage receipt is bound to a canonical result.
-ContextCompiler and HandoffCompiler build scoped target-specific views from this
-state.
+```text
+~/.codex/cortex/v12/projects/p-<sha256-of-resolved-project-root>/cortex.db
+```
 
-`start_orchestration` is the sole task creator and initial coordinator
-capability issuer. Coordinator records carry private task authority; worker
-records carry only exact native dispatch authority. Capabilities survive only
-through bounded, digest-checked handoffs. A missing or lost capability fails
-closed. Native worker execution is native V2 `spawn_agent`, generic timeout-
-bounded `wait_agent` cycles, canonical terminal results plus exact matching
-terminal Stops, an action-specific canonical wave read, and server-derived
-continuation. Host-owned identity binding joins the authorized worker call to
-its exact native child; matching `SubagentStop` is terminal authority.
-Session/environment values are not authorization.
+The database is a durable coordination ledger. It does not store native host
+authority and cannot decide whether the model may delegate, read evidence,
+rework, close, or answer the user.
+
+Only `create_task` carries the exact resolved `project_root` and stores the
+canonical association on the task. The seven task-anchored public calls carry
+the compact `task_ref`; the three entity-derived public calls resolve their
+owner from delegation or report IDs. A `task_ref` is `t_` plus a 12-hex task
+suffix, scanned only across private V12 shards and rejected on zero or ambiguous
+matches. Full `task_id` remains canonical database evidence and a below-public
+schema direct-service locator. No trusted MCP metadata, plugin process `cwd`,
+thread identity, or lifecycle hook supplies the root. The native worker brief
+carries the saved root for working-directory context.
+Optional task `context` is arbitrary JSON rather than a root binding. The task
+also stores its complete versioned result contract: exact original user request,
+user language, English objective, requirements, constraints, acceptance
+criteria, and verification plan.
 
 ## Classification matrix
 
-| Data or path | Owner | Creator / reader | Status |
+| Data | Location | Writers/readers | Classification and retention |
 | --- | --- | --- | --- |
-| ~/.codex/cortex/projects/p-<sha256>/cortex.db | SQLite schema v19 | Runtime writes; scoped APIs and compilers read | Canonical, private, retained by task policy |
-| AttemptResult | SQLite attempt row | submit/repair operations write; coordinator and compilers read | Canonical semantic result plus separately classified server observations and worker attestations |
-| AttemptEvent | SQLite append-only event stream | record_attempt_event and runtime write; runtime reads | Canonical incremental evidence with preserved actor/provenance |
-| repair_escrow | SQLite schema-v19 private immutable row | submit/repair operations create or reuse | Private rejected draft and diagnostics; task-cascaded, never public evidence |
-| Read observations | SQLite task/attempt rows | briefing and predecessor-result reads create them | Canonical server observation |
-| Immutable dispatch briefing | SQLite artifact catalog plus digest-checked briefing file | Runtime creates; worker reads exact grant | Required for native dispatch |
-| results/*.json and results/markdown/*.md | Projection service | Runtime writes; humans and tooling read | Rebuildable view |
-| journal, planning, handoff views, indexes | Projection service | Runtime writes; humans read | Rebuildable view |
-| cortex.db-wal, cortex.db-shm, .state.lock | SQLite and coordination | Runtime | Incidental machinery, never evidence |
+| Schema and project metadata | `schema_migrations`, `v12_metadata`, SQLite pragmas | Store bootstrap/validation | Canonical database-family, schema-v1, and project-hash integrity metadata |
+| Task/result contract | `tasks` | `create_task`; `inspect_task` | Canonical project-scoped exact original request/language plus English outcome, requirements, constraints, acceptance criteria, verification plan, and bounded context |
+| Delegation assignments and projected briefs | `delegations` plus its saved task association | Coordinator `create_delegation`; delegation/task reads | Canonical bounded assignment with required textual ownership scope, exact model/effort, and compiled knowledge contract in `instructions`; the projected native brief adds the task's saved root for context, never host authority |
+| Worker evidence | `reports`, `report_chunks`, `report_usage` | `submit_report`; compact task/delegation references; bounded `read_reports` body/chunk reads | Immutable progress/result/synthesis/plan content, manifest/digest, review policy, assembly state, chunks, and quotas; private and potentially sensitive |
+| User decision evidence | `user_decisions` | `record_user_decision`; task/governance references and decision views | Append-only coordinator-asserted ordinary-chat response, English prompt/normalization, language, subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
+| Mode history | `governance_assessments` | `set_governance_mode`; governance/task reads | Append-only advisory model/user-override assessments |
+| Initiative projection | `initiatives` | `record_initiative` and initiative closure | Current project-level goal/risk/status/notes projection |
+| Initiative history | `initiative_revisions` | Initiative writes/closure; governance reads | Append-only revisions including link state |
+| Initiative relationships | `initiative_links` | `record_initiative`; governance reads | Current parent/dependency/task/report links and unresolved/cyclic warnings |
+| Closure statements | `governance_closures` | `submit_governance_closure`; inspection | Immutable advisory task/initiative verdict and evidence |
+| Ordered chronology | `timeline` | Every semantic mutation; scoped reads | Canonical sequence ordering for incremental inspection |
+| Retry records | `idempotency` | Mutations | Operation/key payload digest and original result; private retry integrity state |
+| Projection queue and metadata | `projection_jobs` and projection metadata | Semantic mutations enqueue; best-effort host materializer and returned `human_view` status | Canonical scheduling/freshness metadata for derived views; no filesystem failure can roll back a valid ledger mutation |
+| Human-readable task views | Private `tasks/<task_ref>/` directory beside the V12 shard | Best-effort materializer; coordinator publication after current verification | Disposable Markdown projection, never canonical state, a recovery input, or native worker instructions; full IDs remain in SQLite/rendered evidence and no write occurs under `project_root` |
+| Maintenance backups | Private `backups/<task-id>/<backup-id>/cortex.db` plus `manifest.json` beside the V12 shard | Explicit `v12_maintenance backup`; offline restore; explicit retention | Sealed whole-project-shard copy anchored to one task; owner-only and potentially contains every canonical record in the shard; never a task-only export |
+| WAL/SHM | Adjacent SQLite files | SQLite | Database machinery, never report evidence or lifecycle authority |
+| Bundled skills and profiles | Plugin package | Coordinator/worker model context and source lint | Authoritative orchestration policy plus advisory roles, not mutable task state |
+| Project/feature docs | Repository `docs/` | Technical writers and humans | Source-backed navigation, never runtime authority |
+| Private error log | Same-user Codex logs | Runtime diagnostics and bounded local inspection | Sensitive diagnostic state; never commit or paste raw |
 
-Filesystem views are private, regular, digest-checked, and disposable. A view
-cannot authorize completion, a gate transition, or a read. A tombstone is
-committed before pruning a view. Use SQLite-aware backup and maintenance.
+## Schema integrity
 
-Exact signed released schema-v17 and schema-v18 histories are recognized as
-in-place migration inputs. Cortex validates the complete ordered signed lineage,
-performs the data cutover transactionally, retains every released append-only
-migration row, and appends schema v19. The exact signed legacy V1--V8 namespace
-is not migrated: it is archived privately before a fresh schema-v19 ledger is
-created, and no public task reference can select its former authority. Unknown,
-missing, unsigned, reordered, or tampered histories and unsafe filesystem
-boundaries fail closed; they are not automatically quarantined, guessed,
-imported, or treated as fresh state. The SQLite migration and integrity history
-remains available for storage maintenance and historical verification.
+An existing database is accepted only when its V12 application ID, schema
+version, ordered `v12-initial` plus `v12-schema-v1-human-views` additive
+migration history, and stored project hash match. New bootstrap is
+transactional. Normal writes use SQLite transactions and WAL so concurrent
+reports, user decisions, assessments, initiative revisions, and projection-job
+enqueue operations remain atomic and ordered.
 
-## Lifecycle
+The one additive pre-release V12 migration runs automatically on the first
+normal, path-bearing `create_task` open of the exact released pre-human-view
+V12 layout. In one transaction it verifies the legacy shard/root metadata,
+adds the missing task-root binding, preserves every existing row, and wraps
+each legacy report body as one finalized canonical chunk. The retained legacy
+non-null report-header field receives only an inert compatibility value for
+new chunked reports; canonical report evidence remains in immutable chunks.
+Unknown or future layouts fail closed, and V11 is never opened or imported.
 
-~~~text
-worker events
-     ↓
-AttemptResult: WORK_COMPLETED
-     ↓ server observations
-FINALIZING ── retry same attempt ──> COMPLETED
-     ├── BLOCKED
-     └── FAILED
-~~~
+The state, project-shard, task, and view directories are created or reconciled
+to `0700`. Before every SQLite open, symlink and non-regular database paths are
+rejected; the database plus adjacent WAL/SHM files and generated Markdown are
+reconciled to `0600`. Do not relocate a database to another project hash or edit
+metadata to force adoption.
 
-`record_attempt_event` is lossless and idempotent by event key. `submit_attempt`
-validates semantic input and commits the canonical result; `repair_attempt`
-applies only a server-issued same-attempt correction. A finalization error
-remains attached to that attempt. After submission, the coordinator continues
-300-second generic wait cycles for ordinary progress; an early, timed-out,
-steered, partial, or unrelated wake-up requires another wait and authorizes no
-read. Once every bound child has a canonical terminal result and matching
-terminal Stop, the canonical read becomes available. Generic wait output is
-progress only and never lifecycle evidence.
-This same-
-user local observation is not cryptographic proof, server attestation, or a
-public storage or recovery surface. Unknown or disabled hook state fails closed,
-and the observation must never be inspected by the model.
+## Reference integrity
+
+Known task, parent-delegation, input-report, linked-task, and linked-report
+references must resolve in the current project ledger. Cross-project references
+are rejected without destination mutation.
+
+An ordinary-chat user decision must name an existing in-scope task, delegation,
+plan, report, or same-project initiative. Plan/report decisions bind to the
+exact immutable report digest; supersession must preserve subject identity. The
+backend verifies that scope and binding but does not authenticate a user or turn
+the record into authorization.
+
+Initiative dependencies are different: a missing target is retained as an
+unresolved same-project relationship and returned with a warning. A cycle is
+also retained with a warning. These warnings are evidence for model reasoning,
+not storage corruption or lifecycle rejection.
+
+## Idempotency
+
+Mutations accept optional operation-scoped idempotency keys. A normalized
+payload digest is stored with the original JSON result. An exact replay returns
+that result and marks it replayed; different content for the same operation/key
+returns a non-mutating conflict.
+
+Idempotency protects retries. It is neither authentication nor proof that
+native work, external effects, or verification commands occurred.
+
+The ledger also cannot prove that the root coordinator respected its
+orchestration-only boundary. Project discovery, source/code/configuration
+reads, analysis, edits, commands, tests, and verification must be attributable
+to worker delegations and reports. The only coordinator project-read exception
+is bounded orchestrator-owned knowledge routing through applicable instructions,
+the project/feature indexes, and task-relevant linked pages. Coordinator
+synthesis is otherwise limited to user input and ledger/report evidence. The
+route uses only non-shell direct reads of already-known exact paths; discovery
+through shell/search/graph and project-local state/artifact checks, including
+`.codex` existence or unchanged-state, remain worker-owned.
+
+Task instructions, delegation contracts, report content, decision
+normalizations, and derived view source content are English. Exact user text is
+preserved in explicitly labelled `*_original` fields. Localized coordinator
+messages are a delivery layer and never replace durable evidence.
+
+## Governance projection
+
+Mode assessments and closures are append-only. The latest user override remains
+the effective mode across later model assessments; with no override, the latest
+model assessment is effective. Initiatives use a current row plus append-only
+revisions, whose immutable payloads remain audit history.
+
+No mode, status, warning, closure verdict, or missing record is an
+authorization datum. Core tools must not consult governance storage to decide
+whether coordination is allowed.
+
+The final documentation-impact decision is model-owned rather than a storage
+gate. Material impact is represented through documentation worker/verifier
+delegations and reports; no impact is recorded as a report-grounded
+`documentation not required` rationale. Missing documentation evidence may
+lead to rework, replacement, or disclosed risk, but never backend prohibition.
+
+Plan review, clarification, pause, revision, cancellation, and user-decision
+interpretation are coordinator-owned ordinary-chat policy. Storage preserves
+evidence and exact bindings; it does not create an approval gate, a pause state,
+or user authorization.
+
+## Derived human-readable task views
+
+The canonical database may best-effort materialize a host-private task view at
+the following exact layout. It never writes any database, report, decision,
+projection, or `.codex` state below the target `project_root`.
+
+```text
+~/.codex/cortex/v12/projects/p-<hash>/
+└── tasks/<task_ref>/
+    ├── index.md
+    ├── task.md
+    ├── plans/
+    │   ├── current.md
+    │   └── revisions/<plan-report-id>.md
+    ├── delegations/<delegation-id>.md
+    ├── reports/<report-id>.md
+    ├── decisions/<decision-id>.md
+    ├── initiatives/<initiative-id>.md
+    ├── closures/<closure-id>.md
+    ├── governance-gate.md
+    ├── handoffs/report-consumption-receipts.md
+    └── timeline/
+        ├── index.md
+        └── pages/<first-sequence>-<last-sequence>.md
+```
+
+`index.md` is the compact entry point; `task.md` is the task summary; and plan,
+delegation, report, decision, and 100-event timeline pages are separately
+addressable. Direct local edits are preserved as `conflict`, not overwritten.
+Projection materialization is nonblocking: its states are `ready`, `stale`,
+`conflict`, `unavailable`, and `disabled`. Only `ready` may return a path, after
+the regular non-symlink file, digest, containment, and current source-sequence
+checks pass. A returned `ready` path may be linked only with a localized summary
+and effect/next step; a non-ready state does not block canonical evidence or a
+final answer.
+
+## Retention and privacy
+
+The ledger is local and retained until the user removes it through an explicit,
+carefully scoped action. Do not include secrets, credentials, personal data, or
+unnecessary raw operational output. Reports and diagnostics should be treated as
+private even when they contain no obvious secret.
+
+Do not commit or attach V12 databases, WAL/SHM files, diagnostics, prompts,
+reports, or private task exports. Documentation may cite sanitized report IDs
+or summarized evidence only when materially useful.
+
+The operator maintenance CLI never prunes canonical task data. Projection prune
+can remove only exact registered non-ready Markdown after validating the whole
+candidate set. Backup retention can remove only 1–20 explicitly named complete
+manifest-bound bundles and defaults to dry-run. There is no automatic cleanup.
+Backup creation covers the whole project shard; restore requires all normal MCP
+access to be stopped and explicit `RESTORE`, exact task/shard, and
+`MCP_STOPPED` acknowledgement. That acknowledgement is not a shared lock.
+
+## Historical compatibility boundary
+
+V11 databases stay in their prior namespace and remain byte-for-byte untouched.
+Schema v1 is fresh V12 state, not an in-place V11 migration. V11 tools and
+unfinished V11 tasks are incompatible and never form a fallback identity or
+recovery source.
 
 ## References
 
-- [ledger_db.py](../../plugins/cortex/scripts/cortex_runtime/ledger_db.py)
-- [cortex.py](../../plugins/cortex/scripts/cortex.py)
-- [context_compiler.py](../../plugins/cortex/scripts/cortex_runtime/context_compiler.py)
-- [handoff_compiler.py](../../plugins/cortex/scripts/cortex_runtime/handoff_compiler.py)
-- [projection_service.py](../../plugins/cortex/scripts/cortex_runtime/projection_service.py)
-- [verification.md](verification.md)
+- [orchestration ledger](../features/orchestration-ledger/index.md)
+- [advisory governance](../features/advisory-governance/index.md)
+- [human-readable task views](../features/human-readable-task-views/index.md)
+- [operator maintenance](../features/operator-maintenance/index.md)
+- [security policy](../../SECURITY.md)
+- [verification](verification.md)
+
+<!-- GENERATED:END -->

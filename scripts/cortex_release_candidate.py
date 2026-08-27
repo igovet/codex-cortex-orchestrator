@@ -17,6 +17,9 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 PUBLIC_RELEASE_FILES = (
     "README.md",
     "LICENSE",
@@ -24,18 +27,24 @@ PUBLIC_RELEASE_FILES = (
     "SECURITY.md",
     "PRIVACY.md",
     "docs/release-readiness.md",
+    "docs/project/index.md",
+    "docs/project/conventions.md",
+    "docs/project/decisions.md",
+    "docs/project/gotchas.md",
+    "docs/project/storage-classification.md",
+    "docs/project/verification.md",
+    "docs/features/index.md",
+    "docs/features/knowledge-route-contract/index.md",
+    "docs/features/lifecycle-telemetry/index.md",
+    "docs/features/orchestration-ledger/index.md",
+    "docs/features/plugin-packaging/index.md",
     ".agents/plugins/marketplace.json",
 )
 SUPPORT_SCRIPTS = (
     "scripts/cortex-host-preflight.py",
-    "scripts/cortex-manifest-benchmark.py",
-    "scripts/cortex-prompt-eval.py",
     "scripts/cortex-prompt-lint.py",
-    "scripts/cortex-prompt-live-eval.py",
-    "scripts/probe-cortex-question-migration.py",
     "scripts/cortex_release_candidate.py",
     "scripts/render_cortex_tool_catalog.py",
-    "scripts/sync-cortex-hook-trust.py",
     "scripts/sync-cortex.sh",
     "scripts/validate-cortex-marketplace.py",
     "scripts/verify-cortex-release.py",
@@ -43,13 +52,8 @@ SUPPORT_SCRIPTS = (
 PLUGIN_STATIC_FILES = (
     "plugins/cortex/.codex-plugin/plugin.json",
     "plugins/cortex/.mcp.json",
-    "plugins/cortex/hooks/hooks.json",
     "plugins/cortex/profiles.json",
-    "plugins/cortex/prompt-contracts.json",
-    "plugins/cortex/prompt-evals/fixtures.json",
-    "plugins/cortex/scripts/cortex-launcher",
     "plugins/cortex/scripts/cortex.py",
-    "plugins/cortex/scripts/cortex_hook.py",
 )
 PLUGIN_SKILLS = (
     "adaptive-pipeline",
@@ -63,12 +67,32 @@ PLUGIN_SKILLS = (
     "output-validation",
     "progress-accounting",
 )
-PLUGIN_PYTHON_ROOTS = (
+ACTIVE_PLUGIN_PYTHON = (
     "plugins/cortex/scripts/cortex.py",
-    "plugins/cortex/scripts/cortex_hook.py",
+    "plugins/cortex/scripts/cortex_runtime/__init__.py",
+    "plugins/cortex/scripts/cortex_runtime/canonical_json.py",
+    "plugins/cortex/scripts/cortex_runtime/delegation.py",
+    "plugins/cortex/scripts/cortex_runtime/mcp_api.py",
+    "plugins/cortex/scripts/cortex_runtime/model_routing.py",
+    "plugins/cortex/scripts/cortex_runtime/public_contracts.py",
+    "plugins/cortex/scripts/cortex_runtime/routing.py",
+    "plugins/cortex/scripts/cortex_runtime/v12_contract.py",
+    "plugins/cortex/scripts/cortex_runtime/v12_maintenance.py",
+    "plugins/cortex/scripts/cortex_runtime/v12_projections.py",
+    "plugins/cortex/scripts/cortex_runtime/v12_service.py",
+    "plugins/cortex/scripts/cortex_runtime/v12_store.py",
+    "plugins/cortex/scripts/cortex_runtime/worker_message.py",
 )
+PLUGIN_ROOT = Path("plugins/cortex")
 FORBIDDEN_PARTS = frozenset({"__pycache__", ".codex"})
 FORBIDDEN_SUFFIXES = frozenset({".pyc", ".pyo"})
+RETIRED_PLUGIN_PATHS = frozenset({
+    Path("plugins/cortex/hooks"),
+    Path("plugins/cortex/scripts/cortex_hook.py"),
+    Path("plugins/cortex/scripts/cortex-launcher"),
+    Path("plugins/cortex/scripts/cortex_runtime/core"),
+    Path("plugins/cortex/scripts/cortex_runtime/record_report"),
+})
 SECRET_PRONE_DIRECTORIES = frozenset({".aws", ".docker", ".gnupg", ".kube", ".ssh"})
 SECRET_PRONE_BASENAMES = frozenset({
     ".env", ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".terraformrc",
@@ -88,6 +112,13 @@ DOCUMENTED_COMMAND_FILES = (
 )
 SCRIPT_PATH_REFERENCE = re.compile(
     r"(?<![A-Za-z0-9_.-])(?P<explicit>\./)?(?P<path>(?:plugins/cortex/)?scripts/[A-Za-z0-9._/-]+)"
+)
+PYTHON_INTERPRETER = re.compile(r"(?<![A-Za-z0-9_./-])python(?:3(?:\.\d+)?)?\b")
+PYTHON_NO_BYTECODE = "PYTHONDONTWRITEBYTECODE=1"
+PYTHON_BYTECODE_FLAG = re.compile(r"(?<![A-Za-z0-9_./-])python(?:3(?:\.\d+)?)?\b\s+-[A-Za-z]*B[A-Za-z]*\b")
+PYTEST_MODULE = re.compile(r"(?<![A-Za-z0-9_./-])python(?:3(?:\.\d+)?)?\b.*\s-m\s+pytest\b")
+PYTHON_BYTECODE_COMPILER = re.compile(
+    r"(?<![A-Za-z0-9_./-])python(?:3(?:\.\d+)?)?\b.*\s-m\s+(?:py_compile|compileall)\b"
 )
 
 
@@ -131,6 +162,66 @@ def _require_regular(root: Path, relative: Path) -> Path:
     return path
 
 
+def _plugin_payload_files(root: Path) -> set[Path]:
+    """Return a clean complete installable plugin tree, rejecting retired residue."""
+    plugin = root / PLUGIN_ROOT
+    try:
+        mode = plugin.lstat().st_mode
+    except OSError as exc:
+        raise CandidateError("installable Cortex plugin directory is missing") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise CandidateError("installable Cortex plugin directory must be a regular directory")
+
+    files: set[Path] = set()
+    for base, directories, names in os.walk(plugin, followlinks=False):
+        current = Path(base)
+        for name in [*directories, *names]:
+            path = current / name
+            relative = path.relative_to(root)
+            if path.is_symlink():
+                raise CandidateError(f"installable plugin contains a symlink: {relative}")
+            if relative in RETIRED_PLUGIN_PATHS or any(
+                retired in relative.parents for retired in RETIRED_PLUGIN_PATHS
+            ):
+                raise CandidateError(f"installable plugin retains retired V11 residue: {relative}")
+            if any(part in FORBIDDEN_PARTS for part in relative.parts):
+                raise CandidateError(f"installable plugin contains runtime state: {relative}")
+            if path.suffix in FORBIDDEN_SUFFIXES:
+                raise CandidateError(f"installable plugin contains Python bytecode: {relative}")
+        for name in names:
+            path = current / name
+            relative = path.relative_to(root)
+            try:
+                mode = path.lstat().st_mode
+            except OSError as exc:
+                raise CandidateError(f"installable plugin file is unreadable: {relative}") from exc
+            if not stat.S_ISREG(mode):
+                raise CandidateError(f"installable plugin has a non-regular payload: {relative}")
+            files.add(relative)
+    return files
+
+
+def _skill_resource_files(root: Path) -> set[Path]:
+    """Include every regular resource bundled with an explicitly shipped skill."""
+    resources: set[Path] = set()
+    for name in PLUGIN_SKILLS:
+        skill_root = root / PLUGIN_ROOT / "skills" / name
+        try:
+            mode = skill_root.lstat().st_mode
+        except OSError as exc:
+            raise CandidateError(f"bundled skill directory is missing: {name}") from exc
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise CandidateError(f"bundled skill directory must be regular: {name}")
+        for path in skill_root.rglob("*"):
+            relative = path.relative_to(root)
+            if path.is_symlink():
+                raise CandidateError(f"bundled skill contains a symlink: {relative}")
+            if path.is_file():
+                _require_regular(root, relative)
+                resources.add(relative)
+    return resources
+
+
 def _module_name_for(root: Path, relative: Path) -> tuple[str, str] | None:
     plugin_scripts = Path("plugins/cortex/scripts")
     support_scripts = Path("scripts")
@@ -170,7 +261,7 @@ def _module_file(root: Path, module: str) -> Path | None:
 
 
 def _local_namespace(module: str) -> bool:
-    if module == "cortex" or module == "cortex_hook" or module.startswith("cortex_runtime"):
+    if module == "cortex" or module.startswith("cortex_runtime"):
         return True
     support_names = {
         Path(item).stem for item in SUPPORT_SCRIPTS
@@ -287,8 +378,15 @@ def _markdown_release_closure(root: Path, seeds: Iterable[Path]) -> set[Path]:
             except ValueError:
                 raise CandidateError(f"public document link escapes the repository: {relative} -> {raw}")
             if resolved.is_dir():
+                index = resolved / "index.md"
+                # Repository navigation may deliberately link a source or
+                # asset directory. Only a directory with a Markdown index is
+                # a release-document dependency; the source assets themselves
+                # are already selected by the explicit package manifest.
+                if not index.is_file():
+                    continue
                 linked = linked / "index.md"
-                resolved = root / linked
+                resolved = index
             if linked.suffix.lower() not in PUBLIC_DOCUMENT_SUFFIXES:
                 continue
             if not resolved.is_file():
@@ -303,7 +401,16 @@ def _markdown_release_closure(root: Path, seeds: Iterable[Path]) -> set[Path]:
 def source_candidate_manifest(root: Path) -> CandidateManifest:
     """Derive the exact allowlisted candidate from public manifests and imports."""
     root = root.resolve()
-    files = {Path(item) for item in (*PUBLIC_RELEASE_FILES, *SUPPORT_SCRIPTS, *PLUGIN_STATIC_FILES)}
+    installable_plugin_files = _plugin_payload_files(root)
+    files = {
+        Path(item)
+        for item in (
+            *PUBLIC_RELEASE_FILES,
+            *SUPPORT_SCRIPTS,
+            *PLUGIN_STATIC_FILES,
+            *ACTIVE_PLUGIN_PYTHON,
+        )
+    }
     plugin_manifest = _load_json(root / "plugins/cortex/.codex-plugin/plugin.json", "plugin manifest")
     profiles = _load_json(root / "plugins/cortex/profiles.json", "profile contract")
 
@@ -323,14 +430,19 @@ def source_candidate_manifest(root: Path) -> CandidateManifest:
             raise CandidateError(f"profile filename must be one TOML basename: {relative}")
         files.add(Path("plugins/cortex/agents") / relative)
 
-    files.update(
-        Path("plugins/cortex/skills") / name / "SKILL.md"
-        for name in PLUGIN_SKILLS
-    )
+    files.update(_skill_resource_files(root))
     files = _markdown_release_closure(root, files)
     files = _python_import_closure(root, files)
     for relative in sorted(files):
         _require_regular(root, relative)
+    staged_plugin_files = {relative for relative in files if relative.is_relative_to(PLUGIN_ROOT)}
+    if installable_plugin_files != staged_plugin_files:
+        missing = sorted(installable_plugin_files - staged_plugin_files)
+        extra = sorted(staged_plugin_files - installable_plugin_files)
+        raise CandidateError(
+            "release candidate plugin tree is not an exact installable payload; "
+            f"missing={missing}; extra={extra}"
+        )
     return CandidateManifest(tuple(sorted(files)))
 
 
@@ -385,11 +497,27 @@ def _validate_public_files(tree: Path) -> None:
 
 
 def _validate_documented_script_commands(tree: Path, manifest: CandidateManifest) -> None:
-    """Require packaged command documentation to reference packaged scripts."""
+    """Require packaged command documentation to reference bytecode-free scripts."""
     packaged = set(manifest.files)
     for relative in DOCUMENTED_COMMAND_FILES:
         source = _require_regular(tree, relative).read_text(encoding="utf-8")
         for line_number, line in enumerate(source.splitlines(), 1):
+            if PYTHON_BYTECODE_COMPILER.search(line) is not None:
+                raise CandidateError(
+                    "documented validation must not use py_compile or compileall because they write bytecode: "
+                    f"{relative}:{line_number}"
+                )
+            uses_python = PYTHON_INTERPRETER.search(line) is not None
+            is_python_gate = uses_python and (
+                SCRIPT_PATH_REFERENCE.search(line) is not None or PYTEST_MODULE.search(line) is not None
+            )
+            if is_python_gate and (
+                PYTHON_NO_BYTECODE not in line or PYTHON_BYTECODE_FLAG.search(line) is None
+            ):
+                raise CandidateError(
+                    "documented Python validation must use PYTHONDONTWRITEBYTECODE=1 and -B: "
+                    f"{relative}:{line_number}"
+                )
             for match in SCRIPT_PATH_REFERENCE.finditer(line):
                 prefix = line[:match.start()]
                 command_context = bool(match.group("explicit")) or re.search(
@@ -420,19 +548,24 @@ def validate_candidate_tree(tree: Path, manifest: CandidateManifest | None = Non
     if closure != set(active.files):
         raise CandidateError("candidate Python import closure differs from its manifest")
     validator = tree / "scripts/validate-cortex-marketplace.py"
+    catalog_renderer = tree / "scripts/render_cortex_tool_catalog.py"
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    checked = subprocess.run(
-        [sys.executable, str(validator), "--root", str(tree)],
-        cwd=tree,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if checked.returncode != 0:
-        detail = checked.stdout.strip() or checked.stderr.strip() or "marketplace validation failed"
-        raise CandidateError(detail)
+    for command, label in (
+        ([sys.executable, "-B", str(validator), "--root", str(tree)], "marketplace validation"),
+        ([sys.executable, "-B", str(catalog_renderer), "--root", str(tree), "--check"], "tool catalog validation"),
+    ):
+        checked = subprocess.run(
+            command,
+            cwd=tree,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if checked.returncode != 0:
+            detail = checked.stdout.strip() or checked.stderr.strip() or f"{label} failed"
+            raise CandidateError(detail)
     return active
 
 

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import tarfile
 import tempfile
+import sys
 from pathlib import Path, PurePosixPath
+
+
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 from cortex_release_candidate import (
     CandidateError,
