@@ -185,6 +185,21 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertIn("## Checks", result)
         self.assertNotIn("## Completed", result)
 
+    def test_canonical_source_text_is_inert_and_not_duplicated(self) -> None:
+        source = "Пользовательский текст — unchanged"
+        rendered = render_report(
+            report_type="plan",
+            content={
+                "schema": "cortex/report/plan/v1", "summary": "English summary",
+                "scope": [], "stages": [], "verification": [], "source_text": source,
+            },
+            report={"report_type": "plan", "assembly_state": "finalized", "status": "completed"},
+        )
+        self.assertIn("## Source material", rendered)
+        self.assertEqual(rendered.count(source), 1)
+        self.assertNotIn("source_text_en", rendered)
+        self.assertNotIn("source_text_ru", rendered)
+
     def test_review_envelope_and_hostile_values_are_safe(self) -> None:
         content = {
             "schema": "cortex/report-view/v1",

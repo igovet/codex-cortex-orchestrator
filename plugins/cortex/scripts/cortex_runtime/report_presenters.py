@@ -623,7 +623,24 @@ def present_report(report_type: object, content: object, report: Mapping[str, An
     if presenter is None:
         return _GENERIC.present(content, metadata)
     try:
-        return presenter.present(content, metadata)
+        source_text = content.get("source_text") if isinstance(content, Mapping) else None
+        presentation_content = (
+            {key: value for key, value in content.items() if key != "source_text"}
+            if isinstance(content, Mapping) and isinstance(source_text, str)
+            else content
+        )
+        document = presenter.present(presentation_content, metadata)
+        # Canonical user source material is one explicitly labeled inert value.
+        # It is never translated, normalized into worker prose, or duplicated.
+        if isinstance(source_text, str):
+            return Document(
+                document.title,
+                status=document.status,
+                summary=document.summary,
+                sections=(*document.sections, Section("Source material", [CodeBlock(source_text)])),
+                metadata=document.metadata,
+            )
+        return document
     except Exception:
         # A malformed future envelope must never make a canonical report
         # unavailable.  Keep this guard intentionally broad: this is a

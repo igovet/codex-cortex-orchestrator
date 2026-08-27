@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v12.0.0 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator; use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
+description: Explicit opt-in Cortex v12.1.0 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator; use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
 ---
 
-# Cortex Orchestrator v12.0.0
+# Cortex Orchestrator v12.1.0
 
 ## Invocation and language
 
@@ -22,11 +22,15 @@ active public MCP registry as the sole authority for tool shapes and continue
 without inventing a resource-read route.
 
 All coordinator-to-worker messages, inter-worker messages, every native worker
-commentary/update, final response, tool-authored durable string, report content,
+commentary/update, final response, tool-authored durable string, and report
+content (worker-authored report narrative),
 decision normalization, ledger prose, and durable human-view source content use
 English. This applies to the complete child-thread transcript, not only its
-final message or database rows. Preserve exact original user text only in the
-fields provided for it.
+final message or database rows. Canonical product-facing reports and handoff
+payloads may carry one optional unchanged `source_text` value as inert source
+material, without language tags or translated/original duplicates. Existing
+task and decision contracts preserve exact original user text in their
+designated fields.
 Coordinator-to-user questions, plan summaries, progress, decision summaries,
 artifact summaries, and the final answer use the language of the latest
 meaningful user message unless the user explicitly requests another language.
@@ -290,6 +294,12 @@ report, decision, failure, rework, or scope change revises the DAG. Keep it
 short, current, and consistent with the latest persisted pipeline revision; the
 initiative ledger remains the durable evidence and the To-Do list is only the
 standard Codex progress projection.
+
+Planner-authored implementation microtasks are evidence in the finalized plan,
+not backend jobs or scheduler instructions. The coordinator may use their
+ownership, dependency, acceptance, and verification data to construct or revise
+the model-owned orchestration DAG. They must not be copied into the standard
+Codex To-Do projection as worker-subtask checklists or report-body mirrors.
 
 Keep independent nodes parallel only when ownership cannot overlap. Sequence a
 node only when it needs a named predecessor report, decision, or external user

@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 12.0.0 projects selected host-private plan and finalized-report evidence
+Cortex 12.1.0 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read
@@ -147,10 +147,13 @@ canonical SQLite evidence inline. The user still receives the substantive task
 state; view delivery is an aid, not a gate on planning, acceptance, decisions,
 or completion.
 
-Durable internal fields and generated view content are English. Original user
-language is retained only in explicitly labelled `*_original` fields, with a
-separate English `*_en` field. The localized coordinator message is a delivery
-layer and does not replace that durable English evidence.
+Durable worker-authored fields and generated view content are English. Existing
+task and decision original user language is retained in explicitly labelled
+`*_original` fields, with a separate English normalization. Canonical
+product-facing report/handoff payloads may instead carry one optional
+unchanged `source_text` value, rendered once as inert source material without
+a language tag or translated/original duplicate. The localized coordinator
+message is a delivery layer and does not replace canonical evidence.
 
 ## Plan review and user decisions
 

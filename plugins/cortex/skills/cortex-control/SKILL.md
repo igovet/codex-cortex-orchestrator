@@ -1,9 +1,9 @@
 ---
 name: cortex-control
-description: Internal Cortex v12.0.0 semantic companion supplied by the host after explicit cortex:orchestrator activation. Never select it for ordinary work or fetch its skill URI through MCP resources/read.
+description: Internal Cortex v12.1.0 semantic companion supplied by the host after explicit cortex:orchestrator activation. Never select it for ordinary work or fetch its skill URI through MCP resources/read.
 ---
 
-# Cortex Control v12.0.0
+# Cortex Control v12.1.0
 
 Cortex is a durable coordination ledger, not a workflow engine. The active MCP
 registry is the sole authority for argument and response shapes. Use returned
@@ -26,8 +26,13 @@ summary and exact report reference rather than rereading the report body.
 
 Every native worker commentary/update, inter-worker message, final response,
 tool-authored durable string, and report is English, even when user-facing
-coordinator summaries use another language. Acceptance covers the complete
-child-thread transcript, not merely final reports or database prose.
+coordinator summaries use another language. Here, report means the
+worker-authored narrative; canonical product-facing reports and handoffs may
+carry one optional unchanged `source_text` value as inert source material,
+without a language tag or translated/original duplicate. Acceptance covers the
+complete child-thread transcript, not merely final reports or database prose.
+Existing task and decision contracts retain user text in explicitly named
+`*_original` fields.
 Coordinator-facing language deterministically matches the actual user message:
 an English user message receives English coordinator communication and a Russian
 user message receives Russian coordinator communication. A harness, task, or

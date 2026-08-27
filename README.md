@@ -13,7 +13,7 @@
         orchestration and safe next-step decision to the model.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-12.0.0-7c3aed" alt="Cortex 12.0.0" />
+        <img src="https://img.shields.io/badge/Cortex-12.1.0-7c3aed" alt="Cortex 12.1.0" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-SQLite%20schema%20v1-0f766e" alt="SQLite ledger schema v1" />
@@ -501,7 +501,7 @@ flowchart TB
         KC --> DN["create_delegation …N<br/>parallel when scopes do not conflict"]
 
         D1 --- SCOPE["scope = required non-empty text boundary<br/>details belong in instructions · object scope is invalid"]
-        D1 --- LANG["English internal plane: every worker commentary · message · final<br/>and durable operational string is English<br/>verbatim user text only in labeled *_original fields"]
+        D1 --- LANG["English worker plane: commentary · message · final · worker narrative<br/>canonical reports may carry one unchanged source_text value<br/>task/decision user text stays in labeled *_original fields"]
         D1 --- PROFILE["profile_name = exact packaged profile<br/>role = separate human label<br/>verify loaded proof or disclose degraded fallback"]
 
         D1 --> R1{"Choose exact model + effort"}
@@ -1004,8 +1004,11 @@ update, inter-worker message, final response, tool-authored durable string,
 ledger record, and generated-view operational source is English; acceptance
 checks the entire child transcript, not only its final. Verbatim user language
 appears only in labeled original fields beside separate English-normalized
-fields. A worker-authored product artifact may use another language only when
-the task itself requires it.
+fields for the task and decision contracts. Canonical product-facing report
+and handoff payloads instead carry any needed user-authored source material
+once in optional `source_text`, unchanged and without a language tag or
+translated/original duplicate. A worker-authored product artifact may use
+another language only when the task itself requires it.
 
 The worker brief is coordination context, not lifecycle authority. Profiles do
 not contain model literals or capability rules. Prompt volume targets are
@@ -1501,7 +1504,7 @@ The complete commands, safety boundaries, and verification contract are in
 
 ### Versioning
 
-The current V12 public contract release is **12.0.0**. Version and build identity are
+The current V12 public contract release is **12.1.0**. Version and build identity are
 defined by `plugins/cortex/.codex-plugin/plugin.json`.
 
 When changing the plugin, update the version according to SemVer:
@@ -1547,10 +1550,13 @@ compatible with V12.
   role text as profile proof. Limit unavailable fallback to degraded non-durable
   dispatch, disclose it, and supply a complete explicit role contract.
 - Keep every native worker commentary, update, message, final response,
-  tool-authored durable string, and report English; scan complete child threads,
-  not only their final messages or database rows.
-  Preserve verbatim user language only in labeled original fields beside
-  English-normalized fields; localize coordinator-to-user summaries and links.
+  tool-authored durable string, and worker-authored report narrative English;
+  scan complete child threads, not only their final messages or database rows.
+  Canonical product-facing reports and handoff payloads use one optional
+  unchanged `source_text` value when they carry user-authored source material;
+  they do not require language tags or translated/original pairs. Existing
+  task and decision contracts retain their designated original/language and
+  English-normalized fields. Localize coordinator-to-user summaries and links.
 - Keep large report content behind the single/chunked `submit_report` protocol
   and bounded `read_reports` section/cursor/byte selection. Do not expose report
   bodies through task or delegation inspection. The owning native worker alone

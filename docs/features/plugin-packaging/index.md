@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 12.0.0 is packaged as a repository-local Codex plugin and distributed to
+Cortex 12.1.0 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -65,6 +65,14 @@ compact `subject_ref`; durable `subject_id` is evidence only.
 Reports support `single`, `begin`, `append`, `finalize`, and `abort` under
 bounded chunk, assembling, retained-content, and response limits. Plan reports
 carry informational/required review policy and immutable digest identity.
+Product-facing reports use the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
+schemas. They may carry one optional unchanged `source_text` value, with no
+language tag or translated/original duplicate. Storage-valid legacy and
+semantic-invalid reports remain immutable evidence; only a finalized,
+completed, semantic-valid canonical plan receives a ready approval relation.
+Planner-authored microtask fields are evidence for the model-owned DAG only;
+they do not create backend jobs, scheduling gates, or worker-subtask To-Do
+entries.
 `record_user_decision` appends coordinator-attributed original/English evidence
 for an exact subject using one closed canonical field set. Plan/report decisions
 require the immutable subject digest; plan approval additionally requires the
@@ -138,7 +146,7 @@ continue to report any residue or catalog drift.
 
 The release candidate must prove:
 
-- manifest and Marketplace version 12.0.0 parity;
+- manifest and Marketplace version 12.1.0 parity;
 - exact eleven-tool registry/runtime parity;
 - uniform participant catalog, closed input schemas, advertised successful
   `outputSchema` validation, and the distinct success/correctable-error/server
@@ -191,7 +199,8 @@ Package metadata must not claim waves, gates, plan authority, capability
 handoff, host lifecycle binding, receipt-gated lifecycle, profile enforcement,
 governance promotion, closure authority, repair/rework waves, resource locks,
 or server-owned recovery. Delivery receipts from worker handoff reads are
-evidence only and never host authority.
+evidence only and never host authority or proof of physical worktree/workspace
+isolation.
 
 It also must not imply that the coordinator may inspect source or operate on
 the target project, directly verify worker work, infer `project_root`, accept
@@ -202,10 +211,13 @@ closure.
 
 Package evidence must not treat a generated Markdown view as canonical, a
 delegation view as worker input, a user decision as cryptographic attestation,
-or a plan-review pause as a backend permission gate. All internal/durable
-operational content is English; verbatim user language belongs only in labeled
-original fields beside English normalizations, while coordinator summaries and
-verified ready links follow the user's language.
+or a plan-review pause as a backend permission gate. All worker-authored
+internal/durable operational content is English. Existing task and decision
+contracts retain verbatim user language in their labeled original fields beside
+English normalizations; canonical product-facing report and handoff payloads
+carry any needed user-authored source material once in optional unchanged
+`source_text`, without language tags or translated/original pairs. Coordinator
+summaries and verified ready links follow the user's language.
 
 ## Verification
 

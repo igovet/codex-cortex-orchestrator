@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 12.0.0 Codex plugin. The V12 runtime is
+This repository contains the Cortex 12.1.0 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -44,8 +44,11 @@ references, not bearer credentials.
 
 Native subagent creation, waiting, permissions, filesystem edits, shell
 commands, browser actions, and external application calls remain host/user
-operations outside the Cortex ledger. Approval to use the local Cortex MCP
-server does not authorize any of those actions.
+operations outside the Cortex ledger. The native dispatch projection also has
+no worktree/workspace selector; physical concurrent-writer isolation is an
+unconfirmed host capability and is not implemented or claimed by Cortex.
+Approval to use the local Cortex MCP server does not authorize any of those
+actions.
 
 The root coordinator is an orchestration-only control plane. It may define the
 outcome and acceptance criteria, select or revise governance, use the ledger,
@@ -177,10 +180,13 @@ raw diagnostic logs, or unnecessarily sensitive operational details in:
 
 Use English for every native worker commentary/update, inter-worker message,
 final response, tool-authored durable string, objective, requirement,
-instruction, report, governance record, and English decision normalization.
-Acceptance covers complete child threads, not only final messages or database
-rows. Preserve exact arbitrary-Unicode user wording only in
-its designated `user_request_original` or `response_original` field with its
+instruction, worker-authored report narrative, governance record, and English
+decision normalization. Acceptance covers complete child threads, not only
+final messages or database rows. Canonical product-facing reports and handoffs
+may carry one optional unchanged `source_text` value as inert source material,
+without a language tag or translated/original duplicate. Existing task and
+decision contracts preserve exact arbitrary-Unicode user wording in their
+designated `user_request_original` or `response_original` fields with
 `user_language`; never overwrite or silently translate that source text.
 
 Reports may contain material engineering evidence, so exact emitted report refs should be

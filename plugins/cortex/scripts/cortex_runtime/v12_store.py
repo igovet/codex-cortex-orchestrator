@@ -24,6 +24,7 @@ from typing import Any, TypeVar
 from cortex_runtime.model_routing import validate_model_selection
 from cortex_runtime.v12_contract import (
     CLOSURE_SUBJECTS, CLOSURE_VERDICTS, DECISION_ATTRIBUTION, DECISION_SUBJECTS,
+    canonical_report_semantic_status,
     DECISION_TYPES, DEFAULT_PAGE_LIMIT, DIGEST_RE, GOVERNANCE_MODES,
     GOVERNANCE_SOURCES, IDEMPOTENCY_KEY_MAX_LENGTH, IDENTIFIER_RE,
     INITIATIVE_STATUSES, JSON_MAX_BYTES, JSON_MAX_DEPTH, LANGUAGE_TAG_MAX_LENGTH,
@@ -56,6 +57,8 @@ _APPROVAL_HANDLE_MIGRATION_VERSION = 7
 _APPROVAL_HANDLE_MIGRATION_NAME = "v12-ready-approval-handles"
 _ADVISORY_GOVERNANCE_MIGRATION_VERSION = 8
 _ADVISORY_GOVERNANCE_MIGRATION_NAME = "v12-advisory-governance"
+_REPORT_SEMANTICS_MIGRATION_VERSION = 9
+_REPORT_SEMANTICS_MIGRATION_NAME = "v12-canonical-report-semantics"
 _APPLICATION_ID = 0x43563132
 _TIMELINE_BACKFILL_METADATA_KEY = "timeline_backfill_v1"
 _TIMELINE_BACKFILL_VERSION = "cortex/v12-timeline-backfill/v1"
@@ -657,6 +660,7 @@ class V12Store:
                         self._migrate_durable_governance_gate(connection)
                         self._migrate_ready_approval_handles(connection)
                         self._migrate_advisory_governance(connection)
+                        self._migrate_canonical_report_semantics(connection)
                         self._validate_existing(connection)
                         self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                     except BaseException:
@@ -676,6 +680,7 @@ class V12Store:
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_hash', ?)", (self.project_hash,))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_root_digest', ?)", (hashlib.sha256(str(self.project_root).encode("utf-8")).hexdigest(),))
                     except BaseException:
@@ -1033,6 +1038,35 @@ class V12Store:
         except sqlite3.DatabaseError as exc:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
 
+    def _migrate_canonical_report_semantics(self, connection: sqlite3.Connection) -> None:
+        """Add non-gating semantic classification for canonical report data."""
+        migration = connection.execute("SELECT name FROM schema_migrations WHERE version=?", (_REPORT_SEMANTICS_MIGRATION_VERSION,)).fetchone()
+        if migration is not None:
+            if str(migration[0]) != _REPORT_SEMANTICS_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        expected = [
+            (SCHEMA_VERSION, MIGRATION_NAME),
+            (_EXPANSION_MIGRATION_VERSION, _EXPANSION_MIGRATION_NAME),
+            (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
+            (_NATIVE_TASK_NAME_MIGRATION_VERSION, _NATIVE_TASK_NAME_MIGRATION_NAME),
+            (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
+            (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
+            (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
+        ]
+        migrations = [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()]
+        if migrations != expected or "semantic_status" in self._column_names(connection, "reports"):
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            connection.execute("DROP TRIGGER reports_terminal_no_update")
+            connection.execute("ALTER TABLE reports ADD COLUMN semantic_status TEXT")
+            connection.execute("UPDATE reports SET semantic_status=CASE WHEN assembly_state='assembling' THEN 'pending' ELSE 'legacy' END")
+            connection.execute("CREATE TRIGGER reports_terminal_no_update BEFORE UPDATE ON reports WHEN OLD.assembly_state IN ('finalized','aborted') BEGIN SELECT RAISE(ABORT,'terminal reports are immutable'); END")
+            connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME, _now()))
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
     def _validate_existing(self, connection: sqlite3.Connection) -> None:
         if int(connection.execute("PRAGMA application_id").fetchone()[0]) != _APPLICATION_ID or int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
@@ -1047,12 +1081,13 @@ class V12Store:
             (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
             (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
             (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
+            (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
         ] or metadata is None or str(metadata[0]) != self.project_hash:
             raise V12StoreError("reference belongs to another project", code="cross_project_reference")
         required_columns = {
             "tasks": {"task_id", "project_hash", "project_root", "objective", "user_request_original", "user_language", "task_contract_version", "requirements_json", "constraints_json", "acceptance_criteria_json", "verification_plan_json", "context_json"},
             "delegations": {"delegation_id", "task_id", "profile_name", "native_task_name", "input_report_ids_json", "input_decision_ids_json"},
-            "reports": {"report_id", "task_id", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy"},
+            "reports": {"report_id", "task_id", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy", "semantic_status"},
             "report_chunks": {"report_id", "chunk_index", "section", "content_json", "content_digest", "content_bytes"},
             "report_usage": {"task_id", "total_retained_bytes", "assembling_bytes", "assembling_reports"},
             "timeline": {"sequence", "task_id", "decision_id", "payload_json"},
@@ -1552,6 +1587,7 @@ class V12Store:
                     self._migrate_durable_governance_gate(connection)
                     self._migrate_ready_approval_handles(connection)
                     self._migrate_advisory_governance(connection)
+                    self._migrate_canonical_report_semantics(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1597,6 +1633,7 @@ class V12Store:
                     self._migrate_durable_governance_gate(connection)
                     self._migrate_ready_approval_handles(connection)
                     self._migrate_advisory_governance(connection)
+                    self._migrate_canonical_report_semantics(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1631,7 +1668,7 @@ class V12Store:
         CREATE TABLE timeline(sequence INTEGER PRIMARY KEY AUTOINCREMENT,occurred_at TEXT NOT NULL,event_type TEXT NOT NULL,entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,task_id TEXT,delegation_id TEXT,report_id TEXT,initiative_id TEXT,assessment_id TEXT,closure_id TEXT,decision_id TEXT,payload_json TEXT NOT NULL);
         CREATE TABLE tasks(task_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,project_root TEXT NOT NULL,objective TEXT NOT NULL,user_request_original TEXT NOT NULL,user_language TEXT NOT NULL,task_contract_version TEXT NOT NULL,requirements_json TEXT NOT NULL,constraints_json TEXT NOT NULL,acceptance_criteria_json TEXT NOT NULL,verification_plan_json TEXT NOT NULL,context_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,updated_sequence INTEGER NOT NULL);
         CREATE TABLE delegations(delegation_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),parent_delegation_id TEXT REFERENCES delegations(delegation_id),native_task_name TEXT NOT NULL,objective TEXT NOT NULL,role TEXT NOT NULL,profile_name TEXT NOT NULL,scope TEXT NOT NULL,instructions TEXT NOT NULL,input_report_ids_json TEXT NOT NULL,input_decision_ids_json TEXT NOT NULL,model TEXT NOT NULL,reasoning_effort TEXT NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
-        CREATE TABLE reports(report_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),report_type TEXT NOT NULL,status TEXT,assembly_state TEXT NOT NULL,next_chunk_index INTEGER NOT NULL,total_chunks INTEGER NOT NULL,total_bytes INTEGER NOT NULL,content_digest TEXT NOT NULL,supersedes_report_id TEXT REFERENCES reports(report_id),review_policy TEXT,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,finalized_at TEXT,finalized_sequence INTEGER,aborted_at TEXT,aborted_sequence INTEGER,abort_reason_en TEXT);
+        CREATE TABLE reports(report_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),report_type TEXT NOT NULL,status TEXT,semantic_status TEXT,assembly_state TEXT NOT NULL,next_chunk_index INTEGER NOT NULL,total_chunks INTEGER NOT NULL,total_bytes INTEGER NOT NULL,content_digest TEXT NOT NULL,supersedes_report_id TEXT REFERENCES reports(report_id),review_policy TEXT,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,finalized_at TEXT,finalized_sequence INTEGER,aborted_at TEXT,aborted_sequence INTEGER,abort_reason_en TEXT);
         CREATE TABLE report_chunks(report_id TEXT NOT NULL REFERENCES reports(report_id),chunk_index INTEGER NOT NULL,section TEXT NOT NULL,content_json TEXT NOT NULL,content_digest TEXT NOT NULL,content_bytes INTEGER NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(report_id,chunk_index));
         CREATE TABLE report_consumption_receipts(receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),consumer_delegation_id TEXT REFERENCES delegations(delegation_id),reader_kind TEXT NOT NULL,report_id TEXT NOT NULL REFERENCES reports(report_id),observed_content_digest TEXT NOT NULL,sections_json TEXT NOT NULL,input_cursor TEXT,output_cursor TEXT,chunk_indexes_json TEXT NOT NULL,returned_content_bytes INTEGER NOT NULL,has_more INTEGER NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
         CREATE TABLE report_usage(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),total_retained_bytes INTEGER NOT NULL,assembling_bytes INTEGER NOT NULL,assembling_reports INTEGER NOT NULL,updated_at TEXT NOT NULL);
@@ -1861,7 +1898,7 @@ class V12Store:
         def write(connection: sqlite3.Connection) -> str:
             task = self._task(connection, anchor)
             item = self._report(connection, report, task_id=anchor)
-            if item["report_type"] != "plan" or item["assembly_state"] != "finalized" or item["status"] != "completed" or item["content_digest"] != report_digest:
+            if item["report_type"] != "plan" or item["assembly_state"] != "finalized" or item["status"] != "completed" or item.get("semantic_status") != "semantic_valid" or item["content_digest"] != report_digest:
                 raise V12StoreError("approval view plan is invalid", code="approval_view_mismatch")
             latest = int(connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM timeline WHERE task_id=?", (anchor,)).fetchone()[0])
             row = connection.execute("SELECT source_sequence,content_digest,status FROM projection_files WHERE task_id=? AND relative_path=?", (anchor, expected_relative)).fetchone()
@@ -2014,8 +2051,10 @@ class V12Store:
 
     @staticmethod
     def _compact_report(report: Mapping[str, Any]) -> dict[str, Any]:
-        keys = ("report_id", "project_hash", "task_id", "delegation_id", "report_type", "status", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy", "created_at", "created_sequence", "finalized_at", "finalized_sequence", "aborted_at", "aborted_sequence")
-        return {key: report.get(key) for key in keys}
+        keys = ("report_id", "project_hash", "task_id", "delegation_id", "report_type", "status", "semantic_status", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy", "created_at", "created_sequence", "finalized_at", "finalized_sequence", "aborted_at", "aborted_sequence")
+        compact = {key: report.get(key) for key in keys}
+        compact["storage_status"] = "storage_valid"
+        return compact
 
     @staticmethod
     def _compact_delegation(delegation: Mapping[str, Any]) -> dict[str, Any]:
@@ -2292,7 +2331,7 @@ class V12Store:
         def update_usage(connection: sqlite3.Connection, task_value: str, state: Mapping[str, int]) -> None:
             connection.execute("UPDATE report_usage SET total_retained_bytes=?,assembling_bytes=?,assembling_reports=?,updated_at=? WHERE task_id=?", (state["total_retained_bytes"], state["assembling_bytes"], state["assembling_reports"], _now(), task_value))
 
-        def insert_header(connection: sqlite3.Connection, task: Mapping[str, Any], owner: Mapping[str, Any], value: str, *, assembly_state: str, semantic_status: str | None, sequence: int) -> None:
+        def insert_header(connection: sqlite3.Connection, task: Mapping[str, Any], owner: Mapping[str, Any], value: str, *, assembly_state: str, semantic_status: str, sequence: int) -> None:
             if supersedes is not None:
                 prior = self._report(connection, supersedes, task_id=str(task["task_id"]))
                 if prior["report_type"] != "plan":
@@ -2312,10 +2351,14 @@ class V12Store:
             # immutable ``report_chunks`` and is never read from this legacy
             # compatibility column.
             if "content_json" in self._column_names(connection, "reports"):
-                legacy_arguments = (*arguments[:5], semantic_status or "partial", *arguments[6:])
-                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,content_json,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, 'null', ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", legacy_arguments)
+                # The predecessor schema made ``status`` non-nullable, so an
+                # assembling header needs the historical partial sentinel;
+                # finalized single reports retain their requested status.
+                legacy_arguments = (*arguments[:5], status_value or "partial", semantic_status, *arguments[6:])
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,content_json,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, 'null', ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", legacy_arguments)
             else:
-                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", arguments)
+                arguments = (*arguments[:5], None, semantic_status, *arguments[6:])
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", arguments)
 
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
@@ -2329,7 +2372,7 @@ class V12Store:
                     if state["assembling_reports"] >= REPORT_ASSEMBLING_MAX_PER_TASK:
                         raise V12StoreError("report quota is exceeded", code="report_quota_exceeded")
                     sequence = self._timeline(connection, event_type="report_started", entity_type="report", entity_id=value, payload={"report_id": value, "delegation_id": owner["delegation_id"], "report_type": type_value}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=value)
-                    insert_header(connection, task, owner, value, assembly_state="assembling", semantic_status=None, sequence=sequence)
+                    insert_header(connection, task, owner, value, assembly_state="assembling", semantic_status="pending", sequence=sequence)
                     state["assembling_reports"] += 1
                     update_usage(connection, str(task["task_id"]), state)
                     return {"report": self._compact_report(self._report(connection, value, task_id=task["task_id"])), "assembly_state": "assembling", "next_chunk_index": 0}
@@ -2337,10 +2380,11 @@ class V12Store:
                 if chunk[2] > REPORT_MAX_BYTES or state["total_retained_bytes"] + chunk[2] > REPORT_RETAINED_MAX_BYTES_PER_TASK:
                     raise V12StoreError("report quota is exceeded", code="report_quota_exceeded")
                 sequence = self._timeline(connection, event_type="report_submitted", entity_type="report", entity_id=value, payload={"report_id": value, "delegation_id": owner["delegation_id"], "report_type": type_value, "status": status_value, "total_chunks": 1, "total_bytes": chunk[2]}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=value)
-                insert_header(connection, task, owner, value, assembly_state="assembling", semantic_status=None, sequence=sequence)
+                insert_header(connection, task, owner, value, assembly_state="assembling", semantic_status="pending", sequence=sequence)
                 connection.execute("INSERT INTO report_chunks(report_id,chunk_index,section,content_json,content_digest,content_bytes,created_at) VALUES (?, 0, 'body', ?, ?, ?, ?)", (value, chunk[1], chunk[3], chunk[2], _now()))
                 digest = self._report_digest(connection, value)
-                connection.execute("UPDATE reports SET next_chunk_index=1,total_chunks=1,total_bytes=?,content_digest=?,assembly_state='finalized',status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (chunk[2], digest, status_value, _now(), sequence, value))
+                semantic = canonical_report_semantic_status(str(type_value), chunk[0])
+                connection.execute("UPDATE reports SET next_chunk_index=1,total_chunks=1,total_bytes=?,content_digest=?,assembly_state='finalized',status=?,semantic_status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (chunk[2], digest, status_value, semantic, _now(), sequence, value))
                 state["total_retained_bytes"] += chunk[2]
                 update_usage(connection, str(task["task_id"]), state)
                 return {"report": self._compact_report(self._report(connection, value, task_id=task["task_id"]))}
@@ -2388,7 +2432,21 @@ class V12Store:
                 if int(report["total_chunks"]) != expected_chunk_count or actual != expected_content_digest or report["content_digest"] != actual:
                     raise V12StoreError("report manifest does not match", code="report_manifest_mismatch")
                 sequence = self._timeline(connection, event_type="report_submitted", entity_type="report", entity_id=identifier, payload={"report_id": identifier, "delegation_id": owner["delegation_id"], "report_type": report["report_type"], "status": status_value, "total_chunks": report["total_chunks"], "total_bytes": report["total_bytes"], "content_digest": actual}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=identifier)
-                connection.execute("UPDATE reports SET assembly_state='finalized',status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (status_value, _now(), sequence, identifier))
+                chunks = self._report_chunks(connection, identifier)
+                canonical_content: object = chunks[0]["content"] if len(chunks) == 1 else None
+                if len(chunks) > 1 and all(isinstance(item["content"], Mapping) for item in chunks):
+                    merged: dict[str, Any] = {}
+                    for item in chunks:
+                        for key, item_value in item["content"].items():
+                            if key in merged:
+                                merged = {}
+                                break
+                            merged[key] = item_value
+                        if not merged:
+                            break
+                    canonical_content = merged or None
+                semantic = canonical_report_semantic_status(str(report["report_type"]), canonical_content)
+                connection.execute("UPDATE reports SET assembly_state='finalized',status=?,semantic_status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (status_value, semantic, _now(), sequence, identifier))
                 state["assembling_bytes"] -= int(report["total_bytes"])
                 state["assembling_reports"] -= 1
                 update_usage(connection, str(task["task_id"]), state)

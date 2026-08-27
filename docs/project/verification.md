@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 12.0.0 source, package, installed-host, and
+This page describes Cortex 12.1.0 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -73,6 +73,11 @@ The V12 protocol evidence must prove:
   supports `single`, `begin`, sequential `append`, `finalize`, and `abort`, and
   enforces 65,536-byte single reports, 32,768-byte chunks, 256 chunks, and 8 MiB
   per report;
+- canonical report bodies use the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
+  schemas with one optional unchanged `source_text` value and no language tag
+  or translated/original duplicate; storage-valid legacy and semantic-invalid
+  bodies remain evidence, while only completed semantic-valid canonical plans
+  receive ready approval relations;
 - interrupted report assembly resumes from manifest and `next_chunk_index`,
   rejects gaps, post-finalize/abort appends, and overwrites, and uses explicit
   supersession for a replacement;
@@ -179,8 +184,11 @@ Also prove all of the following:
 - direct local edits are preserved as `conflict`; materialization uses safe
   atomic write/read-back verification and a newer source sequence supersedes a
   stale job;
-- plan/report views and internal durable/projection source content are English while
-  `*_original` fields preserve user text; and
+- plan/report views and worker-authored durable/projection source content are
+  English; canonical product-facing report/handoff payloads may carry one
+  optional unchanged `source_text` value without language tags or
+  translated/original duplicates, while existing task/decision `*_original`
+  fields preserve user text; and
 - coordinator publication pairs every returned ready absolute link with a
   localized evidence summary and effect/next step, while a non-ready view is
   described inline without blocking the task or final answer.
@@ -331,17 +339,23 @@ after any install or update.
 
 Use an ordinary interactive Codex CLI inside a background tmux session. Create
 the named session, send commands directly, capture a bounded pane, and clean
-up the session; do not use `codex exec`:
+up the session; do not use `codex exec`. If the host denies a nested tmux
+server with `Operation not permitted`, use the independent socket form below;
+`env -u TMUX` applies only to tmux management commands and keeps Codex
+interactive:
 
 ```bash
 session_name=cortex-v12-smoke
-tmux has-session -t "$session_name" 2>/dev/null && tmux kill-session -t "$session_name" || true
-tmux new-session -d -s "$session_name" -c "/path/to/codex-orchestration" bash
-tmux send-keys -t "$session_name" 'cd /path/to/codex-orchestration && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
+socket_name=cortex-v12-smoke
+tmux_cmd=(env -u TMUX tmux -L "$socket_name" -f /dev/null)
+"${tmux_cmd[@]}" has-session -t "=$session_name" 2>/dev/null && \
+  "${tmux_cmd[@]}" kill-session -t "=$session_name" || true
+"${tmux_cmd[@]}" new-session -d -s "$session_name" -c "/path/to/codex-orchestration" bash
+"${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" 'cd /path/to/codex-orchestration && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
 # After the launcher is ready, inject only the narrow smoke input:
-tmux send-keys -t "$session_name" '<targeted test input>' C-m
-tmux capture-pane -p -t "$session_name" -S -200 -E -1
-tmux kill-session -t "$session_name" 2>/dev/null || true
+"${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" '<targeted test input>' C-m
+"${tmux_cmd[@]}" capture-pane -p -t "=$session_name:0.0" -S -200 -E -1
+"${tmux_cmd[@]}" kill-session -t "=$session_name" 2>/dev/null || true
 ```
 
 After installation or source synchronization, run exactly one fresh interactive
@@ -386,10 +400,12 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     finalized plan digest, then creates a revised plan and new review after a
     revision response.
 12. A localized non-English user decision whose every child commentary,
-    inter-worker message, final response, tool-authored durable string, task,
-    report, decision, and task-view source remains English with `*_original`
-    text preserved; the coordinator publishes a localized summary and a
-    verified ready link.
+    inter-worker message, final response, tool-authored durable string,
+    worker-authored report narrative, task, decision, and task-view source
+    remains English with task/decision `*_original` text preserved; a canonical
+    report carrying source material preserves one unchanged `source_text`
+    value without a language duplicate, and the coordinator publishes a
+    localized summary and verified ready link.
 13. A large result written through `begin`/ordered `append`/`finalize`, then
     read through a section-scoped cursor and resumed without duplicate chunks.
 14. A required-plan case where the user forbids coordinator project operations;
@@ -437,7 +453,9 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     are unnecessary.
 25. Russian coordinator-to-user updates lead with result, impact, and next
     safe step and reveal technical detail progressively, while all worker,
-    inter-worker, ledger, and report content remains English.
+    inter-worker, ledger, and worker-authored report content remains English;
+    any canonical report `source_text` is carried unchanged as inert source
+    material.
 
 Confirm native Luna dispatch omits the model override while Terra/Sol carry
 exact overrides and every selected effort is preserved. Confirm no hook trust,
@@ -467,7 +485,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/12.0.0/schema-v1 identifiers;
+- V12/12.1.0/schema-v1 identifiers;
 - exact eleven-tool names;
 - explicit `project_root` only on `create_task`, compact `task_ref` on the seven
   task-anchored tools, compact `delegation_ref`/`report_ref`/`report_refs` on

@@ -43,6 +43,7 @@ _MIGRATIONS = (
     (6, "v12-durable-governance-gate"),
     (7, "v12-ready-approval-handles"),
     (8, "v12-advisory-governance"),
+    (9, "v12-canonical-report-semantics"),
 )
 _BACKUP_FORMAT = "cortex/v12-maintenance-backup/v1"
 _BACKUP_ID_PREFIX = "backup-"

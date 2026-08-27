@@ -69,7 +69,7 @@ class V12CompatibilityTests(unittest.TestCase):
             mode="single",
             report_type="plan",
             status="completed",
-            content={"steps": ["Preserve immutable plan digest."]},
+            content={"schema": "cortex/report/plan/v1", "summary": "Compatibility plan", "scope": [], "stages": [], "verification": []},
         )[0]["report"]
         return task, str(report["report_id"])
 
@@ -118,7 +118,7 @@ class V12CompatibilityTests(unittest.TestCase):
             retired_index = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='index' AND name='governance_gates_assessment'"
             ).fetchone()
-        self.assertEqual(migrations[-1], (8, "v12-advisory-governance"))
+        self.assertEqual(migrations[-1], (9, "v12-canonical-report-semantics"))
         self.assertIsNone(retired_table)
         self.assertIsNone(retired_index)
 
@@ -266,7 +266,7 @@ class V12CompatibilityTests(unittest.TestCase):
             "mode": "single",
             "report_type": "plan",
             "status": "completed",
-            "content": {"steps": ["Use only canonical public fields."]},
+            "content": {"schema": "cortex/report/plan/v1", "summary": "Canonical public fields", "scope": [], "stages": [], "verification": []},
         })
         # Context recovery must accept the same complete, server-issued
         # relation shape returned from a bounded plan read, not only the
@@ -364,10 +364,13 @@ class V12CompatibilityTests(unittest.TestCase):
             "role": "writer", "profile_name": "technical_writer", "scope": "One advisory report.",
             "instructions": "Submit a bounded plan report.", "model": "gpt-5.6-luna", "reasoning_effort": "high",
         })
-        self._successful_tool("submit_report", {
+        invalid = self._successful_tool("submit_report", {
             "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "single", "report_type": "plan",
             "status": "completed", "content": {"advisory": True},
         })
+        self.assertEqual(invalid["report"]["storage_status"], "storage_valid")
+        self.assertEqual(invalid["report"]["semantic_status"], "legacy")
+        self.assertEqual(invalid["approval_view"]["status"], "unavailable")
         closure = self._successful_tool("submit_governance_closure", {
             "task_ref": task_ref_value, "subject_type": "task", "subject_ref": task_ref_value,
             "verdict": "ready", "evidence": {"checked": "advisory"}, "unresolved_risks": [], "follow_ups": [],

@@ -1,10 +1,10 @@
 # Release readiness
 
-Status: source-mode release contract for Cortex 12.0.0.
+Status: source-mode release contract for Cortex 12.1.0.
 
 ## Current release identity
 
-- release label: 12.0.0
+- release label: 12.1.0
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
 - public facade: exactly eleven action-specific MCP tools
@@ -298,14 +298,14 @@ eleven-tool facade and runtime, schema-v1 store, host-private operator
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 and assets. It must not ship lifecycle hooks or lifecycle hook code.
 
-The package and repository metadata must consistently identify Cortex 12.0.0,
+The package and repository metadata must consistently identify Cortex 12.1.0,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the exact eleven-tool catalog. Stale claims about waves, gates, capabilities,
 plan authority, host epochs, receipt-gated lifecycle, required wait/read order,
 lifecycle HMAC, repair escrow, closure breakers, resource locks, required
 governance workers, or server-owned recovery are release defects. Worker
 handoff delivery receipts are valid evidence but must not be described as host
-lifecycle authority.
+lifecycle authority or proof of physical worktree/workspace isolation.
 
 V11 state is a historical compatibility boundary only. V12 must not open,
 migrate, delete, or modify V11 databases. V11 tools and unfinished V11 tasks
@@ -449,8 +449,11 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     `skill://` MCP attempt, plus exact byte-for-byte reuse of every returned
     compact ref, durable evidence ID, and digest in the appropriate context.
 15. Four durable delegations produce four matching host spawns copied exactly
-    from their returned native-dispatch payloads, with correct fork isolation,
-    model/effort fields, renderer/profile evidence, and worker-owned reports.
+    from their returned native-dispatch payloads, with the required
+    `fork_turns="none"`, model/effort fields, renderer/profile evidence, and
+    worker-owned reports. Physical worktree/workspace isolation is not asserted
+    here: the native projection has no host workspace selector and that
+    capability remains unconfirmed outside the ledger.
 16. Ordinary delegations select exact packaged `profile_name` values and
     produce loaded proof/digests; the separate human-readable `role` is not
     profile proof, and a degraded non-durable fallback requires an explicit
@@ -495,9 +498,11 @@ storage paths, model/effort rules, commands, and the V11 compatibility boundary.
 Also verify explicit root only on `create_task`, compact `task_ref` on the seven
 task-anchored tools, compact `delegation_ref`/`report_ref`/`report_refs` on
 entity-derived tools, `subject_ref`/`initiative_ref` where applicable, the exact
-task/result language fields, textual delegation scope, exact
+task/result language fields, canonical report schemas and one optional
+unchanged `source_text` value (without language or translated/original
+duplicates), evidence-only planner microtasks, textual delegation scope, exact
 `profile_name`/human `role`, loaded proof, one-to-one native dispatch,
-model/effort, English-only complete child transcripts, chunked report modes and bounded complete-chunk reads, plan-review
+model/effort, English-only worker-authored content, chunked report modes and bounded complete-chunk reads, plan-review
 and user-decision subject/digest semantics, compact paginated inspections,
 required closure subject fields, worker-owned documentation-impact evidence and
 initiative/closure citations, verified host-private human-view links with

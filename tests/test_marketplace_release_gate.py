@@ -833,7 +833,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
 
     manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
     require(manifest.get("name") == "cortex", "marketplace manifest name")
-    require(str(manifest.get("version") or "").startswith("12.0.0"), "manifest is the V12 release")
+    require(str(manifest.get("version") or "").startswith("12.1.0"), "manifest is the V12 release")
     require(isinstance(json.loads((plugin / ".mcp.json").read_text(encoding="utf-8")), dict), "MCP manifest is valid JSON")
     hook_manifest = plugin / "hooks" / "hooks.json"
     if hook_manifest.exists():
@@ -1444,7 +1444,12 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         plan_chunk_zero_args = {
             "task_id": task_a, "delegation_id": delegation_b, "mode": "append", "report_id": plan_id,
             "chunk_index": 0, "section": "plan.overview",
-            "content": {"summary": "Run the eleven-tool V12 release gate.", "owner": "qa"},
+            "content": {
+                "schema": "cortex/report/plan/v1",
+                "summary": "Run the eleven-tool V12 release gate.",
+                "scope": [],
+                "stages": [],
+            },
             "idempotency_key": "plan-append-0",
         }
         plan_chunk_zero = server.tool("submit_report", plan_chunk_zero_args)
@@ -1470,7 +1475,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         plan_chunk_one_args = {
             "task_id": task_a, "delegation_id": delegation_b, "mode": "append", "report_id": plan_id,
             "chunk_index": 1, "section": "plan.verification",
-            "content": {"command": "python3 -m pytest -q", "expected": "exit 0"},
+            "content": {"verification": [{"command": "python3 -m pytest -q", "expected": "exit 0"}]},
             "idempotency_key": "plan-append-1",
         }
         plan_chunk_one = server.tool("submit_report", plan_chunk_one_args)
@@ -1761,7 +1766,13 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "submit_report",
             {
                 "task_id": task_a, "delegation_id": delegation_b, "mode": "single", "report_type": "plan", "status": "completed",
-                "content": {"summary": "A revised plan needs its own explicit review."}, "supersedes_report_id": plan_id,
+                "content": {
+                    "schema": "cortex/report/plan/v1",
+                    "summary": "A revised plan needs its own explicit review.",
+                    "scope": [],
+                    "stages": [],
+                    "verification": [],
+                }, "supersedes_report_id": plan_id,
                 "review_policy": "required", "idempotency_key": "plan-revision-single",
             },
         )
@@ -2527,6 +2538,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             (6, "v12-durable-governance-gate"),
             (7, "v12-ready-approval-handles"),
             (8, "v12-advisory-governance"),
+            (9, "v12-canonical-report-semantics"),
             ],
         "legacy V12 shard records each additive V12 migration exactly once",
     )
@@ -2595,9 +2607,10 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             (4, "v12-durable-native-task-name"),
             (5, "v12-report-consumption-receipts"),
             (6, "v12-durable-governance-gate"),
-            (7, "v12-ready-approval-handles"),
-            (8, "v12-advisory-governance"),
-        ]
+                (7, "v12-ready-approval-handles"),
+                (8, "v12-advisory-governance"),
+                (9, "v12-canonical-report-semantics"),
+            ]
         and concurrent_task_count == (3,)
         and concurrent_integrity == ("ok",)
         and not (concurrent_project / ".codex").exists(),
@@ -3107,7 +3120,12 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "report_id": plan_id,
                 "chunk_index": 0,
                 "section": "plan.scope",
-                "content": {"owner": "planner", "summary": "Delegate implementation and documentation evidence."},
+                "content": {
+                    "schema": "cortex/report/plan/v1",
+                    "summary": "Delegate implementation and documentation evidence.",
+                    "scope": [],
+                    "stages": [],
+                },
                 "idempotency_key": "production-plan-append-zero",
             },
         )
@@ -3120,7 +3138,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "report_id": plan_id,
                 "chunk_index": 1,
                 "section": "plan.verification",
-                "content": {"command": "python3 -m pytest -q", "expected": "zero exit status"},
+                "content": {"verification": [{"command": "python3 -m pytest -q", "expected": "zero exit status"}]},
                 "idempotency_key": "production-plan-append-one",
             },
         )
@@ -3662,7 +3680,13 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
             "submit_report",
             {
                 "task_id": task_id, "delegation_id": plan_delegation, "mode": "single", "report_type": "plan", "status": "completed",
-                "content": {"owner": "planner", "summary": "Repair the retained V12 chronology."}, "review_policy": "informational",
+                "content": {
+                    "schema": "cortex/report/plan/v1",
+                    "summary": "Repair the retained V12 chronology.",
+                    "scope": [],
+                    "stages": [],
+                    "verification": [],
+                }, "review_policy": "informational",
                 "idempotency_key": "backfill-r1",
             },
         )

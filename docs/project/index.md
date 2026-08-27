@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 12.0.0 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 12.1.0 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -167,6 +167,14 @@ callable public locators, while durable IDs are non-callable evidence.
 `read_reports` is the only report body/chunk reader: it accepts 1–20 unique
 known report refs in request order and resumes bounded section reads using its returned
 cursor. Large reports are never returned as one unbounded body.
+Canonical product-facing report bodies use the fixed
+`cortex/report/{progress,result,synthesis,plan}/v1` schemas. They may carry one
+optional unchanged `source_text` value, without a language tag or a
+translated/original duplicate. Storage-valid legacy and semantic-invalid
+reports remain immutable evidence; only a finalized completed semantic-valid
+canonical plan receives a ready approval relation. Planner-authored
+implementation microtasks are evidence for the model-owned DAG only, never
+backend jobs, scheduling gates, or worker-subtask To-Do entries.
 Inspection reads use `after_sequence` plus `limit`, expose compact references,
 and return `next_sequence` with `has_more`; these inspections create no
 receipts. A worker handoff `read_reports` read may create an immutable page
@@ -185,6 +193,12 @@ read also provides `handles.decision_binding` with exact decision-input names; p
 revision/cancellation feedback preserves the exact plan digest and response
 without volatile view binding. Missing, renamed, extra, or cross-mixed fields
 are rejected before mutation.
+
+The native dispatch projection does not select an isolated worktree or
+workspace. Physical concurrent-writer isolation is therefore an unconfirmed
+host capability outside the ledger; Cortex does not implement or claim
+collision prevention until a supported host mechanism and lifecycle owner are
+supplied.
 Delegation `scope` is required non-empty text defining the
 concise worker-ownership boundary, while execution detail belongs in
 `instructions`; object-shaped scope is invalid. Closure requires `subject_type`

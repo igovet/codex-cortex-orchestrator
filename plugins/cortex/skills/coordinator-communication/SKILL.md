@@ -15,10 +15,13 @@ contract only: it does not add a runtime loader, dispatcher, lifecycle hook,
 tool, permission, or backend gate.
 
 Keep every coordinator-to-worker message, inter-worker message, native worker
-transcript, report, decision normalization, ledger prose, and durable human-view
-source content in English. Preserve exact original user text only in its
-designated field. This policy governs the separate coordinator-to-user surface;
-it never authorizes translating or exposing durable internal content.
+transcript, worker-authored report narrative, decision normalization, ledger
+prose, and durable human-view source content in English. Canonical
+product-facing reports and handoffs may carry one optional unchanged
+`source_text` value as inert source material; existing task/decision original
+user text remains in its designated field. This policy governs the separate
+coordinator-to-user surface; it never authorizes translating or exposing
+durable internal content.
 
 ## Default user-facing shape
 
@@ -71,7 +74,7 @@ When the latest meaningful user message is Russian, coordinator-to-user
 communication remains Russian and keeps this same outcome-first order: state the
 result, explain the user impact, then give the next safe step. Add technical
 detail progressively only as it helps the user's decision. Keep worker,
-inter-worker, ledger, and report content in English; Russian is a coordinator-
+inter-worker, ledger, and worker-authored report content in English; Russian is a coordinator-
 to-user tone and localization rule, not permission to translate durable worker
 evidence or expose internal identifiers.
 

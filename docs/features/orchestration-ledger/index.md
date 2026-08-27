@@ -140,6 +140,22 @@ input/output cursors, returned chunk indexes, byte count, and chronology
 sequence. Coordinator reads are explicitly classified and cannot be mistaken
 for downstream consumption. Receipts prove ledger delivery, not semantic use of
 opaque report prose or native-worker lifecycle.
+
+Canonical product-facing reports use the fixed `cortex/report/progress/v1`,
+`cortex/report/result/v1`, `cortex/report/synthesis/v1`, and
+`cortex/report/plan/v1` schemas. Storage-valid JSON always remains immutable
+evidence, including legacy or semantic-invalid reports. A semantic-valid
+canonical payload may carry one optional `source_text` value unchanged; it has
+no language tag or translated/original duplicate. Only a finalized, completed,
+semantic-valid canonical plan may produce a ready approval relation. This
+classification is evidence, not a scheduler or lifecycle gate.
+Planner-authored implementation microtasks, when present in plan evidence,
+are likewise evidence for the model-owned orchestration DAG: they carry
+ownership, dependencies, acceptance, and verification context but are not
+backend jobs, scheduler entries, workflow gates, or a worker-subtask copy in
+the standard Codex To-Do projection. The coordinator may use that evidence to
+add, remove, reorder, or rework worker stages while completed reports remain
+immutable.
 Independent delegations may proceed concurrently, and a missing worker report
 does not block replacement or synthesis. Status is `partial`, `completed`,
 `blocked`, or `failed`; it does not imply acceptance or native termination.
@@ -217,12 +233,21 @@ These checks stay delegated when read-only, performed before plan review, used
 to recover from a report gap, or explicitly requested from the coordinator.
 
 The coordinator communicates with the user in the user's latest meaningful
-language. Worker messages, worker reports, plans, normalized decisions,
-governance records, timeline records, and generated plan/report Markdown are
-English. Exact user text is retained only in labeled original fields beside
-separate English-normalized fields and is never treated as unquoted worker
-instruction. A task-required product/output language remains part of the
-delegated product contract.
+language. Worker-authored messages, report narrative, plans, normalized
+decisions, governance records, timeline records, and generated plan/report
+Markdown are English. Canonical product-facing reports and handoff payloads
+may carry one optional `source_text` value unchanged as labeled inert source
+material; they do not require language tags or translated/original duplicates.
+The existing task and decision contracts retain their exact original/language
+and English-normalized fields. Source text is never treated as an unquoted
+worker instruction. A task-required product/output language remains part of
+the delegated product contract.
+
+The native dispatch projection does not select an isolated worktree or
+workspace. Physical concurrent-writer isolation therefore remains an
+unconfirmed host capability outside this ledger; the package neither
+implements nor claims collision prevention until a supported host mechanism
+and lifecycle owner are supplied.
 
 Coordinator-facing communication follows the packaged result → impact → next
 step policy. It suppresses unchanged waiting updates, defaults to hiding opaque

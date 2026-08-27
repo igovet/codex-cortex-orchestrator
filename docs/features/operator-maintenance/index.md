@@ -4,7 +4,7 @@
 
 ## Purpose and boundary
 
-Cortex 12.0.0 includes a local administrator CLI for explicit maintenance of
+Cortex 12.1.0 includes a local administrator CLI for explicit maintenance of
 one existing V12 project shard. It is implemented by
 [v12_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/v12_maintenance.py)
 and is deliberately outside the public MCP registry. It adds no twelfth tool,

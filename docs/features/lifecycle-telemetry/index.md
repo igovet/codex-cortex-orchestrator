@@ -5,7 +5,7 @@
 This page is retained only as a historical link target for the V12 release
 documentation closure. Lifecycle telemetry is not an active Cortex V12 feature.
 
-Cortex 12.0.0 ships no native lifecycle hooks and no lifecycle hook script.
+Cortex 12.1.0 ships no native lifecycle hooks and no lifecycle hook script.
 Host session, subagent start/stop, coordinator stop, wait output,
 environment state, and compaction events are not ledger records, authorization,
 completion evidence, or recovery inputs.

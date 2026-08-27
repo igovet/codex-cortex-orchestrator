@@ -19,8 +19,8 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_BASE_VERSION = "12.0.0"
-VERSION_PATTERN = re.compile(r"^12\.0\.0\+codex\.\d{14}$")
+EXPECTED_BASE_VERSION = "12.1.0"
+VERSION_PATTERN = re.compile(r"^12\.1\.0\+codex\.\d{14}$")
 EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
@@ -239,9 +239,9 @@ def validate_manifest(plugin: Path) -> None:
     manifest = load_json(plugin / ".codex-plugin/plugin.json", "plugin manifest")
     version = manifest.get("version")
     if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
-        fail("plugin manifest must use Cortex 12.0.0 with a codex timestamp cachebuster")
+        fail("plugin manifest must use Cortex 12.1.0 with a codex timestamp cachebuster")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
-        fail("plugin manifest semantic version must be 12.0.0")
+        fail("plugin manifest semantic version must be 12.1.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare the bundled skills and MCP companion")
     interface = manifest.get("interface")
@@ -419,7 +419,7 @@ def validate_runtime(plugin: Path) -> None:
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         fail(f"V12 runtime cannot be imported: {exc}")
     if getattr(cortex, "SERVER_VERSION", None) != EXPECTED_BASE_VERSION:
-        fail("Cortex server must publish the 12.0.0 semantic version")
+        fail("Cortex server must publish the 12.1.0 semantic version")
     compact_probe = "task-" + ("a" * 64) + "-" + ("b" * 32)
     compact_ref = task_ref(compact_probe)
     if (

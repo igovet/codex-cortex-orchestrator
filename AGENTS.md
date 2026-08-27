@@ -51,32 +51,51 @@ runtime guarantees from those bundled sources without depending on this file.
   ordinary Codex. Create a fresh named session in the background, and deliver
   every workload command directly with `tmux send-keys`; do not open or drive a
   foreground console, use `codex exec`, an exec-mode wrapper, or a
-  detached/non-interactive Codex substitute. Use this bounded session
-  sequence, replacing `<repository-root>` with the exact checkout:
+  detached/non-interactive Codex substitute. `tmux` uses `$TMUX` to locate the
+  server for commands issued from an existing tmux pane. On hosts where that
+  nested-server path is denied with `Operation not permitted`, use a separate
+  tmux server socket and remove `$TMUX` only for the tmux management commands;
+  this keeps the Codex process interactive while avoiding the host's nested
+  terminal restriction. The independent socket is a tmux namespace, not a
+  filesystem or plugin-install location. Use this bounded session sequence,
+  replacing `<repository-root>` with the exact checkout:
 
   ```bash
   session_name=cortex-v12-smoke
-  tmux has-session -t "$session_name" 2>/dev/null && tmux kill-session -t "$session_name" || true
-  tmux new-session -d -s "$session_name" -c "<repository-root>" bash
-  tmux send-keys -t "$session_name" 'cd <repository-root> && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
+  socket_name=cortex-v12-smoke
+  tmux_cmd=(env -u TMUX tmux -L "$socket_name" -f /dev/null)
+  "${tmux_cmd[@]}" has-session -t "=$session_name" 2>/dev/null && \
+    "${tmux_cmd[@]}" kill-session -t "=$session_name" || true
+  "${tmux_cmd[@]}" new-session -d -s "$session_name" -c "<repository-root>" bash
+  "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" 'cd <repository-root> && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
   # After the launcher is ready, inject only the narrow smoke input:
-  tmux send-keys -t "$session_name" '<targeted test input>' C-m
-  tmux capture-pane -p -t "$session_name" -S -200 -E -1
-  tmux kill-session -t "$session_name" 2>/dev/null || true
+  "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" '<targeted test input>' C-m
+  "${tmux_cmd[@]}" capture-pane -p -t "=$session_name:0.0" -S -200 -E -1
+  "${tmux_cmd[@]}" kill-session -t "=$session_name" 2>/dev/null || true
   ```
 
-  The first `tmux` management commands run from the controlling shell; the
-  launch and smoke commands themselves must be injected into the named
-  session. Use bounded `capture-pane` output as the result record. If the
-  session exits early, the launcher prints an error, the exit marker is
-  non-zero, or the bounded capture has no usable result, report the live-dev
-  test as failed or unverified with the captured outcome; never infer success.
-  Before the scoped smoke, record the candidate target printed by the launcher
-  as `$HOME/.cortex-dev/.codex` and the refreshed cache version shown by the
-  launcher/synchronization output. Keep each test narrowly targeted to the
-  modified tool, function, or contract; do not turn a focused smoke into a
-  broad repository or release run. Record the exact session command, isolated
-  target, scope, outcome, cleanup, and any unrun checks.
+  The first tmux management commands run from the controlling shell; the
+  launcher and smoke commands themselves must be injected into the named pane.
+  `env -u TMUX` is scoped to tmux clients only and does not change the
+  candidate's `HOME`/`CODEX_HOME` or the environment inherited by Codex. The
+  `-L` socket is independent and must be used consistently for creation,
+  input, capture, and cleanup. `-f /dev/null` prevents an unrelated tmux
+  configuration from changing the smoke. Use bounded `capture-pane` output as
+  the result record. If either the normal socket or independent-socket form is
+  denied, do not fall back to a foreground console, `codex exec`, or a shell
+  pipe: classify the smoke as failed or unverified and report the host's
+  terminal/permission limitation. If the session exits early, the launcher
+  prints an error, the exit marker is non-zero, or the bounded capture has no
+  usable result, report the live-dev test as failed or unverified from the
+  capture; never infer success. Before the scoped smoke, record the candidate
+  target printed by the launcher as `$HOME/.cortex-dev/.codex` and the
+  refreshed cache version shown by the launcher/synchronization output. Keep
+  each test narrowly targeted to the modified tool, function, or contract; do
+  not turn a focused smoke into a broad repository or release run. Record the
+  exact session and socket commands, isolated target, scope, outcome, cleanup,
+  and any unrun checks. A successful smoke must end with the exact named
+  session gone; if the independent server has no other user sessions, also
+  run `"${tmux_cmd[@]}" kill-server` during cleanup.
 - Before finishing a change, run the smallest non-destructive check set that
   proves the affected behavior, then broaden validation in proportion to risk.
   State every unrun release gate or environmental limitation plainly.

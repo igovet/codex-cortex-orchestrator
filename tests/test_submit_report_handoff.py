@@ -53,10 +53,12 @@ class SubmitReportHandoffTests(unittest.TestCase):
                     mode="single",
                     report_type="plan",
                     status="completed",
-                    content={"summary": "Ready"},
+                    content={"schema": "cortex/report/plan/v1", "summary": "Ready", "scope": [], "stages": [], "verification": []},
                 )
 
                 self.assertEqual(receipt["report"]["report_type"], "plan")
+                self.assertEqual(receipt["report"]["storage_status"], "storage_valid")
+                self.assertEqual(receipt["report"]["semantic_status"], "semantic_valid")
                 self.assertEqual(receipt["approval_view"]["status"], "ready")
                 self.assertTrue(receipt["approval_view"]["approval_handle"])
                 self.assertEqual(

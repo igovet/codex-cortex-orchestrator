@@ -143,7 +143,11 @@ def _ready_approval_view(store: V12Store, report: Mapping[str, Any]) -> dict[str
         "source_sequence": view.get("source_sequence"),
         "content_digest": view.get("content_digest"),
         "approval_handle": None,
+        "semantic_status": report.get("semantic_status"),
     }
+    if report.get("semantic_status") != "semantic_valid":
+        approval.update({"status": "unavailable", "path": None, "source_sequence": None, "content_digest": None})
+        return approval
     if view.get("status") == "ready":
         approval["markdown_link"] = view.get("markdown_link")
         try:

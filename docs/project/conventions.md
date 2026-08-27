@@ -188,6 +188,9 @@
   summaries carry current stage/state, outcome, next owner/action, pipeline or
   review delta, changed/verified surface, exact report ref/digest, and residual
   risk or unrun checks so routine coordinator body reads are unnecessary.
+- Treat planner-authored implementation microtasks as evidence for the
+  model-owned orchestration DAG only. They are not backend jobs, scheduling
+  instructions, worker-subtask checklists, or report-body copies.
 - Do not add a server-owned model fallback, worker recovery route, wave/gate
   state machine, plan-approval gate, receipt-gated lifecycle, host binding, or
   lifecycle authorization. Coordinator-owned plan review and worker handoff

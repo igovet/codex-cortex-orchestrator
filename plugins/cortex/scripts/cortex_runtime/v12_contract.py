@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping
 
 
 IDENTIFIER_MAX_LENGTH = 160
@@ -57,6 +58,13 @@ MAX_REPORT_IDS = 20
 MAX_DECISION_IDS = 20
 
 REPORT_CONTENT_SCHEMA = "cortex/report-content/v1"
+CANONICAL_REPORT_SCHEMAS = {
+    "progress": "cortex/report/progress/v1",
+    "result": "cortex/report/result/v1",
+    "synthesis": "cortex/report/synthesis/v1",
+    "plan": "cortex/report/plan/v1",
+}
+REPORT_SEMANTIC_STATUSES = ("pending", "semantic_valid", "semantic_invalid", "legacy")
 REPORT_SINGLE_MAX_BYTES = 65_536
 REPORT_CHUNK_MAX_BYTES = 32_768
 REPORT_MAX_CHUNKS = 256
@@ -109,6 +117,41 @@ DECISION_TYPES = (
 DECISION_ATTRIBUTION = "user_via_coordinator"
 DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 DIGEST_RE = re.compile(DIGEST_PATTERN)
+
+
+def canonical_report_semantic_status(report_type: object, content: object) -> str:
+    """Classify fixed canonical report data without mutating stored evidence."""
+    if not isinstance(report_type, str) or report_type not in CANONICAL_REPORT_SCHEMAS:
+        return "legacy"
+    if not isinstance(content, Mapping):
+        return "legacy"
+    schema = content.get("schema")
+    if schema != CANONICAL_REPORT_SCHEMAS[report_type]:
+        return "legacy" if schema is None else "semantic_invalid"
+    fields: dict[str, tuple[str, ...]] = {
+        "progress": ("summary", "completed", "active", "blocked", "next_steps"),
+        "result": ("summary", "outcome", "changes", "verification", "risks"),
+        "synthesis": ("summary", "findings", "recommendations"),
+        "plan": ("summary", "scope", "stages", "verification"),
+    }
+    required = fields[report_type]
+    # source_text is the only optional user-authored value. The closed field
+    # set rejects language tags and original/translated or en/ru duplicates.
+    if any(not isinstance(key, str) or key not in {"schema", "source_text", *required} for key in content):
+        return "semantic_invalid"
+    if not isinstance(content.get("summary"), str) or not content["summary"].strip():
+        return "semantic_invalid"
+    if "source_text" in content and not isinstance(content["source_text"], str):
+        return "semantic_invalid"
+    for field in required:
+        if field == "summary":
+            continue
+        if report_type == "result" and field == "outcome":
+            if not isinstance(content.get(field), str):
+                return "semantic_invalid"
+        elif not isinstance(content.get(field), list):
+            return "semantic_invalid"
+    return "semantic_valid"
 
 
 def new_task_id(project_hash: str) -> str:

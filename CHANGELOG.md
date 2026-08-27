@@ -1,5 +1,13 @@
 # Changelog
 
+## [12.1.0] - 2026-08-28
+
+- Added fixed canonical semantic report schemas with a single unchanged
+  `source_text` value and non-gating semantic classification.
+- Restricted ready plan approval relations to completed semantic-valid
+  canonical plan reports while preserving legacy and invalid reports as
+  immutable evidence.
+
 ## [12.0.0] - 2026-08-27
 
 ### Added

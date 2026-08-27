@@ -36,7 +36,7 @@ from cortex_runtime.v12_service import (
 )
 
 
-SERVER_VERSION = "12.0.0"
+SERVER_VERSION = "12.1.0"
 SERVER_INSTRUCTIONS = (
     "Cortex v12 is a durable coordination ledger. All participants receive the "
     "same eleven tools. The model owns delegation, model/effort selection, governance, "

@@ -216,9 +216,11 @@
 - V11 databases are untouched and incompatible. Never migrate or adopt them for
   V12.
 - Every native worker commentary, update, message, final response,
-  tool-authored durable string, durable record, and derived view source is
-  English. Retain user text in explicit `*_original` fields; localize
-  coordinator-to-user summaries,
+  tool-authored durable string, worker-authored durable record, and derived
+  view source is English. Canonical product-facing report/handoff payloads may
+  carry one optional unchanged `source_text` value as inert source material;
+  task and decision contracts retain user text in explicit `*_original` fields.
+  Localize coordinator-to-user summaries,
   questions, decisions, and ready-view explanations.
 - The database is canonical; only plan and finalized-report Markdown views are
   host-private derived files under the V12 shard. Task, decision, delegation,

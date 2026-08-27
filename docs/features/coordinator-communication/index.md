@@ -4,7 +4,7 @@
 
 ## Purpose and boundary
 
-Cortex 12.0.0 ships a packaged coordinator-to-user communication policy. It
+Cortex 12.1.0 ships a packaged coordinator-to-user communication policy. It
 keeps user-facing commentary, questions, plan summaries, progress, decision
 summaries, artifact summaries, and final answers clear without creating a
 runtime loader, dispatcher, lifecycle hook, tool, or backend gate.
@@ -14,8 +14,11 @@ the latest meaningful user language, suppresses unchanged wait updates, hides
 opaque identifiers and ledger jargon by default, reveals technical detail
 progressively, and permits only safe optional contextual humor after the
 material fact. Coordinator-to-worker messages, native worker transcripts,
-reports, decision normalization, ledger prose, and human-view source content
-remain English; exact original user text remains only in its designated field.
+worker-authored report narrative, decision normalization, ledger prose, and
+human-view source content remain English. Canonical product-facing
+reports/handoffs may carry one optional unchanged `source_text` value as inert
+source material; existing task/decision original text remains in its designated
+field.
 
 For a Russian latest meaningful user message, coordinator-to-user communication
 is Russian while preserving the same outcome-first, progressively detailed

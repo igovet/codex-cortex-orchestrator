@@ -56,8 +56,12 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   `delegation_ref`, `report_type`, `status`, and one bounded JSON `content`
   value. For a durable plan, use `report_type="plan"` and
   `status="completed"`; `mode="single"` is required.
-  `content` is opaque report material: Cortex limits its JSON encoding and
-  size only, and never parses or semantically validates its prose. Do not add
+  Storage preserves canonical JSON unchanged. For a product-facing canonical
+  report, use the fixed `cortex/report/<type>/v1` schema and, when necessary,
+  one unchanged `source_text` value; never add language tags or
+  translated/original duplicate fields. Legacy or semantic-invalid evidence is
+  still stored, but only a semantic-valid completed canonical plan receives a
+  ready approval relation. Do not add
   `task_ref`, `task_id`, another worker's ID, or made-up identifiers. Submit
   only the advertised top-level field names: never wrap them in `report` or
   `body`, and never improvise aliases such as `title`, `reportType`,
