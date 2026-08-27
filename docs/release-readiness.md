@@ -70,7 +70,18 @@ overrides the root. `create_delegation.scope` is required non-empty text
 detailed execution belongs in `instructions`, and object-shaped scope is
 invalid. `create_delegation` also separates exact packaged `profile_name` from
 the human-readable `role`, requires loaded renderer proof, and returns one exact
-native-dispatch payload for one matching host spawn.
+native-dispatch payload for one matching host spawn. The successful response is
+dispatch-first: root-level `native_dispatch` and `renderer` proof are returned,
+and the complete rendered message occurs only once at
+`native_dispatch.native_arguments.message`. Copy it byte-for-byte into one
+matching host spawn. `read_delegation` retains the verbose brief and bounded
+chronology for recovery and is not required on the healthy path.
+`record_user_decision` uses one closed canonical request containing the task and
+subject refs/digest, decision type, English prompt, exact original response,
+English response normalization, and user language. Plan approval additionally
+requires the matching ready-view handle, view digest, and source sequence from
+one returned relation; missing, renamed, extra, or cross-mixed fields fail
+before mutation.
 `submit_governance_closure` requires `subject_type` and the existing compact
 task or initiative `subject_ref`; durable `subject_id` is evidence only.
 
@@ -367,13 +378,24 @@ behavior, or an interactive user flow.
 ## Installed and interactive verification
 
 End users install or update through the README's GitHub Marketplace flow. For
-an explicitly authorized final local-source synchronization from this checkout,
-repository developers use:
+an explicitly authorized interactive local-source synchronization from this
+checkout, repository developers use the isolated candidate helper:
 
 ```bash
-./scripts/sync-cortex.sh
-./scripts/sync-cortex.sh --check
+./scripts/cortex-dev
 ```
+
+It keeps the stable HOME/CODEX_HOME and V12 state outside the candidate by
+using the exact persistent `$HOME/.cortex-dev` directory. Reset is explicit and
+path-guarded:
+
+```bash
+./scripts/cortex-dev-reset --confirm
+```
+
+Direct `./scripts/sync-cortex.sh` remains the explicitly authorized
+source-checkout operation; run `--check` in the environment whose candidate or
+installation is being checked.
 
 Then start a new ordinary interactive Codex CLI session inside tmux. Do not use
 `codex exec`:

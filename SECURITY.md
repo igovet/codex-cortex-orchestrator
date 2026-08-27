@@ -420,8 +420,9 @@ require a delegated documentation-sync update under `docs/project/` and
 `docs/features/`, followed by a separate documentation-verifier worker. If
 there is no material impact, the coordinator obtains a finalized worker-owned
 report with an explicit English documentation-impact section and
-material/no-impact rationale, links its exact report ID in the final initiative,
-and cites that ID plus its returned digest in closure evidence. A self-asserted
+material/no-impact rationale, links its exact `report_ref` in the final initiative,
+and cites that compact ref plus its returned digest in closure evidence. A durable
+`report_id` may remain in evidence, but is not a callable public locator. A self-asserted
 `documentation_not_required` value is invalid. The coordinator does not
 manufacture an edit and may use the bounded routing exception
 to identify affected knowledge paths, but never edits or verifies those files;
@@ -433,9 +434,16 @@ backend lifecycle gate.
 The installable product lives below `plugins/cortex/`. Repository-root scripts,
 tests, documents, and `AGENTS.md` are development support and cannot silently
 change installed runtime behavior. End users install/update through the README's
-GitHub Marketplace flow. Repository developers use `./scripts/sync-cortex.sh`
-only for explicitly authorized local-source synchronization. Source-mode checks
-do not prove an installed cache or interactive host behavior.
+GitHub Marketplace flow. Repository developers use `./scripts/cortex-dev` for
+interactive development: it creates the exact persistent `$HOME/.cortex-dev`
+candidate directory, sets `HOME` and `CODEX_HOME` inside that candidate, runs
+the checkout synchronization there, and starts ordinary Codex. This keeps the
+stable runtime and its V12 state outside the candidate boundary. The paired
+`./scripts/cortex-dev-reset --confirm` helper removes only that exact dedicated
+candidate and refuses the active HOME, repository, broad paths, symlinks, and
+non-regular entries. Direct `./scripts/sync-cortex.sh` use remains an explicitly
+authorized local-source operation; source-mode checks do not prove an installed
+cache or interactive host behavior.
 
 V12 state uses a new namespace. V11 databases are not opened, migrated,
 deleted, or modified. V11 public tools and unfinished V11 tasks are incompatible
@@ -476,7 +484,11 @@ A useful report includes:
    `scope` is required non-empty text, object scope is rejected, exact packaged
    `profile_name` stays distinct from human `role`, model/effort are required
    together, closure requires `subject_type` plus matching `subject_ref`,
-   and user decisions bind the correct subject and digest.
+   and user decisions bind the correct subject and digest. For a plan approval,
+   verify the complete canonical decision payload: exact `response_original`,
+   separate English `response_en`, `prompt_en`, `user_language`, the finalized
+   plan ref/digest, and the matching ready-view handle, view digest, and source
+   sequence; malformed or mixed fields must fail without a mutation.
 4. Run the self-contained skill/profile lint and isolated V12 release/protocol
    test.
 5. Verify schema-v1 bootstrap, concurrent mutations, idempotency conflicts,
@@ -490,8 +502,11 @@ A useful report includes:
    validates backups before retention/restore, requires offline `MCP_STOPPED`
    restore acknowledgement, preserves canonical data during projection/backup
    cleanup, and writes neither project nor V11 state.
-8. Confirm one durable delegation maps to one exact returned host spawn;
-   `fork_turns="none"` and effort are explicit, Luna omits the native model
+8. Confirm one durable delegation maps to one exact returned host spawn; the
+   healthy `create_delegation` response carries root-level `native_dispatch` and
+   `renderer`, with the complete worker message only once in
+   `native_dispatch.native_arguments.message`; `read_delegation` is recovery
+   only. Confirm `fork_turns="none"` and effort are explicit, Luna omits the native model
    override, and Terra/Sol carry theirs.
 9. Run package validation, release-candidate validation, `git diff --check`, and
    `./scripts/sync-cortex.sh --dry-run`.

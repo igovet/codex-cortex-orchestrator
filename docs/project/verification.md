@@ -59,9 +59,13 @@ The V12 protocol evidence must prove:
   characters, object scope is rejected, and detailed execution belongs in
   `instructions`;
 - `create_delegation` requires a human-readable `role`, exact packaged
-  `profile_name`, and exact model/effort together; the returned native brief
-  contains the saved canonical root, unchanged coordinator `instructions`,
-  loaded profile proof/digest, and one exact native-dispatch payload;
+  `profile_name`, and exact model/effort together; its successful response is
+  dispatch-first with root-level `native_dispatch` and `renderer` proof, and
+  the complete rendered message occurs once at
+  `native_dispatch.native_arguments.message`; the host copies that payload
+  byte-for-byte into one spawn without a healthy-path `read_delegation` call;
+  `read_delegation` retains the verbose brief and bounded chronology for
+  recovery after host reconciliation;
 - `submit_governance_closure` requires `subject_type` plus the existing compact
   task or initiative `subject_ref`; durable `subject_id` is evidence only;
 - `submit_report` accepts the immutable types `progress`, `result`, `synthesis`,
@@ -84,12 +88,16 @@ The V12 protocol evidence must prove:
   worker handoff `read_reports` reads create immutable delivery receipts, which
   are not native lifecycle evidence;
 - `record_user_decision` accepts only an existing in-scope task, delegation,
-  plan, report, or same-project initiative subject; preserves exact
-  `response_original`, English `response_en`, `prompt_en`, language, attribution,
-  and supersession; and requires/validates the exact immutable digest for plan
-  and report subjects;
+  plan, report, or same-project initiative subject; accepts the complete
+  canonical field set (`task_ref`, subject type/ref/digest, decision type,
+  `prompt_en`, exact `response_original`, English `response_en`, and
+  `user_language`); preserves attribution and supersession; and
+  requires/validates the exact immutable digest for plan and report subjects;
 - only plan `decision_type=approve` requires the exact finalized plan
   revision/digest plus a current ready approval view and opaque approval handle;
+  the approval payload must also copy the matching view digest and source
+  sequence from that one returned ready relation; missing, renamed, extra, or
+  cross-mixed fields fail before mutation;
   plan `request_revision` and `cancel` preserve the exact finalized plan
   digest/response without volatile view binding, so intervening non-plan events
   cannot block saving feedback; silence/unrelated text is not approval, and
@@ -219,10 +227,11 @@ test commands themselves must run with `PYTHONDONTWRITEBYTECODE=1` and
 For every supported model, verify `low`, `medium`, `high`, `xhigh`, and `max`.
 Native projection must retain `fork_turns="none"` and the exact effort.
 
-For each durable delegation, verify the returned native-dispatch payload has
-the exact rendered worker message, task/delegation and input-report references,
-loaded-profile proof in the surrounding worker brief, and logical model/effort.
-The host call must copy its native arguments byte-for-byte exactly once. A
+For each durable delegation, verify the successful `create_delegation` response
+has root-level `native_dispatch` and `renderer` proof, with the exact rendered
+worker message only once at `native_dispatch.native_arguments.message`, and
+logical model/effort. The host call must copy its native arguments byte-for-byte
+exactly once without a healthy-path `read_delegation` call. A
 missing/duplicate spawn, ad-hoc message, shared worker across delegations,
 `fork_turns="all"`, omitted effort, explicit Luna model, or omitted Terra/Sol
 model is a failure.
@@ -295,12 +304,21 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode hea
 
 End users install through the GitHub Marketplace instructions in
 [README.md](../../README.md). Repository developers may synchronize the current
-checkout only after explicit user direction:
+checkout only after explicit user direction. For an interactive candidate
+session, use the isolated helper so the stable HOME/CODEX_HOME and V12 state
+remain untouched:
 
 ```bash
-./scripts/sync-cortex.sh
-./scripts/sync-cortex.sh --check
+./scripts/cortex-dev
 ```
+
+The helper synchronizes the checkout under the exact persistent
+`$HOME/.cortex-dev` candidate runtime, then launches ordinary Codex. Its
+companion reset requires `./scripts/cortex-dev-reset --confirm` and refuses
+stable, repository, broad, symlinked, or non-regular targets. Direct
+`./scripts/sync-cortex.sh` is still the explicitly authorized local-source
+operation; `--check` remains read-only and must be run in the environment whose
+candidate or installation is being checked.
 
 Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 eleven-tool catalog, bundled skill/profile content, schema-v1 path, host-private

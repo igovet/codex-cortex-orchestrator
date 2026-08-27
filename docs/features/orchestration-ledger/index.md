@@ -49,7 +49,7 @@ create_task
     │       ├── discovery / implementation / review / verification / security
     │       └── evidence may add/remove/reorder/retry/rework later nodes
     │
-    ├── create_delegation ──► direct worker brief ──► native worker
+    ├── create_delegation ──► native_dispatch + renderer proof ──► native worker
     │                                                │
     │                                                ▼
     │                                          submit_report
@@ -90,7 +90,7 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | --- | --- |
 | `create_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful `cortex/task-contract/v1` result fields; return preferred `task_ref` and canonical `task_id`. |
 | `inspect_task` | Use `task_ref` to return compact task history after `after_sequence`, bounded by `limit`, plus exact persisted continuation dispatches for host reconciliation. Continuations are lifecycle-unknown and require a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
-| `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return a direct worker brief carrying the saved root. Normal spawn uses that receipt directly; no immediate read is needed. |
+| `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return root-level `native_dispatch` and `renderer` proof. The complete message occurs once at `native_dispatch.native_arguments.message`; normal spawn uses that receipt directly, while `read_delegation` is recovery-only. |
 | `read_delegation` | Use the exact emitted `delegation_ref` plus `after_sequence` to resolve its owner task and return compact local history without a receipt. Do not supply `task_ref` or `task_id`; no legacy or direct-ID public shape is accepted. |
 | `submit_report` | Use the exact emitted `delegation_ref` for single or stable-reference `begin`/`append`/`finalize`/`abort` progress, result, synthesis, or plan evidence. It resolves the owner task; do not supply `task_ref` or `task_id`. |
 | `read_reports` | Use exact `report_refs` to resolve their owner task and read metadata or whole JSON chunks for 1–20 known reports in requested order, with section/cursor/integer-byte bounds. Do not supply `task_ref` or `task_id`. |
@@ -176,9 +176,12 @@ Plan reports add `review_policy=informational|required` and may name a
 finalized predecessor. A required review is a coordinator-owned pause for
 plan-dependent work, not a backend gate. `record_user_decision` preserves an
 exact response plus its English normalization and attribution
-`user_via_coordinator`. Plan/report decisions require the canonical digest;
-only plan `approve` also requires the current ready approval-view
-digest/source sequence and opaque handle. Plan `request_revision` and `cancel`
+`user_via_coordinator` through one closed canonical request containing task and
+subject refs/digest, decision type, English prompt, original response, English
+response, and user language. Plan/report decisions require the canonical
+digest; only plan `approve` also requires the current ready approval-view
+digest/source sequence and opaque handle copied from one returned relation. Plan
+`request_revision` and `cancel`
 preserve the exact plan digest/response without volatile view binding, so
 unrelated timeline events do not block feedback. Approval does not transfer to
 a revised report ID/digest, and clarification is not approval.

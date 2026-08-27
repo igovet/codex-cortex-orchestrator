@@ -203,13 +203,20 @@ class V12CompatibilityTests(unittest.TestCase):
         })
         delegation_ref = delegation["handles"]["delegation_ref"]
         self.assertIsInstance(delegation_ref, str)
-        worker_brief = delegation["worker_brief"]
-        native_dispatch = worker_brief["native_dispatch"]
-        self.assertEqual(native_dispatch["task_name"], worker_brief["native_task_name"])
-        self.assertEqual(native_dispatch["native_arguments"]["message"], worker_brief["worker_message"])
+        native_dispatch = delegation["native_dispatch"]
+        renderer = delegation["renderer"]
+        self.assertEqual(native_dispatch["task_name"], delegation["delegation"]["native_task_name"])
+        self.assertEqual(native_dispatch["selection"], {
+            "model": "gpt-5.6-luna", "reasoning_effort": "high",
+        })
         self.assertEqual(native_dispatch["native_arguments"]["reasoning_effort"], "high")
         self.assertEqual(native_dispatch["native_arguments"]["fork_turns"], "none")
         self.assertNotIn("model", native_dispatch["native_arguments"])
+        self.assertEqual(renderer["profile_name"], "planner")
+        self.assertEqual(renderer["profile_state"], "loaded")
+        self.assertNotIn("worker_brief", delegation)
+        self.assertNotIn("worker_message", delegation)
+        self.assertNotIn("native_dispatch", delegation["delegation"])
         plan = self._successful_tool("submit_report", {
             "delegation_ref": delegation_ref,
             "report_type": "plan",
@@ -232,15 +239,17 @@ class V12CompatibilityTests(unittest.TestCase):
             "subject_digest": approval_view["report_content_digest"],
             "decision_type": "approve",
             "prompt_en": "Approve this canonical plan?",
-            "response_original": "Approve.",
+            "response_original": "Одобряю план.",
             "response_en": "I approve the plan.",
-            "user_language": "en",
+            "user_language": "ru",
             "approval_handle": approval_view["approval_handle"],
             "approval_view_content_digest": approval_view["content_digest"],
             "approval_view_source_sequence": approval_view["source_sequence"],
         }
         accepted = self._successful_tool("record_user_decision", valid)
         self.assertEqual(accepted["decision"]["subject_digest"], valid["subject_digest"])
+        self.assertEqual(accepted["decision"]["response_en_excerpt"], valid["response_en"])
+        self.assertNotIn("response_original", accepted["decision"])
 
         successor = self._successful_tool("create_delegation", {
             "task_ref": task_ref,
@@ -330,7 +339,7 @@ class V12CompatibilityTests(unittest.TestCase):
         recovered = self._successful_tool("read_delegation", {
             "delegation_ref": created["handles"]["delegation_ref"], "after_sequence": 0,
         })
-        self.assertEqual(recovered["worker_brief"]["native_dispatch"], created["worker_brief"]["native_dispatch"])
+        self.assertEqual(recovered["worker_brief"]["native_dispatch"], created["native_dispatch"])
 
     def test_storage_unavailable_preserves_pending_decision_and_mutates_nothing(self) -> None:
         store = V12Store(self.project)

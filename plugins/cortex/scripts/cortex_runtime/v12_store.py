@@ -2107,7 +2107,17 @@ class V12Store:
             sequence = self._timeline(connection, event_type="delegation_created", entity_type="delegation", entity_id=identifier, payload={"delegation_id": identifier, "task_id": task["task_id"], "native_task_name": native_name}, task_id=task["task_id"], delegation_id=identifier)
             connection.execute("INSERT INTO delegations(delegation_id,project_hash,task_id,parent_delegation_id,native_task_name,objective,role,profile_name,scope,instructions,input_report_ids_json,input_decision_ids_json,model,reasoning_effort,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, task["task_id"], payload["parent_delegation_id"], native_name, payload["objective"], payload["role"], payload["profile_name"], payload["scope"], payload["instructions"], _canonical_json(payload["input_report_ids"], label="input_report_ids"), _canonical_json(payload["input_decision_ids"], label="input_decision_ids"), payload["model"], payload["reasoning_effort"], _now(), sequence))
             delegation = self._delegation(connection, identifier, task_id=task["task_id"])
-            return {"delegation": delegation, "worker_brief": self._worker_brief(connection, task, delegation)}
+            # Creation must be immediately dispatchable, but must not echo the
+            # full recovery brief as well as its native message.  Retain that
+            # detailed durable brief for ``read_delegation``; the creation
+            # receipt carries only the exact projection a host needs to spawn
+            # this delegation and the proof that its selected profile loaded.
+            worker_brief = self._worker_brief(connection, task, delegation)
+            return {
+                "delegation": delegation,
+                "native_dispatch": worker_brief["native_dispatch"],
+                "renderer": worker_brief["renderer"],
+            }
         return self._mutation("create_delegation", payload, idempotency_key, write)
 
     def _worker_brief(self, connection: sqlite3.Connection, task: Mapping[str, Any], delegation: Mapping[str, Any]) -> dict[str, Any]:

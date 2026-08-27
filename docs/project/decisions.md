@@ -103,7 +103,8 @@ arbitrary JSON. Delegation `scope` is required non-empty text (up to 65,536
 characters) describing the concise worker-ownership boundary; detailed
 execution belongs in `instructions`, and object scope is invalid. Governance
 closure names its existing task or initiative through required `subject_type`
-and `subject_id`.
+and compact `subject_ref`. A durable `subject_id` is evidence only and is not a
+callable public locator.
 
 Reports are immutable `progress`, `result`, or `synthesis` evidence with
 `partial`, `completed`, `blocked`, or `failed` status; `plan` is the fourth
@@ -117,13 +118,14 @@ Reports use one immutable lifecycle: `single`, or `begin` followed by sequential
 limited to 65,536 bytes; an appended chunk to 32,768 bytes; a report to 256
 chunks and 8 MiB. A failed or interrupted assembly resumes from its stored
 manifest and next index. It is never restarted at zero, overwritten, or treated
-as finalized; a replacement explicitly supersedes its predecessor. Report IDs
-can be passed to later delegations. Ordinary inspection creates no receipt;
-worker handoff reads create immutable delivery receipts. Report status and
+as finalized; a replacement explicitly supersedes its predecessor. Compact
+`report_ref` values can be passed to later delegations; durable report IDs remain
+evidence only. Ordinary inspection creates no receipt; worker handoff reads
+create immutable delivery receipts. Report status and
 receipt presence are not backend acceptance or native lifecycle evidence.
 
-`read_reports` preserves the requested order for at most 20 unique known IDs
-and is the only report body/chunk reader. It accepts an optional named-section
+`read_reports` preserves the requested order for at most 20 unique known
+`report_refs` and is the only report body/chunk reader. It accepts an optional named-section
 selection, returns no more than 65,536 content bytes per call, and supplies a
 scope-bound cursor for exact resumption; `max_bytes=0` returns metadata only.
 Task, delegation, and governance inspection use `after_sequence` plus `limit`,

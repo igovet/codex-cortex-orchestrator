@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Start an interactive Codex session backed by the isolated Cortex dev runtime.
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+project_dir="$(cd -- "${script_dir}/.." && pwd -P)"
+original_home="$(cd -- "${HOME:?HOME is required}" && pwd -P)"
+dev_home="${original_home}/.cortex-dev"
+
+if [[ $# -gt 0 && "${1}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/cortex-dev [codex arguments]
+
+Start ordinary interactive Codex with a persistent, isolated Cortex candidate
+runtime at $HOME/.cortex-dev. The stable HOME and CODEX_HOME are not modified.
+EOF
+  exit 0
+fi
+
+python3 -B - "${original_home}" "${dev_home}" "${project_dir}" <<'PY'
+import sys
+from pathlib import Path
+
+original_home = Path(sys.argv[1]).resolve(strict=True)
+dev_home = Path(sys.argv[2]).absolute()
+project_root = Path(sys.argv[3]).resolve(strict=True)
+expected = original_home / ".cortex-dev"
+if dev_home != expected or dev_home in {Path("/"), original_home, project_root}:
+    raise SystemExit("error: Cortex dev home must be the exact dedicated $HOME/.cortex-dev directory")
+for path, label in ((original_home, "HOME"), (project_root, "project root")):
+    if not path.is_dir() or path.is_symlink():
+        raise SystemExit(f"error: {label} must be a regular directory")
+current = dev_home
+while current != original_home:
+    if current.exists() and current.is_symlink():
+        raise SystemExit(f"error: Cortex dev home must not traverse symlinks: {current}")
+    current = current.parent
+if dev_home.exists() and not dev_home.is_dir():
+    raise SystemExit("error: Cortex dev home must be a directory")
+PY
+
+umask 077
+mkdir -p -- "${dev_home}/.codex"
+chmod 700 -- "${dev_home}" "${dev_home}/.codex"
+
+export HOME="${dev_home}"
+export CODEX_HOME="${HOME}/.codex"
+cd -- "${project_dir}"
+./scripts/sync-cortex.sh
+exec codex "$@"

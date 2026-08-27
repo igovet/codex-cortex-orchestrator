@@ -374,7 +374,28 @@ _HANDLES_SCHEMA = {
         "approval_view": _APPROVAL_VIEW_SCHEMA,
     },
 }
-_WORKER_BRIEF_SCHEMA = _result_object("Coordinator-owned worker brief and renderer proof; it creates no host lifecycle record or dispatch handle.", {
+_RENDERER_SCHEMA = _result_object("Packaged-profile renderer proof.", {
+    "version": _string(maximum=160, description="Exact packaged renderer version."),
+    "profile_name": _string(maximum=ROLE_MAX_LENGTH, description="Exact selected packaged profile name."),
+    "profile_state": _string(maximum=32, description="Renderer profile availability state."),
+    "profile_digest": _opaque_digest("SHA-256 digest of the exact loaded packaged profile.", nullable=True),
+    "common_policy_digest": _opaque_digest("SHA-256 digest of the common trusted renderer policy."),
+})
+_NATIVE_DISPATCH_SCHEMA = _result_object("Exact coordinator-selected native spawn projection; it is data, not a host receipt or lifecycle handle.", {
+    "task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Exact server-derived host-safe task_name. Copy native_dispatch.task_name byte-for-byte into spawn_agent; never derive, sanitize, or replace it."),
+    "selection": _result_object("Exact logical model and effort selected by the coordinator.", {
+        "model": _string(enum=NATIVE_MODELS, maximum=64, description="Exact logical model selection; no fallback is inferred."),
+        "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact selected effort; it is never escalated by the ledger."),
+    }),
+    "native_arguments": _result_object("Byte-exact host spawn arguments; Luna omits only its native model override.", {
+        "task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Exact server-derived host-safe task_name, identical to native_dispatch.task_name."),
+        "message": _string(maximum=TEXT_MAX_LENGTH, description="Exact rendered worker message."),
+        "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact native effort argument."),
+        "model": _string(enum=NATIVE_MODELS, maximum=64, description="Native override when supplied; omitted for configured-default Luna."),
+        "fork_turns": _string(enum=("none",), maximum=8, description="Required isolated native spawn setting."),
+    }),
+})
+_WORKER_BRIEF_SCHEMA = _result_object("Coordinator-owned recovery brief and renderer proof; it creates no host lifecycle record or dispatch handle.", {
     "delegation_id": _opaque_record_id("Durable delegation handle for this worker brief."),
     "task_id": _opaque_task_id("Durable task handle for this worker brief."),
     "native_task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Persisted exact server-derived native task name; it is not a lifecycle receipt."),
@@ -383,27 +404,8 @@ _WORKER_BRIEF_SCHEMA = _result_object("Coordinator-owned worker brief and render
         "content_digest": _opaque_digest("Exact finalized predecessor report manifest digest."),
         "assembly_state": _string(enum=("finalized",), maximum=16),
     })),
-    "renderer": _result_object("Packaged-profile renderer proof.", {
-        "version": _string(maximum=160, description="Exact packaged renderer version."),
-        "profile_name": _string(maximum=ROLE_MAX_LENGTH, description="Exact selected packaged profile name."),
-        "profile_state": _string(maximum=32, description="Renderer profile availability state."),
-        "profile_digest": _opaque_digest("SHA-256 digest of the exact loaded packaged profile.", nullable=True),
-        "common_policy_digest": _opaque_digest("SHA-256 digest of the common trusted renderer policy."),
-    }),
-    "native_dispatch": _result_object("Exact coordinator-selected native spawn projection; it is data, not a host receipt or lifecycle handle.", {
-        "task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Exact server-derived host-safe task_name. Copy native_dispatch.task_name byte-for-byte into spawn_agent; never derive, sanitize, or replace it."),
-        "selection": _result_object("Exact logical model and effort selected by the coordinator.", {
-            "model": _string(enum=NATIVE_MODELS, maximum=64, description="Exact logical model selection; no fallback is inferred."),
-            "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact selected effort; it is never escalated by the ledger."),
-        }),
-        "native_arguments": _result_object("Byte-exact host spawn arguments; Luna omits only its native model override.", {
-            "task_name": _string(maximum=64, pattern=r"^[a-z][a-z0-9_]*$", description="Exact server-derived host-safe task_name, identical to native_dispatch.task_name."),
-            "message": _string(maximum=TEXT_MAX_LENGTH, description="Exact rendered worker message."),
-            "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact native effort argument."),
-            "model": _string(enum=NATIVE_MODELS, maximum=64, description="Native override when supplied; omitted for configured-default Luna."),
-            "fork_turns": _string(enum=("none",), maximum=8, description="Required isolated native spawn setting."),
-        }),
-    }),
+    "renderer": _RENDERER_SCHEMA,
+    "native_dispatch": _NATIVE_DISPATCH_SCHEMA,
 })
 
 
@@ -423,6 +425,8 @@ _RESULT_PROPERTY_SCHEMAS: dict[str, dict[str, Any]] = {
         "reasoning_effort": _string(enum=NATIVE_REASONING_EFFORTS, maximum=16, description="Exact coordinator-selected effort."),
     }),
     "worker_brief": _WORKER_BRIEF_SCHEMA,
+    "renderer": _RENDERER_SCHEMA,
+    "native_dispatch": _NATIVE_DISPATCH_SCHEMA,
     "report": _COMPACT_REPORT_SCHEMA,
     "reports": _result_array("Requested report records in caller order; report chunks and bodies appear only in read_reports.", _COMPACT_REPORT_SCHEMA),
     "consumption_receipts": _result_array("Structural report-read receipts created by this call.", _REPORT_CONSUMPTION_RECEIPT_SCHEMA),
@@ -653,7 +657,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "outputSchema": _tool_output_schema("task", "delegations", "continuations", "reports", "decisions", "consumption_receipts", "timeline", "next_sequence", "has_more", optional_success_fields=("human_view",)),
         },
         "create_delegation": {
-            "description": "Create one new model-authored delegation and return its durable worker brief and native-dispatch payload. This creation-only tool never retrieves or replays an existing delegation: reuse the original complete payload only for an exact idempotent retry. Normal dispatch uses this receipt directly. For recovery, inspect_task returns the exact persisted delegation_ref and worker/native dispatch; reconcile that identity with the host, resume or wait if present, and spawn once only after absence is proven.",
+            "description": "Create one new model-authored delegation and return one compact, self-sufficient native-dispatch receipt plus loaded renderer proof. The complete rendered worker message occurs only in native_dispatch.native_arguments.message, so normal dispatch needs no read_delegation call. This creation-only tool never retrieves or replays an existing delegation: reuse the original complete payload only for an exact idempotent retry. read_delegation retains the verbose recovery brief; reconcile its persisted delegation_ref with the host, resume or wait if present, and spawn once only after absence is proven.",
             "inputSchema": _closed(
                 {
                     "task_ref": task_ref,
@@ -672,7 +676,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                 },
                 ("task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"),
             ),
-            "outputSchema": _tool_output_schema("delegation", "worker_brief", "replayed", optional_success_fields=("human_view",)),
+            "outputSchema": _tool_output_schema("delegation", "native_dispatch", "renderer", "replayed", optional_success_fields=("human_view",)),
         },
         "read_delegation": {
             "description": "Retrieve a read-only durable delegation, its trusted worker/native-dispatch payload, and bounded delegation-scoped chronology with its exact emitted delegation_ref.",

@@ -45,6 +45,8 @@ SUPPORT_SCRIPTS = (
     "scripts/cortex-host-preflight.py",
     "scripts/cortex-prompt-lint.py",
     "scripts/cortex_release_candidate.py",
+    "scripts/cortex-dev",
+    "scripts/cortex-dev-reset",
     "scripts/render_cortex_tool_catalog.py",
     "scripts/sync-cortex.sh",
     "scripts/validate-cortex-marketplace.py",

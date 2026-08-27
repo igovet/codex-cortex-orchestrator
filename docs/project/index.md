@@ -110,6 +110,8 @@ receipts; those receipts are evidence, not enforcement. Exact packaged
 - Coordinator communication: [coordinator-communication/SKILL.md](../../plugins/cortex/skills/coordinator-communication/SKILL.md)
 - User installation: GitHub Marketplace flow in [README.md](../../README.md)
 - Contributor source synchronization: [sync-cortex.sh](../../scripts/sync-cortex.sh)
+- Isolated candidate launcher: [cortex-dev](../../scripts/cortex-dev)
+- Candidate reset helper: [cortex-dev-reset](../../scripts/cortex-dev-reset)
 
 ## Runtime requirements
 
@@ -144,9 +146,13 @@ The native worker brief carries the saved root only for project working context.
 The four task/result arrays are non-empty meaningful English contracts before
 task creation; optional context cannot replace one. Every delegation carries
 the exact six-part knowledge block once, in order, with non-empty values before
-native spawn. Its returned native-dispatch payload is copied byte-for-byte into
-exactly one matching host spawn; Luna omits only the model override, all efforts
-are explicit, and one worker is never reused across durable delegations.
+native spawn. A successful `create_delegation` returns root-level
+`native_dispatch` and `renderer` proof; the complete rendered worker message
+occurs only once at `native_dispatch.native_arguments.message` and is copied
+byte-for-byte into exactly one matching host spawn. `read_delegation` is the
+verbose recovery surface and is not required on the healthy path. Luna omits
+only the model override, all efforts are explicit, and one worker is never
+reused across durable delegations.
 
 `submit_report` records immutable `progress`, `result`, `synthesis`, or `plan`
 evidence. It supports `single`, `begin`, sequential `append`, `finalize`, and
@@ -167,11 +173,17 @@ receipts. A worker handoff `read_reports` read may create an immutable page
 receipt for the exact consuming delegation.
 
 `record_user_decision` appends coordinator-asserted ordinary-chat evidence, not
-backend authority. Its one canonical request preserves an exact `*_original` response alongside English
-normalization, language, subject binding, and the required immutable digest for
-plan/report subjects. Only plan approval additionally binds a current ready
-approval view and opaque approval handle; plan revision/cancellation feedback
-preserves the exact plan digest and response without volatile view binding.
+backend authority. Its one canonical request contains `task_ref`,
+`subject_type`, `subject_ref`, `subject_digest`, `decision_type`, `prompt_en`,
+exact `response_original`, English `response_en`, and `user_language`. It
+preserves an exact `*_original` response alongside English normalization,
+language, subject binding, and the required immutable digest for plan/report
+subjects. Only plan approval additionally binds a current ready approval view
+with `approval_handle`, `approval_view_content_digest`, and
+`approval_view_source_sequence` copied from one returned relation; plan
+revision/cancellation feedback preserves the exact plan digest and response
+without volatile view binding. Missing, renamed, extra, or cross-mixed fields
+are rejected before mutation.
 Delegation `scope` is required non-empty text defining the
 concise worker-ownership boundary, while execution detail belongs in
 `instructions`; object-shaped scope is invalid. Closure requires `subject_type`

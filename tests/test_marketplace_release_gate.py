@@ -1024,7 +1024,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         "opaque immutable return data for every model caller",
         "The coordinator never calls `submit_report`",
         "Never create a report-only final initiative.",
-        "Each successful durable delegation returns one native-dispatch payload.",
+        "Each successful `create_delegation` returns root-level `native_dispatch` and",
         "makes exactly one corresponding host spawn",
             "copying `native_dispatch.task_name` and the nested native arguments byte-for-byte.",
         "Every native worker commentary/update, inter-worker message, final response, tool-authored durable string, and report is English",
@@ -1275,8 +1275,16 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         delegation_view = luna_delegation.get("delegation")
         require(isinstance(delegation_view, Mapping), "delegation receipt is durable")
         require(delegation_view.get("scope") == luna_args["scope"], "textual delegation scope round-trips in durable delegation")
-        worker_brief = luna_delegation.get("worker_brief")
-        require(isinstance(worker_brief, Mapping) and worker_brief.get("scope") == luna_args["scope"], "textual delegation scope round-trips in worker brief")
+        native_dispatch = luna_delegation.get("native_dispatch")
+        renderer = luna_delegation.get("renderer")
+        require(isinstance(native_dispatch, Mapping), "creation receipt is immediately native-dispatchable")
+        require("worker_brief" not in luna_delegation, "creation receipt omits the verbose recovery brief")
+        worker_message = native_dispatch.get("native_arguments", {}).get("message") if isinstance(native_dispatch.get("native_arguments"), Mapping) else None
+        require(isinstance(worker_message, str), "creation receipt carries the complete rendered message once")
+        require("worker_message" not in luna_delegation and "native_dispatch" not in delegation_view, "creation receipt does not duplicate the rendered worker message")
+        recovery = server.tool("read_delegation", {"delegation_id": delegation_a, "after_sequence": 0})
+        worker_brief = recovery.get("worker_brief")
+        require(isinstance(worker_brief, Mapping) and worker_brief.get("scope") == luna_args["scope"], "recovery brief retains textual delegation scope")
         require(worker_brief.get("project_root") == canonical_project_a, "worker brief carries the canonical task-stored project root")
         require(worker_brief.get("instructions") == KNOWLEDGE_CONTRACT_INSTRUCTIONS, "worker brief preserves the coordinator's structured knowledge contract")
         require("knowledge_requirements" not in worker_brief, "worker brief does not synthesize a second generic knowledge-routing block")
@@ -1295,16 +1303,17 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                 len(matches) == 1 and bool(matches[0].partition(":")[2].strip()),
                 f"worker brief retains exactly one non-empty knowledge-contract field: {field}",
             )
-        renderer = worker_brief.get("renderer") if isinstance(worker_brief, Mapping) else None
-        worker_message = worker_brief.get("worker_message") if isinstance(worker_brief, Mapping) else None
+        recovery_renderer = worker_brief.get("renderer") if isinstance(worker_brief, Mapping) else None
+        recovery_message = worker_brief.get("worker_message") if isinstance(worker_brief, Mapping) else None
         require(
-            isinstance(worker_message, str)
-            and "## Trusted operating policy" in worker_message
-            and "## Trusted advisory profile" in worker_message
-            and "## Untrusted task and delegation data" in worker_message,
+            isinstance(recovery_message, str)
+            and recovery_message == worker_message
+            and "## Trusted operating policy" in recovery_message
+            and "## Trusted advisory profile" in recovery_message
+            and "## Untrusted task and delegation data" in recovery_message,
             "worker renderer separates immutable policy and advisory profile from untrusted task data",
         )
-        normalized_worker_message = " ".join(worker_message.split())
+        normalized_worker_message = " ".join(recovery_message.split())
         for exact_reference in (
             f'"task_ref":"{_task_ref(task_a)}"',
             f'"delegation_ref":"{_record_ref(delegation_a, "delegation")}"',
@@ -1314,7 +1323,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             '"reasoning_effort":"xhigh"',
         ):
             require(
-                exact_reference in worker_message,
+                exact_reference in recovery_message,
                 f"worker renderer preserves exact native dispatch evidence: {exact_reference}",
             )
         for marker in (
@@ -1329,6 +1338,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             require(marker in normalized_worker_message, f"worker renderer preserves report-call ownership: {marker}")
         require(
             isinstance(renderer, Mapping)
+            and renderer == recovery_renderer
             and renderer.get("version") == "cortex/worker-message/v1"
             and renderer.get("profile_name") == "qa_engineer"
             and renderer.get("profile_state") == "loaded"
@@ -1336,12 +1346,10 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             and re.fullmatch(r"sha256:[0-9a-f]{64}", str(renderer.get("profile_digest"))) is not None
             and isinstance(renderer.get("common_policy_digest"), str)
             and re.fullmatch(r"sha256:[0-9a-f]{64}", str(renderer.get("common_policy_digest"))) is not None,
-            "worker brief carries verifiable profile and common-policy renderer attestations",
+            "creation and recovery carry identical verifiable profile attestations",
         )
         require(delegation_view.get("model") == "gpt-5.6-luna", "coordinator Luna selection is preserved")
         require(delegation_view.get("reasoning_effort") == "xhigh", "coordinator effort selection is preserved")
-        native_dispatch = worker_brief.get("native_dispatch")
-        require(isinstance(native_dispatch, Mapping), "delegation receipt returns one native dispatch projection")
         native_selection = native_dispatch.get("selection") if isinstance(native_dispatch, Mapping) else None
         native_arguments = native_dispatch.get("native_arguments") if isinstance(native_dispatch, Mapping) else None
         require(
@@ -1350,7 +1358,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         )
         require(
             isinstance(native_arguments, Mapping)
-            and native_arguments.get("message") == worker_message
+            and native_arguments.get("message") == recovery_message
             and native_arguments.get("reasoning_effort") == "xhigh"
             and native_arguments.get("fork_turns") == "none"
             and "model" not in native_arguments
@@ -1361,7 +1369,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         replayed_delegation = server.tool("create_delegation", luna_args)
         require(_delegation_id(replayed_delegation) == delegation_a and replayed_delegation.get("replayed") is True, "delegation replay is idempotent")
         require(
-            replayed_delegation.get("worker_brief", {}).get("native_dispatch") == native_dispatch,
+            replayed_delegation.get("native_dispatch") == native_dispatch,
             "idempotent delegation replay preserves the byte-identical native dispatch payload",
         )
         _require_idempotency_conflict(server, "create_delegation", {**luna_args, "scope": "Conflicting delegated scope."})
@@ -1779,7 +1787,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                 "input_decision_ids": [decision_id],
             },
         )
-        decision_brief = decision_consumer.get("worker_brief")
+        decision_brief = server.tool("read_delegation", {"delegation_id": _delegation_id(decision_consumer), "after_sequence": 0}).get("worker_brief")
         require(
             decision_consumer.get("delegation", {}).get("input_decision_ids") == [decision_id]
             and isinstance(decision_brief, Mapping)
@@ -3055,32 +3063,29 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 arguments,
             )
             identifier = _delegation_id(receipt)
-            brief = receipt.get("worker_brief")
-            require(isinstance(brief, Mapping), "every production delegation returns a worker-owned handoff brief")
+            dispatch = receipt.get("native_dispatch")
+            renderer = receipt.get("renderer")
+            require(isinstance(dispatch, Mapping), "every production delegation returns a self-sufficient native dispatch")
             require(
-                brief.get("project_root") == str(project.resolve())
-                and brief.get("instructions") == KNOWLEDGE_CONTRACT_INSTRUCTIONS,
-                "every worker receives the canonical root and the exact coordinator-compiled knowledge contract",
+                    isinstance(dispatch.get("native_arguments"), Mapping)
+                    and isinstance(dispatch["native_arguments"].get("message"), str)
+                    and "worker_brief" not in receipt
+                    and "worker_message" not in receipt
+                    and "native_dispatch" not in (receipt.get("delegation") or {}),
+                "every creation receipt contains exactly one complete host-ready worker message",
             )
-            for header in (
-                "Documents to consume first:", "Applicable requirements:", "Verification contract:",
-                "Ownership constraints:", "Known documentation state:", "Further documentation discovery:",
-            ):
-                require(header in str(brief.get("instructions") or ""), f"{role} receives knowledge-contract header: {header}")
             require(
-                brief.get("model") == model and brief.get("reasoning_effort") == effort,
-                "worker brief preserves the coordinator-selected logical model and effort exactly",
+                dispatch.get("selection") == {"model": model, "reasoning_effort": effort},
+                "creation dispatch preserves the coordinator-selected logical model and effort exactly",
             )
-            renderer = brief.get("renderer")
             require(
-                brief.get("profile_name") == profile_name
-                and isinstance(renderer, Mapping)
+                isinstance(renderer, Mapping)
                 and renderer.get("profile_name") == profile_name
                 and renderer.get("profile_state") == "loaded"
                 and re.fullmatch(r"sha256:[0-9a-f]{64}", str(renderer.get("profile_digest") or "")) is not None,
-                "every normal production delegation binds an explicit packaged profile and a loaded renderer digest",
+                "every normal production delegation includes its loaded packaged-profile proof",
             )
-            return identifier, brief
+            return identifier, receipt
 
         plan_delegation, _plan_brief = delegation(
             role="planner",
@@ -3214,6 +3219,9 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             input_report_ids=[plan_id],
             input_decision_ids=[decision_id],
         )
+        implementation_brief = server.tool(
+            "read_delegation", {"delegation_id": implementation_delegation, "after_sequence": 0},
+        ).get("worker_brief") or {}
         require(
             implementation_brief.get("input_report_ids") == [plan_id]
             and implementation_brief.get("input_decision_ids") == [decision_id]
@@ -3484,8 +3492,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 },
             )
             profile_delegation = profile_receipt.get("delegation") or {}
-            profile_brief = profile_receipt.get("worker_brief") or {}
-            profile_renderer = profile_brief.get("renderer") if isinstance(profile_brief, Mapping) else None
+            profile_renderer = profile_receipt.get("renderer")
             require(
                 profile_delegation.get("role") == f"Human release evidence role {index}"
                 and profile_delegation.get("profile_name") == profile_name

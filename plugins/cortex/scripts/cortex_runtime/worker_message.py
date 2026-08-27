@@ -67,13 +67,14 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   `delegation_ref`, `mode="begin"`, and `report_type`; copy its returned
   `report_ref`. Each `append` requires that exact `report_ref`, the returned
   `next_chunk_index`, a section, and opaque bounded JSON `content`.
-  `finalize` requires the same report ID, a status, and the exact
+  `finalize` requires the same `report_ref`, a status, and the exact
   `expected_chunk_count` and `expected_content_digest` returned after append.
-  Successors consume stable report IDs and manifest digests through `read_reports` (omit redundant
-  `task_id`), selected English
+  Successors consume compact `report_ref`/`report_refs` and manifest digests through
+  `read_reports` (omit redundant `task_id`), selected English
   sections, and bounded cursors, not copied full report bodies. Before project
-  work, read every supplied input report and verify its returned report ID,
-  finalized state, and manifest digest against the supplied reference. State
+  work, read every supplied input report and verify its returned compact
+  `report_ref`, finalized state, and manifest digest against the supplied
+  reference; any durable `report_id` is evidence-only. State
   those exact consumed references in your own finalized report. If an input
   report is incomplete, mismatched, or unreadable, submit a blocked/partial
   report; do not pretend it was consumed or launch a successor handoff.

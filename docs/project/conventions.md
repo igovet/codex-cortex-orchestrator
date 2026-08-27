@@ -254,8 +254,13 @@
   transcripts, and private diagnostics out of documentation, fixtures, issues,
   commits, and logs.
 - Keep end-user install/update on the README's GitHub Marketplace flow. Use
-  `./scripts/sync-cortex.sh` only for explicitly authorized repository
-  source synchronization; `--dry-run`/`--check` are validation modes.
+  `./scripts/cortex-dev` for interactive repository development: it isolates
+  `HOME` and `CODEX_HOME` under the exact persistent `$HOME/.cortex-dev`
+  candidate directory before synchronizing and launching Codex. Use
+  `./scripts/cortex-dev-reset --confirm` only to remove that dedicated
+  candidate; its path guards must never be weakened. Direct
+  `./scripts/sync-cortex.sh` remains an explicitly authorized repository
+  source-synchronization operation; `--dry-run`/`--check` are validation modes.
 - Delegate the smallest non-destructive checks that prove affected behavior,
   broaden in proportion to risk, and report every unrun release or live-host
   check.

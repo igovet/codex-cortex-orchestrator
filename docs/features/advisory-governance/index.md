@@ -125,15 +125,18 @@ review or a real product, scope, destructive, external, security, privacy, or
 risk decision is needed. It never changes public-tool availability.
 
 `record_user_decision` appends `user_via_coordinator` evidence for an exact
-task, plan, initiative, delegation, or report. Decision types are `approve`,
-`reject`, `request_revision`, `clarification`, `cancel`, `accept_risk`, and
-`override`. The record preserves the original response beside a separate
-English normalization and asserted user language. Plan/report decisions require
-the canonical `sha256:<64-lowercase-hex>` subject digest; a plan must already be
-finalized and completed. Only plan `approve` additionally requires a current
-ready `approval_view` and opaque approval handle. Plan `request_revision` and
-`cancel` preserve the exact finalized plan digest and response without volatile
-view binding, so intervening non-plan events cannot block feedback.
+task, plan, initiative, delegation, or report through one closed canonical
+request containing task and subject refs/digest, decision type, English prompt,
+exact original response, English response normalization, and asserted user
+language. Decision types are `approve`, `reject`, `request_revision`,
+`clarification`, `cancel`, `accept_risk`, and `override`. Plan/report decisions
+require the canonical `sha256:<64-lowercase-hex>` subject digest; a plan must
+already be finalized and completed. Only plan `approve` additionally requires a
+current ready `approval_view` with its exact opaque handle, view digest, and
+source sequence. Plan `request_revision` and `cancel` preserve the exact
+finalized plan digest and response without volatile view binding, so
+intervening non-plan events cannot block feedback. Missing or cross-mixed fields
+fail before mutation.
 Clarification is not approval, and approval of an old digest never transfers to
 a revised plan.
 

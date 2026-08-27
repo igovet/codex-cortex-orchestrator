@@ -60,7 +60,7 @@ immutable evidence and retain their normal project/reference validation.
 | --- | --- |
 | `create_task` | Create one exact task/result contract from its explicit root and return preferred `task_ref` plus canonical durable task ID. |
 | `inspect_task` | Read the task header, bounded chronology, and exact persisted continuation dispatches. A continuation is `ledger_unknown` for host lifecycle and must end in a finalized report, explicit blocked/partial handoff, or parent-linked replacement; native commentary alone is not a predecessor. |
-| `create_delegation` | Record bounded work, separate human role, exact packaged profile, model/effort, and relevant report/decision inputs; return the rendered worker brief and native-dispatch payload. |
+| `create_delegation` | Record bounded work, separate human role, exact packaged profile, model/effort, and relevant report/decision inputs; return root-level `native_dispatch` plus `renderer` proof. The complete message occurs once in `native_dispatch.native_arguments.message`; use it directly for normal spawning. |
 | `read_delegation` | Read one complete delegation contract and bounded compact chronology. |
 | `submit_report` | Create, chunk, finalize, or abort an immutable progress, result, synthesis, or plan report. |
 | `read_reports` | Read selected report manifests, sections, and chunks in requested report order with bounded resume. |
@@ -192,12 +192,13 @@ ID error means do not retry the shortened display—reuse the exact handle.
 is an opaque string for `read_reports` only; never convert, append, or exchange
 the two values.
 
-Each successful durable delegation returns one native-dispatch payload. The
-coordinator first verifies the surrounding worker projection's exact rendered
-message, task/delegation anchors, input-report references, profile proof, and
-logical model/effort, then makes exactly one corresponding host spawn by
-copying `native_dispatch.task_name` and the nested native arguments
-byte-for-byte. It never writes an ad-hoc
+Each successful `create_delegation` returns root-level `native_dispatch` and
+`renderer` proof. The complete rendered message occurs only once at
+`native_dispatch.native_arguments.message`. The coordinator first verifies the
+exact rendered message, task/delegation anchors, input-report references,
+profile proof, and logical model/effort, then makes exactly one corresponding
+host spawn by copying `native_dispatch.task_name` and the nested native
+arguments byte-for-byte. It never writes an ad-hoc
 prompt, edits or reassembles the payload,
 uses one worker for multiple delegations, leaves a delegation unspawned, or
 claims a spawn against a different delegation. The native arguments always use
@@ -209,9 +210,11 @@ reconciled by exact native handle, not duplicated blindly.
 `create_delegation` is creation-only: never pass a `delegation_ref` to retrieve
 or replay work. For an exact idempotent mutation retry, reuse the original
 complete creation payload and its returned retry handle. Otherwise retrieve the
-existing delegation and its trusted native-dispatch payload with exactly
+existing delegation's verbose recovery brief and trusted native-dispatch payload with exactly
 `read_delegation({delegation_ref, after_sequence})`, using the emitted compact reference
-and the durable sequence (or `0` for the first page).
+and the durable sequence (or `0` for the first page). Healthy creation does not
+need this read; use it only to recover an ambiguous or interrupted spawn after
+host reconciliation.
 
 The orchestrator's project-read exception is a closed direct-read allowlist,
 not tool or discovery authority. The coordinator may read only an already-known
@@ -283,10 +286,13 @@ same-task delegation with the exact report reference, then continue safely.
 ## User decisions
 
 Only coordinator policy may assert that ordinary-chat text is a direct user
-decision. `record_user_decision` stores the exact arbitrary-Unicode response,
-separate English normalization and prompt context, user language, subject type
-and exact compact subject ref, immutable subject digest when applicable, supersession, attribution,
-and chronology. The backend verifies binding and project/task scope but does
+decision. `record_user_decision` accepts one closed canonical field set:
+`task_ref`, `subject_type`, `subject_ref`, `subject_digest`, `decision_type`,
+`prompt_en`, exact `response_original`, English `response_en`, and
+`user_language`. It stores the exact arbitrary-Unicode response, separate
+English normalization and prompt context, user language, subject type and exact
+compact subject ref, immutable subject digest when applicable, supersession,
+attribution, and chronology. The backend verifies binding and project/task scope but does
 not authenticate the user or interpret the row as authorization.
 
 Plan `approve` binds only the exact immutable plan revision and digest and also

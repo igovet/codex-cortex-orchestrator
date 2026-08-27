@@ -258,8 +258,10 @@ declared work uses them. The original request, silence, implicit instruction,
 or inferred consent is never approval, and ordinary live approvals still govern
 destructive, external, privileged, or scope-expanding actions.
 
-Use the returned `create_delegation` worker brief and native-dispatch payload
-directly for normal spawning; do not create then immediately read. On resume,
+Use the root-level `native_dispatch` and `renderer` proof returned by
+`create_delegation` directly for normal spawning; the complete rendered message
+is only at `native_dispatch.native_arguments.message`, and no immediate
+`read_delegation` is needed. On resume,
 `inspect_task` returns exact persisted continuation dispatches with
 `dispatch_state=ledger_unknown`. Reconcile the exact native identity with the
 host: resume or wait when present, spawn once only when absence is proven, and
@@ -358,10 +360,12 @@ healthy path, prefer durable evidence in this order:
 3. Complete bounded routing, compile the delegation contract, and call
    `create_delegation` with that `task_ref`, the relevant report and decision
    refs, concise textual scope, and exact model/effort.
-4. Verify that the returned worker-message projection contains profile proof,
-   task and delegation anchors, the exact finalized input report refs and
-   manifest digests, and the selected logical model/effort, and that its nested
-   native-dispatch payload carries that exact rendered message and selection.
+4. Verify that the successful creation response contains root-level
+   `native_dispatch` and `renderer` proof, task/delegation anchors, the exact
+   finalized input report refs and manifest digests, and the selected logical
+   model/effort. The complete rendered worker message must occur only once at
+   `native_dispatch.native_arguments.message`; the nested native arguments are
+   the exact host payload.
 5. Make exactly one native host spawn for that durable delegation immediately:
    the returned task name uses the selected profile exactly (`planner`,
    `qa_engineer`, and so on); additional same-profile sibling delegations use
@@ -384,9 +388,11 @@ delegation and use that replacement's own returned dispatch exactly once.
 `create_delegation` is creation-only: never pass a `delegation_ref` to retrieve
 or replay work. For an exact idempotent mutation retry, reuse the original
 complete creation payload and its returned retry handle. Otherwise retrieve the
-existing delegation and its trusted native-dispatch payload with exactly
+existing delegation's verbose recovery brief and trusted native-dispatch payload with exactly
 `read_delegation({delegation_ref, after_sequence})`, using the emitted compact reference
-and the durable sequence (or `0` for the first page).
+and the durable sequence (or `0` for the first page). Healthy creation does not
+need this read; reconcile the returned delegation with the host only when
+recovering an ambiguous or interrupted spawn.
 
 Healthy writes are preferred durable evidence, not permission to start. Only
 `create_task` receives `project_root`. Task-anchored creation and governance
@@ -514,8 +520,11 @@ concatenate, shorten, substitute `native_task_name`, or infer a path. Present
 only that exact returned path with a localized summary and explicit
 approve/revise/cancel choices (or reject). End the turn. Silence, unrelated
 text, or a ledger row is not approval. Record approval with
-`record_user_decision` against the exact `approval_view` `report_ref`/digest,
-view digest/sequence, and approval handle. This relation proves only that the
+`record_user_decision` using its one closed canonical field set: `task_ref`,
+`subject_type`, `subject_ref`, `subject_digest`, `decision_type`, `prompt_en`,
+exact `response_original`, English `response_en`, and `user_language`. For
+`approve`, include the exact `approval_view` `report_ref`/digest, view
+digest/sequence, and approval handle. This relation proves only that the
 ready view existed before the decision write; MCP has no host-authenticated
 user-turn receipt, so the new-user-response requirement remains coordinator
 policy. When the work is plan-dependent, the coordinator supplies that compact
@@ -801,6 +810,8 @@ If no durable documentation changed, require one finalized worker-owned report
 with an explicit English documentation-impact section and material/no-impact
 rationale. An already-finalized implementation or verification report may serve
 as that documentation-impact report only when it contains the explicit section.
+The phrase “documentation-impact report ID” refers only to a durable
+`report_id` in evidence; public calls use the compact `report_ref`.
 Otherwise create a bounded English evidence-synthesis/documentation-impact
 delegation with the exact relevant report refs, dispatch its returned rendered
 brief, wait for that worker to submit and finalize its own synthesis report, and

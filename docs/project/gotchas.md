@@ -43,17 +43,20 @@
 ## Delegations and reports
 
 - `create_delegation` records work; it does not spawn a native worker or create
-  host authority.
-- Its successful worker brief returns one native-dispatch payload. Copy those
-  native arguments byte-for-byte into exactly one matching host spawn. Do not
-  create an ad-hoc prompt, use fewer workers than durable delegations, reuse one
-  worker across delegations, or silently inherit model/effort/fork settings.
+  host authority. Its successful response is dispatch-first: root-level
+  `native_dispatch` and `renderer` proof are returned, and the complete worker
+  message appears only once at
+  `native_dispatch.native_arguments.message`. Copy that payload byte-for-byte
+  into exactly one matching host spawn. Do not create an ad-hoc prompt, use
+  fewer workers than durable delegations, reuse one worker across delegations,
+  or silently inherit model/effort/fork settings.
 - Delegation `scope` is required non-empty text (maximum 65,536 characters) and
   should concisely name the worker's ownership boundary. Put execution detail
   in `instructions`; an object-shaped scope is a schema error.
-- Read the worker brief from the returned delegation or `read_delegation`.
-  It carries the saved canonical root for native working context. Reading
-  creates no receipt and no predecessor barrier.
+- `read_delegation` is recovery-only: it returns the verbose worker brief and
+  bounded chronology after host reconciliation. It is not needed after a
+  healthy `create_delegation`, creates no receipt, and creates no predecessor
+  barrier.
 - Before delegation creation and native spawn, the six knowledge sections must
   appear exactly once, in order, and contain delegation-specific values. Missing,
   empty, TODO/TBD/unknown, or generic placeholder sections are invalid.
@@ -69,8 +72,8 @@
   bytes, and one report has at most 256 chunks/8 MiB. Resume with the stored
   manifest and `next_chunk_index`; do not restart, skip an index, append after
   finalization/abort, or overwrite an immutable report. Supersede explicitly.
-- `read_reports` accepts no more than 20 distinct known IDs and returns them in
-  request order. Select only needed sections, observe its 65,536-byte read
+- `read_reports` accepts no more than 20 distinct known compact `report_refs` and
+  returns them in request order. Select only needed sections, observe its 65,536-byte read
   integer `max_bytes` budget, and continue with its scope-bound cursor. `max_bytes=0` is
   metadata-only recovery. Task and delegation
   inspections intentionally return
@@ -130,12 +133,13 @@
 - Missing closure never blocks a final answer. Disclose material missing
   evidence rather than an internal ledger ceremony.
 - `submit_governance_closure` needs `subject_type`, the exact existing task or
-  task-related initiative `subject_id`, one `verdict`, and bounded opaque JSON
-  `evidence`; neither ID is inferred. Omit optional risks/follow-ups to store
-  empty lists.
+  task-related initiative `subject_ref`, one `verdict`, and bounded opaque JSON
+  `evidence`; neither compact ref is inferred. A durable `subject_id` may appear
+  in returned evidence, but is not a callable public locator. Omit optional
+  risks/follow-ups to store empty lists.
 - Do not mix subject fields: task closures omit initiative status/completion
-  fields, while initiative closures use the exact returned initiative ID. The
-  closure call has no subject digest argument.
+  fields, while initiative closures use the exact returned compact
+  `initiative_ref`. The closure call has no subject digest argument.
 - `record_user_decision` is coordinator-asserted evidence. Preserve the exact
   ordinary-chat response in `response_original` and a separate English
   normalization in `response_en`; bind plan/report decisions to the exact
@@ -161,8 +165,9 @@
   worker only when existing reports do not already contain that section; the
   coordinator never calls `submit_report` or self-asserts the result.
 - The final no-impact initiative must link the exact task, the exact
-  documentation-impact report ID, and every other required report; closure
-  evidence cites their exact IDs and returned digests. A report-only initiative
+  documentation-impact `report_ref`, and every other required `report_ref`;
+  closure evidence cites those compact refs and returned digests. Durable report
+  IDs remain evidence only. A report-only initiative
   cannot surface reliably in task scope. Close the exact initiative, then verify
   task-scoped and initiative-scoped governance before claiming durable `ready`.
 - Missing documentation update or verification evidence calls for rework,
@@ -189,7 +194,12 @@
 ## Installation and validation
 
 - End users install/update through the README's GitHub Marketplace flow.
-- `./scripts/sync-cortex.sh` is the repository developer/local-source
+- `./scripts/cortex-dev` is the repository developer workflow: it keeps the
+  candidate's HOME, CODEX_HOME, plugin cache, config, and V12 state under the
+  exact persistent `$HOME/.cortex-dev` boundary before synchronizing. Reset
+  requires `./scripts/cortex-dev-reset --confirm` and cannot target stable or
+  arbitrary paths.
+- `./scripts/sync-cortex.sh` remains the repository local-source
   synchronization path, not the public installation replacement.
 - A source test does not prove the installed plugin or a live Codex session.
 - Live acceptance uses ordinary interactive `codex` inside tmux, never

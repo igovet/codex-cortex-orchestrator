@@ -761,8 +761,10 @@ apply.
    compact input report/decision refs, persisted server-derived native task
    name, and exact model/effort pair. The first worker of a profile uses that
    exact profile name; same-profile siblings receive `_2`, `_3`, and later
-   numeric suffixes. The returned worker brief carries the
-   corresponding immutable manifest digests.
+   numeric suffixes. The successful creation response carries root-level
+   `native_dispatch` and `renderer` proof; the complete rendered message is
+   present only once at `native_dispatch.native_arguments.message`, alongside
+   the corresponding immutable manifest digests.
    Detailed execution belongs in `instructions`; an object-shaped `scope` is
    invalid. The coordinator—not the backend—chooses profile, model, and effort.
    The successful receipt supplies one attested native-dispatch payload; the
@@ -842,13 +844,19 @@ A delegation is a durable, model-authored work record. Its required `scope` is
 a non-empty text string of at most 65,536 characters containing a concise
 boundary of worker ownership; detailed execution belongs in `instructions`, and
 object-valued scopes are invalid. `create_delegation` returns a stable
-compact `delegation_ref` plus a complete worker brief. The coordinator selects one exact
+compact `delegation_ref`, a compact root-level `native_dispatch` payload, and
+the loaded `renderer` proof. The complete rendered worker message appears only
+once, at `native_dispatch.native_arguments.message`, so the coordinator copies
+that receipt directly into exactly one matching host spawn and does not call
+`read_delegation` on the healthy path. The coordinator selects one exact
 packaged `profile_name` and verifies its loaded proof; the separate `role` is a
 bounded human-readable assignment label, never profile proof. An unavailable
 fallback is limited to a degraded non-durable dispatch with a complete role
-contract plus explicit disclosure. A worker can call
-`read_delegation`, perform its bounded work, and submit one or more immutable
-reports for that same delegation. The worker owns every `submit_report` call;
+contract plus explicit disclosure. `read_delegation` retains the verbose
+worker brief and bounded chronology for recovery; reconcile its exact
+`delegation_ref` with the host before resuming or spawning once. A worker can
+perform its bounded work and submit one or more immutable reports for that same
+delegation. The worker owns every `submit_report` call;
 the coordinator never submits plan, result, verification, synthesis, or
 documentation-impact evidence on its behalf. Ordinary inspection creates no
 receipt; a worker handoff `read_reports` call creates an immutable page
@@ -909,13 +917,21 @@ states distinguish informational, awaiting user, approved, revision requested,
 rejected, cancelled, and superseded plans.
 
 `record_user_decision` appends coordinator-attributed `user_via_coordinator`
-evidence for a task, plan, initiative, delegation, or report. It records one of
-`approve`, `reject`, `request_revision`, `clarification`, `cancel`,
-`accept_risk`, or `override`, preserving `response_original` beside the English
-`prompt_en`/`response_en` normalization and `user_language`. Plan/report
-decisions require the exact `sha256:<64hex>` subject digest; a plan must already
-be finalized and completed. A later decision may supersede an earlier decision
-but may never bind a different digest through replay.
+evidence for a task, plan, initiative, delegation, or report. Its canonical
+request contains `task_ref`, `subject_type`, `subject_ref`, `subject_digest`,
+`decision_type`, `prompt_en`, exact `response_original`, English `response_en`,
+and `user_language`; it records one of `approve`, `reject`, `request_revision`,
+`clarification`, `cancel`, `accept_risk`, or `override`. Plan/report decisions
+require the exact `sha256:<64hex>` subject digest; a plan must already be
+finalized and completed. A plan `approve` additionally requires the exact
+ready-view relation from one successful read: `approval_handle`,
+`approval_view_content_digest`, and `approval_view_source_sequence` matching
+the plan report ref/digest. Revision and cancellation remain bound to the
+immutable plan digest but do not require a volatile view handle. A later
+decision may supersede an earlier decision but may never bind a different
+digest through replay. Missing, extra, renamed, or cross-mixed fields are
+validation errors; retry with the exact complete returned values rather than
+guessing an alias.
 
 The record is evidence, not cryptographic proof that a particular human acted.
 For a plan marked `required`, and for the active `light`/`full` relation, the
@@ -1138,7 +1154,7 @@ from host metadata, thread identity, or process working directory.
 | --- | --- |
 | `create_task` | Create one durable project-scoped task from explicit `project_root`, exact original request and concrete language, English objective, and four non-empty meaningful result-contract arrays; return compact `task_ref`. |
 | `inspect_task` | Use `task_ref` to read compact task history after `after_sequence`, bounded by `limit`, and exact persisted continuation dispatches. Continuations are lifecycle-unknown: reconcile the exact native identity with the host and obtain a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
-| `create_delegation` | Use `task_ref` to persist bounded work with separate human `role`, exact packaged `profile_name`, required textual `scope`, exact model/effort, and selected report/decision inputs; return an attested worker brief and exact native-dispatch payload carrying the saved root. Use this receipt directly for normal spawning; do not create then immediately read. |
+| `create_delegation` | Use `task_ref` to persist bounded work with separate human `role`, exact packaged `profile_name`, required textual `scope`, exact model/effort, and selected report/decision inputs; return root-level `native_dispatch` plus `renderer` proof. The complete message appears once in `native_dispatch.native_arguments.message`; use this receipt directly for normal spawning. `read_delegation` is recovery-only. |
 | `read_delegation` | Use `delegation_ref` plus `after_sequence` to resolve and read compact history without a receipt; do not supply `task_ref` or `task_id`. |
 | `submit_report` | Use `delegation_ref` for a single body or stable-reference `begin`/`append`/`finalize`/`abort` report: `progress`, `result`, `synthesis`, or `plan`; do not supply `task_ref` or `task_id`. |
 | `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and integer `max_bytes` budget. Do not supply `task_ref` or `task_id`. Worker handoff reads additionally name the exact consuming delegation reference and leave immutable page receipts. |
@@ -1369,9 +1385,41 @@ Important entry points:
 | `plugins/cortex/skills/cortex-control/SKILL.md` | Authoritative eleven-tool, nonblocking, and task-anchor semantics |
 | `.agents/plugins/marketplace.json` | Repository-local Marketplace |
 | `scripts/sync-cortex.sh` | Synchronize and verify this local source checkout during development |
+| `scripts/cortex-dev` | Start an interactive Codex session in the persistent isolated `$HOME/.cortex-dev` candidate runtime |
+| `scripts/cortex-dev-reset` | Remove that candidate runtime only after explicit `--confirm` |
 
 Lifecycle hook code is not a V12 entry point and must be absent from the
 installable release.
+
+### Isolated candidate runtime
+
+Use the repository helper for interactive development. It resolves this
+checkout from the helper's own location, creates or reuses the dedicated
+`$HOME/.cortex-dev` directory with owner-only permissions, exports
+`HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.codex` inside that candidate
+runtime, synchronizes the checkout there, and then starts ordinary interactive
+Codex. The candidate HOME, `CODEX_HOME`, plugin cache, configuration, and V12
+state are isolated from the stable runtime. The normal checkout synchronization
+can still update source metadata or generated content and remove disposable
+plugin bytecode; the helper isolates those effects to the candidate workflow but
+does not make the source checkout immutable.
+
+```bash
+./scripts/cortex-dev
+```
+
+The helper accepts ordinary Codex arguments after the script name. Its `--help`
+mode only prints usage. The candidate reset helper requires an explicit
+confirmation token and refuses the active HOME, repository, broad paths,
+symlinked targets, and non-regular entries:
+
+```bash
+./scripts/cortex-dev-reset --confirm
+```
+
+Run reset only when the shell's active HOME is the original home that owns the
+dedicated `.cortex-dev` directory. The helper is deliberately limited to that
+exact candidate path; it cannot reset the stable runtime or arbitrary data.
 
 ### Recommended development loop
 
@@ -1383,16 +1431,18 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-host-preflight.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-prompt-lint.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_marketplace_release_gate.py
 
-# 3. Preview the update without writing
+# 3. Preview the source update without writing
 ./scripts/sync-cortex.sh --dry-run
 
-# 4. Install or reinstall only after explicit user direction
-./scripts/sync-cortex.sh
+# 4. Start the isolated candidate runtime; candidate state is isolated, while
+#    normal synchronization may update source metadata/generated content and
+#    remove disposable plugin bytecode
+./scripts/cortex-dev
 
 # 5. Open a new ordinary interactive Codex task and test the changed behavior
 
-# 6. Confirm that the installed copy matches the checkout
-./scripts/sync-cortex.sh --check
+# 6. Confirm the candidate environment's synchronized copy matches the checkout
+CORTEX_DEV_HOME="${HOME}/.cortex-dev" HOME="$CORTEX_DEV_HOME" CODEX_HOME="$CORTEX_DEV_HOME/.codex" ./scripts/sync-cortex.sh --check
 ```
 
 `sync-cortex.sh` validates package metadata, synchronizes `cortex@cortex`,
@@ -1401,7 +1451,12 @@ preserving unrelated configuration. In normal synchronization mode it also
 removes only disposable Python bytecode beneath `plugins/cortex` and refreshes
 the marked orchestrator routing table from `profiles.json`; read-only modes do
 not rewrite source state. It does not import, migrate, or modify user V11
-ledgers or unrelated plugin data.
+ledgers or unrelated plugin data. Run normal synchronization through
+`scripts/cortex-dev` during active development so those changes land only in
+the candidate runtime. Normal synchronization may update source metadata,
+generated content, and disposable plugin bytecode in the checkout, so direct
+normal synchronization is an explicitly authorized source-checkout operation,
+not the public Marketplace install flow.
 
 To select another Python interpreter:
 

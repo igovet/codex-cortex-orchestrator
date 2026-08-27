@@ -63,8 +63,8 @@ user-approval gate.
 
 The durable light/full governance gate is narrower: it validates the planner
 report/approval decision relation before downstream delegation. Its required
-relations are monotonic for the task: preserve the exact opaque plan report ID,
-plan digest, and approval decision ID in each successor input list. A failed,
+relations are monotonic for the task: preserve the exact opaque plan `report_ref`,
+plan digest, and approval decision `decision_ref` in each successor input list. A failed,
 partial, missing, or schema-rejected planner report requires correction, rework,
 or a parent-linked planner replacement—not a downgrade, native-prose
 substitute, explorer/QA/implementation bypass, or free-text instruction. After

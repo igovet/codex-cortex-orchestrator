@@ -165,11 +165,14 @@ text.
 
 `record_user_decision` records `approve`, `reject`, `request_revision`,
 `clarification`, `cancel`, `accept_risk`, or `override` against an exact task,
-plan, initiative, delegation, or report. For plan and report decisions, the
-decision is bound to the canonical `sha256:<64-lowercase-hex>` subject digest;
-a plan must be finalized and completed. Only `decision_type=approve` requires
-the exact server-issued `approval_handle` from a current ready `approval_view`,
-plus the matching plan digest, view digest, and view source sequence. The
+plan, initiative, delegation, or report. Its closed canonical request preserves
+the task/subject refs and digest, decision type, `prompt_en`, exact
+`response_original`, English `response_en`, and `user_language`. For plan and
+report decisions, the decision is bound to the canonical
+`sha256:<64-lowercase-hex>` subject digest; a plan must be finalized and
+completed. Only `decision_type=approve` requires the exact server-issued
+`approval_handle` from a current ready `approval_view`, plus the matching plan
+digest, view digest, and view source sequence. The
 `request_revision` and `cancel` decisions preserve the exact finalized plan
 digest and user response but do not require a volatile approval-view binding;
 intervening non-plan timeline events therefore do not block saving that

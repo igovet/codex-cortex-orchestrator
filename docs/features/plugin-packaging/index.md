@@ -29,6 +29,8 @@ and release-facing documentation must describe the same V12 contract.
 - [cortex_release_candidate.py](../../../scripts/cortex_release_candidate.py) builds the explicit source candidate and docs closure.
 - [verify-cortex-release.py](../../../scripts/verify-cortex-release.py) validates source or committed candidates.
 - [sync-cortex.sh](../../../scripts/sync-cortex.sh) supports repository-development/local-source synchronization and check/dry-run modes.
+- [cortex-dev](../../../scripts/cortex-dev) starts an interactive Codex session in the isolated persistent candidate runtime.
+- [cortex-dev-reset](../../../scripts/cortex-dev-reset) removes only that exact candidate after explicit confirmation.
 
 ## Current package contract
 
@@ -64,7 +66,10 @@ Reports support `single`, `begin`, `append`, `finalize`, and `abort` under
 bounded chunk, assembling, retained-content, and response limits. Plan reports
 carry informational/required review policy and immutable digest identity.
 `record_user_decision` appends coordinator-attributed original/English evidence
-for an exact subject; plan/report decisions require that digest. Neither review
+for an exact subject using one closed canonical field set. Plan/report decisions
+require the immutable subject digest; plan approval additionally requires the
+matching ready-view handle, view digest, and source sequence copied from one
+returned relation. Missing or mixed fields fail before mutation. Neither review
 nor decision is a backend admission rule.
 
 The bundled orchestration/control skills are the authoritative runtime model
@@ -111,9 +116,15 @@ End users add
 `https://github.com/igovet/codex-cortex-orchestrator` at Git ref `main` as a
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
-`./scripts/sync-cortex.sh` is for this repository's local source development
-and final explicitly authorized checkout synchronization. It must not replace
-the public GitHub Marketplace instructions. `--dry-run` and `--check` are
+`./scripts/cortex-dev` is the repository's interactive local source-development
+entry point. It creates/reuses the exact persistent `$HOME/.cortex-dev`
+candidate, isolates both `HOME` and `CODEX_HOME` (including plugin cache,
+configuration, and V12 state), synchronizes this checkout there, and starts
+ordinary Codex. Its paired `./scripts/cortex-dev-reset --confirm` helper is
+explicit and path-guarded; it refuses stable, repository, broad, symlinked,
+and non-regular targets. `./scripts/sync-cortex.sh` remains the explicitly
+authorized local-source synchronization operation and must not replace the
+public GitHub Marketplace instructions. `--dry-run` and `--check` are
 non-installing validation modes.
 
 The normal synchronization mode removes only disposable Python bytecode
