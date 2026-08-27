@@ -1,65 +1,89 @@
 ---
 name: context-compaction
-description: Internal Cortex recovery overlay. Load only for an explicitly activated Cortex task after compaction, reset, or a required bounded handoff; never select for ordinary work.
+description: Internal Cortex v12 recovery overlay. Load only for an explicitly activated Cortex task after compaction, reset, or a required bounded handoff.
 ---
 
-# Context Handoff
+# Durable Context Recovery
 
-Do not pass raw transcripts by default. Create a compact handoff containing only:
+Do not preserve raw transcripts by default. A bounded handoff should retain the
+current outcome and acceptance criteria, verified project facts and source
+references, material decisions, changed files, decisive checks, open user
+questions, and the next evidence-backed action. Never include secrets,
+credentials, personal data, private logs, or raw tool streams.
 
-1. Goal and acceptance criteria.
-2. Verified repository facts with file and symbol references.
-3. Decisions made and alternatives rejected.
-4. Changed files or current diff state.
-5. Commands run and decisive outputs.
-6. Open questions, blockers, and next action.
+For an active Cortex task, preserve `task_ref` as the mandatory ledger-recovery
+anchor, plus the absolute project root, governance mode, applicable knowledge
+paths and constraints, exact task/result contract, current plan/report digest,
+and known initiative, delegation, report, and user-decision IDs. Preserve each
+decision's subject type, subject ID, subject digest, supersession, and effect on
+the orchestration DAG revision. Preserve incomplete report assembly state: report ID, state,
+next chunk index, expected count/digest when known, and completed section
+manifest. Preserve verified projection paths with their source sequence or
+revision and digest, but treat them as publishable only after fresh
+reverification. These are references, not bearer capabilities.
 
-Use short summaries for older logs and results. Preserve exact error output only when the next agent needs it to reproduce or diagnose the issue. Never summarize secrets into the handoff. The parent thread should integrate the handoff; do not depend on private host databases or resume a failed subagent session.
+Preserve every ID, digest, and cursor byte-for-byte as opaque immutable return
+data. Never recover one by parsing, concatenating, normalizing, reconstructing,
+or appending a remembered suffix; copy it from a successful retained response
+or fresh inspection.
 
-Compactness is a prompt-writing preference, not a data limit. Keep a handoff
-concise when the information remains complete, but never truncate, omit, or
-reject material task, plan, result, event, question, answer, or artifact data
-to meet a byte, character, or file-size target. When the complete content is
-large, include it intact or use the exact authorized artifact/reference that
-contains it; the backend stores the complete submitted content.
+Also retain known live native child handles, task names, mutation scopes, and
+last observed host status as bounded private host context. They are not ledger
+rows, must not enter durable reports or user-facing links, and do not prove
+that a worker is still running. Preserve an unconsumed returned native-dispatch
+payload byte-for-byte with its exact delegation association and whether its one
+allowed host spawn was attempted; never reconstruct or redispatch it from
+memory. After compaction:
 
-## Cortex recovery after context reset or compaction
+1. Use `inspect_task` with the known preserved `task_ref` to recover the task
+   header and chronological frontier.
+2. Use `inspect_governance` when mode history, initiative links, dependencies,
+   or closure history affects the next decision.
+3. Use `read_delegation` or `read_reports` only for the specific details,
+   selected sections, and evidence needed next. Resume paginated reads with the
+   returned cursor. Resume an assembling report from its recorded
+   `next_chunk_index`; never restart or finalize from a guessed count/digest.
+4. Reverify any projection's containment, freshness, and digest before
+   publishing it. A stored path alone is never sufficient.
+5. Recover the current orchestration DAG from the exact task contract, persisted
+   initiative revision, immutable planner plan revision/digest, decisions, and
+   report evidence; then continue safe work. Never reconstruct or author the
+   project solution plan—the planner report remains its sole authority.
 
-When the coordinator resumes after automatic/manual compaction or a host
-`clear` context reset,
-do not assume that the active skill version, transient protocol reminders, or
-the last visible lifecycle response survived. Preserve the opaque `task_ref`
-and call `manage_orchestration` with `intent="inspect"` exactly once for that
-task. Treat the returned `context_handoff`, current pipeline, result refs, and
-relative step as the authoritative recovery snapshot. Reconcile
-`pending_dispatches` against the top-level inspect `dispatches` and invoke only
-those exact still-unstarted requests. Treat `active_workers[].host_agent_id` as
-the exact persisted native wait targets; never respawn them. A host wait-any
-form may omit explicit targets only while one of those bound workers is
-running. If an exact targeted wait receives a host identity-unavailable proof,
-the `PostToolUse` hook retires only that child as a terminal resultless stop;
-inspect it once, then use its exact failed continuation. A timeout, transport
-failure, generic error, or ambiguous multi-target error does not prove a child
-ended and never authorizes a replacement. Treat `stopped_workers` as non-waitable: consume their persisted
-result refs, surface durable question refs, or submit their exact failed result
-to `continue_orchestration` with its `worker` slot, `status`, `reason`, and
-the matching stopped-worker `dispatch_ref` so Cortex applies rework to that
-attempt only. Never use
-`followup_task` to repair a stopped worker's result error; it is permitted only
-for the same question-paused worker after the durable answer is recorded. Each pending dispatch retains its `dispatch_ref`, immutable
-`briefing_path`, and `briefing_digest`, but the coordinator must not read or
-inline the briefing. Do not call
-`start_orchestration` again, replay completed dispatches, or reconstruct state
-from a raw transcript. After rehydration, continue the existing task. Consume
-only the exact server-returned AttemptResult refs and completion summary; do
-not create, publish, or republish a separate human projection artifact during
+Only `create_task` receives `project_root`. Recovery calls use the preserved
+`task_ref`; do not resend the root as an MCP argument. Keep the root only for
+native worker working-directory context and a self-contained fallback brief.
+
+For the coordinator, recovery remains coordination-only: do not reopen target
+project files, search the repository, rerun commands, or reconstruct technical
+facts through direct analysis. Delegate any missing project discovery,
+implementation, or project verification and recover its evidence through a
+report ID.
+
+Recovery never permits root discovery or project-local artifact/state probes.
+Git, manifests, caches, worktrees, existence/absence or unchanged-state, and
+project-local `.codex` must be checked by a worker and returned as evidence.
+
+Do not promise ID-less enumeration. If `task_ref` was not preserved, do not
+claim that the ledger can rediscover the task from project root, filesystem,
+session, or other task content. Continue from safely preserved native evidence
+and self-contained worker briefs when possible, or disclose the ledger context
+loss. Never invent an ID or create a duplicate task merely to simulate
 recovery.
 
-When the resumed session is a worker (`SubagentStart`/worker `SessionStart`),
-the lifecycle hook rehydrates only the exact attempt-bound immutable briefing
-(assignment), compiled plan unit, and user-intent artifact, each with its
-SHA-256 digest. The worker must verify those artifacts and continue the same
-attempt; ambiguous identity or missing artifacts is internal recovery evidence
-that Cortex routes to a diagnostic worker. It must not
-reconstruct assignment, plan, intent, or result contract from the transcript,
-or read the shared ledger.
+If a native child was known live before compaction, reconcile that exact handle
+through ordinary host coordination. Continue or follow it up only when the
+handle and ownership scope remain known and safe. When its state is unknown,
+do not overlap mutation ownership; wait for bounded host evidence when useful,
+or create a `parent_delegation_id`-linked replacement after containing the
+scope. A durable delegation with no report does not reveal whether the native
+child never started, is running, stopped, or was abandoned.
+
+If the ledger, selected report read, or projection service is unavailable,
+retain sanitized native evidence and continue through a complete self-contained
+worker brief when safe. Disclose the durability or human-view limitation and
+never invent recovered rows, report content, decisions, or links.
+
+Missing closure, partial or unavailable reports, unfinished linked work, and
+unresolved dependencies remain advisory context; none prevents native
+delegation or an honest final answer.

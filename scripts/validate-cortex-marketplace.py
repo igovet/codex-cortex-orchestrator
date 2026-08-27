@@ -1,22 +1,149 @@
 #!/usr/bin/env python3
-"""Validate this repository's local Codex marketplace contract."""
+"""Validate the repository-local Cortex V12 plugin package."""
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
+import re
 import stat
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
+
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_NAME = "cortex"
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_SKILLS = {"adaptive-pipeline", "content-safety", "context-compaction", "orchestrator", "cortex-control", "documentation-sync", "find-skills", "knowledge-harvest", "output-validation", "progress-accounting"}
+EXPECTED_BASE_VERSION = "12.0.0"
+VERSION_PATTERN = re.compile(r"^12\.0\.0\+codex\.\d{14}$")
+EXPECTED_SKILLS = (
+    "adaptive-pipeline",
+    "content-safety",
+    "context-compaction",
+    "cortex-control",
+    "documentation-sync",
+    "find-skills",
+    "knowledge-harvest",
+    "orchestrator",
+    "output-validation",
+    "progress-accounting",
+)
+EXPECTED_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
+EXPECTED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+BASE_V12_TOOLS = (
+    "create_task",
+    "inspect_task",
+    "create_delegation",
+    "read_delegation",
+    "submit_report",
+    "read_reports",
+    "set_governance_mode",
+    "record_initiative",
+    "inspect_governance",
+    "submit_governance_closure",
+    "record_user_decision",
+)
+SUPPORTED_V12_CATALOGUES = (BASE_V12_TOOLS,)
+TASK_ANCHORED_TOOLS = {
+    "inspect_task", "create_delegation", "set_governance_mode", "record_initiative",
+    "inspect_governance", "submit_governance_closure", "record_user_decision",
+}
+EXPECTED_TOOL_FIELDS = {
+    "create_task": {
+        "project_root", "objective", "user_request_original", "user_language", "task_contract_version",
+        "requirements", "constraints", "acceptance_criteria", "verification_plan", "context",
+        "idempotency_key",
+    },
+    "inspect_task": {"task_ref", "after_sequence", "limit"},
+    "create_delegation": {
+        "task_ref", "objective", "role", "profile_name", "scope", "instructions",
+        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "approval_decision_ref", "model", "reasoning_effort",
+        "idempotency_key",
+    },
+    "read_delegation": {"delegation_ref", "after_sequence", "limit"},
+    "submit_report": {
+        "delegation_ref", "mode", "report_type", "status", "content", "report_ref",
+        "chunk_index", "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en",
+        "supersedes_report_ref", "review_policy", "idempotency_key",
+    },
+    "read_reports": {"report_refs", "sections", "cursor", "max_bytes", "consumer_delegation_ref", "reader_kind"},
+    "set_governance_mode": {
+        "task_ref", "mode", "rationale", "reason", "risk_factors", "source", "initiative_ref", "idempotency_key",
+    },
+    "record_initiative": {
+        "task_ref", "goal", "initiative_ref", "parent_initiative_ref", "risk", "status", "dependency_refs",
+        "linked_task_refs", "linked_delegation_refs", "linked_report_refs", "linked_decision_refs", "notes", "idempotency_key",
+    },
+    "inspect_governance": {"task_ref", "initiative_ref", "after_sequence", "limit"},
+    "submit_governance_closure": {
+        "task_ref", "subject_type", "subject_ref", "verdict", "evidence", "unresolved_risks", "follow_ups",
+        "initiative_status", "completion_notes", "idempotency_key",
+    },
+}
+EXPECTED_TOOL_REQUIRED = {
+    "create_task": {
+        "project_root", "objective", "user_request_original", "user_language",
+        "task_contract_version", "requirements", "constraints",
+        "acceptance_criteria", "verification_plan",
+    },
+    "inspect_task": {"task_ref"},
+    "create_delegation": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"},
+    "read_delegation": {"delegation_ref", "after_sequence"},
+    "submit_report": {"delegation_ref"},
+    "read_reports": {"report_refs"},
+    "set_governance_mode": {"task_ref", "mode"},
+    "record_initiative": {"task_ref", "goal"},
+    "inspect_governance": {"task_ref"},
+    "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
+    "record_user_decision": {
+        "task_ref", "subject_type", "subject_ref", "decision_type", "prompt_en",
+        "response_original", "response_en", "user_language",
+    },
+}
+EXPECTED_DECISION_FIELDS = {
+    "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en",
+    "response_original", "response_en", "user_language", "approval_handle",
+    "approval_view_content_digest", "approval_view_source_sequence", "supersedes_decision_ref",
+    "idempotency_key",
+}
+ACTIVE_RUNTIME_FILES = {
+    "__init__.py",
+    "canonical_json.py",
+    "delegation.py",
+    "mcp_api.py",
+    "model_routing.py",
+    "public_contracts.py",
+    "routing.py",
+    "v12_contract.py",
+    "v12_maintenance.py",
+    "v12_projections.py",
+    "v12_service.py",
+    "v12_store.py",
+    "worker_message.py",
+}
+EXPECTED_SKILL_RESOURCES = {
+    Path("cortex-control/agents/openai.yaml"),
+    Path("knowledge-harvest/references/feature-census.md"),
+}
+RETIRED_PLUGIN_PATHS = {
+    Path("hooks"),
+    Path("scripts/cortex_hook.py"),
+    Path("scripts/cortex-launcher"),
+    Path("scripts/cortex_runtime/core"),
+    Path("scripts/cortex_runtime/record_report"),
+}
+RETIRED_RUNTIME_MARKERS = (
+    "reliability_recovery_target",
+    "Luna-to-Terra-to-Sol",
+    "SubagentStop",
+    "read_worker_wave",
+    "wait_agent",
+)
 
 
 def fail(message: str) -> NoReturn:
@@ -45,24 +172,34 @@ def reject_symlinks(root: Path, label: str) -> None:
     for directory, names, files in os.walk(root, followlinks=False):
         base = Path(directory)
         for name in [*names, *files]:
+            if (base / name).is_symlink():
+                fail(f"{label} must not contain symlinks: {(base / name).relative_to(root)}")
+
+
+def reject_plugin_residue(plugin: Path) -> None:
+    """Reject bytecode and retired V11 control-plane payloads before packaging."""
+    for directory, names, files in os.walk(plugin, followlinks=False):
+        base = Path(directory)
+        for name in [*names, *files]:
             path = base / name
-            if path.is_symlink():
-                fail(f"{label} must not contain symlinks: {path.relative_to(root)}")
+            relative = path.relative_to(plugin)
+            if any(part == "__pycache__" for part in relative.parts):
+                fail(f"plugin source contains Python bytecode state: {relative}")
+            if path.suffix in {".pyc", ".pyo"}:
+                fail(f"plugin source contains Python bytecode: {relative}")
+            if relative in RETIRED_PLUGIN_PATHS or any(retired in relative.parents for retired in RETIRED_PLUGIN_PATHS):
+                fail(f"plugin source retains retired V11 hook/control-plane residue: {relative}")
 
 
-def render_profile_catalog(profiles: list[dict[str, object]]) -> str:
-    by_name = {str(item["name"]): item for item in profiles}
-    lines = [
-        "| Profile | Route | Access | Select when | Avoid when |",
-        "| --- | --- | --- | --- | --- |",
-    ]
-    for name in sorted(by_name):
-        profile = by_name[name]
-        lines.append(
-            f"| `{name}` | {profile['route_category']} | {profile['sandbox']} | "
-            f"{profile['select_when']} | {profile['avoid_when']} |"
-        )
-    return "\n".join(lines)
+def load_json(path: Path, label: str) -> dict[str, Any]:
+    regular_file(path, label)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        fail(f"{label} is invalid: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"{label} must contain an object")
+    return payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,431 +208,358 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    root = parse_args().root.resolve(strict=False)
-    regular_directory(root, "repository root")
-    marketplace = root / ".agents/plugins/marketplace.json"
-    plugin = root / "plugins/cortex"
-    retired_marketplace = root / "marketplace"
-    regular_file(marketplace, "root marketplace manifest")
-    regular_directory(plugin, "canonical plugin source")
-    if retired_marketplace.exists() or retired_marketplace.is_symlink():
-        fail("retired nested marketplace artifacts must not ship")
-    reject_symlinks(root / ".agents", "root marketplace metadata")
-    reject_symlinks(plugin, "canonical plugin source")
-    runtime_path = str(plugin / "scripts")
-    if runtime_path not in sys.path:
-        sys.path.insert(0, runtime_path)
-    try:
-        from cortex_runtime.prompt_compiler import lint_prompt_sources
-        from cortex_runtime.prompt_eval import run_prompt_evals
-        prompt_issues = lint_prompt_sources(root)
-        if prompt_issues:
-            fail("prompt contract lint failed: " + "; ".join(prompt_issues))
-        run_prompt_evals(fixtures_path=plugin / "prompt-evals" / "fixtures.json")
-    except (AssertionError, OSError, RuntimeError, ValueError) as exc:
-        fail("prompt contract validation failed: " + str(exc))
-    try:
-        payload = json.loads(marketplace.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        fail(str(exc))
-    if not isinstance(payload, dict) or payload.get("name") != EXPECTED_NAME:
-        fail(f"marketplace name must be {EXPECTED_NAME!r}")
-    interface = payload.get("interface")
+def validate_marketplace(root: Path, plugin: Path) -> None:
+    marketplace = load_json(root / ".agents/plugins/marketplace.json", "root marketplace manifest")
+    if marketplace.get("name") != EXPECTED_PLUGIN:
+        fail("marketplace name must be 'cortex'")
+    interface = marketplace.get("interface")
     if not isinstance(interface, dict) or not isinstance(interface.get("displayName"), str) or not interface["displayName"].strip():
-        fail("interface.displayName must be a non-empty string")
-    plugins = payload.get("plugins")
-    if not isinstance(plugins, list) or len(plugins) != 1:
-        fail("plugins must contain exactly the repository-managed plugin")
+        fail("marketplace interface.displayName must be a non-empty string")
     expected = {
         "name": EXPECTED_PLUGIN,
         "source": {"source": "local", "path": "./plugins/cortex"},
         "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
         "category": "DeveloperTools",
     }
-    if plugins[0] != expected:
-        fail("plugin entry does not match the repo-source installation policy")
+    if marketplace.get("plugins") != [expected]:
+        fail("marketplace must contain exactly the repository-managed Cortex plugin entry")
+    if (root / "marketplace").exists() or (root / "marketplace").is_symlink():
+        fail("retired nested marketplace artifacts must not ship")
     if (plugin / ".codex").exists():
-        fail("plugin source must not contain plugin-local .codex runtime state")
-    try:
-        manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
-        mcp = json.loads((plugin / ".mcp.json").read_text(encoding="utf-8"))
-        hooks = json.loads((plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        fail(f"invalid plugin companion file: {exc}")
+        fail("plugin source must not contain plugin-local runtime state")
+
+
+def validate_manifest(plugin: Path) -> None:
+    manifest = load_json(plugin / ".codex-plugin/plugin.json", "plugin manifest")
     version = manifest.get("version")
-    base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "10.0.7":
-        fail("plugin manifest must identify cortex at release version 10.0.7")
+    if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
+        fail("plugin manifest must use Cortex 12.0.0 with a codex timestamp cachebuster")
+    if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
+        fail("plugin manifest semantic version must be 12.0.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
-        fail("plugin manifest must declare its skills and MCP companion")
-    launcher = plugin / "scripts/cortex-launcher"
-    regular_file(launcher, "Cortex launcher")
-    if not launcher.stat().st_mode & 0o111:
-        fail("Cortex launcher must have executable permissions")
-    launcher_source = launcher.read_text(encoding="utf-8")
-    if "CORTEX_PYTHON" not in launcher_source or "exec" not in launcher_source:
-        fail("Cortex launcher must resolve CORTEX_PYTHON and exec the selected runtime")
-    try:
-        profile_contract = json.loads((plugin / "profiles.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        fail(f"invalid profile contract: {exc}")
-    if profile_contract.get("schema") != "cortex/profile-contract/v1" or len(profile_contract.get("profiles", [])) != 21:
-        fail("profile contract must define exactly 21 Cortex profiles")
-    profile_fields = {
-        "name", "filename", "sandbox", "route_category", "gates",
-        "description", "select_when", "avoid_when",
-    }
-    for item in profile_contract["profiles"]:
-        if not isinstance(item, dict) or not profile_fields.issubset(item):
-            fail("every profile must define complete identity and routing metadata")
-        if item.get("sandbox") not in {"read-only", "workspace-write"}:
-            fail(f"invalid profile sandbox: {item.get('name')}")
-        if item.get("route_category") not in {"automatic", "manual"}:
-            fail(f"invalid profile route category: {item.get('name')}")
-        gates = item.get("gates")
-        if not isinstance(gates, list) or len(gates) != len(set(gates)):
-            fail(f"invalid or duplicate profile gates: {item.get('name')}")
-        if item.get("route_category") == "automatic" and not gates:
-            fail(f"automatic profile must own a gate: {item.get('name')}")
-        if item.get("route_category") == "manual" and gates:
-            fail(f"manual profile must be implementation-selected: {item.get('name')}")
-        if not all(isinstance(item.get(field), str) and item[field].strip() for field in ("description", "select_when", "avoid_when")):
-            fail(f"incomplete profile routing text: {item.get('name')}")
-    profile_names = {item["name"] for item in profile_contract["profiles"]}
-    model_routing = profile_contract.get("model_routing")
-    if not isinstance(model_routing, dict) or model_routing.get("schema") != "cortex/model-routing/v1":
-        fail("profile contract must define the Cortex model-routing policy")
-    if model_routing.get("configured_default_model") != "gpt-5.6-luna":
-        fail("model routing must keep Luna as the configured hidden-agent default")
-    if model_routing.get("max_policy") != "complex_work_or_repeated_rework":
-        fail("model routing must allow automatic max for complex work and repeated unresolved rework")
-    if model_routing.get("security", {}).get("model") != "gpt-5.6-sol":
-        fail("security model routing must select Sol")
-    if model_routing.get("explorer", {}).get("model") != "gpt-5.6-luna":
-        fail("explorer model routing must select Luna")
-    profile_classes = model_routing.get("profile_classes")
-    if not isinstance(profile_classes, dict) or set(profile_classes) != {"efficient", "adaptive", "deep"}:
-        fail("model routing must define efficient, adaptive, and deep profile classes")
-    if any(
-        not isinstance(members, list)
-        or not members
-        or not all(isinstance(name, str) for name in members)
-        for members in profile_classes.values()
+        fail("plugin manifest must declare the bundled skills and MCP companion")
+    interface = manifest.get("interface")
+    if not isinstance(interface, dict) or not all(
+        isinstance(interface.get(field), str) and interface[field].strip()
+        for field in ("displayName", "shortDescription", "longDescription", "logo", "defaultPrompt")
     ):
-        fail("model profile classes must contain non-empty profile-name lists")
-    classified_profiles = [name for members in profile_classes.values() for name in members]
-    if (
-        len(classified_profiles) != len(set(classified_profiles))
-        or set(classified_profiles) != profile_names - {"explorer", "security_auditor"}
-    ):
-        fail("model profile classes must cover every ordinary profile exactly once")
-    supported_efforts = {"low", "medium", "high", "xhigh"}
-    luna_bounded_effort = model_routing.get("luna_bounded_effort_by_complexity")
-    luna_efficient_effort = model_routing.get("luna_efficient_effort_by_complexity")
-    terra_effort = model_routing.get("terra_effort_by_complexity")
-    effort_floor_by_risk = model_routing.get("effort_floor_by_risk")
-    security_effort = model_routing.get("security", {}).get("effort_by_complexity")
-    explorer_effort = model_routing.get("explorer", {}).get("effort_by_risk")
-    if luna_bounded_effort != {"C1": "high", "C2": "xhigh", "C3": "max"}:
-        fail("bounded Luna routing must define high/xhigh/max complexity effort")
-    if not isinstance(luna_efficient_effort, dict) or set(luna_efficient_effort) != {"C1", "C2", "C3"}:
-        fail("efficient Luna routing must define every complexity effort floor")
-    if not isinstance(terra_effort, dict) or set(terra_effort) != {"C1", "C2", "C3"}:
-        fail("Terra routing must define every complexity effort floor")
-    if not isinstance(effort_floor_by_risk, dict) or set(effort_floor_by_risk) != {"low", "moderate", "high", "critical"}:
-        fail("model routing must define every risk effort floor")
-    if not isinstance(security_effort, dict) or set(security_effort) != {"C1", "C2", "C3"}:
-        fail("security routing must define every complexity effort floor")
-    if not isinstance(explorer_effort, dict) or set(explorer_effort) != {"low", "moderate", "high", "critical"}:
-        fail("explorer routing must define every risk effort default")
-    if any(
-        not set(mapping.values()).issubset(supported_efforts)
-        for mapping in (luna_efficient_effort, terra_effort, effort_floor_by_risk, security_effort, explorer_effort)
-    ):
-        fail("non-bounded automatic model-routing effort maps must not contain unsupported or max effort")
-    terra_task_kinds = model_routing.get("terra_task_kinds")
-    if (
-        not isinstance(terra_task_kinds, list)
-        or not terra_task_kinds
-        or not all(isinstance(kind, str) and kind and kind.replace("_", "").isalnum() for kind in terra_task_kinds)
-        or len(terra_task_kinds) != len(set(terra_task_kinds))
-    ):
-        fail("model routing must define unique Terra trigger task kinds")
-    expected_gates = {
-        "scope", "plan", "discover", "architecture", "database_architecture", "implementation",
-        "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close",
-        "governance_activation", "governance_close",
-    }
-    gate_briefings = profile_contract.get("gate_briefings")
-    if not isinstance(gate_briefings, dict) or set(gate_briefings) != expected_gates:
-        fail("profile contract must define exactly one briefing for every Cortex gate")
-    for gate, briefing in gate_briefings.items():
-        if not isinstance(briefing, dict) or set(briefing) != {"objective", "ownership", "acceptance", "verification"}:
-            fail(f"invalid gate briefing shape: {gate}")
-        if not all(isinstance(briefing.get(key), str) and briefing[key].strip() for key in ("objective", "ownership")):
-            fail(f"gate briefing lacks objective or ownership: {gate}")
-        if not all(isinstance(briefing.get(key), list) and briefing[key] for key in ("acceptance", "verification")):
-            fail(f"gate briefing lacks acceptance or verification: {gate}")
-    shared = profile_contract.get("shared_worker_contract", {})
-    retry_policy = shared.get("retry_policy")
-    if retry_policy != {
-        "pipeline_rework": "unbounded_while_acceptance_or_findings_require_correction",
-        "terra_after_failed_attempts": 2,
-        "effort_by_prior_failures": {"1": "high", "2": "xhigh", "3+": "max"},
-    }:
-        fail("shared worker contract must define unbounded rework with model/effort escalation")
-    prompt_compaction_guidance = shared.get("prompt_compaction_guidance")
-    if prompt_compaction_guidance != {
-        "bootstrap_target_bytes": 1500,
-        "ordinary_briefing_target_bytes": 16384,
-        "harvest_briefing_target_bytes": 18432,
-        "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
-    }:
-        fail("shared worker contract must define the canonical prompt compaction guidance")
-    mode_overlays = profile_contract.get("mode_overlays")
-    expected_harvest_profiles = {
-        "planner", "explorer", "architect", "technical_writer", "code_reviewer", "build_verification",
-    }
-    if (
-        not isinstance(mode_overlays, dict)
-        or set(mode_overlays) != {"harvest"}
-        or set(mode_overlays["harvest"]) != expected_harvest_profiles
-        or not all(isinstance(value, str) and value.strip() for value in mode_overlays["harvest"].values())
-    ):
-        fail("harvest guidance must live in one conditional mode overlay")
-    required_attempt_fields = ["status", "summary", "findings", "decisions_needed", "unresolved"]
-    if (
-        shared.get("attempt_result_schema") != "cortex/attempt-result/v1"
-        or shared.get("attempt_result_ref_schema") != "cortex/attempt-result-ref/v1"
-        or shared.get("required_attempt_result_fields") != required_attempt_fields
-    ):
-        fail("shared worker contract must define the complete AttemptResult payload")
-    expected_public_operations = {
-        "start_orchestration", "continue_orchestration", "manage_orchestration",
-        "manage_governance",
-        "worker_question", "record_attempt_event", "complete_attempt",
-        "read_dispatch_briefing", "read_worker_result",
-    }
-    if set(shared.get("public_operations", [])) != expected_public_operations:
-        fail("shared worker contract must declare the nine public Cortex operations")
-    if shared.get("worker_operations") != [
-        "worker_question", "record_attempt_event", "complete_attempt",
-        "read_dispatch_briefing", "read_worker_result",
-    ]:
-        fail("workers must receive scoped reads, question, attempt event, and completion operations")
-    question_resume_contract = str(shared.get("question_resume_contract") or "")
-    for marker in (
-        "QUESTION_RECORDED", "followup_task", "worker_question(action=poll)",
-        "record_attempt_event", "complete_attempt", "OTHER_TERMINAL",
-    ):
-        if marker not in question_resume_contract:
-            fail("shared worker contract must define the complete question resume route")
-    if (
-        shared.get("dispatch_briefing_fallback")
-        != "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable"
-    ):
-        fail("worker briefing fallback must be exact-identity/digest scoped")
-    if set(shared.get("coordinator_operations", [])) != {
-        "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance",
-        "read_worker_result",
-    }:
-        fail("coordinator operations must own lifecycle and result reading")
-    if shared.get("worker_final_response") != "compact_generated_attempt_result_ref_and_at_most_two_sentence_summary_or_exact_error":
-        fail("worker final response must be compact and must not contain projection JSON")
-    if (
-        shared.get("result_lifecycle")
-        != "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker"
-        or shared.get("result_projection")
-        != "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord"
-        or shared.get("caller_correctable_tool_errors")
-        != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
-        or shared.get("read_only_workspace_delta")
-        != "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified"
-    ):
-        fail("shared worker contract must define semantic result finalization and read-only concurrency semantics")
-    if (
-        shared.get("repository_intelligence")
-        != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
-        or shared.get("codebase_memory_project_resolution")
-        != "derive_canonical_path_key_then_single_exact_root_list_fallback"
-        or shared.get("codebase_memory_project_key_algorithm")
-        != "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200"
-        or set(shared.get("codebase_memory_refresh_profiles", []))
-        != {"planner", "explorer", "architect", "database_architect"}
-        or shared.get("codebase_memory_fallback")
-        != "one_bounded_attempt_then_repository_native_tools_without_looping"
-    ):
-        fail("shared worker contract must define bounded Codebase Memory discovery and fallback")
-    EXPECTED_AGENTS = {item.get("name") for item in profile_contract["profiles"]}
-    execution_contracts = profile_contract.get("profile_execution_contracts")
-    if not isinstance(execution_contracts, dict) or set(execution_contracts) != EXPECTED_AGENTS:
-        fail("profile execution contracts must cover every supported agent exactly once")
-    for name, execution in execution_contracts.items():
-        if not isinstance(execution, dict) or set(execution) != {"inputs", "project_artifacts", "completion"}:
-            fail(f"profile execution contract has an invalid shape: {name}")
-        if not all(isinstance(value, str) and len(value.split()) >= 6 for value in execution.values()):
-            fail(f"profile execution contract is too shallow: {name}")
-    # MCP configuration supports a plugin-relative working directory.  Unlike
-    # hook commands, ${PLUGIN_ROOT} is not expanded in stdio-MCP arguments by
-    # the host, so the executable must remain plugin-relative.
-    expected_server = {"command": "./scripts/cortex-launcher", "args": ["./scripts/cortex.py"], "cwd": "."}
+        fail("plugin interface metadata is incomplete")
+    regular_file(plugin / str(interface["logo"]).removeprefix("./"), "plugin logo")
+
+    mcp = load_json(plugin / ".mcp.json", "MCP companion")
+    expected_server = {"command": "python3", "args": ["./scripts/cortex.py"], "cwd": "."}
     if mcp != {"mcpServers": {"cortex": expected_server}}:
-        fail("MCP companion must expose only the cortex server")
-    hook_commands = [
-        hook.get("command")
-        for registrations in hooks.get("hooks", {}).values()
-        if isinstance(registrations, list)
-        for registration in registrations
-        if isinstance(registration, dict)
-        for hook in registration.get("hooks", [])
-        if isinstance(hook, dict)
-    ]
-    if len(hook_commands) != 6 or any(
-        not isinstance(command, str)
-        or '"${PLUGIN_ROOT}/scripts/cortex-launcher"' not in command
-        or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
-        for command in hook_commands
-    ):
-        fail("all six lifecycle hooks must invoke the bundled Cortex launcher")
-    for skill_name in EXPECTED_SKILLS:
-        skill = plugin / "skills" / skill_name / "SKILL.md"
+        fail("MCP companion must expose only the direct Python Cortex V12 server")
+    if (plugin / "hooks/hooks.json").exists() or (plugin / "scripts/cortex_hook.py").exists() or (plugin / "scripts/cortex-launcher").exists():
+        fail("Cortex V12 package must not ship hook or launcher lifecycle assets")
+
+
+def validate_profiles(plugin: Path) -> None:
+    contract = load_json(plugin / "profiles.json", "advisory profile contract")
+    if set(contract) != {"schema", "model_routing", "dynamic_pipeline", "profiles"} or contract.get("schema") != "cortex/advisory-profiles/v1":
+        fail("profiles.json must be the compact V12 advisory profile contract")
+    routing = contract.get("model_routing")
+    if not isinstance(routing, dict) or set(routing) != {"schema", "native_default_model", "ownership", "recommendations"}:
+        fail("advisory model routing metadata has an invalid shape")
+    if routing.get("schema") != "cortex/advisory-model-selection/v1" or routing.get("native_default_model") != "gpt-5.6-luna":
+        fail("advisory routing must retain Luna as the configured native default")
+    if not isinstance(routing.get("ownership"), str) or not routing["ownership"].strip():
+        fail("advisory routing must explain coordinator-owned selection")
+    recommendations = routing.get("recommendations")
+    if not isinstance(recommendations, list) or len(recommendations) != len(EXPECTED_MODELS):
+        fail("advisory routing must contain one recommendation for every native model")
+    for expected_model, recommendation in zip(EXPECTED_MODELS, recommendations, strict=True):
+        if not isinstance(recommendation, dict) or set(recommendation) != {"model", "recommended_effort", "choose_for"}:
+            fail("advisory model recommendation has an invalid shape")
+        if recommendation.get("model") != expected_model or recommendation.get("recommended_effort") not in EXPECTED_EFFORTS:
+            fail("advisory model recommendation does not preserve native model/effort support")
+        if not isinstance(recommendation.get("choose_for"), str) or not recommendation["choose_for"].strip():
+            fail("advisory model recommendation lacks selection guidance")
+
+    pipeline = contract.get("dynamic_pipeline")
+    if not isinstance(pipeline, dict) or set(pipeline) != {
+        "schema", "ownership", "complexity_baselines", "governance_baselines", "stages", "rules",
+    } or pipeline.get("schema") != "cortex/model-owned-pipeline/v1":
+        fail("advisory dynamic-pipeline metadata has an invalid shape")
+    if not isinstance(pipeline.get("ownership"), str) or not pipeline["ownership"].strip():
+        fail("advisory dynamic-pipeline metadata lacks coordinator ownership guidance")
+    if pipeline.get("governance_baselines") != {"C1": "minimal", "C2": "light", "C3": "full"}:
+        fail("advisory dynamic-pipeline metadata must preserve C1/C2/C3 governance baselines")
+    if not isinstance(pipeline.get("complexity_baselines"), dict) or not isinstance(pipeline.get("stages"), list) or not isinstance(pipeline.get("rules"), list):
+        fail("advisory dynamic-pipeline metadata must contain bounded baselines, stages, and rules")
+
+    profiles = contract.get("profiles")
+    if not isinstance(profiles, list) or len(profiles) != 22:
+        fail("advisory profile contract must define exactly 22 profiles")
+    expected_names: set[str] = set()
+    for item in profiles:
+        if not isinstance(item, dict) or set(item) != {"name", "filename", "description", "select_when", "avoid_when"}:
+            fail("each advisory profile must contain only prompt-template metadata")
+        name = item.get("name")
+        filename = item.get("filename")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            fail("advisory profile has an invalid name")
+        if not isinstance(filename, str) or Path(filename).name != filename or not filename.endswith(".toml"):
+            fail(f"advisory profile filename is invalid: {name}")
+        if name in expected_names:
+            fail(f"duplicate advisory profile: {name}")
+        expected_names.add(name)
+        if not all(isinstance(item.get(field), str) and item[field].strip() for field in ("description", "select_when", "avoid_when")):
+            fail(f"advisory profile text is incomplete: {name}")
+        path = plugin / "agents" / filename
+        regular_file(path, f"advisory profile {name}")
         try:
-            content = skill.read_text(encoding="utf-8")
-        except OSError as exc:
-            fail(f"missing skill {skill_name}: {exc}")
-        if f"\nname: {skill_name}\n" not in content:
-            fail(f"skill frontmatter must identify {skill_name}")
-        forbidden_comments = [
-            line for line in content.splitlines()
-            if line.strip().startswith("<!--")
-            and line.strip() not in {
-                "<!-- BEGIN GENERATED PROFILE CATALOG -->",
-                "<!-- END GENERATED PROFILE CATALOG -->",
-            }
-        ]
-        if forbidden_comments:
-            fail(f"model-facing skill contains normative HTML comments: {skill_name}")
-        frontmatter = content.split("---", 2)[1] if content.startswith("---") else ""
-        description_line = next(
-            (line for line in frontmatter.splitlines() if line.startswith("description:")), ""
-        )
-        if skill_name == "orchestrator" and "Explicit opt-in Cortex coordinator" not in description_line:
-            fail("orchestrator frontmatter must make explicit opt-in authoritative")
-        if skill_name in {
-            "cortex-control", "adaptive-pipeline", "context-compaction", "documentation-sync",
-            "output-validation", "knowledge-harvest",
-        } and "Internal Cortex" not in description_line:
-            fail(f"internal Cortex overlay must be marked internal in frontmatter: {skill_name}")
-        if skill_name == "find-skills" and "Explicit skill-discovery helper" not in description_line:
-            fail("find-skills must require explicit skill-discovery intent")
-    cortex_skill = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-    harvest_skill = (plugin / "skills/knowledge-harvest/SKILL.md").read_text(encoding="utf-8")
-    if 'depends_on: ["scope"]' not in cortex_skill or 'depends_on: ["plan"]' in cortex_skill.split("## Harvest route contract", 1)[1].split("## Coordinator isolation invariant", 1)[0]:
-        fail("harvest discovery must depend on scope in the orchestrator contract")
-    if any(line.strip().startswith("<!--") for line in harvest_skill.splitlines()):
-        fail("knowledge-harvest must not retain historical normative HTML comments")
-    required_routes = ("| `empty` | `orchestrate` |", "| `help` | `help` |", "| `harvest` | `harvest` |", "| `harvest-refresh` | `harvest-refresh` |", "| `normal` | `normal` |")
-    if not all(route in cortex_skill for route in required_routes):
-        fail("Cortex skill must declare every supported route deterministically")
-    required_invocation_guidance = ("Skills picker", "`$cortex:orchestrator`", "`/skills`", "not registered native slash")
-    if not all(marker in cortex_skill for marker in required_invocation_guidance):
-        fail("Cortex skill must document Desktop/CLI invocation and textual shorthand")
-    expected_catalog = render_profile_catalog(profile_contract["profiles"])
-    catalog_start = "<!-- BEGIN GENERATED PROFILE CATALOG -->"
-    catalog_end = "<!-- END GENERATED PROFILE CATALOG -->"
-    if cortex_skill.count(catalog_start) != 1 or cortex_skill.count(catalog_end) != 1:
-        fail("Cortex skill must contain exactly one generated profile catalog")
-    actual_catalog = cortex_skill.split(catalog_start, 1)[1].split(catalog_end, 1)[0].strip()
-    if actual_catalog != expected_catalog:
-        fail("Cortex skill profile catalog is stale relative to profiles.json")
-    agent_files = sorted((plugin / "agents").glob("*.toml"))
-    try:
-        agent_names = {tomllib.loads(path.read_text(encoding="utf-8"))["name"] for path in agent_files}
-    except (OSError, tomllib.TOMLDecodeError, KeyError) as exc:
-        fail(f"invalid bundled agent profile: {exc}")
-    if agent_names != EXPECTED_AGENTS or len(agent_files) != len(EXPECTED_AGENTS):
-        fail("bundled agent profiles do not match the supported Cortex profile set")
-    for item in profile_contract["profiles"]:
-        path = plugin / "agents" / str(item.get("filename", ""))
-        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
-        if parsed.get("name") != item.get("name") or parsed.get("sandbox_mode") != item.get("sandbox") or parsed.get("description") != item.get("description"):
-            fail(f"profile contract does not match {path.name}")
-        prompt = str(parsed.get("developer_instructions", ""))
-        prompt_lower = prompt.lower()
-        if "select this profile" in prompt_lower or "do not select" in prompt_lower:
-            fail(f"selected worker prompt must not contain coordinator routing guidance: {path.name}")
-        if not all(marker in prompt_lower for marker in ("attemptresult", "escalate")):
-            fail(f"profile prompt lacks evidence or escalation guidance: {path.name}")
-        if not all(marker in prompt_lower for marker in ("role and mission:", "operating workflow:", "quality bar:")):
-            fail(f"profile prompt lacks the professional playbook structure: {path.name}")
-        if "gpt-" in prompt or "model_reasoning_effort" in prompt:
-            fail(f"profile prompt must not pin a model or effort: {path.name}")
-        if "knowledge-harvest specialization:" in prompt_lower:
-            fail(f"harvest guidance must not load in an ordinary profile prompt: {path.name}")
-    prompt_paragraphs: dict[str, str] = {}
-    for path in agent_files:
-        prompt = str(tomllib.loads(path.read_text(encoding="utf-8")).get("developer_instructions", ""))
-        for paragraph in prompt.split("\n\n"):
-            normalized = " ".join(paragraph.lower().split())
-            if len(normalized) < 200:
-                continue
-            prior = prompt_paragraphs.get(normalized)
-            if prior:
-                fail(f"duplicate normative profile paragraph in {prior} and {path.name}")
-            prompt_paragraphs[normalized] = path.name
-    briefings_source = (plugin / "scripts/cortex_runtime/briefings.py").read_text(encoding="utf-8")
-    prompt_compiler_source = (plugin / "scripts/cortex_runtime/prompt_compiler.py").read_text(encoding="utf-8")
-    if "from cortex_runtime.prompt_compiler import compile_v3_briefing" not in briefings_source:
-        fail("worker assignment data must be rendered through the JSON encoder")
-    try:
-        briefings_tree = ast.parse(briefings_source, filename="briefings.py")
-    except SyntaxError as exc:
-        fail(f"briefings.py is not valid Python: {exc}")
-    host_prompt = next(
-        (
-            node for node in ast.walk(briefings_tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "host_spawn_prompt"
-        ),
-        None,
+            prompt = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+            fail(f"advisory profile {name} is invalid TOML: {exc}")
+        if (
+            set(prompt) != {"name", "description", "developer_instructions"}
+            or prompt.get("name") != name
+            or not isinstance(prompt.get("description"), str)
+            or not prompt["description"].strip()
+        ):
+            fail(f"advisory profile {name} diverges from profiles.json")
+        instructions = prompt.get("developer_instructions")
+        if not isinstance(instructions, str) or not instructions.strip() or "gpt-" in instructions or "reasoning_effort" in instructions:
+            fail(f"advisory profile {name} must remain a model-neutral prompt template")
+    agent_files = {path.name for path in (plugin / "agents").glob("*.toml")}
+    if agent_files != {str(item["filename"]) for item in profiles}:
+        fail("bundled agent files must match the advisory profile contract exactly")
+
+
+def validate_skills(plugin: Path) -> None:
+    folders = {path.name for path in (plugin / "skills").iterdir() if path.is_dir() and not path.is_symlink()}
+    if folders != set(EXPECTED_SKILLS):
+        fail("bundled skills must be exactly the ten V12 skills")
+    resources = {
+        path.relative_to(plugin / "skills")
+        for path in (plugin / "skills").rglob("*")
+        if path.is_file() and path.name != "SKILL.md"
+    }
+    if resources != EXPECTED_SKILL_RESOURCES:
+        fail("bundled skill resources must match the explicit installable V12 resource set")
+    for relative in sorted(resources):
+        regular_file(plugin / "skills" / relative, f"skill resource {relative}")
+    for name in EXPECTED_SKILLS:
+        path = plugin / "skills" / name / "SKILL.md"
+        regular_file(path, f"skill {name}")
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            fail(f"skill {name} is unreadable: {exc}")
+        if f"\nname: {name}\n" not in content:
+            fail(f"skill frontmatter must identify {name}")
+    orchestrator = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+    if "gpt-5.6-luna" not in orchestrator or "fork_turns=\"none\"" not in orchestrator:
+        fail("orchestrator guidance must preserve the native Luna/default dispatch rule")
+    required_safety_markers = (
+        "deterministically matches the actual user message",
+        "must not inject a contradictory target language",
+        "`create_task` is the terminal task-anchoring boundary",
+        "Do not start degraded project work, use a fallback",
     )
-    compiler_calls = [
-        node for node in ast.walk(host_prompt) if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name) and node.func.id == "compile_v3_briefing"
-    ] if host_prompt is not None else []
-    if not any(
-        any(
-            keyword.arg == "assignment"
-            and isinstance(keyword.value, ast.Name)
-            and keyword.value.id == "assignment"
-            for keyword in call.keywords
-        )
-        for call in compiler_calls
+    missing_safety_markers = [marker for marker in required_safety_markers if marker not in orchestrator]
+    if missing_safety_markers:
+        fail("orchestrator guidance lacks terminal create_task/language safeguards: " + ", ".join(missing_safety_markers))
+
+
+def validate_prompt_contract(root: Path) -> None:
+    """Run the self-contained V12 skill/profile contract lint as a source gate."""
+    lint = root / "scripts/cortex-prompt-lint.py"
+    regular_file(lint, "V12 skill/profile contract lint")
+    checked = subprocess.run(
+        [sys.executable, "-B", str(lint)],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if checked.returncode != 0:
+        detail = checked.stdout.strip() or checked.stderr.strip() or "no diagnostic output"
+        fail("V12 skill/profile contract lint failed: " + detail)
+
+
+def validate_runtime(plugin: Path) -> None:
+    runtime = plugin / "scripts" / "cortex_runtime"
+    regular_directory(runtime, "Cortex runtime package")
+    files = {path.name for path in runtime.glob("*.py")}
+    if files != ACTIVE_RUNTIME_FILES:
+        fail("package must contain only the active V12 runtime modules")
+    source = "\n".join((runtime / name).read_text(encoding="utf-8") for name in sorted(files))
+    retired = [marker for marker in RETIRED_RUNTIME_MARKERS if marker in source]
+    if retired:
+        fail("active V12 runtime retains retired control-plane markers: " + ", ".join(retired))
+
+    runtime_path = str(plugin / "scripts")
+    if runtime_path not in sys.path:
+        sys.path.insert(0, runtime_path)
+    try:
+        import cortex
+        from cortex_runtime import model_routing, v12_projections
+        from cortex_runtime.v12_contract import task_ref
+        from cortex_runtime.public_contracts import V12_TOOL_NAMES, build_public_contracts
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        fail(f"V12 runtime cannot be imported: {exc}")
+    if getattr(cortex, "SERVER_VERSION", None) != EXPECTED_BASE_VERSION:
+        fail("Cortex server must publish the 12.0.0 semantic version")
+    compact_probe = "task-" + ("a" * 64) + "-" + ("b" * 32)
+    compact_ref = task_ref(compact_probe)
+    if (
+        compact_ref != "t_" + ("b" * 12)
+        or v12_projections._task_relative(compact_ref, "task.md") != Path("tasks") / compact_ref / "task.md"
     ):
-        fail("host_spawn_prompt must pass the encoded assignment object to compile_v3_briefing")
-    if "assignment_json_block(assignment)" not in prompt_compiler_source or "json.dumps(assignment" not in prompt_compiler_source:
-        fail("worker assignment data must be rendered through the JSON encoder")
-    for forbidden in (
-        "Exact user-authored request (authoritative intent boundary):",
-        "Model route and reasoning effort:",
-        "Attempt baseline ref:",
-        "def prompt_list(",
-    ):
-        if forbidden in briefings_source:
-            fail(f"briefing compiler retains forbidden policy/data interpolation: {forbidden}")
-    routing = profile_contract.get("implementation_routing")
-    if not isinstance(routing, dict) or routing.get("fallback") != "general" or not isinstance(routing.get("rules"), list):
-        fail("implementation routing must define a general fallback and ordered specialist rules")
-    rule_profiles = [item.get("profile") for item in routing["rules"] if isinstance(item, dict)]
-    expected_writers = {"backend_dev", "data_engineer", "debugger", "devops_engineer", "frontend_dev", "fullstack_dev", "mobile_dev", "refactorer"}
-    if set(rule_profiles) != expected_writers or len(rule_profiles) != len(set(rule_profiles)):
-        fail("implementation routing must cover every specialist writer exactly once")
-    if (root / "agents").exists() or (root / "skills").exists():
-        fail("installable agent and skill sources must exist only inside plugins/cortex")
-    if (root / "agents/orchestrator.toml").exists():
-        fail("retired dedicated orchestrator profile must not ship")
-    print(f"marketplace validation passed: {marketplace}")
+        fail("V12 projections must use the canonical compact task_ref directory")
+    tools = getattr(cortex, "PUBLIC_TOOLS", None)
+    contracts = build_public_contracts()
+    catalogue = tuple(V12_TOOL_NAMES)
+    if catalogue not in SUPPORTED_V12_CATALOGUES:
+        fail("Cortex runtime exposes an unsupported V12 catalogue; expected the canonical base or approved decision extension")
+    if not isinstance(tools, dict) or tuple(tools) != catalogue or tuple(contracts) != catalogue:
+        fail("Cortex runtime/public-contract catalogues must be identical and ordered")
+    for name in catalogue:
+        contract = contracts[name]
+        registration = tools[name]
+        schema = contract.get("inputSchema") if isinstance(contract, dict) else None
+        expected_fields = EXPECTED_TOOL_FIELDS.get(name)
+        expected_required = EXPECTED_TOOL_REQUIRED.get(name)
+        if (
+            not isinstance(schema, dict)
+            or schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+            or "audience" in contract
+            or not isinstance(registration, dict)
+            or not callable(registration.get("handler"))
+        ):
+            fail(f"V12 public contract is invalid: {name}")
+        properties = schema["properties"]
+        required = set(schema.get("required") or ())
+        if expected_fields is not None and set(properties) != expected_fields:
+            fail(f"V12 public contract fields drifted: {name}")
+        if expected_required is not None and required != expected_required:
+            fail(f"V12 public contract required fields drifted: {name}")
+        if name == "create_task":
+            project_root = properties.get("project_root")
+            if not isinstance(project_root, dict) or project_root.get("type") != "string":
+                fail("create_task.project_root must remain the explicit V12 shard anchor")
+        elif name in {"read_delegation", "submit_report", "read_reports"}:
+            derived_required = {
+                "read_delegation": {"delegation_ref", "after_sequence"},
+                "submit_report": {"delegation_ref"},
+                "read_reports": {"report_refs"},
+            }[name]
+            if (
+                "project_root" in properties
+                or "task_id" in properties
+                or "task_ref" in properties
+                or not derived_required.issubset(required)
+            ):
+                fail(f"{name} must resolve through its required opaque record references without a public task anchor")
+        elif name in TASK_ANCHORED_TOOLS:
+            task_ref = properties.get("task_ref")
+            if (
+                "project_root" in properties
+                or "task_id" in properties
+                or "task_ref" not in required
+                or not isinstance(task_ref, dict)
+                or task_ref.get("type") != "string"
+                or task_ref.get("maxLength") != 14
+            ):
+                fail(f"{name} must resolve through required compact task_ref without a public task_id alternative")
+        if name == "create_delegation":
+            scope = properties.get("scope")
+            if (
+                not isinstance(scope, dict)
+                or scope.get("type") != "string"
+                or scope.get("minLength") != 1
+                or not isinstance(scope.get("maxLength"), int)
+                or scope["maxLength"] < 1
+            ):
+                fail("create_delegation.scope must be a bounded non-empty string")
+        if name == "submit_governance_closure":
+            subject_id = properties.get("subject_ref")
+            if (
+                not isinstance(subject_id, dict)
+                or subject_id.get("type") != "string"
+                or subject_id.get("minLength") != 1
+                or subject_id.get("maxLength") != 14
+            ):
+                fail("submit_governance_closure.subject_ref must be a bounded compact reference")
+        if name == "record_user_decision":
+            if set(properties) != EXPECTED_DECISION_FIELDS:
+                fail("record_user_decision fields drifted from the canonical V12 user-decision contract")
+            subject_type = properties.get("subject_type")
+            decision_type = properties.get("decision_type")
+            approval_handle = properties.get("approval_handle")
+            approval_view_digest = properties.get("approval_view_content_digest")
+            approval_view_sequence = properties.get("approval_view_source_sequence")
+            if (
+                not isinstance(subject_type, dict)
+                or subject_type.get("type") != "string"
+                or subject_type.get("enum") != ["task", "plan", "initiative", "delegation", "report"]
+                or not isinstance(decision_type, dict)
+                or decision_type.get("type") != "string"
+                or decision_type.get("enum") != [
+                    "approve", "reject", "request_revision", "clarification", "cancel", "accept_risk", "override",
+                ]
+            ):
+                fail("record_user_decision must preserve the canonical V12 subject and decision enums")
+            if (
+                {"approval_handle", "approval_view_content_digest", "approval_view_source_sequence"} & required
+                or not isinstance(approval_handle, dict)
+                or approval_handle.get("type") != "string"
+                or approval_handle.get("minLength") != 1
+                or approval_handle.get("maxLength") != 160
+                or not isinstance(approval_view_digest, dict)
+                or approval_view_digest.get("type") != "string"
+                or approval_view_digest.get("minLength") != 0
+                or approval_view_digest.get("maxLength") != 71
+                or not isinstance(approval_view_digest.get("pattern"), str)
+                or not isinstance(approval_view_sequence, dict)
+                or approval_view_sequence.get("type") != "integer"
+                or approval_view_sequence.get("minimum") != 0
+            ):
+                fail("record_user_decision must preserve optional plan approval relation fields")
+    if hasattr(__import__("cortex_runtime.mcp_api", fromlist=["public_tools_for_audience"]), "public_tools_for_audience"):
+        fail("V12 MCP transport must not project tools by audience")
+
+    registry = model_routing.model_effort_registry()
+    if tuple(registry) != EXPECTED_MODELS or registry != {model: EXPECTED_EFFORTS for model in EXPECTED_MODELS}:
+        fail("native model/effort registry must preserve all exact supported selections")
+    for model in EXPECTED_MODELS:
+        for effort in EXPECTED_EFFORTS:
+            try:
+                native = model_routing.native_spawn_arguments(
+                    model=model,
+                    reasoning_effort=effort,
+                    task_name="cortex-v12-validator",
+                    message="Preserve the selected native model and effort exactly.",
+                )
+            except ValueError as exc:
+                fail(f"native model/effort transport rejected {model}/{effort}: {exc}")
+            if native.get("reasoning_effort") != effort or native.get("fork_turns") != "none":
+                fail(f"native model/effort transport rewrote {model}/{effort}")
+            if model == "gpt-5.6-luna":
+                if "model" in native:
+                    fail("native Luna transport must omit the model override")
+            elif native.get("model") != model:
+                fail(f"native {model} transport must retain the explicit model override")
+
+
+def main() -> int:
+    root = parse_args().root.resolve(strict=False)
+    regular_directory(root, "repository root")
+    plugin = root / "plugins" / EXPECTED_PLUGIN
+    regular_directory(plugin, "canonical plugin source")
+    reject_symlinks(root / ".agents", "root marketplace metadata")
+    reject_symlinks(plugin, "canonical plugin source")
+    reject_plugin_residue(plugin)
+    validate_marketplace(root, plugin)
+    validate_manifest(plugin)
+    validate_profiles(plugin)
+    validate_skills(plugin)
+    validate_prompt_contract(root)
+    validate_runtime(plugin)
+    print(f"marketplace validation passed: {root / '.agents/plugins/marketplace.json'}")
     return 0
 
 

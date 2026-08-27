@@ -1,7 +1,6 @@
-"""Cortex runtime components.
+"""Cortex V12 runtime components.
 
-The executable ``scripts/cortex.py`` is intentionally retained as the stable
-MCP and hook public facade. Domain logic belongs in this package so
-that it can be tested and evolved without turning the executable entrypoint
-into another all-purpose control-plane module.
+The executable ``scripts/cortex.py`` is the stable MCP composition root.
+Domain logic remains in this package so it can be tested without turning the
+entrypoint into another control-plane implementation.
 """

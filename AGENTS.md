@@ -22,6 +22,11 @@ runtime guarantees from those bundled sources without depending on this file.
   are development support only. When runtime behavior changes, update the
   bundled contract and add a parity or behavior test before trimming any local
   development note.
+- During Cortex development, install or update the plugin only with
+  `./scripts/sync-cortex.sh`; use `./scripts/sync-cortex.sh --check` or
+  `./scripts/sync-cortex.sh --dry-run` for read-only validation. Do not invoke
+  cachebuster helpers manually, run `codex plugin add`, or edit marketplace or
+  Codex configuration as a substitute.
 - Follow semantic versioning in
   `plugins/cortex/.codex-plugin/plugin.json`: patch for fixes, minor for
   backward-compatible features, and major for large or breaking changes. Do

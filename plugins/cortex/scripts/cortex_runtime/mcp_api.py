@@ -1,1799 +1,860 @@
-"""Public MCP registry and stdio transport, independent of orchestration policy.
+"""Small, policy-neutral MCP stdio transport for the Cortex v12 ledger.
 
-The stdio protocol does not carry a trustworthy per-call actor identity.  A
-server process therefore receives one immutable audience at launch time.  The
-ordinary Desktop launch uses the fresh public union.  A host that can
-establish separate trusted channels may opt into coordinator and worker
-projections.
+This module intentionally knows nothing about coordinator/worker roles, native
+children, host threads, governance state, or lifecycle progression.  It only
+advertises one fixed catalogue, validates its schemas, and transports durable
+service results as JSON-RPC MCP tool results.
 """
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
-from cortex_runtime.communication import public_risks, render, render_lifecycle, render_plan
+from cortex_runtime.v12_service import V12ServiceError
+from cortex_runtime.v12_contract import MAX_PAGE_LIMIT, record_ref, task_ref, task_ref_parts
 
 
-MCP_AUDIENCES = frozenset({"default", "coordinator", "worker"})
-DEFAULT_MCP_AUDIENCE = "default"
+MCP_PROTOCOL_VERSION = "2025-06-18"
+_MAX_TOOLS = 11
+# MCP stdio is JSONL.  Enforce this at the byte transport boundary before a
+# JSON parser can allocate for an unbounded physical line.  The terminating
+# newline is part of the physical frame when present.
+MAX_PHYSICAL_JSONL_FRAME_BYTES = 256 * 1024
+_FRAME_READ_LIMIT = MAX_PHYSICAL_JSONL_FRAME_BYTES + 1
+_MAX_REQUEST_ID_BYTES = 512
+_SERVER_STATE_CODES = frozenset({"storage_unavailable", "ledger_corrupt", "schema_unsupported", "ledger_error"})
+_RECOVERY_ACTIONS = {
+    "validation_error": "Do not retry a shortened or UI-ellipsized value. For task-anchored tools, reuse structuredContent.handles.task_ref from the last success, then correct any remaining field shape.",
+    "invalid_argument": "Correct the named argument and call the same tool again.",
+    "invalid_identifier": "Do not retry a shortened value. For task-anchored tools, reuse structuredContent.handles.task_ref byte-for-byte; otherwise reuse the exact emitted identifier.",
+    "content_invalid": "Supply finite JSON within the advertised size and depth bounds.",
+    "cross_project_reference": "Use references that belong to the supplied task and its resolved project shard.",
+    "task_not_found": "Use the task_ref emitted by create_task and verify it was copied byte-for-byte.",
+    "task_ref_ambiguous": "Do not guess or expand the task_ref. Use the exact task_ref from the successful create_task result.",
+    "delegation_not_found": "Use a delegation_id emitted for the supplied task_id.",
+    "report_not_found": "Use a report_id emitted for the supplied task_id.",
+    "initiative_not_found": "Use an initiative_id from the same resolved project ledger.",
+    "decision_not_found": "Use a decision_id emitted for the supplied task_id.",
+    "idempotency_conflict": "Reuse the exact retry handle and byte-identical arguments for the same mutation. A new mutation receives a distinct server retry handle.",
+    "task_exists": "Use a new task_id, or omit task_id and let Cortex mint one.",
+    "delegation_exists": "Use a new delegation_id, or omit delegation_id and let Cortex mint one.",
+    "report_exists": "Use a new report_id, or omit report_id and let Cortex mint one.",
+    "invalid_model_selection": "Select one advertised model and one advertised reasoning_effort as the required atomic pair.",
+    "profile_unavailable": "Select an advertised packaged profile after the plugin profile catalogue is available; do not substitute the free-form role.",
+    "governance_gate_preapproval": "Before plan approval, use only the allowed planner path or the explicitly parent-linked discovery path with its finalized planner handoff.",
+    "governance_gate_links_required": "For a post-approval delegation, include the finalized plan in input_report_refs and the exact approved decision in approval_decision_ref. Keep any additional finalized evidence reports in input_report_refs.",
+    "governance_gate_evidence_mismatch": "Refresh the finalized plan and approval decision, then reuse their current compact refs; do not construct or substitute approval evidence.",
+    "documentation_impact_required": "Before closure, create a post-approval technical_writer delegation with the approved plan in input_report_refs, approval_decision_ref, and every relevant finalized result report; then have its worker submit a finalized result.",
+    "documentation_impact_evidence_missing": "Read the finalized technical_writer documentation-impact result through read_reports as coordinator. Verify its delegation includes the approved plan, approval decision, and relevant finalized result refs; do not use coordinator-authored evidence as a substitute.",
+    "initiative_closure_required": "Close every initiative related to the task first. Then submit_governance_closure with subject_type=task and subject_ref exactly equal to task_ref.",
+    "invalid_report": "Use report metadata allowed by the selected mode and report_type; plan-only metadata requires a plan creation.",
+    "invalid_report_operation": "Use exactly the fields required by the selected report mode and omit fields belonging to other modes.",
+    "report_chunk_too_large": "Reduce this content chunk to the advertised report chunk bound and retry the same next chunk index.",
+    "report_quota_exceeded": "Reduce retained or assembling report content before creating another report chunk.",
+    "report_state_conflict": "Inspect report metadata with read_reports and use an operation valid for its current assembly state.",
+    "report_chunk_conflict": "Keep the acknowledged chunk unchanged, or use the next_chunk_index from the accepted append.",
+    "report_chunk_out_of_order": "Append exactly the next_chunk_index acknowledged by the report receipt.",
+    "report_manifest_mismatch": "Read report metadata, then finalize with the exact current chunk count and content digest.",
+    "report_cursor_invalid": "Restart read_reports without cursor, or copy the last returned cursor byte-for-byte.",
+    "report_cursor_scope_mismatch": "Reuse the cursor only with the exact original task_id, report_ids order, and sections filter.",
+    "report_cursor_stale": "Restart read_reports without cursor because the selected report snapshot changed.",
+    "invalid_governance_mode": "Use one advertised governance mode and source value.",
+    "invalid_initiative_status": "Use one advertised initiative status value.",
+    "invalid_initiative_parent": "Choose an existing same-project parent that does not introduce a parent cycle.",
+    "invalid_closure_subject": "Match subject_type to subject_ref. For a task closure use subject_ref exactly equal to task_ref; omit initiative_status, while opaque completion_notes are allowed.",
+    "invalid_decision_subject": "Use an existing subject of the selected type in the supplied task scope.",
+    "invalid_decision_type": "Use one advertised decision_type value.",
+    "decision_subject_not_finalized": "Finalize the selected plan report with completed status before recording a plan decision.",
+    "decision_subject_digest_mismatch": "Copy the current selected subject digest byte-for-byte before recording the decision.",
+    "approval_view_required": "Read the exact finalized plan until its returned approval_view is ready, then copy its handle and view identifiers byte-for-byte.",
+    "approval_view_not_ready": "Refresh the exact plan read until a new ready approval_view is returned; do not construct a path or reuse a stale view.",
+    "approval_view_mismatch": "Use the exact report and ready approval_view values returned together by Cortex.",
+    "approval_handle_not_found": "Use only the opaque approval_handle returned in the ready approval_view.",
+    "approval_handle_mismatch": "Use the exact plan report digest, view digest, source sequence, and single-use approval_handle from one ready approval_view.",
+    "approval_handle_consumed": "Read the plan again and obtain a new ready approval_view before recording a different decision.",
+    "decision_response_required": "Ask the user for one new explicit approve, request-revision, or cancel response after the ready view, then record that response.",
+    "decision_response_reused_original": "The original task request cannot be reused as plan approval; ask for one new explicit response after the ready view.",
+}
+_PUBLIC_ERROR_MESSAGES = {
+    "validation_error": "The supplied arguments do not satisfy the advertised tool schema.",
+    "invalid_argument": "A supplied public argument is invalid.",
+    "invalid_identifier": "A supplied Cortex identifier is invalid.",
+    "content_invalid": "A supplied JSON value is invalid.",
+    "cross_project_reference": "A supplied reference is outside the task's project scope.",
+    "task_not_found": "The referenced task does not exist in the resolved V12 shard.",
+    "task_ref_ambiguous": "The compact task locator is ambiguous and was not resolved.",
+    "delegation_not_found": "The referenced delegation does not exist in the anchored task.",
+    "report_not_found": "The referenced report does not exist in the anchored task.",
+    "initiative_not_found": "The referenced initiative does not exist in the resolved V12 shard.",
+    "decision_not_found": "The referenced user decision does not exist in the anchored task.",
+    "idempotency_conflict": "The idempotency key was already used for different arguments.",
+    "task_exists": "The supplied task identifier already exists.",
+    "delegation_exists": "The supplied delegation identifier already exists.",
+    "report_exists": "The supplied report identifier already exists.",
+    "invalid_model_selection": "The supplied model and reasoning-effort selection is invalid.",
+    "profile_unavailable": "The selected packaged profile is unavailable.",
+    "governance_gate_preapproval": "The delegation is not permitted before plan approval.",
+    "governance_gate_links_required": "The delegation is missing required approved-plan evidence.",
+    "governance_gate_evidence_mismatch": "The supplied approved-plan evidence is inconsistent.",
+    "documentation_impact_required": "A worker-owned documentation-impact assessment is required before closure.",
+    "documentation_impact_evidence_missing": "The required documentation-impact evidence has not been durably consumed.",
+    "initiative_closure_required": "Every task-related initiative requires a distinct closure before task closure.",
+    "invalid_report": "The supplied report metadata is invalid.",
+    "invalid_report_operation": "The supplied report operation is invalid.",
+    "report_chunk_too_large": "The supplied report chunk exceeds its allowed size.",
+    "report_quota_exceeded": "The report retention or assembly quota is exhausted.",
+    "report_state_conflict": "The report is not in a state that permits this operation.",
+    "report_chunk_conflict": "The supplied report chunk conflicts with an accepted chunk.",
+    "report_chunk_out_of_order": "The supplied report chunk is not the next accepted chunk.",
+    "report_manifest_mismatch": "The supplied report manifest does not match the current assembly.",
+    "report_cursor_invalid": "The supplied report cursor is invalid.",
+    "report_cursor_scope_mismatch": "The supplied report cursor belongs to a different read scope.",
+    "report_cursor_stale": "The supplied report cursor is stale.",
+    "invalid_governance_mode": "The supplied governance mode is invalid.",
+    "invalid_initiative_status": "The supplied initiative status is invalid.",
+    "invalid_initiative_parent": "The supplied initiative parent is invalid.",
+    "invalid_closure_subject": "The supplied closure subject is invalid.",
+    "invalid_decision_subject": "The supplied decision subject is invalid.",
+    "invalid_decision_type": "The supplied decision type is invalid.",
+    "decision_subject_not_finalized": "The selected decision subject is not finalized evidence.",
+    "decision_subject_digest_mismatch": "The supplied decision subject digest does not match.",
+    "approval_view_required": "The plan decision requires an exact ready approval view.",
+    "approval_view_not_ready": "The approval view is not currently ready.",
+    "approval_view_mismatch": "The supplied approval view does not match the plan.",
+    "approval_handle_not_found": "The supplied approval handle was not found.",
+    "approval_handle_mismatch": "The supplied approval handle does not match the ready plan view.",
+    "approval_handle_consumed": "The supplied approval handle has already been used.",
+    "decision_response_required": "The plan decision requires a new explicit user response.",
+    "decision_response_reused_original": "The original task request cannot be reused as a plan decision.",
+    "project_root_invalid": "The supplied project root is unavailable or is not a directory.",
+    "storage_busy": "The V12 ledger is temporarily busy.",
+}
+_PUBLIC_SERVICE_CODES = frozenset((*_RECOVERY_ACTIONS, *_SERVER_STATE_CODES, "project_root_invalid", "storage_busy"))
+_SAFE_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SAFE_PATH_RE = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}|\[[0-9]{1,4}\]){0,16}$")
+_SAFE_EXPECTED_VALUES = frozenset({"restart_without_cursor", "advertised_input_schema"})
 
 
-def _public_next_action(value: object) -> str:
-    """Return a user/LLM-safe action without internal routing guards.
-
-    Older persisted receipts can still carry the former ``COORDINATOR LOCK``
-    prefix even though the current public contract no longer exposes it.  A
-    receipt must remain actionable when read through a newer plugin, so strip
-    only that private prefix and retain the concrete operation that follows.
-    Never expose the coordinator's implementation-only prohibition as a
-    visible blocker.
-    """
-    # A few older runtime receipts stored the action as a structured private
-    # object.  Never stringify that implementation object into the public
-    # transcript (``{'operation': ...}`` is not an executable instruction).
-    if isinstance(value, Mapping):
-        nested = value.get("next_action") or value.get("action")
-        operation = value.get("operation") or value.get("tool")
-        if nested:
-            value = nested
-        elif operation:
-            value = f"Call {operation} with the server-returned arguments for this same task."
-        else:
-            value = "Inspect the same task and follow the server-returned recovery action."
-    text = str(value or "").strip()
-    marker = "COORDINATOR LOCK:"
-    if marker in text:
-        text = text.split(marker, 1)[1].strip()
-        boundary = "All project operations belong to workers; failure or delay never authorizes direct project work."
-        if boundary in text:
-            text = text.split(boundary, 1)[1].strip()
-        elif "NEXT REQUIRED ACTION:" in text:
-            text = text.split("NEXT REQUIRED ACTION:", 1)[1].strip()
-    return text or "Inspect the same task and follow the server-returned recovery action."
+class _RpcError(Exception):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
-def _public_user_view(rendered: object) -> dict[str, Any]:
-    """Return only presentation fields; transport metadata stays internal."""
-    if not isinstance(rendered, dict):
-        return {}
-    allowed = (
-        "message_type", "message", "next_step", "profile", "detail_level",
-        "quality", "question", "requires_user_decision", "recommendation",
-        "risks", "why_it_matters", "output_policy",
-    )
-    return {key: rendered[key] for key in allowed if key in rendered}
+class _SchemaError(ValueError):
+    def __init__(self, path: str, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.message = message
 
 
-def _is_user_decision_event(outcome: object, result: object = None) -> bool:
-    """Return whether this response is allowed to pause the visible chat.
-
-    Technical validation/recovery states may use ``needs_input`` internally
-    for compatibility with the lifecycle ledger, but they are not questions.
-    Only an explicit plan-approval state or a server-returned question may
-    request a user decision at the public MCP boundary.
-    """
-    if str(outcome or "").strip().lower() == "awaiting_plan_approval":
-        return True
-    if not isinstance(result, Mapping):
+def _is_json_value(value: object) -> bool:
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
         return False
-    return bool(result.get("requires_user_decision") or result.get("question"))
+    return True
 
 
-def _explicit_plan_approval_requested(
-    response: Mapping[str, Any],
-    result: Mapping[str, Any] | None = None,
-) -> bool:
-    """Return only durable, explicit user intent for plan approval.
-
-    Older lifecycle receipts used ``plan_reapproval_required`` for both a
-    policy-generated Planner recommendation and a genuine user-requested
-    review.  The policy-generated form must not pause the public pipeline.
-    Do not infer intent from ``requires_user_decision`` or from the legacy
-    error code; those fields are precisely what old receipts over-reported.
-    """
-    containers: list[Mapping[str, Any]] = [response]
-    if isinstance(result, Mapping):
-        containers.append(result)
-    for key in ("state_summary", "plan_approval", "task", "pipeline", "request"):
-        value = response.get(key)
-        if isinstance(value, Mapping):
-            containers.append(value)
-    for container in tuple(containers):
-        for key in ("plan_review", "approval"):
-            value = container.get(key)
-            if isinstance(value, Mapping):
-                containers.append(value)
-    for container in containers:
-        if any(
-            container.get(marker) is True
-            for marker in (
-                "plan_approval_user_requested",
-                "user_requested_plan_approval",
-                "plan_review_requested",
-                "explicit_plan_approval_requested",
-            )
-        ):
+def _type_matches(value: object, expected: object) -> bool:
+    expected_values = expected if isinstance(expected, list) else [expected]
+    for item in expected_values:
+        if item == "object" and isinstance(value, Mapping):
             return True
-        approval = container.get("plan_approval")
-        if isinstance(approval, Mapping) and approval.get("user_requested") is True:
+        if item == "array" and isinstance(value, list):
+            return True
+        if item == "string" and isinstance(value, str):
+            return True
+        if item == "integer" and isinstance(value, int) and not isinstance(value, bool):
+            return True
+        if item == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True
+        if item == "boolean" and isinstance(value, bool):
+            return True
+        if item == "null" and value is None:
             return True
     return False
 
 
-def _public_user_view_with_decision(
-    rendered: object,
-    *,
-    requires_user_decision: bool,
-) -> dict[str, Any]:
-    """Add the strict decision bit without leaking transport metadata."""
-    view = _public_user_view(rendered)
-    view["requires_user_decision"] = bool(requires_user_decision)
-    view["message_type"] = "decision_required" if requires_user_decision else (
-        "progress" if view.get("message_type") == "Question" else view.get("message_type", "Update")
-    )
-    return view
+def _encoded_json_bytes(value: object, path: str) -> int:
+    """Return a compact UTF-8 JSON size or a public validation failure."""
+    try:
+        rendered = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise _SchemaError(path, "value is not valid JSON") from error
+    return len(rendered.encode("utf-8"))
 
 
-def _internal_protocol(response: Mapping[str, Any]) -> dict[str, Any]:
-    """Nest a bounded machine receipt under one explicit boundary.
+def _utf8_size_exceeds(value: str, maximum: int) -> bool:
+    """Measure a text-stream frame without materializing an encoded copy."""
+    total = 0
+    for character in value:
+        codepoint = ord(character)
+        total += 1 if codepoint < 0x80 else len(character.encode("utf-8"))
+        if total > maximum:
+            return True
+    return False
 
-    The top-level response carries the native dispatch payload.  Repeating
-    those large host messages inside ``internal``
-    can exceed the host's response budget, so this boundary keeps identity,
-    receipt references, and dispatch metadata while leaving the authoritative
-    native payload at its existing top-level location.
+
+def _drain_binary_line(stream: Any, chunk: bytes) -> None:
+    """Discard the remainder of one oversized binary JSONL physical line."""
+    while chunk and not chunk.endswith(b"\n"):
+        chunk = stream.readline(_FRAME_READ_LIMIT)
+
+
+def _drain_text_line(stream: Any, chunk: str) -> None:
+    """Discard the remainder of one oversized text JSONL physical line."""
+    while chunk and not chunk.endswith("\n"):
+        chunk = stream.readline(_FRAME_READ_LIMIT)
+
+
+def _read_physical_jsonl_frame(stream: Any) -> tuple[str | None, bool]:
+    """Read one bounded JSONL frame and drain an oversized physical line.
+
+    ``True`` in the second tuple item means an overlong or non-UTF-8 frame
+    was consumed and must receive only a generic parse error.  The binary
+    path is used for normal stdio so the 256 KiB limit applies to bytes, not
+    decoded characters.  The text fallback keeps embedded/unit-test streams
+    bounded and applies the equivalent UTF-8 measurement.
     """
-    keep = {
-        "schema", "ok", "outcome", "task_ref", "step", "replayed",
-        "attempt_result_ref", "receipt_ref", "continuation",
+    binary_stream = getattr(stream, "buffer", None)
+    if callable(getattr(binary_stream, "readline", None)):
+        chunk = binary_stream.readline(_FRAME_READ_LIMIT)
+        if not chunk:
+            return None, False
+        if not isinstance(chunk, bytes):
+            return "", True
+        oversized = len(chunk) > MAX_PHYSICAL_JSONL_FRAME_BYTES
+        if oversized:
+            _drain_binary_line(binary_stream, chunk)
+            return "", True
+        try:
+            return chunk.decode("utf-8"), False
+        except UnicodeDecodeError:
+            return "", True
+
+    chunk = stream.readline(_FRAME_READ_LIMIT)
+    if not chunk:
+        return None, False
+    if not isinstance(chunk, str):
+        return "", True
+    oversized = (
+        len(chunk) >= _FRAME_READ_LIMIT
+        or _utf8_size_exceeds(chunk, MAX_PHYSICAL_JSONL_FRAME_BYTES)
+    )
+    if oversized:
+        _drain_text_line(stream, chunk)
+        return "", True
+    return chunk, False
+
+
+def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") -> None:
+    """Validate the compact JSON-Schema subset used by the V12 public API."""
+    const = schema.get("const")
+    if "const" in schema and value != const:
+        raise _SchemaError(path, "value does not match the required constant")
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for item in all_of:
+            if isinstance(item, Mapping):
+                _validate_schema(item, value, path)
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list):
+        failures: list[_SchemaError] = []
+        for item in any_of:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                _validate_schema(item, value, path)
+                break
+            except _SchemaError as error:
+                failures.append(error)
+        else:
+            if failures:
+                raise failures[0]
+            raise _SchemaError(path, "value does not match a permitted input shape")
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list):
+        matches = 0
+        failures: list[_SchemaError] = []
+        alternatives = [item for item in one_of if isinstance(item, Mapping)]
+        # Prefer a branch whose explicit discriminator already matches the
+        # supplied object.  This keeps a missing append/finalize field from
+        # being reported as the unrelated legacy-single branch.
+        if isinstance(value, Mapping):
+            matching_discriminators = [
+                item for item in alternatives
+                if any(
+                    isinstance(property_schema, Mapping)
+                    and "const" in property_schema
+                    and value.get(str(name)) == property_schema.get("const")
+                    for name, property_schema in (item.get("properties") or {}).items()
+                )
+            ]
+            if matching_discriminators:
+                alternatives = matching_discriminators
+        for item in alternatives:
+            try:
+                _validate_schema(item, value, path)
+                matches += 1
+            except _SchemaError as error:
+                failures.append(error)
+        if matches != 1:
+            if matches == 0 and failures:
+                raise failures[0]
+            raise _SchemaError(path, "value must match exactly one permitted input shape")
+    prohibited = schema.get("not")
+    if isinstance(prohibited, Mapping):
+        try:
+            _validate_schema(prohibited, value, path)
+        except _SchemaError:
+            pass
+        else:
+            required = prohibited.get("required")
+            if isinstance(required, list) and len(required) == 1 and isinstance(required[0], str):
+                raise _SchemaError(path, f"property {required[0]!r} is not permitted for this input shape")
+            raise _SchemaError(path, "value contains a property not permitted for this input shape")
+    expected_type = schema.get("type")
+    if expected_type is not None and not _type_matches(value, expected_type):
+        raise _SchemaError(path, "value has the wrong type")
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        raise _SchemaError(path, "value is not one of the permitted values")
+    maximum_bytes = schema.get("maxBytes")
+    if isinstance(maximum_bytes, int) and not isinstance(maximum_bytes, bool):
+        if _encoded_json_bytes(value, path) > maximum_bytes:
+            raise _SchemaError(path, "JSON value exceeds the maximum encoded byte length")
+    if isinstance(value, str):
+        minimum = schema.get("minLength")
+        maximum = schema.get("maxLength")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise _SchemaError(path, "string is shorter than the minimum length")
+        if isinstance(maximum, int) and len(value) > maximum:
+            raise _SchemaError(path, "string is longer than the maximum length")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+            raise _SchemaError(path, "string does not match the required pattern")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            raise _SchemaError(path, "number is below the minimum")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            raise _SchemaError(path, "number is above the maximum")
+    if isinstance(value, list):
+        minimum = schema.get("minItems")
+        maximum = schema.get("maxItems")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise _SchemaError(path, "array has too few items")
+        if isinstance(maximum, int) and len(value) > maximum:
+            raise _SchemaError(path, "array has too many items")
+        if schema.get("uniqueItems") is True:
+            for index, item in enumerate(value):
+                if any(item == earlier for earlier in value[:index]):
+                    raise _SchemaError(f"{path}[{index}]", "array items must be unique")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, Mapping):
+            for index, item in enumerate(value):
+                _validate_schema(item_schema, item, f"{path}[{index}]")
+    if isinstance(value, Mapping):
+        properties = schema.get("properties")
+        property_map = properties if isinstance(properties, Mapping) else {}
+        required = schema.get("required")
+        for name in required if isinstance(required, list) else []:
+            if name not in value:
+                raise _SchemaError(path, f"missing required property {name!r}")
+        if schema.get("additionalProperties") is False:
+            extras = set(value) - set(property_map)
+            if extras:
+                raise _SchemaError(path, f"unsupported property {sorted(map(str, extras))[0]!r}")
+        for name, item in value.items():
+            child_schema = property_map.get(name)
+            if isinstance(child_schema, Mapping):
+                _validate_schema(child_schema, item, f"{path}.{name}")
+
+
+def _safe_details(value: object) -> dict[str, object]:
+    """Keep only bounded, named public detail scalars on the tool wire.
+
+    A V12 service exception is ordinarily sanitized, but the MCP facade is a
+    separate trust boundary.  Do not render arbitrary exception detail JSON:
+    it may later gain host paths, SQLite diagnostics, or caller data.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    details: dict[str, object] = {}
+    path = value.get("path")
+    if isinstance(path, str) and _SAFE_PATH_RE.fullmatch(path):
+        details["path"] = path
+    field = value.get("field")
+    if isinstance(field, str) and _SAFE_FIELD_RE.fullmatch(field):
+        details["field"] = field
+    expected = value.get("expected")
+    if isinstance(expected, str) and expected in _SAFE_EXPECTED_VALUES:
+        details["expected"] = expected
+    retry_after_ms = value.get("retry_after_ms")
+    if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool) and 0 <= retry_after_ms <= 60_000:
+        details["retry_after_ms"] = retry_after_ms
+    return details
+
+
+def _safe_message(code: object) -> str:
+    """Return a fixed public explanation without rendering exception text."""
+    if isinstance(code, str):
+        return _PUBLIC_ERROR_MESSAGES.get(code, "The tool request could not be completed.")
+    return "The tool request could not be completed."
+
+
+def _sqlite_is_busy(error: BaseException) -> bool:
+    """Recognize only SQLite's primary BUSY/LOCKED codes, not error text."""
+    sqlite_code = getattr(error, "sqlite_errorcode", None)
+    try:
+        primary_code = int(sqlite_code) & 0xFF
+    except (TypeError, ValueError):
+        return False
+    return primary_code in {
+        getattr(sqlite3, "SQLITE_BUSY", -1),
+        getattr(sqlite3, "SQLITE_LOCKED", -1),
     }
-    result = {key: response[key] for key in keep if key in response}
-    dispatches = response.get("dispatches")
-    if isinstance(dispatches, list):
-        result["dispatches"] = [
-            {
-                key: item[key]
-                for key in ("dispatch_ref", "phase", "profile", "display_name", "briefing_digest", "worker")
-                if isinstance(item, dict) and key in item
-            }
-            for item in dispatches
-            if isinstance(item, dict)
-        ]
-    if "next_action" in response:
-        result["next_action_ref"] = "top-level next_action"
-    if isinstance(response.get("diagnostics"), list):
-        result["diagnostic_count"] = len(response["diagnostics"])
+
+
+def _recovery(code: str, details: object) -> tuple[bool, str]:
+    if code == "storage_busy":
+        return True, "Retry this same mutation once with the same idempotency_key after the stated delay."
+    if code == "storage_unavailable":
+        return True, "Retry the same idempotent mutation after local storage is available; do not change its idempotency_key."
+    action = _RECOVERY_ACTIONS.get(code)
+    if action is not None:
+        return False, action
+    if isinstance(details, Mapping) and details.get("field"):
+        return False, "Correct the named public field and call the same tool again."
+    return False, "Review the advertised tool schema and use only durable IDs and values emitted by Cortex."
+
+
+def _failure_text(*, code: str, details: object, mutation: str, retryable: bool, action: str) -> str:
+    """Render one bounded TextContent failure without echoing private data."""
+    parts = [f"Cortex tool error [{code}]: {_safe_message(code)}"]
+    if isinstance(details, Mapping):
+        path = details.get("path")
+        field = details.get("field")
+        expected = details.get("expected")
+        if isinstance(path, str):
+            parts.append(f"Location: {path}.")
+        elif isinstance(field, str):
+            parts.append(f"Field: {field}.")
+        if isinstance(expected, str):
+            parts.append(f"Expected: {expected[:256]}.")
+        retry_after_ms = details.get("retry_after_ms")
+        if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool):
+            parts.append(f"Retry after: {retry_after_ms} ms.")
+    parts.append(f"Mutation: {mutation}.")
+    parts.append(f"Action: {action}")
+    if code in {"validation_error", "invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found", "initiative_not_found", "decision_not_found"}:
+        parts.append("Handle rule: do not retry a shortened, ellipsized, inferred, or reconstructed value; reuse the exact structuredContent.handles value from the last success.")
+    parts.append("Retryable now: yes." if retryable else "Retryable unchanged: no; correct the request first.")
+    return " ".join(parts)[:2_048]
+
+
+def _service_failure(error: V12ServiceError) -> dict[str, Any]:
+    """Extract the service's bounded public code, message, details, and action."""
+    candidate = getattr(error, "code", "ledger_error")
+    code = candidate if isinstance(candidate, str) and candidate in _PUBLIC_SERVICE_CODES else "ledger_error"
+    details = _safe_details(getattr(error, "details", None))
+    retryable, action = _recovery(code, details)
+    return {
+        "code": code,
+        "message": _safe_message(code),
+        "details": details,
+        "retryable": retryable,
+        "action": action,
+    }
+
+
+def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    details = _safe_details({"path": error.path, "expected": "advertised_input_schema"})
+    retryable, action = _recovery("validation_error", details)
+    if tool_name == "create_delegation" and "delegation_id" in arguments:
+        action = (
+            "create_delegation is creation-only: never pass delegation_id to it. "
+            "For retrieval, call read_delegation({delegation_ref, after_sequence}) exactly "
+            "with the emitted delegation_ref and durable sequence. For an exact mutation retry, "
+            "reuse the original complete create_delegation payload with its returned retry_handle."
+        )
+    elif tool_name in {"inspect_task", "read_delegation", "inspect_governance"} and "limit" in arguments:
+        action = (
+            f"Use an integer limit from 1 through {MAX_PAGE_LIMIT}; limit={MAX_PAGE_LIMIT} is the maximum. "
+            "For additional chronology, copy the returned next_sequence unchanged into after_sequence."
+        )
+    return {
+        "code": "validation_error",
+        "message": _safe_message("validation_error"),
+        "details": details,
+        "retryable": retryable,
+        "action": action,
+    }
+
+
+def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+    """Project a nested public view to its compact, callable surface.
+
+    Services retain canonical IDs so they can validate durable relationships.
+    Views are public next-call material, however, and must never make a caller
+    transcribe those IDs. Whitelisting also keeps future nested service fields
+    from accidentally becoming public handles.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    if not approval:
+        return {
+            field: value[field]
+            for field in ("status", "path", "source_sequence", "content_digest")
+            if field in value
+        }
+    result = {
+        field: value[field]
+        for field in (
+            "report_content_digest",
+            "status",
+            "path",
+            "source_sequence",
+            "content_digest",
+            "approval_handle",
+        )
+        if field in value
+    }
+    fallback: Mapping[str, Any] = {}
+    if owner is not None and isinstance(owner.get("reports"), list):
+        for report in owner["reports"]:
+            if isinstance(report, Mapping) and report.get("report_type") == "plan":
+                fallback = report
+                break
+    for canonical_name, compact_name in (("report_id", "report_ref"), ("delegation_id", "delegation_ref")):
+        compact = record_ref(value.get(canonical_name)) or record_ref(fallback.get(canonical_name))
+        if compact is not None:
+            result[compact_name] = compact
     return result
 
-# ``read_worker_result`` is intentionally shared: the coordinator reads a
-# completed canonical result, while a successor worker may read only refs
-# granted in its dispatch.  Handler-level scope checks remain authoritative.
-COORDINATOR_PUBLIC_TOOL_NAMES = (
-    "start_orchestration",
-    "continue_orchestration",
-    "manage_orchestration",
-    "manage_governance",
-    "read_worker_result",
-)
-WORKER_PUBLIC_TOOL_NAMES = (
-    "worker_question",
-    "record_attempt_event",
-    "complete_attempt",
-    "read_dispatch_briefing",
-    "read_worker_result",
-)
-# Desktop uses the same fresh-only nine-operation union as the explicit
-# audience projections.
-DEFAULT_PUBLIC_TOOL_NAMES = tuple(dict.fromkeys(
-    (*COORDINATOR_PUBLIC_TOOL_NAMES, *WORKER_PUBLIC_TOOL_NAMES)
-))
+
+def _project_public_views(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Replace every public nested handle/view with its compact projection."""
+    result = dict(value)
+    for field, approval in (("human_view", False), ("approval_view", True)):
+        projected = _public_view(result.get(field), approval=approval, owner=result)
+        if projected is not None:
+            result[field] = projected
+    return result
 
 
-PUBLIC_TOOL_DESCRIPTIONS = {
-    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. When Desktop supplied the canonical Cortex Markdown skill link but the link is absent from task.user_request, preserve that explicit route selection in activation_marker with the exact value $cortex:orchestrator. Arbitrary links and other marker values are rejected. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
-    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is a server-owned reconciliation receipt; Cortex rehydrates the exact task and continues or surfaces only a real task question.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is an idempotent server-owned retry for a lost recovery response and accepts no coordinator-authored future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
-    "worker_question": "Worker-only operation: persist one self-contained task question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Questions may cover only task requirements, scope, acceptance/product behavior, or explicit external/destructive authorization; Cortex policy, gates, planner, retries, workers, routing, ledger, and recovery are returned as orchestrator advice and never shown as user questions. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget.",
-    "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
-    "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may submit the initial full planning work breakdown. If planning validation returns diagnostics and a rejected-draft digest, Cortex has retained the complete draft and every field that passed validation: retry this same attempt with ONLY base_payload_digest plus non-empty diagnostic-scoped RFC6902 patches. Never resend or regenerate the full planning object during repair; unrelated fields are preserved server-side. The canonical AttemptResult is immutable and no replacement worker is authorized. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
-    "read_dispatch_briefing": "Worker-only scoped read: read exactly the immutable briefing identified by the task, attempt, profile, dispatch, and SHA-256 tuple. A successful complete read records an idempotent server-owned briefing receipt; the worker never copies an acknowledgement marker into semantic output.",
-    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view by attempt_result_ref and exact task scope. For a finalized successful result of the coordinator's current active slot, the server returns continuation={task_id,step,results}; retain task_id as an identity check and copy step/results verbatim into continue_orchestration, never increment step or use projection_ref/formatted ref text. For a current terminal blocked/failed result, the server returns terminal_continuation={task_id,step,results} with exact status, dispatch_ref, and reason; copy it verbatim into continue_orchestration and never wait, respawn, replace, or fabricate success. The compact internal receipt retains these server-derived continuations across compaction. A successful successor-worker read records an idempotent predecessor receipt; coordinators omit worker identity, while successors include their exact attempt_id/profile and may read only assigned refs.",
-    "manage_governance": "Coordinator-capability-gated: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If a recovery response was lost, recover_coordinator_capability requires the same active principal, thread, task_ref, and original non-durable recovery proof; it redelivers the same pending pair until acknowledge_coordinator_recovery presents the old proof plus both replacement values and retires the old pair. Initial start-response loss remains fail-closed because no proof exists. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
-}
+def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a deterministic, non-recursive next-call handle envelope.
 
-
-
-def build_public_schemas(
-    *,
-    agents: Mapping[str, Any],
-    max_work_packages: int,
-    max_microtasks_per_package: int,
-    max_discovery_domains: int,
-    question_option_schema: dict[str, Any],
-    available_gates: set[str] | None = None,
-    pipeline_gate_aliases: Mapping[str, str] | None = None,
-    profile_aliases: Mapping[str, str] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Build the nine fresh public contracts independently of handlers."""
-    # The runtime supplies these from its authoritative contract.  Keeping a
-    # small fallback makes this registry independently importable in schema
-    # tooling and tests, while the installed facade never relies on it.
-    canonical_gates = set(available_gates or {
-        "scope", "plan", "discover", "architecture", "database_architecture",
-        "implementation", "qa", "security", "performance", "accessibility",
-        "ux", "review", "documentation", "close", "governance_activation",
-        "governance_close",
-    })
-    gate_aliases = dict(pipeline_gate_aliases or {})
-    profile_aliases = dict(profile_aliases or {})
-    public_phase_values = sorted(canonical_gates | set(gate_aliases))
-    public_profile_values = sorted(set(agents) | set(profile_aliases))
-    EXECUTED_TEST_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "command": {
-                "type": "string",
-                "minLength": 2,
-                "description": "Exact reproducible command that was executed; placeholders such as ... are forbidden.",
-            },
-            "cwd": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Exact project root or safe project-relative working directory used for the command.",
-            },
-            "exit_code": {"type": "integer", "const": 0},
-            "evidence": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Decisive observed output or behavior from this executed command.",
-            },
-        },
-        "required": ["command", "cwd", "exit_code", "evidence"],
-    }
-    PLANNING_STRING_LIST_SCHEMA = {
-        "type": "array",
-        "minItems": 1,
-        "uniqueItems": True,
-        "items": {"type": "string", "minLength": 1},
-    }
-    PLANNING_PATHS_SCHEMA = {
-        "type": "array",
-        "minItems": 1,
-        "uniqueItems": True,
-        "items": {"type": "string", "minLength": 1},
-    }
-    PLANNING_NARROW_PATHS_SCHEMA = {
-        "type": "array",
-        "minItems": 1,
-        "uniqueItems": True,
-        "items": {
-            "type": "string",
-            "minLength": 1,
-            "not": {"enum": [".", "*"]},
-        },
-    }
-    PLANNING_DEPENDENCIES_SCHEMA = {
-        "type": "array",
-        "uniqueItems": True,
-        "items": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-    }
-    PLANNING_COVERAGE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "requirement": {"type": "string", "minLength": 1},
-            "plan_refs": {
-                "type": "array", "minItems": 1, "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1, "maxLength": 160},
-            },
-            "verification": PLANNING_STRING_LIST_SCHEMA,
-            "status": {"type": "string", "enum": ["covered"]},
-        },
-        "required": ["requirement", "plan_refs", "verification", "status"],
-    }
-    REQUIRED_ARTIFACT_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "path": {"type": "string", "minLength": 1, "description": "Project-relative path that must exist when the owning gate completes."},
-            "kind": {"type": "string", "enum": ["file", "test_suite", "fixture", "cli", "document", "report", "schema", "config", "other"], "description": "Artifact kind."},
-            "owner_gate": {"type": "string", "enum": sorted(canonical_gates | set(gate_aliases))},
-            "verification": {"type": "string", "minLength": 1, "description": "Exact trusted verification id or command contract for this artifact."},
-        },
-        "required": ["path", "kind", "owner_gate", "verification"],
-    }
-    PLANNING_MICROTASK_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-            "title": {"type": "string", "minLength": 1},
-            "objective": {"type": "string", "minLength": 1},
-            "profile": {
-                "type": "string",
-                "enum": public_profile_values,
-                "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
-            },
-            "allowed_paths": PLANNING_NARROW_PATHS_SCHEMA,
-            "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
-            "status": {"type": "string", "enum": ["pending", "ready", "running", "blocked", "completed", "skipped"]},
-            "order": {"type": "integer", "minimum": 1},
-            "gates": PLANNING_STRING_LIST_SCHEMA,
-            "acceptance_criteria": PLANNING_STRING_LIST_SCHEMA,
-            "verification": PLANNING_STRING_LIST_SCHEMA,
-            "required_artifacts": {
-                "type": "array", "uniqueItems": True, "items": REQUIRED_ARTIFACT_SCHEMA,
-                "description": "Machine-readable deliverables checked against the project workspace at implementation/QA completion.",
-            },
-        },
-        "required": ["id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"],
-    }
-    PLANNING_PACKAGE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-            "title": {"type": "string", "minLength": 1},
-            "objective": {"type": "string", "minLength": 1},
-            "allowed_paths": PLANNING_PATHS_SCHEMA,
-            "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
-            "status": {"type": "string", "enum": ["pending", "ready", "running", "blocked", "completed", "skipped"]},
-            "order": {"type": "integer", "minimum": 1},
-            "gates": PLANNING_STRING_LIST_SCHEMA,
-            "required_artifacts": {
-                "type": "array", "uniqueItems": True, "items": REQUIRED_ARTIFACT_SCHEMA,
-                "description": "Package-level deliverables checked against the project workspace at their owner gate.",
-            },
-            "microtasks": {
-                "type": "array",
-                "minItems": 1,
-                "items": PLANNING_MICROTASK_SCHEMA,
-            },
-        },
-        "required": ["id", "title", "objective", "microtasks"],
-    }
-    V3_PLANNING_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "overview": {"type": "string", "minLength": 1},
-            "requirement_coverage": {
-                "type": "array", "uniqueItems": True,
-                "items": PLANNING_COVERAGE_SCHEMA,
-                "description": (
-                    "Optional traceability map. When the user changes an active task, every latest requirement "
-                    "must appear here exactly once with the plan items and verification that cover it."
-                ),
-            },
-            "recommendation": {"type": "string", "enum": ["approve", "revise"]},
-            "recommendation_rationale": {"type": "string", "minLength": 1},
-            "recommendation_actions": {
-                "type": "array",
-                "description": "Concrete corrective actions required by the planner recommendation; required when recommendation=revise.",
-                "items": {
-                    "type": "object", "additionalProperties": False,
-                    "properties": {
-                        "issue": {"type": "string", "minLength": 1},
-                        "action": {"type": "string", "minLength": 1},
-                        "plan_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                        "verification": {"type": "string", "minLength": 1},
-                    },
-                    "required": ["issue", "action", "plan_refs", "verification"],
-                },
-            },
-            "resolved_questions": {
-                "type": "array", "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1},
-            },
-            "risks": {"type": "array", "items": {"type": "string", "minLength": 1}},
-            "work_packages": {
-                "type": "array", "minItems": 1,
-                "description": (
-                    "Planner-only task-local work breakdown. Runtime requires each package to have id, title, objective, "
-                    "and non-empty microtasks, and writes the validated artifact to the host-private task projection store."
-                ),
-                "items": PLANNING_PACKAGE_SCHEMA,
-            },
-        },
-        "required": ["overview", "work_packages"],
-    }
-    SCOPING_DOMAIN_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-            "title": {"type": "string", "minLength": 1},
-            "objective": {"type": "string", "minLength": 1},
-            "paths": PLANNING_PATHS_SCHEMA,
-            "context": PLANNING_STRING_LIST_SCHEMA,
-            "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
-            "acceptance_criteria": PLANNING_STRING_LIST_SCHEMA,
-            "verification": PLANNING_STRING_LIST_SCHEMA,
-        },
-        "required": [
-            "id", "title", "objective", "paths", "context", "depends_on",
-            "acceptance_criteria", "verification",
-        ],
-    }
-    V3_SCOPING_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "overview": {"type": "string", "minLength": 1},
-            "context_files": {
-                "type": "array", "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1},
-            },
-            "discovery_domains": {
-                "type": "array", "minItems": 1,
-                "items": SCOPING_DOMAIN_SCHEMA,
-            },
-        },
-        "required": ["overview", "context_files", "discovery_domains"],
-    }
-    V3_WORKER_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "phase": {
-                "type": "string",
-                "minLength": 1,
-                "enum": sorted(canonical_gates | set(gate_aliases)),
-                "description": (
-                    "Canonical phase: scope, plan, discover, architecture, database_architecture, implementation, qa, "
-                    "security, performance, accessibility, ux, review, documentation, governance_activation, "
-                    "governance_close, or close. Common aliases "
-                    "are normalized; build_verification/final_verification map to close. A canonical phase may "
-                    "appear in only one wave, though one wave may contain multiple workers for that phase."
-                ),
-            },
-            "profile": {
-                "type": "string",
-                "enum": public_profile_values,
-                "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
-            },
-            "objective": {"type": "string"},
-            "strategy": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional concise name for the worker approach; Cortex preserves it as rework evidence but never uses it to impose an attempt limit.",
-            },
-            "paths": {"type": "array", "items": {"type": "string"}},
-            "allowed_paths": {
-                "type": "array", "minItems": 1,
-                "items": {
-                    "type": "string", "minLength": 1,
-                    "not": {"enum": [".", "*"]},
-                },
-                "description": (
-                    "Canonical server-owned worker write scope. Paths must be narrow, project-relative, and "
-                    "must not be `.` or `*`; Cortex validates and normalizes them before dispatch."
-                ),
-            },
-            "acceptance": {"type": "array", "items": {"type": "string"}},
-            "verification": {"type": "array", "items": {"type": "string"}},
-            "context_files": {
-                "type": "array",
-                "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1},
-                "description": (
-                    "Task-relevant project/feature knowledge pages selected from the repository indexes. "
-                    "Cortex also injects docs/project/index.md and docs/features/index.md when present."
-                ),
-            },
-            "depends_on": {
-                "type": "array",
-                "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1, "enum": public_phase_values},
-                "description": (
-                    "Optional exact prerequisite phases whose verified AttemptResults this worker must receive. "
-                    "Omit to receive every completed predecessor result; use an empty list only when the worker "
-                    "is intentionally independent."
-                ),
-            },
-            "context_result_refs": {
-                "type": "array",
-                "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1},
-                "description": (
-                    "Optional exact immutable AttemptResult refs that must be supplied to this worker. "
-                    "Use for corrective handoffs that must retain an origin result; Cortex validates that "
-                    "each result belongs to the current task before dispatch."
-                ),
-            },
-            "model": {"type": "string", "description": "Optional expert override; luna, terra, and sol aliases are accepted."},
-            "user_requested_model": {
-                "type": "string",
-                "description": (
-                    "Model explicitly requested by the user; luna, terra, and sol aliases are accepted. "
-                    "Non-security Sol is rejected unless it is supplied through this field."
-                ),
-            },
-            "effort": {"type": "string", "description": "Optional expert reasoning-effort override."},
-            "visible": {
-                "type": "boolean",
-                "default": False,
-                "description": (
-                    "Opt into a user-owned visible task only when the immutable task contract contains "
-                    "visible_thread_requested=true; otherwise Cortex rejects this field and uses a hidden subagent."
-                ),
-            },
-            "isolated_checkout": {
-                "type": "boolean",
-                "default": False,
-                "description": "Optional worktree isolation for an explicitly authorized visible task.",
-            },
-        },
-        "required": ["phase"],
-    }
-    V3_WAVE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {"workers": {"type": "array", "minItems": 1, "maxItems": 32, "items": V3_WORKER_SCHEMA}},
-        "required": ["workers"],
-    }
-    START_ORCHESTRATION_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
-            "activation_marker": {
-                "type": "string",
-                "const": "$cortex:orchestrator",
-                "description": (
-                    "Optional exact host/skill activation marker. Include this when Desktop supplied the canonical "
-                    "[$cortex:orchestrator](.../skills/orchestrator/SKILL.md) route link but task.user_request contains "
-                    "only the task body. No other marker or arbitrary file link is accepted."
-                ),
-            },
-            "task": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "user_request": {"type": "string", "minLength": 1, "description": "Exact user-authored task text. Do not paraphrase, normalize, or expand it."},
-                    "requirements": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "constraints": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Explicit non-negotiable task constraints compiled as first-class canonical context."},
-                    "acceptance_criteria": {
-                        "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1},
-                        "description": "Required observable outcomes, except harvest routes where Cortex supplies the exhaustive census contract.",
-                    },
-                    "scope": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "allowed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "verification": {
-                        "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1},
-                        "description": "Required authoritative checks, except harvest routes where Cortex supplies the census checks.",
-                    },
-                    "budget": {"type": "string"},
-                    "pause_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "plan_approval": {
-                        "type": "string",
-                        "enum": ["auto", "required"],
-                        "description": (
-                            "Post-plan user review policy. Defaults to auto for every complexity; "
-                            "required is valid only when the user explicitly requested plan approval. "
-                            "Governance, Planner, risk, and review recommendations never request approval "
-                            "on the user's behalf."
-                        ),
-                    },
-                    "initiative_ref": {"type": "string", "pattern": "^initiative-[A-Za-z0-9_.:-]+$", "description": "Optional existing initiative scope; the server verifies the reference before task creation."},
-                    "governance_mode": {"type": "string", "enum": ["auto", "required", "off"], "description": "Requested governance floor. required always resolves to full. off is valid only for C1 after risk_triggers supplies every documented hard/topology trigger as an explicit boolean false; text and positive structured triggers still force full governance."},
-                    "risk_triggers": {"type": ["array", "object"], "description": "Explicit stated governance trigger classes. governance_mode=off requires an exhaustive boolean object; auto/required may use an object or array. No numeric scope inference is applied."},
-                    "governance_triggers": {"type": ["array", "object"], "description": "Explicit stated governance trigger classes; no numeric scope inference is applied."},
-                    "multiple_repositories": {"type": "boolean"},
-                    "related_tasks": {"type": "boolean"},
-                    "long_lived_lanes": {"type": "boolean"},
-                    "conflicting_resources": {"type": "boolean"},
-                    "multi_session_handoff": {"type": "boolean"},
-                    "user_language": {"type": "string"},
-                    "language": {"type": "string"},
-                    "communication_profile": {"type": "string", "enum": ["natural", "neutral", "compact", "technical"], "default": "natural", "description": "User-facing message style. neutral is an alias for natural; internal metadata remains separate."},
-                    "visible_thread_requested": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": (
-                            "Explicit user authorization for visible task creation. Set only when the user asked "
-                            "for a visible task; hidden subagents remain the default and visible worker fields are "
-                            "rejected without this immutable opt-in."
-                        ),
-                    },
-                    "complexity": {"type": ["string", "integer"], "description": "Optional C1/C2/C3 or human alias; defaults to C2."},
-                    "replan_limit": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Historical task metadata. It is not a lifetime execution cap; evidence-backed public replans are not blocked by it.",
-                    },
-                },
-                "required": ["user_request"],
-                "anyOf": [
-                    {
-                        "required": ["acceptance_criteria", "verification"],
-                        "description": "Every ordinary task must provide a complete observable result contract before dispatch.",
-                    },
-                    {
-                        "properties": {
-                            "user_request": {
-                                "pattern": "(?:[Hh][Aa][Rr][Vv][Ee][Ss][Tt](?:-[Rr][Ee][Ff][Rr][Ee][Ss][Hh])?)",
-                            }
-                        },
-                        "description": "Knowledge-harvest routes may omit either list because Cortex supplies the exhaustive census contract.",
-                    },
-                ],
-            },
-            "waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
-        },
-        "required": ["project_root", "task"],
-    }
-    CONTINUE_ORCHESTRATION_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
-            "task_ref": {"type": "string", "description": "Exact opaque task reference returned by start_orchestration; required for every continuation."},
-            "step": {"type": "integer", "minimum": 1, "description": "Relative step returned by the preceding Cortex response; enables safe idempotent replay without a wave identifier."},
-            "results": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "worker": {"type": "integer", "minimum": 1, "description": "Required only for a parallel wave."},
-                        "attempt_result_ref": {"type": "string", "minLength": 1, "description": "Bare canonical result ref from read_worker_result.continuation.results; never a projection_ref or formatted attempt_result_ref=<id> string. Successful continuation never accepts an inline worker result body."},
-                        "dispatch_ref": {"type": "string", "minLength": 1, "description": "Exact dispatch ref returned by Cortex; required only for a non-success result so stale failures cannot target a replacement attempt."},
-                        "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
-                        "reason": {"type": "string", "description": "Required for a non-success result."},
-                        "next_strategy": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Optional materially different approach when evidence supports it; never required merely to authorize another corrective attempt.",
-                        },
-                    },
-                },
-            },
-            "future_waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
-            "rework": {
-                "type": "boolean",
-                "default": False,
-                "description": "Optional rework hint. Cortex automatically infers rework when future_waves reintroduces a current or completed phase.",
-            },
-            "reason": {"type": "string"},
-        },
-        "required": ["project_root", "step", "results"],
-    }
-    WORKER_RECORD_ATTEMPT_EVENT_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "description": "Append one lossless semantic checkpoint. Identity, timestamps, workspace state, read receipts, and projection status are server-owned; content volume is advisory in prompts only.",
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
-            "event_type": {
-                "type": "string",
-                "enum": ["finding_added", "decision_evidence", "blocker", "verification_claimed", "progress", "note"],
-            },
-            "payload": {
-                "description": "Bounded worker semantic fact. Use verification_claimed for a worker assertion; only Cortex records verification_observed after a trusted server-side observation.",
-            },
-            "event_key": {
-                "type": "string",
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-                "description": "Optional stable idempotency key for this fact; Cortex derives one from content when omitted.",
-            },
-        },
-        "required": ["project_root", "task_id", "attempt_id", "profile", "event_type", "payload"],
-    }
-    WORKER_COMPLETE_ATTEMPT_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "description": (
-            "Persist the minimal semantic AttemptResult, then let Cortex finalize server-owned receipts, "
-            "workspace observations, and a regenerated non-authoritative result view on the same attempt. "
-            "A rejected planner draft is repaired in a separate PATCH-only shape: send only the identity "
-            "fields, base_payload_digest, and diagnostic-scoped patches; never resend the full planning object "
-            "or semantic fields during repair."
-        ),
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
-            "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
-            "summary": {"type": "string", "minLength": 1},
-            "findings": {"type": "array"},
-            "decisions_needed": {"type": "array"},
-            "unresolved": {"type": "array"},
-            "claims": {
-                "type": "array",
-                "description": "Optional semantic criterion/evidence claims; Cortex maps them into generated acceptance projections without treating them as identity or telemetry.",
-            },
-            "base_payload_digest": {
-                "type": "string",
-                "pattern": "^sha256:[0-9a-f]{64}$",
-                "description": "Digest returned with a rejected planner draft; required for same-attempt PATCH repair.",
-            },
-            "patches": {
-                "type": "array",
-                "minItems": 1,
-                "description": "PATCH-only planner repair. Every path must be a returned diagnostic path or descendant; unrelated fields are preserved server-side.",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "op": {"type": "string", "enum": ["replace", "add", "remove"]},
-                        "path": {"type": "string", "pattern": "^/"},
-                        "value": {},
-                    },
-                    "required": ["op", "path"],
-                },
-            },
-            "planning": {
-                "type": "object",
-                "additionalProperties": False,
-                "description": "Planner-only work breakdown. Accepted only for the planner profile on the plan gate; Cortex validates and persists it separately from AttemptResult.",
-                "properties": V3_PLANNING_SCHEMA["properties"],
-                "required": V3_PLANNING_SCHEMA["required"],
-            },
-        },
-        # The semantic fields are required for a normal completion, but not
-        # for a planner repair.  Keeping this distinction in the public JSON
-        # Schema is important: the model must be able to emit only the
-        # rejected-field patches after validation, rather than reconstructing
-        # a complete AttemptResult and planning object.
-        "required": ["project_root", "task_id", "attempt_id", "profile"],
-        "oneOf": [
-            {
-                "required": ["status", "summary", "findings", "decisions_needed", "unresolved"],
-                "not": {
-                    "anyOf": [
-                        {"required": ["planning"]},
-                        {"required": ["base_payload_digest"]},
-                        {"required": ["patches"]},
-                    ],
-                },
-            },
-            {
-                "required": ["status", "summary", "findings", "decisions_needed", "unresolved", "planning"],
-                "not": {
-                    "anyOf": [
-                        {"required": ["base_payload_digest"]},
-                        {"required": ["patches"]},
-                    ],
-                },
-            },
-            {
-                "required": ["base_payload_digest", "patches"],
-                "not": {
-                    "anyOf": [
-                        {"required": ["status"]},
-                        {"required": ["summary"]},
-                        {"required": ["findings"]},
-                        {"required": ["decisions_needed"]},
-                        {"required": ["unresolved"]},
-                        {"required": ["claims"]},
-                        {"required": ["planning"]},
-                    ],
-                },
-            },
-        ],
-    }
-    WORKER_QUESTION_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
-            "action": {"type": "string", "enum": ["ask", "poll", "ask_batch", "poll_batch"]},
-            "question_ref": {"type": "string", "description": "Exact ref returned by ask; required for poll."},
-            "batch_ref": {"type": "string", "description": "Exact ref returned by ask_batch; required for poll_batch."},
-            "question": {"type": "string", "minLength": 1, "description": "Material user decision; required for ask."},
-            "header": {"type": "string"},
-            "options": {"type": "array", "items": question_option_schema},
-            "multiple": {"type": "boolean"},
-            "custom_label": {"type": "string"},
-            "context": {},
-            "recommendation": {"type": "string", "minLength": 1, "description": "Required LLM rationale for the recommended answer."},
-            "recommended_option_ids": {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"type": "string"}, "description": "Required for choice questions; IDs must name the option(s) the LLM recommends."},
-            "recommended_answer": {"type": "string", "minLength": 1, "description": "Required for text questions; concrete answer wording the LLM recommends."},
-            "batch": {
-                "type": "object",
-                "additionalProperties": False,
-                "description": "Durable material-question batch. question_key and option_id are stable canonical identifiers; the coordinator renders one ordinary-chat question per turn, stops, and checkpoints the user's next message before advancing.",
-                "properties": {
-                    "batch_key": {"type": "string", "minLength": 1},
-                    "questions": {
-                        "type": "array", "minItems": 1,
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "question_key": {"type": "string", "minLength": 1},
-                                "question": {"type": "string", "minLength": 1},
-                                "type": {"type": "string", "enum": ["single_select", "multi_select", "text"]},
-                                "header": {"type": "string"},
-                                "options": {"type": "array", "items": question_option_schema},
-                                "custom_label": {"type": "string"},
-                                "context": {"type": "string", "description": "Evidence or conflict that makes this user decision necessary."},
-                                "recommendation": {"type": "string", "minLength": 1, "description": "Required LLM rationale for the recommended answer; neutrality is expressed in the rationale, never by omission."},
-                                "recommended_option_ids": {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"type": "string"}, "description": "Required for single_select and multi_select; exact option IDs the LLM recommends."},
-                                "recommended_answer": {"type": "string", "minLength": 1, "description": "Required for text; concrete answer wording the LLM recommends."},
-                            },
-                            "required": ["question_key", "question", "type", "recommendation"],
-                        },
-                    },
-                },
-                "required": ["batch_key", "questions"],
-            },
-        },
-        "required": ["project_root", "task_id", "attempt_id", "profile", "action"],
-    }
-    READ_WORKER_RESULT_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_ref": {"type": "string", "description": "Exact opaque task reference; required for every result read."},
-            "attempt_result_ref": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
-            "profile": {"type": "string", "enum": public_profile_values, "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
-        },
-        "required": ["project_root", "task_ref", "attempt_result_ref"],
-    }
-    READ_DISPATCH_BRIEFING_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": public_profile_values},
-            "dispatch_ref": {"type": "string", "minLength": 1},
-            "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing; task, worker identity, dispatch and digest remain required on every call."},
-            "max_bytes": {"type": "integer", "minimum": 1, "description": "Optional caller-selected UTF-8 briefing page size. Omit it to read the complete immutable briefing; Cortex does not clamp it."},
-        },
-        "required": [
-            "project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest",
-        ],
-    }
-    MANAGE_ORCHESTRATION_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
-            "intent": {
-                "type": "string",
-                "enum": [
-                    "inspect", "recover_inspect", "resume", "deactivate", "lane", "resource",
-                    "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts",
-                ],
-                "description": "Canonical management operation. Convenience aliases are not part of the public contract; use the enum value exactly.",
-            },
-            "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent. Only prune and maintenance omit it."},
-            "reason": {"type": "string"},
-            "payload": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "future_waves": {
-                        "type": "array",
-                        "minItems": 1,
-                        "description": "Resume/rework waves. Each item is a complete FutureWave object; invalid fields are reported by their exact nested path.",
-                        "items": V3_WAVE_SCHEMA,
-                    },
-                    "rework": {"type": "boolean", "default": False},
-                    "command": {"type": "string", "enum": ["ask", "answer", "list", "updates", "inspect"]},
-                    "question_ref": {"type": "string", "minLength": 1},
-                    "answer": {},
-                    "answer_en": {"type": "string", "minLength": 1},
-                    "canonical_answers": {
-                        "type": "object", "additionalProperties": {"type": "string", "minLength": 1},
-                    },
-                    "decision": {"type": "string", "enum": ["prompt", "approve", "approve_with_recommendations", "approve_without_recommendations", "cancel", "revise"]},
-                    "approval_mode": {"type": "string", "enum": ["approve_with_recommendations", "approve_without_recommendations"]},
-                    "feedback": {"type": "string"},
-                    "request_id": {"type": "string", "minLength": 1},
-                    "localized_prompt": {"type": "string"},
-                    "localized_title": {"type": "string"},
-                    "localized_approve": {"type": "string"},
-                    "localized_cancel": {"type": "string"},
-                    "localized_question": {"type": "string", "minLength": 1},
-                    "localized_header": {"type": "string"},
-                    "localized_options": {"type": "array", "items": question_option_schema},
-                    "localized_custom_label": {"type": "string"},
-                    "source_task_ref": {"type": "string", "minLength": 1},
-                    "user_request": {"type": "string", "minLength": 1},
-                    "requirements": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "constraints": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                    "scope": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "allowed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                    "budget": {"type": "string"},
-                    "pause_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "user_language": {"type": "string"},
-                    "language": {"type": "string"},
-                    "complexity": {"type": ["string", "integer"]},
-                    "replan_limit": {"type": "integer", "minimum": 0},
-                    "plan_approval": {
-                        "type": "string",
-                        "enum": ["auto", "required"],
-                        "description": (
-                            "Explicit plan-review intent for the task. Use required only when the user asked "
-                            "to approve plans; internal recommendations remain advisory."
-                        ),
-                    },
-                    "result_refs": {"type": "array", "uniqueItems": True, "items": {"type": "string", "minLength": 1}},
-                    "question": {"type": "string", "minLength": 1},
-                    "header": {"type": "string"},
-                    "options": {"type": "array", "items": question_option_schema},
-                    "multiple": {"type": "boolean"},
-                    "custom_label": {"type": "string"},
-                    "context": {},
-                    "source_result_refs": {
-                        "type": "array", "uniqueItems": True,
-                        "items": {"type": "string", "minLength": 1},
-                    },
-                    "action": {"type": "string", "enum": ["health", "checkpoint", "backup", "verify_backup_restore", "optimize", "vacuum", "reconcile_projections"]},
-                    "confirmation": {"type": "string"},
-                    "full_confirmation": {"type": "string"},
-                    "older_than_days": {"type": "integer", "minimum": 0},
-                    "mode": {"type": "string", "enum": ["recover_lifecycle"]},
-                    "artifacts": {"type": "array", "items": {"type": "object"}},
-                    "cursor": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1},
-                },
-                "description": (
-                    "Rare-operation payload. For intent=plan_approval, decision=prompt returns a detailed "
-                    "cortex/chat-interaction/v1 plan summary with approve, revise, and cancel meanings plus an explicit "
-                    "LLM recommendation. Render it as the final ordinary chat message and end the turn. The user's next "
-                    "message must be submitted with the exact request_id; preserve revision feedback verbatim. For intent=follow_up, use the completed source task_ref and an exact "
-                    "corrective user_request; optional source_result_refs select canonical result context. For intent=question normal usage is exactly "
-                    "{question_ref: '<worker ref>'} plus optional localized display labels. Cortex returns one detailed "
-                    "ordinary-chat interaction containing context, consequences, options, and the mandatory LLM recommendation. For batch localization, "
-                    "each ordered item uses localized_question, localized_header, localized_options, and optional "
-                    "localized_custom_label. Every question "
-                    "and option must be self-contained and outcome-specific; generic numbered or recommended/alternative "
-                    "placeholders are rejected. If Cortex returns "
-                    "awaiting_translation, submit its translation_request unchanged except for the English translation: "
-                    "a single question uses {question_ref, answer, answer_en}; a batch uses {question_ref, canonical_answers}. "
-                    "Cortex resolves task/principal/thread and never opens nested UI. For intent=resume after a closure-rework cycle, payload.future_waves is the coordinator's chosen corrective pipeline; Planner is one recommendation, not a required first wave. No-progress findings are recorded as routing evidence and do not pause other executable work; payload.rework may name the exact gate to update when several findings exist. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
-                    "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
-                    "and accepts older_than_days (default 7). Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup creates a private .cortex-backup DR bundle containing the SQLite ledger, governance lifecycle key, and fingerprint manifest, and verify_backup_restore validates that bundle on a fresh disposable host root through the governance layer. Normal wave progression never uses this field."
-                ),
-            },
-        },
-        "required": ["project_root", "intent"],
-        "allOf": [
-            {
-                "if": {
-                    "properties": {
-                        "intent": {"enum": [
-                            "inspect", "recover_inspect", "resume", "deactivate", "lane", "resource",
-                            "question", "plan_approval", "follow_up", "steer", "artifacts",
-                        ]},
-                    },
-                    "required": ["intent"],
-                },
-                "then": {"required": ["task_ref"]},
-            },
-            {
-                "if": {
-                    "properties": {"intent": {"enum": ["prune", "maintenance"]}},
-                    "required": ["intent"],
-                },
-                "then": {"not": {"required": ["task_ref"]}},
-            },
-        ],
-    }
-    MANAGE_GOVERNANCE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "description": "Dedicated governance surface for initiatives, dependency graph integrity, append-only records, snapshots, exceptions, and approval-only promotion proposals.",
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "action": {"type": "string", "minLength": 1, "enum": [
-                "create", "create_initiative", "inspect", "inspect_initiative",
-                "link_task", "link", "link_record", "record_link",
-                "add_dependency", "dependency", "transition", "transition_initiative",
-                "create_record", "record_create", "revise_record", "record_revise", "revise",
-                "inspect_record", "record_inspect", "history", "list_records", "snapshot", "snapshot_inspect",
-                "request_exception", "exception_request", "evaluate_promotion", "promotion_evaluate", "promotion_inspect",
-                "approve_promotion", "promotion_approve", "approve", "reject_promotion", "promotion_reject", "reject",
-                "recover_coordinator_capability", "rotate_coordinator_capability", "acknowledge_coordinator_recovery"
-            ], "description": "Canonical governance action. Use only one enum value; aliases are accepted only where explicitly listed by this schema."},
-            "principal": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator principal; when omitted, Cortex derives it from the capability."},
-            "thread_id": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator thread/session identity; provide it together with principal or omit both."},
-            "coordinator_capability": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque short-lived task-scoped server-issued capability returned by a successful start_orchestration or recovery delivery. Only its SHA-256 verifier and non-secret server-owned claims are durable. Never persist it or include it in worker briefings. It is required for normal governance actions and, with the replacement proof, for acknowledge_coordinator_recovery."},
-            "coordinator_recovery_proof": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Coordinator-only non-durable proof returned with authorization. It is required with task_ref and active principal/thread to request/redeliver a recovery; the delivered replacement proof plus replacement capability explicitly acknowledges and commits that recovery. Never persist it or include it in worker briefings."},
-            "previous_coordinator_recovery_proof": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Original active recovery proof. Required only by acknowledge_coordinator_recovery, together with the delivered replacement capability and replacement coordinator_recovery_proof. This proof prevents public identifiers or tampered pending metadata from activating a caller-chosen credential."},
-            "task_ref": {"type": "string", "minLength": 1, "description": "Exact task reference. Required for recover_coordinator_capability and acknowledge_coordinator_recovery, together with the active server-bound principal and thread_id. Public identifiers alone never authorize either phase."},
-            "capability_generation": {"type": "integer", "minimum": 1, "description": "Optional expected server-owned capability generation. Recovery expects the current generation; acknowledgement expects its next generation. A mismatch fails closed."},
-            "submission_id": {"type": "string", "minLength": 1, "description": "Stable caller-generated identifier for durable create_record retry after a lost response. Reuse is accepted only for the exact same immutable command."},
-            "entity": {"type": "string"},
-            "initiative_ref": {"type": "string"},
-            "parent_ref": {"type": "string"},
-            "title": {"type": "string"},
-            "goal": {"type": "string"},
-            "owner": {"type": "string"},
-            "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]},
-            "acceptance_oracle_artifact_ref": {"type": "string"},
-            "task_id": {"type": "string"},
-            "lane_id": {"type": "string"},
-            "relationship": {"type": "string"},
-            "milestone": {"type": "string"},
-            "deliverable": {"type": "string"},
-            "corrective": {"type": "boolean"},
-            "expected_revision": {"type": "integer", "minimum": 1},
-            "status": {"type": "string"},
-            "evidence": {"type": "object"},
-            "source_type": {"type": "string", "enum": ["initiative", "task"]},
-            "source_ref": {"type": "string"},
-            "target_type": {"type": "string", "enum": ["initiative", "task"]},
-            "target_ref": {"type": "string"},
-            "dependency_type": {"type": "string", "enum": ["blocks", "requires", "relates_to", "follows"]},
-            "dependency_ref": {"type": "string"},
-            "record_ref": {"type": "string"},
-            "record_type": {"type": "string", "enum": ["policy", "decision", "ruling", "preference", "assumption", "risk", "learning", "reflection", "exception", "promotion"]},
-            "content": {},
-            "created_by": {"type": "string"},
-            "supersedes": {"type": "string"},
-            "expires_at": {"type": "string", "description": "Timezone-aware ISO-8601 expiry. Sensitive records derive it from the approved retention_days policy when omitted and may not exceed that bound."},
-            "approval_basis": {},
-            "content_artifact_ref": {"type": "string"},
-            "link_ref": {"type": "string"},
-            "finding_fingerprint": {"type": "string"},
-            "evidence_ref": {"type": "string"},
-            "fingerprint": {"type": "string"},
-            "findings": {"type": "array", "items": {"type": "object"}},
-            "threshold": {"type": "integer", "minimum": 1},
-            "window_days": {"type": "integer", "minimum": 1},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 256, "description": "Bounded governance history/snapshot page size."},
-            "offset": {"type": "integer", "minimum": 0, "description": "Bounded governance history/snapshot page offset."},
-            "proposal_ref": {"type": "string"},
-            "trigger": {"type": "string"},
-            "reason": {"type": "string"},
-        },
-        "required": ["project_root", "action"],
-        "allOf": [
-            {
-                "if": {"properties": {"action": {"enum": ["recover_coordinator_capability", "rotate_coordinator_capability", "acknowledge_coordinator_recovery"]}}, "required": ["action"]},
-                # Recovery may be requested after the original bearer was
-                # lost.  The canonical handler authenticates that route with
-                # the non-durable recovery proof and returns its precise
-                # proof/delivery diagnostic.  Do not make the replacement
-                # capability a boundary-level requirement for all three
-                # actions, or the caller never reaches that handler.
-                "then": {"required": ["task_ref", "principal", "thread_id"]}
-            },
-            {
-                "if": {"properties": {"action": {"enum": ["create_initiative"]}}, "required": ["action"]},
-                "then": {"required": ["title", "goal"]}
-            },
-            {
-                "if": {"properties": {"action": {"enum": ["create_record", "record_create"]}}, "required": ["action"]},
-                "then": {"required": ["record_type", "content"]}
-            },
-            {
-                "if": {"properties": {"action": {"enum": ["add_dependency", "dependency"]}}, "required": ["action"]},
-                "then": {"required": ["source_type", "source_ref", "target_type", "target_ref", "dependency_type"]}
-            },
-            {
-                "if": {"properties": {"action": {"enum": ["request_exception", "exception_request"]}}, "required": ["action"]},
-                "then": {"required": ["trigger", "reason"]}
-            }
-        ],
-    }
-
-    return {
-        "start_orchestration": START_ORCHESTRATION_SCHEMA,
-        "continue_orchestration": CONTINUE_ORCHESTRATION_SCHEMA,
-        "manage_orchestration": MANAGE_ORCHESTRATION_SCHEMA,
-        "manage_governance": MANAGE_GOVERNANCE_SCHEMA,
-        "worker_question": WORKER_QUESTION_SCHEMA,
-        "record_attempt_event": WORKER_RECORD_ATTEMPT_EVENT_SCHEMA,
-        "complete_attempt": WORKER_COMPLETE_ATTEMPT_SCHEMA,
-        "read_dispatch_briefing": READ_DISPATCH_BRIEFING_SCHEMA,
-        "read_worker_result": READ_WORKER_RESULT_SCHEMA,
-    }
-
-
-
-def v3_response(
-    old: dict[str, Any],
-    task_ref: str,
-    *,
-    native_arguments: Callable[[dict[str, Any]], dict[str, Any]],
-    public_schema: str,
-    coordinator_lock: str,
-    include_result: bool = False,
-    start_replayed: bool | None = None,
-) -> dict[str, Any]:
-    state_summary = old.get("state_summary") if isinstance(old.get("state_summary"), dict) else {}
-    communication_profile = old.get("communication_profile") or state_summary.get("communication_profile")
-    user_language = old.get("user_language") or state_summary.get("user_language")
-    communication_config = ({key: value for key, value in {
-        "communication_profile": communication_profile,
-        "user_language": user_language,
-    }.items() if value} or None)
-    wave_label = str(old.get("wave_id") or "")
-    wave_match = re.search(r"(\d+)$", wave_label)
-    step = int(wave_match.group(1)) if wave_match else None
-    if not old.get("ok"):
-        diagnostics = old.get("diagnostics") if isinstance(old.get("diagnostics"), list) else []
-        operation = str(old.get("operation") or "")
-        retry_tool = "start_orchestration" if operation == "start" else "continue_orchestration"
-        raw_outcome = str(old.get("state", "needs_input"))
-        public_outcome = "needs_input" if raw_outcome == "blocked" else raw_outcome
-        old_result = old.get("result") if isinstance(old.get("result"), dict) else {}
-        requires_user_decision = _is_user_decision_event(public_outcome, old_result)
-        server_action = str(old.get("next_action") or "").strip()
-        response = {
-            "schema": public_schema,
-            "ok": False,
-            "outcome": public_outcome,
-            "code": old.get("code", "orchestration_failed"),
-            "step": step,
-            "diagnostics": diagnostics,
-            "dispatches": [],
-            "recoverable": bool(old.get("recoverable", True)),
-            "next_action": server_action or f"Correct every diagnostic and retry {retry_tool} with the same task; do not mutate unrelated fields.",
-            "requires_user_decision": requires_user_decision,
-        }
-        if old.get("code") == "plan_reapproval_required":
-            explicit_plan_review = _explicit_plan_approval_requested(old, old_result)
-            requires_user_decision = explicit_plan_review
-            if explicit_plan_review:
-                response["outcome"] = "plan_reapproval_required"
-                # This is the only legacy form that may pause the visible
-                # chat: the durable receipt contains an explicit user intent
-                # marker, rather than merely a policy-generated recommendation.
-                response["requires_user_decision"] = True
-                response["next_action"] = str(old.get("next_action") or (
-                    "Call manage_orchestration with intent=plan_approval for the same task_ref "
-                    "and submit the user's explicit approve, revise, or cancel decision."
-                ))
-            else:
-                # Legacy policy defaults (notably C2/C3's former implicit
-                # required mode) are advisory evidence.  They must not be
-                # exposed as approval stops or copied into user_view as a
-                # question.  Keep the original diagnostics for audit, while
-                # routing the chosen pipeline through normal recovery.
-                response["outcome"] = "recovery_pending"
-                response["code"] = "plan_reapproval_advisory"
-                response["requires_user_decision"] = False
-                response["advisory"] = {
-                    "code": "plan_reapproval_advisory",
-                    "source_code": "plan_reapproval_required",
-                    "severity": "warning",
-                    "requires_user_decision": False,
-                    "message": "Legacy plan-review policy was normalized to orchestrator-owned advice.",
-                }
-                response["recovery"] = {
-                    "mode": "orchestrator_owned",
-                    "action": "continue_chosen_pipeline",
-                    "same_task": True,
-                    "replacement_worker": False,
-                }
-                response["next_action"] = (
-                    f"Continue the chosen pipeline for task_ref={task_ref!r} using the server-returned "
-                    "continuation or corrective dispatch; record the plan recommendation as advisory and "
-                    "do not call intent=plan_approval or ask the user."
-                )
-        if task_ref:
-            response["task_ref"] = task_ref
-        if include_result and "result" in old:
-            response["result"] = old["result"]
-        if isinstance(old.get("pipeline"), dict):
-            response["pipeline"] = old["pipeline"]
-        if isinstance(old.get("governance"), dict):
-            response["governance"] = old["governance"]
-            response["requested_mode"] = old["governance"].get("requested_mode")
-            response["effective_mode"] = old["governance"].get("effective_mode")
-            response["classification_reasons"] = old["governance"].get("reasons", [])
-            response["trigger_evidence"] = old["governance"].get("trigger_evidence", [])
-            response["initiative_ref"] = old["governance"].get("initiative_ref")
-            response["policy_snapshot_digest"] = old["governance"].get("policy_snapshot_digest")
-            response["close_obligations"] = old["governance"].get("close_obligations", [])
-        # `blocked` remains an internal audit/recovery marker only.  The
-        # public coordinator contract never stops Cortex on that state: it
-        # asks for the exact recovery action or one concrete user decision.
-        response["user_message"] = render_lifecycle(
-            response.get("outcome"), ok=False, config=communication_config,
-            metadata={"code": response.get("code"), "recoverable": response.get("recoverable")},
-        )
-        response["next_action"] = _public_next_action(response.get("next_action"))
-        response["user_view"] = _public_user_view_with_decision(
-            response["user_message"], requires_user_decision=requires_user_decision,
-        )
-        response["internal"] = _internal_protocol(response)
-        return response
-    requests = old.get("spawn_requests") if isinstance(old.get("spawn_requests"), list) else []
-    prepared_dispatches = [
-        {
-            "worker": index,
-            "dispatch_ref": request.get("dispatch_ref"),
-            "phase": request.get("phase"),
-            "profile": request.get("profile"),
-            "display_name": request.get("display_name"),
-            "capability": request.get("capability"),
-            "sandbox": request.get("sandbox"),
-            "selection_reason": request.get("selection_reason"),
-            "briefing_path": request.get("briefing_path"),
-            "briefing_digest": request.get("briefing_digest"),
-            "call": request.get("host_tool") or "spawn_agent",
-            "arguments": native_arguments(request),
-        }
-        for index, request in enumerate(requests, 1)
-    ]
-    # A replay is a lifecycle receipt, never a second host-dispatch grant. If
-    # the original response was lost before any native call was made, inspect
-    # can recover only the still-awaiting requests without making every exact
-    # duplicate start capable of spawning a duplicate worker wave.
-    dispatches = [] if start_replayed is True else prepared_dispatches
-    raw_outcome = old.get("state")
-    outcome = "needs_input" if raw_outcome == "blocked" else raw_outcome
-    if start_replayed is True:
-        next_action = (
-            f"{coordinator_lock} start_orchestration was already completed for task_ref={task_ref}. "
-            "Do not invoke or repeat any worker dispatch from this replay. If the original start response was "
-            "lost before its native dispatches were invoked, call manage_orchestration with intent inspect once "
-            "and invoke only the still-awaiting dispatches returned by that recovery call."
-        )
-    elif dispatches:
-        start_transition = (
-            f" start_orchestration is complete for task_ref={task_ref}; never call it again for this task."
-            if start_replayed is not None else ""
-        )
-        next_action = (
-            f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: FIRST close every known completed child whose "
-            "canonical AttemptResult was read or whose exact failed result Cortex already accepted; never close a running or "
-            "question-paused child. If recovery may have missed one, use list_agents defensively. THEN call every "
-            "dispatch.call exactly once with its exact dispatch.arguments. Until every returned dispatch has been "
-            "invoked, do not call start_orchestration, continue_orchestration, manage_orchestration, inspect, or wait. "
-            "A worker exists only after the native call returns a child target. Never claim it was sent or call wait "
-            "without the returned child target. Do not substitute a generic collaboration spawn, self-authored task "
-            "name, or replacement child: it cannot bind to or advance the issued Cortex attempt. Wait only for those "
-            "returned targets. Each worker must publish through "
-            "complete_attempt. For each terminal worker, read its exact returned attempt_result_ref with read_worker_result, "
-            "then copy that server-returned read_worker_result.continuation.step and continuation.results verbatim into "
-            "continue_orchestration; never increment its step or substitute a projection_ref/formatted reference. Only "
-            "after that successful server continuation or terminal audit, close that exact completed native child with "
-            "close_agent. Do not dispatch another worker before that close succeeds."
-        )
-    elif outcome == "awaiting_plan_approval":
-        next_action = (
-            f"{coordinator_lock} Read the Planner's attempt_result_ref with read_worker_result after it completes. "
-            "Use its generated result view only as a non-authoritative display projection. Then call manage_orchestration with "
-            "intent=plan_approval and payload.decision=prompt. Render its chat_interaction completely as one final "
-            "ordinary user-language message: objective, work packages, paths, dependencies, verification, risks, "
-            "remaining phases, all approve/revise/cancel meanings, and the visibly labelled LLM recommendation with "
-            "rationale. Do not call a UI/input/approval/elicitation tool. End the turn and wait. Submit the user's "
-            "next unambiguous response with the exact request_id; preserve requested changes verbatim."
-        )
-    elif outcome == "completion_pending":
-        pending = (
-            old.get("result", {}).get("pending_result_completions", [])
-            if isinstance(old.get("result"), dict) else []
-        )
-        selections = []
-        for item in pending:
-            if not isinstance(item, dict):
-                continue
-            slot = item.get("worker")
-            refs = [str(ref) for ref in item.get("candidate_attempt_result_refs", []) if str(ref).strip()]
-            if slot and refs:
-                selections.append(f"worker={slot}: " + ", ".join(refs))
-        next_action = (
-            f"{coordinator_lock} A native worker already stopped after recording a durable AttemptResult; it is not a live "
-            "child. Never wait on, respawn, or resume it. Read the candidate AttemptResult refs, then explicitly select "
-            "exactly one identity-validated attempt_result_ref for each listed worker slot and call continue_orchestration "
-            f"once for task_ref={task_ref} and this step. Cortex rejects a superseded canonical result before any "
-            "state mutation. Candidates: "
-            + ("; ".join(selections) if selections else "none validated; inspect the canonical result mismatch and do not fabricate a result.")
-        )
-    elif outcome == "completed":
-        next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
-    elif raw_outcome == "blocked":
-        stopped_result_recovery = (
-            old.get("result", {}).get("stopped_result_recovery")
-            if isinstance(old.get("result"), dict) else None
-        )
-        if isinstance(stopped_result_recovery, dict):
-            next_action = (
-                "The stopped worker has no usable canonical AttemptResult. Cortex records this transport failure "
-                "and derives the server-owned corrective dispatch automatically. Use only the returned recovery "
-                "dispatch; do not wait, call manage_orchestration, respawn, replace the child, or edit ledger state."
-            )
-        else:
-            next_action = (
-                "Cortex retained the condition as recoverable evidence and will reconcile it through the "
-                "server-owned corrective route. Follow only the returned recovery or real task question; do not "
-                "call manage_orchestration, wait, respawn, or create a replacement worker."
-            )
-    elif outcome == "needs_input":
-        user_question = (
-            old.get("result", {}).get("question")
-            if isinstance(old.get("result"), dict) else None
-        )
-        if user_question:
-            next_action = (
-                f"{coordinator_lock} Ask the user this exact orchestration question: {user_question} "
-                "Record the user's decision through manage_orchestration for the same task_ref, then let Cortex "
-                "resume the server-owned route. Do not mark the task blocked, wait, respawn, or invent future_waves."
-            )
-        else:
-            next_action = (
-                str(old.get("next_action") or "").strip()
-                or "Cortex will reconcile this technical diagnostic from the durable task state and return the "
-                "server-owned recovery action; do not call manage_orchestration, wait, respawn, or create a "
-                "replacement worker."
-            )
-    else:
-        next_action = (
-            f"{coordinator_lock} Wait idly for the active worker results, then call continue_orchestration "
-            f"with task_ref={task_ref} and this step."
-        )
-    if old.get("operation") == "inspect" and isinstance(old.get("result"), dict) and isinstance(old["result"].get("context_handoff"), dict):
-        handoff = old["result"]["context_handoff"]
-        active_worker_ids = [
-            str(item.get("host_agent_id") or "")
-            for item in handoff.get("active_workers", [])
-            if isinstance(item, dict) and str(item.get("host_agent_id") or "").strip()
-        ]
-        stopped_workers = [
-            item for item in handoff.get("stopped_workers", []) if isinstance(item, dict)
-        ]
-        open_questions = [
-            item for item in handoff.get("open_questions", []) if isinstance(item, dict)
-        ]
-        pending_dispatches = [
-            item for item in handoff.get("pending_dispatches", []) if isinstance(item, dict)
-        ]
-        terminal_results = [
-            item for item in handoff.get("completed_results", [])
-            if isinstance(item, dict)
-            and str(item.get("lifecycle_status") or "").strip().lower() in {"blocked", "failed"}
-            and str(item.get("attempt_result_ref") or "").strip()
-            and str(item.get("dispatch_ref") or "").strip()
-        ]
-        finalization_pending = [item for item in stopped_workers if item.get("finalization_pending")]
-        terminal_failures = [
-            item for item in stopped_workers
-            if str(item.get("failure_status") or "").strip()
-            and not item.get("awaiting_user")
-            and str(item.get("dispatch_ref") or "").strip()
-        ]
-        question_pauses = [
-            item for item in stopped_workers
-            if item.get("awaiting_user")
-            and str(item.get("dispatch_ref") or "").strip()
-        ]
-        if outcome == "completion_pending" or (
-            raw_outcome == "blocked"
-            and isinstance(old.get("result"), dict)
-            and isinstance(old["result"].get("stopped_result_recovery"), dict)
-        ):
-            pass
-        elif (
-            raw_outcome in {"waiting_workers", "blocked"}
-            and not active_worker_ids
-            and not pending_dispatches
-            and terminal_results
-        ):
-            refs = "; ".join(
-                f"attempt_result_ref={item['attempt_result_ref']!r}, dispatch_ref={item['dispatch_ref']!r}, "
-                f"status={str(item.get('lifecycle_status') or '').strip().lower()!r}"
-                for item in terminal_results
-            )
-            next_action = (
-                f"{coordinator_lock} No active or pending worker exists. Read each exact canonical result with "
-                f"read_worker_result(task_ref={task_ref!r}, attempt_result_ref=...) for {refs}; then copy the returned "
-                "terminal_continuation.task_id, step, and results verbatim into continue_orchestration. Do not wait, "
-                "respawn, replace, or fabricate a success result."
-            )
-        elif outcome == "waiting_workers" and active_worker_ids:
-            failed_result_clause = ""
-            if terminal_failures:
-                targets = "; ".join(
-                    f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
-                    for item in terminal_failures
-                )
-                failed_result_clause = " Include exactly one failed result for each stopped slot when continuing: " + targets + "."
-            next_action = (
-                f"{coordinator_lock} Rehydrate only from result.context_handoff. Do not restart, replay, or respawn "
-                "running attempts. Wait only on these exact persisted native child ids: "
-                + ", ".join(active_worker_ids)
-                + ". After completion, read each canonical AttemptResult with read_worker_result; the server records the "
-                "machine read receipt before you continue Cortex."
-                + failed_result_clause
-            )
-        elif finalization_pending:
-            next_action = (
-                f"{coordinator_lock} A stopped worker already has a canonical AttemptResult but finalization remains pending. "
-                "Do not wait on, respawn, or replace it. Inspect once, then retry complete_attempt only for that exact persisted attempt."
-            )
-        elif question_pauses or open_questions:
-            question_targets = question_pauses or open_questions
-            targets = "; ".join(
-                f"question_ref={item.get('question_ref') or (item.get('question_refs') or [''])[0]!r}, "
-                f"dispatch_ref={item.get('dispatch_ref')!r}"
-                for item in question_targets
-            )
-            next_action = (
-                f"{coordinator_lock} A worker is paused for a durable user question, not blocked and not running. "
-                f"Surface the exact question and call manage_orchestration(intent='question', task_ref={task_ref!r}, "
-                f"payload={{'question_ref': ...}}) for {targets}; render the returned chat interaction and end this turn. "
-                "After the user's answer, call manage_orchestration with the same question_ref, resume the exact same child, "
-                "then call continue_orchestration only after that attempt result is recorded. Never wait, respawn, replace, "
-                "or invent future_waves."
-            )
-        elif terminal_failures:
-            failure_targets = "; ".join(
-                f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
-                for item in terminal_failures
-            )
-            next_action = (
-                f"{coordinator_lock} Recovery found a terminal stopped worker without an AttemptResult. Never wait on, "
-                "follow up, or respawn the stopped child. Call continue_orchestration exactly once with the current "
-                f"task_ref={task_ref!r}, current step, and results=[{{'status':'failed','reason':..., 'dispatch_ref':...}}] "
-                "using: " + failure_targets + "; Cortex will route bounded corrective rework automatically and never "
-                "create a replacement worker for this receipt."
-            )
-        elif outcome == "waiting_workers" and not active_worker_ids and not pending_dispatches:
-            next_action = (
-                "There are no active workers or pending dispatches. Cortex will reconcile the durable lifecycle "
-                "state and emit the next recovery dispatch; do not wait, call manage_orchestration, respawn, or "
-                "edit ledger state."
-            )
-        else:
-            next_action = (
-                f"{coordinator_lock} Rehydrate only from result.context_handoff before continuing. "
-                "It is the durable post-compaction state and target-handoff snapshot; do not restart the task or replay completed dispatches. Then "
-                + next_action
-            )
-    response = {
-        "schema": public_schema,
-        "ok": True,
-        "outcome": outcome,
-        "task_ref": task_ref,
-        "step": step,
-        "next_action": next_action,
-        "dispatches": dispatches,
-    }
-    requires_user_decision = _is_user_decision_event(outcome, old.get("result"))
-    # ``needs_input`` is also used by the durable ledger for technical
-    # recovery.  Render that case as an error/progress update unless the
-    # server explicitly attached a real question or plan approval.
-    visible_outcome = outcome if requires_user_decision or outcome != "needs_input" else "error"
-    response["requires_user_decision"] = requires_user_decision
-    response["user_message"] = render_lifecycle(
-        visible_outcome, config=communication_config,
-        metadata={"outcome": outcome, "step": step},
-    )
-    if outcome == "waiting_workers":
-        response.update({
-            "output_policy": "silent",
-            "allowed_visible_events": [],
-        })
-    if start_replayed is not None:
-        response["replayed"] = start_replayed
-    if isinstance(old.get("pipeline"), dict):
-        response["pipeline"] = old["pipeline"]
-    if isinstance(old.get("governance"), dict):
-        response["governance"] = old["governance"]
-        response["requested_mode"] = old["governance"].get("requested_mode")
-        response["effective_mode"] = old["governance"].get("effective_mode")
-        response["classification_reasons"] = old["governance"].get("reasons", [])
-        response["trigger_evidence"] = old["governance"].get("trigger_evidence", [])
-        response["initiative_ref"] = old["governance"].get("initiative_ref")
-        response["policy_snapshot_digest"] = old["governance"].get("policy_snapshot_digest")
-        response["close_obligations"] = old["governance"].get("close_obligations", [])
-    if outcome == "completed":
-        summary = old.get("state_summary") if isinstance(old.get("state_summary"), dict) else {}
-        response["result"] = {
-            "close_verified": bool(summary.get("close_verified")),
-            "handoff_ready": bool(summary.get("handoff_created")),
-        }
-    if include_result and "result" in old:
-        response["result"] = old["result"]
-        if isinstance(old["result"], dict) and isinstance(old["result"].get("context_handoff"), dict):
-            response["context_handoff"] = old["result"]["context_handoff"]
-        if isinstance(old["result"], dict) and old["result"].get("decision") == "cancelled":
-            response["output_policy"] = "silent"
-            response["allowed_visible_events"] = ["user_message"]
-            response["next_action"] = (
-                f"{coordinator_lock} Stop now and wait for the user's next message. Keep the plan pending; do not "
-                "dispatch, revise, or send approval/cancellation commentary."
-            )
-    response["next_action"] = _public_next_action(response.get("next_action"))
-    if outcome == "awaiting_plan_approval":
-        review = (old.get("result") or {}).get("plan_review") if isinstance(old.get("result"), dict) else None
-        if isinstance(review, dict):
-            response["plan_review"] = review
-    response["user_view"] = (
-        None if outcome == "waiting_workers" else
-        _public_user_view_with_decision(
-            response["user_message"], requires_user_decision=requires_user_decision,
-        )
-    )
-    if outcome == "awaiting_plan_approval" and isinstance(response.get("plan_review"), dict):
-        review = response["plan_review"]
-        packages = review.get("work_packages") if isinstance(review.get("work_packages"), list) else []
-        steps = [
-            str(item.get("title") or item.get("summary") or "Review the planned work.").strip()
-            for item in packages if isinstance(item, dict)
-        ][:5]
-        if not steps:
-            steps = ["Review the proposed work and its verification."]
-        review_recommendation = str(review.get("recommendation") or "approve").strip().lower()
-        has_material_risk = bool(review.get("risks") or review.get("uncertainty") or review.get("findings"))
-        recommended_decision = "revise" if review_recommendation == "revise" or has_material_risk else "approve"
-        is_ru = str(user_language or "").lower().startswith("ru")
-        if is_ru:
-            recommendation = (
-                "Рекомендация: доработать план — остаётся существенный риск или пробел в проверке."
-                if recommended_decision == "revise" else
-                "Рекомендация: утвердить план — требования покрыты, неопределённости закрыты, проверки конкретны."
-            )
-            approval_question = "Утвердить план, запросить доработку или отменить?"
-        else:
-            recommendation = (
-                "Recommendation: revise — a material risk or verification gap remains."
-                if recommended_decision == "revise" else
-                "Recommendation: approve — the request is covered, uncertainties are closed, and checks are concrete."
-            )
-            approval_question = "Approve the plan, request a revision, or cancel?"
-        response["user_view"] = render_plan(
-            str(review.get("summary") or review.get("objective") or "Review the proposed plan."),
-            steps,
-            question=approval_question,
-            recommendation=recommendation,
-            config=communication_config,
-        )
-        recommendation_rendered = render(
-            recommendation,
-            kind="question",
-            next_step=approval_question,
-            config=communication_config,
-        )
-        why_rendered = render(
-            "Решение определяет, можно ли перейти к выполнению плана." if is_ru else
-            "Your decision determines whether the plan can move to implementation.",
-            kind="question",
-            next_step=approval_question,
-            config=communication_config,
-        )
-        response["user_view"]["risks"] = public_risks(
-            review.get("risks") or review.get("uncertainty") or review.get("findings"),
-            config=communication_config,
-            limit=4,
-        )
-        response["user_view"]["recommendation"] = recommendation_rendered["message"]
-        response["user_view"]["requires_user_decision"] = True
-        response["user_view"]["why_it_matters"] = why_rendered["message"]
-        quality = dict(response["user_view"].get("quality") or {})
-        quality["fallback_applied"] = bool(
-            quality.get("fallback_applied")
-            or recommendation_rendered["quality"].get("fallback_applied")
-            or why_rendered["quality"].get("fallback_applied")
-        )
-        quality["ok"] = bool(
-            quality.get("ok")
-            and recommendation_rendered["quality"].get("ok")
-            and why_rendered["quality"].get("ok")
-        )
-        response["user_view"]["quality"] = quality
-    response["internal"] = _internal_protocol(response)
-    return response
-
-def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[str, Any]]]) -> set[str]:
-    """Apply authorization requirements to internal handlers before projection."""
-    tools["record_delegation"][1]["properties"]["dispatch_mode"]["description"] = (
-        "visible_thread creates a user-owned Luna task only when explicitly requested; it is never a fallback."
-    )
-    tools["record_delegation"][1]["properties"]["luna_fallback"]["description"] = (
-        "An unavailable hidden Luna dispatch falls back to an explicit hidden Terra spawn_agent request."
-    )
-    tools["record_delegation"][1]["properties"]["luna_fallback"]["default"] = "terra"
-    authorized = {
-        "init_task", "get_task_status", "record_delegation", "prepare_delegation", "prepare_delegations", "confirm_host_spawn", "finalize_attempt", "record_evidence", "execute_verification_command",
-        "cortex.question", "publish_worker_question", "list_worker_questions", "answer_worker_question", "get_worker_question_updates",
-        "record_gate_outcome", "commit_gate", "resume_task", "update_pipeline", "reassess_pipeline", "acquire_lock", "release_lock",
-        "create_handoff", "claim_resource", "release_resource",
-        "create_lane", "get_lane_status", "claim_lane", "release_lane", "retire_lane", "bind_task_lane",
-        "claim_lane_resource", "release_lane_resource", "materialize_lane", "reconcile_lane",
-    }
-    for name in authorized:
-        schema = tools[name][1]
-        schema.setdefault("properties", {}).setdefault("principal", {"type": "string", "minLength": 1})
-        if "principal" not in schema.setdefault("required", []):
-            schema["required"].append("principal")
-    for _, schema in tools.values():
-        schema.setdefault("properties", {}).setdefault("project_root", {
-            "type": "string",
-            "minLength": 1,
-            "description": "Absolute project workspace path. Cortex derives an opaque host-private control ledger from this path; callers cannot choose its storage location.",
-        })
-    if "project_root" not in tools["activate_orchestration"][1].setdefault("required", []):
-        tools["activate_orchestration"][1]["required"].append("project_root")
-    for name, fields in {
-        "claim_resource": ["expires_at"], "claim_lane": ["expires_at"], "claim_lane_resource": ["expires_at"],
-        "create_handoff": ["completed", "next_action"], "retire_lane": ["confirm"],
-    }.items():
-        for field in fields:
-            if field not in tools[name][1]["required"]:
-                tools[name][1]["required"].append(field)
-    tools["retire_lane"][1]["properties"]["confirm"] = {"type": "boolean"}
-    tools["record_delegation"][1]["required"] = [
-        field for field in tools["record_delegation"][1]["required"]
-        if field not in {"expected_revision", "status_receipt", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"}
-    ]
-    for field in ("allowed_paths", "acceptance_criteria", "verification"):
-        tools["record_delegation"][1]["properties"][field].pop("minItems", None)
-    return authorized
-
-
-def public_tools(
-    internal_handlers: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
-    *,
-    worker_question: Callable[..., Any],
-    worker_question_schema: dict[str, Any],
-    record_attempt_event: Callable[..., Any],
-    record_attempt_event_schema: dict[str, Any],
-    complete_attempt: Callable[..., Any],
-    complete_attempt_schema: dict[str, Any],
-    read_dispatch_briefing: Callable[..., Any],
-    read_dispatch_briefing_schema: dict[str, Any],
-    read_worker_result: Callable[..., Any],
-    read_worker_result_schema: dict[str, Any],
-    manage_governance: Callable[..., Any],
-    manage_governance_schema: dict[str, Any],
-) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
-    """Return the fresh-only nine-operation public registry."""
-    return {
-        "start_orchestration": internal_handlers["start_orchestration"],
-        "continue_orchestration": internal_handlers["continue_orchestration"],
-        "manage_orchestration": internal_handlers["manage_orchestration"],
-        "manage_governance": (manage_governance, manage_governance_schema),
-        "worker_question": (worker_question, worker_question_schema),
-        "record_attempt_event": (record_attempt_event, record_attempt_event_schema),
-        "complete_attempt": (complete_attempt, complete_attempt_schema),
-        "read_dispatch_briefing": (read_dispatch_briefing, read_dispatch_briefing_schema),
-        "read_worker_result": (read_worker_result, read_worker_result_schema),
-    }
-
-
-def public_tools_for_audience(
-    all_public_tools: Mapping[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]],
-    audience: str,
-) -> dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]]:
-    """Project the public registry for one launch-time MCP audience.
-
-    ``audience`` is intentionally not accepted from JSON-RPC initialization or
-    individual tool arguments: those values are controlled by the caller and
-    cannot establish a privilege boundary.  The host selects it before the
-    process starts.  Unknown/missing audiences use the default fresh union;
-    hosts that need role separation select ``worker`` or ``coordinator``.
+    Only fixed public result locations are considered.  In particular, report
+    bodies, worker prose, timeline payloads, and arbitrary JSON never become
+    handles.  This prevents one nested or displayed value from being mistaken
+    for an authoritative durable identifier.
     """
-    selected = str(audience or "").strip().lower()
-    if selected == "coordinator":
-        names = COORDINATOR_PUBLIC_TOOL_NAMES
-    elif selected == "worker":
-        names = WORKER_PUBLIC_TOOL_NAMES
-    else:
-        names = DEFAULT_PUBLIC_TOOL_NAMES
+    result: dict[str, Any] = {}
+    for field in ("idempotency_key", "retry_handle"):
+        candidate = value.get(field)
+        if isinstance(candidate, str) and candidate:
+            result[field] = candidate
+
+    def entity_id(candidate: object, name: str) -> str | None:
+        value = candidate.get(name) if isinstance(candidate, Mapping) else None
+        return value if isinstance(value, str) and value else None
+
+    # Canonical IDs are durable evidence, never public next-call handles.  The
+    # compact typed refs below are the only callable entity locators emitted
+    # from this function.
+    task_id = next((entity_id(value.get(name), "task_id") for name in ("task", "delegation", "report", "initiative", "closure", "decision", "assessment") if entity_id(value.get(name), "task_id") is not None), None)
+    delegation_id = next((entity_id(value.get(name), "delegation_id") for name in ("delegation", "report") if entity_id(value.get(name), "delegation_id") is not None), None)
+    report_id = entity_id(value.get("report"), "report_id")
+    initiative_id = next((entity_id(value.get(name), "initiative_id") for name in ("initiative", "assessment") if entity_id(value.get(name), "initiative_id") is not None), None)
+    decision_id = entity_id(value.get("decision"), "decision_id")
+    brief = value.get("worker_brief")
+    task_id = task_id or entity_id(brief, "task_id")
+    delegation_id = delegation_id or entity_id(brief, "delegation_id")
+    action = value.get("next_action")
+    action_task_ref = action.get("task_ref") if isinstance(action, Mapping) else None
+    if not isinstance(action_task_ref, str) and isinstance(action, Mapping):
+        arguments = action.get("arguments")
+        action_task_ref = arguments.get("task_ref") if isinstance(arguments, Mapping) else None
+    reports = value.get("reports")
+    if isinstance(reports, list):
+        report_ids = [item["report_id"] for item in reports if isinstance(item, Mapping) and isinstance(item.get("report_id"), str) and item["report_id"]]
+        if report_ids:
+            # Read order remains observable in the structured body; only the
+            # compact refs belong in a public callable handle envelope.
+            if len(report_ids) == 1:
+                report_id = report_id or report_ids[0]
+            result["report_refs"] = [record_ref(item) for item in report_ids]
+    cursor = value.get("next_cursor")
+    if isinstance(cursor, str) and cursor:
+        result["cursor"] = cursor
+    sequence = value.get("next_sequence")
+    if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
+        result["next_sequence"] = sequence
+    for field, approval in (("human_view", False), ("approval_view", True)):
+        projected = _public_view(value.get(field), approval=approval, owner=value)
+        if projected is not None:
+            result[field] = projected
+    compact = task_ref(task_id)
+    if compact is None and task_ref_parts(action_task_ref, allow_legacy=False) is not None:
+        compact = action_task_ref
+    if compact is not None:
+        result["task_ref"] = compact
+    for canonical, compact_name in ((delegation_id, "delegation_ref"), (report_id, "report_ref"), (decision_id, "decision_ref"), (initiative_id, "initiative_ref")):
+        compact_entity = record_ref(canonical)
+        if compact_entity is not None:
+            result[compact_name] = compact_entity
+    return result
+
+
+def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    structured = _project_public_views(value)
+    compact_handles = json.dumps({"handles": structured["handles"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return {
-        name: all_public_tools[name]
-        for name in names
-        if name in all_public_tools
+        "content": [{"type": "text", "text": compact_handles + "\nCopy only structuredContent.handles compact typed refs and server-issued opaque tokens byte-for-byte; canonical durable IDs in any rendered evidence are non-callable. Task-anchored calls use task_ref. Entity-derived calls use delegation_ref, report_ref/report_refs, decision_ref, or initiative_ref as advertised. If structuredContent.next_action is present, it is the exact required next call and its task_ref must be copied byte-for-byte. Delegation recovery: create_delegation is creation-only; retrieve an existing delegation with read_delegation({delegation_ref, after_sequence}) exactly. Read all result data from structuredContent; it is not duplicated into TextContent so bounded 200-event pages remain one valid JSONL frame."}],
+        "structuredContent": structured,
+        "isError": False,
+    }
+
+
+def _tool_error_result(failure: Mapping[str, Any], *, mutation: str) -> dict[str, Any]:
+    """Correctable tool errors intentionally have TextContent only.
+
+    The text carries the stable Cortex code, safe reason, affected public
+    field/path when available, and one next action.  Omitting
+    ``structuredContent`` avoids presenting a second success-output shape to
+    clients that validate it against the advertised output schema.
+    """
+    return {
+        "content": [{
+            "type": "text",
+            "text": _failure_text(
+                code=str(failure["code"]),
+                details=failure.get("details"),
+                mutation=mutation,
+                retryable=bool(failure.get("retryable")),
+                action=str(failure.get("action") or "Review the advertised input contract."),
+            ),
+        }],
+        "isError": True,
     }
 
 
 def serve_stdio(
     *,
-    public_tools: Mapping[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]],
-    internal_handlers: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
+    public_tools: Mapping[str, Mapping[str, Any]],
     server_version: str,
     instructions: str,
-    log_tool_error: Callable[[object, object, str, Exception], None],
-    audience: str = DEFAULT_MCP_AUDIENCE,
 ) -> None:
-    """Run the narrow JSON-RPC transport without importing orchestration internals.
+    """Serve a fixed V12 MCP tool catalogue over standard input/output."""
+    if len(public_tools) != _MAX_TOOLS:
+        raise RuntimeError("Cortex v12 requires exactly eleven public tools")
+    for name, contract in public_tools.items():
+        if not isinstance(name, str) or not isinstance(contract, Mapping):
+            raise RuntimeError("Cortex v12 public tool registry is invalid")
+        if not isinstance(contract.get("description"), str):
+            raise RuntimeError("Cortex v12 public tool description is invalid")
+        if (
+            not isinstance(contract.get("inputSchema"), Mapping)
+            or not isinstance(contract.get("outputSchema"), Mapping)
+            or not callable(contract.get("handler"))
+        ):
+            raise RuntimeError("Cortex v12 public tool binding is invalid")
 
-    The selected tool mapping is fixed for the process lifetime.  This is the
-    strongest boundary available to a plain stdio transport: it cannot trust a
-    role supplied by the client after the process has started.
-    """
-    normalized_audience = str(audience or "").strip().lower()
-    if normalized_audience not in MCP_AUDIENCES:
-        normalized_audience = DEFAULT_MCP_AUDIENCE
-    # ``serve_stdio`` is also imported by source-mode tests and embedding
-    # hosts.  Enforce the projection here rather than relying exclusively on
-    # the CLI entry point to pass an already-filtered mapping.
-    public_tools = public_tools_for_audience(public_tools, normalized_audience)
-    all_public_names = frozenset(PUBLIC_TOOL_DESCRIPTIONS)
+    def render(value: Mapping[str, Any]) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+    def write(value: Mapping[str, Any]) -> None:
+        sys.stdout.write(render(value) + "\n")
+        sys.stdout.flush()
+
+    def reply(request_id: object, result: Mapping[str, Any]) -> None:
+        payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+        if len(render(payload).encode("utf-8")) > MAX_PHYSICAL_JSONL_FRAME_BYTES:
+            # A valid structured result must not be split across JSONL frames.
+            # The duplicate compact TextContent is intentionally bounded at
+            # this final wire boundary rather than relying on any individual
+            # service field's encoding characteristics.
+            write({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32603,
+                    "message": "Cortex server response is unavailable",
+                    "data": {"cortex_code": "ledger_error"},
+                },
+            })
+            return
+        write(payload)
+
+    def rpc_error(request_id: object, code: int, message: str, *, data: Mapping[str, Any] | None = None) -> None:
+        error: dict[str, Any] = {"code": code, "message": message}
+        if data:
+            error["data"] = dict(data)
+        write({"jsonrpc": "2.0", "id": request_id, "error": error})
+
+    session_state = "new"
     while True:
-        line = sys.stdin.readline()
-        if not line:
+        line, frame_rejected = _read_physical_jsonl_frame(sys.stdin)
+        if frame_rejected:
+            # Do not parse or echo any caller-controlled oversized frame.
+            # It has already been drained, so the next JSONL request begins
+            # at a known record boundary.
+            rpc_error(None, -32700, "Parse error")
+            continue
+        if line is None:
             return
         request_id: object = None
-        request: object = None
+        has_request_id = False
         try:
-            request = json.loads(line)
-            if not isinstance(request, dict):
-                raise ValueError("JSON-RPC request must be an object")
-            method, request_id = request.get("method"), request.get("id")
+            try:
+                request = json.loads(line, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+            except (json.JSONDecodeError, ValueError):
+                raise _RpcError(-32700, "Parse error")
+            if not isinstance(request, Mapping) or request.get("jsonrpc") != "2.0":
+                raise _RpcError(-32600, "Invalid Request")
+            has_request_id = "id" in request
+            request_id = request.get("id")
+            if has_request_id and not (
+                isinstance(request_id, str)
+                or (isinstance(request_id, int) and not isinstance(request_id, bool))
+                or request_id is None
+            ):
+                raise _RpcError(-32600, "Invalid Request")
+            if isinstance(request_id, str) and len(request_id.encode("utf-8")) > _MAX_REQUEST_ID_BYTES:
+                raise _RpcError(-32600, "Invalid Request")
+            method = request.get("method")
+            if not isinstance(method, str):
+                raise _RpcError(-32600, "Invalid Request")
+            params = request.get("params", {})
+            if not isinstance(params, Mapping):
+                raise _RpcError(-32602, "Invalid params")
+
             if method == "initialize":
-                result: dict[str, Any] = {
-                    "protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"),
-                    "capabilities": {"tools": {}, "resources": {"subscribe": False, "listChanged": False}},
+                if not has_request_id:
+                    continue
+                if session_state != "new":
+                    raise _RpcError(-32600, "Invalid Request")
+                if set(params) - {"protocolVersion", "capabilities", "clientInfo", "_meta"}:
+                    raise _RpcError(-32602, "Invalid params")
+                client_info = params.get("clientInfo")
+                if (
+                    params.get("protocolVersion") != MCP_PROTOCOL_VERSION
+                    or not isinstance(params.get("capabilities"), Mapping)
+                    or not isinstance(client_info, Mapping)
+                    or not isinstance(client_info.get("name"), str)
+                    or not isinstance(client_info.get("version"), str)
+                    or not client_info["name"]
+                    or not client_info["version"]
+                ):
+                    raise _RpcError(-32602, "Invalid params")
+                reply(request_id, {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
                     "serverInfo": {"name": "cortex", "version": server_version},
                     "instructions": instructions,
-                }
-            elif method == "notifications/initialized":
+                })
+                session_state = "initialize_response_sent"
                 continue
-            elif method == "tools/list":
-                result = {"tools": [
-                    {"name": name, "description": PUBLIC_TOOL_DESCRIPTIONS[name], "inputSchema": schema}
-                    for name, (_, schema) in public_tools.items()
-                ]}
-            elif method == "resources/list":
-                result = {"resources": []}
-            elif method == "resources/templates/list":
-                result = {"resourceTemplates": []}
-            elif method == "tools/call":
-                name = request.get("params", {}).get("name")
-                if name not in public_tools:
-                    if name in all_public_names:
-                        raise ValueError(
-                            f"tool_not_available_for_{normalized_audience}_mcp_audience"
-                        )
-                    if name in internal_handlers:
-                        raise ValueError("tool_is_internal_use_cortex_orchestration_v4")
-                    raise ValueError(f"unknown tool '{name}'")
-                arguments = request.get("params", {}).get("arguments", {})
-                if not isinstance(arguments, dict):
-                    raise ValueError("tool arguments must be an object")
-                value = public_tools[name][0](arguments)
-                result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
-            elif method == "ping":
-                result = {}
-            else:
-                raise ValueError(f"unsupported method '{method}'")
-            if request_id is not None:
-                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
-                sys.stdout.flush()
-        except Exception as exc:
-            is_ledger_busy = exc.__class__.__name__ == "LedgerBusyError"
-            if not is_ledger_busy:
-                log_tool_error(request, request_id, line.rstrip("\n"), exc)
-            if request_id is not None:
-                if is_ledger_busy:
-                    holder = getattr(exc, "holder", None)
-                    data = {
-                        "schema": "cortex/ledger-busy/v1",
-                        "code": "ledger_busy",
-                        "retryable": True,
-                        "retry_after_ms": 250,
-                        "operation": str(getattr(exc, "operation", "mutation")),
-                        "held_duration_ms": int(getattr(exc, "held_duration_ms", 0)),
+            if method == "notifications/initialized":
+                if has_request_id:
+                    raise _RpcError(-32600, "Invalid Request")
+                if set(params) - {"_meta"}:
+                    continue
+                if session_state == "initialize_response_sent":
+                    session_state = "ready"
+                continue
+            if session_state != "ready":
+                raise _RpcError(-32002, "Server not initialized")
+            if method == "ping":
+                if has_request_id:
+                    reply(request_id, {})
+                continue
+            if method == "tools/list":
+                if not has_request_id:
+                    continue
+                if set(params) - {"cursor", "_meta"}:
+                    raise _RpcError(-32602, "Invalid params")
+                cursor = params.get("cursor")
+                if cursor not in {None, ""}:
+                    raise _RpcError(-32602, "Invalid params")
+                reply(request_id, {"tools": [
+                    {
+                        "name": name,
+                        "description": str(contract["description"]),
+                        "inputSchema": dict(contract["inputSchema"]),
+                        "outputSchema": dict(contract["outputSchema"]),
                     }
-                    if isinstance(holder, dict):
-                        data["holder"] = holder
-                    error = {
-                        "code": -32009,
-                        "message": "Cortex ledger is busy; retry the same operation without changing its input.",
-                        "data": data,
-                    }
+                    for name, contract in public_tools.items()
+                ]})
+                continue
+            if method != "tools/call":
+                raise _RpcError(-32601, "Method not found")
+            if not has_request_id:
+                continue
+            if set(params) - {"name", "arguments", "_meta"}:
+                raise _RpcError(-32602, "Invalid params")
+            name = params.get("name")
+            arguments = params.get("arguments", {})
+            if not isinstance(name, str) or name not in public_tools or not isinstance(arguments, Mapping):
+                raise _RpcError(-32602, "Invalid params")
+            contract = public_tools[name]
+            try:
+                _validate_schema(contract["inputSchema"], arguments)
+            except _SchemaError as error:
+                reply(request_id, _tool_error_result(_validation_failure(error, tool_name=name, arguments=arguments), mutation=name))
+                continue
+            try:
+                result = contract["handler"](**dict(arguments))
+            except V12ServiceError as error:
+                failure = _service_failure(error)
+                if str(failure["code"]) in _SERVER_STATE_CODES:
+                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": str(failure["code"])})
                 else:
-                    error = {"code": -32602, "message": str(exc)}
-                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": error}, ensure_ascii=False) + "\n")
-                sys.stdout.flush()
+                    reply(request_id, _tool_error_result(failure, mutation=name))
+            except sqlite3.Error as error:
+                if _sqlite_is_busy(error):
+                    reply(request_id, _tool_error_result({
+                        "code": "storage_busy",
+                        "message": _safe_message("storage_busy"),
+                        "details": {"retry_after_ms": 100},
+                        "retryable": True,
+                        "action": _recovery("storage_busy", {})[1],
+                    }, mutation=name))
+                else:
+                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+            except (TypeError, ValueError):
+                # Public input validation and typed V12ServiceError cover all
+                # caller-correctable failures. A raw Python type/value error
+                # after dispatch is an implementation fault, not a second
+                # inconsistent tool-error protocol.
+                rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+            except Exception:
+                rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+            else:
+                if not isinstance(result, Mapping) or not _is_json_value(result):
+                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+                    continue
+                result = _project_public_views(result)
+                result["handles"] = _handles(result)
+                try:
+                    _validate_schema(contract["outputSchema"], result)
+                except _SchemaError:
+                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+                    continue
+                reply(request_id, _success_tool_result(dict(result)))
+        except _RpcError as error:
+            if has_request_id:
+                rpc_error(request_id, error.code, error.message)
+            elif error.code == -32700:
+                rpc_error(None, error.code, error.message)

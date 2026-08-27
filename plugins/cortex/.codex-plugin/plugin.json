@@ -1,7 +1,7 @@
 {
   "name": "cortex",
-  "version": "10.0.7+codex.20260823165829",
-  "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
+  "version": "12.0.0+codex.20260827103000",
+  "description": "Durable local coordination ledger for model-owned multi-agent governance.",
   "author": {
     "name": "igovet"
   },
@@ -9,22 +9,19 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Cortex",
-    "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, evidence-first scope and planning gates, approval-fresh adaptive pipelines, scoped immutable dispatch briefings, governance policy and initiative management, and semantic attempt-event/result transport over the canonical local Cortex v10 task ledger with schema v15 integrity. Cortex preserves the exact user-authored request, binds native workers for compaction-safe recovery, requires observable task and microtask contracts, reconciles worker observations with database-backed immutable evidence, applies checksummed SQLite-to-SQLite schema migrations on plugin upgrades, and keeps receipt-backed gates, verification, maintenance, and handoff state.",
+    "shortDescription": "Coordinate durable multi-agent work",
+    "longDescription": "Adds 22 advisory agent profiles and ten coordination skills around a local Cortex v12 ledger. Cortex stores project-scoped tasks, model-authored delegations, immutable reports, governance assessments, initiatives, and advisory closures. The coordinator model owns decomposition, native agent dispatch, exact model and effort selection, governance depth, rework, verification, and the final answer. The ledger enforces only data integrity, idempotency, project isolation, and safe bounded validation: governance records never become lifecycle gates.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [
-      "Local MCP control plane",
-      "Task ledger",
-      "Scoped immutable dispatch briefings",
-      "Compaction-safe worker recovery",
-      "Semantic attempt event bus",
-      "Durable worker question bus",
-      "Agent profiles",
-      "Knowledge harvest routes",
-      "Lifecycle hooks"
+      "Local MCP coordination ledger",
+      "Project-scoped tasks and delegations",
+      "Immutable delegation reports",
+      "Advisory governance history",
+      "Project initiatives and closures",
+      "Advisory agent profiles"
     ],
     "logo": "./assets/logo.png",
-    "defaultPrompt": "Coordinate this task with Cortex. Use help, harvest, harvest-refresh, or prune when that exact route is requested."
+    "defaultPrompt": "Coordinate this task with Cortex V12. Choose proportional governance, delegate useful independent work, preserve report evidence, and keep governance advisory."
   }
 }
