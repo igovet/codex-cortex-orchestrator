@@ -24,12 +24,13 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
       PYTHONHASHSEED: "0"
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/cortex-pycache
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install release-gate test dependency
+        run: python -m pip install --disable-pip-version-check --no-input "pytest>=8,<9"
       - name: Run the Cortex marketplace release gates
         run: |
           python -B scripts/cortex-prompt-lint.py
