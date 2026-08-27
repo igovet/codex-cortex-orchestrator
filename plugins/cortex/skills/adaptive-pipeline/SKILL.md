@@ -44,6 +44,13 @@ updated pipeline revision with its stage owners, input report/decision refs,
 5. Reassess C1/C2/C3, governance depth, residual risk, verification depth, and
    the final documentation branch after every material evidence arrival.
 
+After each revision, update the standard Codex To-Do projection from the latest
+DAG. To-Do contains only current pipeline stages and gate state, never worker subtasks,
+implementation checklists, or report bodies. Keep it concise and current with
+the persisted initiative revision; update it when a stage or gate changes, and
+when evidence adds, removes, reorders, retries, or reworks a node. The To-Do
+projection is for live progress only and is not a second durable task ledger.
+
 The C-level is advisory: C1 normally starts minimal, C2 light, and C3 full.
 Escalate or reduce the advisory starting-depth label only with recorded
 evidence; an explicit user choice remains the governing preference subject to
@@ -115,6 +122,12 @@ Use `set_governance_mode` for an evidence-backed mode revision. Use
 chooses the role, exact model, and reasoning effort for every delegation; the
 backend records the choice but never promotes a model, substitutes a profile,
 or chooses a recovery route.
+
+Routing remains Luna-first: Explorer and ordinary discovery always use Luna,
+with effort increased before a model change. Terra requires evidence of
+genuinely complex non-security work or planning; Sol is reserved for security
+work and review. Do not encode an automatic escalation ladder in a pipeline
+revision.
 
 A failed worker, partial report, missing report, or `not_ready` closure is
 evidence for the model's next decision, not a lifecycle barrier. Create a

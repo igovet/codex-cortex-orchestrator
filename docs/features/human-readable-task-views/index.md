@@ -95,9 +95,14 @@ Every output path is derived from server-generated validated identifiers rather
 than caller-supplied export paths. Generated files are ordinary, readable
 Markdown: plans and reports are structured human-readable documents with
 labeled headings, normal lists, and paragraphs, not raw nested field dumps.
-Authored Markdown in task or report content is preserved verbatim: the renderer
-does not add backslashes, entity-escape HTML, or otherwise rewrite the content.
-Structured JSON is canonical database data only; it is never dumped as a JSON
+The renderer owns the document hierarchy: ordinary authored strings are data,
+not executable Markdown, and are sanitized context-sensitively so headings,
+lists, tables, blockquotes, HTML, rules, and fences cannot inject structure.
+Readable punctuation is retained. Only explicitly typed blocks (such as a code
+block) emit their intended formatting. The optional `cortex/report-view/v1`
+envelope is parsed only at render time; malformed, unknown, or legacy content
+uses the safe generic fallback without changing canonical report acceptance or
+persistence. Structured JSON is canonical database data only; it is never dumped as a JSON
 object, script block, `<pre>` block, entity-encoded payload, or opaque blob into
 a human view.
 

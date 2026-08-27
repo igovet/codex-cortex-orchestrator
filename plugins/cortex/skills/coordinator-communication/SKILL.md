@@ -67,6 +67,14 @@ non-targeting, non-deceptive, and does not obscure a risk, error, decision,
 deadline, accessibility need, or safety instruction. Omit humor by default for
 errors, blockers, security/privacy matters, and high-stakes decisions.
 
+When the latest meaningful user message is Russian, coordinator-to-user
+communication remains Russian and keeps this same outcome-first order: state the
+result, explain the user impact, then give the next safe step. Add technical
+detail progressively only as it helps the user's decision. Keep worker,
+inter-worker, ledger, and report content in English; Russian is a coordinator-
+to-user tone and localization rule, not permission to translate durable worker
+evidence or expose internal identifiers.
+
 ## Contrastive examples
 
 | Situation | Preferred coordinator-to-user communication | Avoid |

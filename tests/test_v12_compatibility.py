@@ -98,10 +98,58 @@ class V12CompatibilityTests(unittest.TestCase):
         self.assertIsInstance(structured, dict)
         return structured
 
-    def _rejected_tool(self, name: str, arguments: dict[str, object]) -> None:
+    def _rejected_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         result = self._public_tool(name, arguments)
         self.assertIs(result.get("isError"), True)
         self.assertNotIn("structuredContent", result)
+        return result
+
+    def test_schema_failures_name_output_only_and_approval_relation_fields(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project),
+            "objective": "Verify public validation diagnostics.",
+            "user_request_original": "Verify public validation diagnostics.",
+            "user_language": "en",
+            "task_contract_version": "cortex/task-contract/v1",
+            "requirements": ["Use only advertised public fields."],
+            "constraints": ["Do not mutate on schema rejection."],
+            "acceptance_criteria": ["Failures name the repairable field."],
+            "verification_plan": ["Exercise the MCP schema boundary."],
+        })
+        task_ref = task["handles"]["task_ref"]
+        self.assertIsInstance(task_ref, str)
+        before = self._successful_tool("inspect_task", {"task_ref": task_ref})
+
+        rejected_gate = self._rejected_tool("set_governance_mode", {
+            "task_ref": task_ref,
+            "mode": "minimal",
+            "governance_gate": {},
+        })
+        gate_text = rejected_gate["content"][0]["text"]
+        self.assertIn("governance_gate is an output-only durable relation", gate_text)
+        self.assertIn("Location: $.", gate_text)
+        after_rejection = self._successful_tool("inspect_task", {"task_ref": task_ref})
+        self.assertEqual(after_rejection["timeline"], before["timeline"])
+
+        accepted = self._successful_tool("set_governance_mode", {
+            "task_ref": task_ref,
+            "mode": "minimal",
+        })
+        self.assertIn("governance_gate", accepted)
+
+        rejected_approval = self._rejected_tool("record_user_decision", {
+            "task_ref": task_ref,
+            "subject_type": "plan",
+            "subject_ref": "r_000000000000",
+            "subject_digest": "sha256:" + ("0" * 64),
+            "decision_type": "approve",
+            "prompt_en": "Approve?",
+            "response_original": "Approve.",
+            "response_en": "I approve.",
+            "user_language": "en",
+        })
+        approval_text = rejected_approval["content"][0]["text"]
+        self.assertIn("approval_handle, approval_view_content_digest, approval_view_source_sequence", approval_text)
 
     def test_canonical_decision_contract_rejects_aliases_before_mutation(self) -> None:
         task = self._successful_tool("create_task", {
@@ -129,6 +177,13 @@ class V12CompatibilityTests(unittest.TestCase):
         })
         delegation_ref = delegation["handles"]["delegation_ref"]
         self.assertIsInstance(delegation_ref, str)
+        worker_brief = delegation["worker_brief"]
+        native_dispatch = worker_brief["native_dispatch"]
+        self.assertEqual(native_dispatch["task_name"], worker_brief["native_task_name"])
+        self.assertEqual(native_dispatch["native_arguments"]["message"], worker_brief["worker_message"])
+        self.assertEqual(native_dispatch["native_arguments"]["reasoning_effort"], "high")
+        self.assertEqual(native_dispatch["native_arguments"]["fork_turns"], "none")
+        self.assertNotIn("model", native_dispatch["native_arguments"])
         plan = self._successful_tool("submit_report", {
             "delegation_ref": delegation_ref,
             "report_type": "plan",

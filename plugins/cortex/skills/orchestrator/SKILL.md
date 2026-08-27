@@ -328,6 +328,17 @@ same minimal DAG from the task contract and worker evidence. Revisions append;
 they never overwrite an earlier pipeline snapshot or treat free-text initiative
 content as backend-parsed control grammar.
 
+The coordinator also maintains a live standard Codex To-Do projection of this
+pipeline. To-Do entries represent only current pipeline stages and closed or
+open gates (for example, discovery, plan approval, implementation, verification,
+and documentation impact); they are not a second task list. They are never worker subtasks,
+implementation checklists, or duplicated report prose. Update
+the To-Do projection whenever a stage or gate changes state, including when a
+report, decision, failure, rework, or scope change revises the DAG. Keep it
+short, current, and consistent with the latest persisted pipeline revision; the
+initiative ledger remains the durable evidence and the To-Do list is only the
+standard Codex progress projection.
+
 Keep independent nodes parallel only when ownership cannot overlap. Sequence a
 node only when it needs a named predecessor report, decision, or external user
 approval. On a report, user decision, failed or incomplete check, changed risk,
@@ -476,10 +487,19 @@ models support the five exact efforts `low`, `medium`, `high`, `xhigh`, and
 
 | Exact model | Recommended effort | Recommend for |
 | --- | --- | --- |
-| `gpt-5.6-luna` | `high` | Default bounded work, including discovery, ordinary implementation, QA, and deterministic rechecks. |
-| `gpt-5.6-terra` | `high` | Genuinely complex non-security implementation, cross-cutting analysis, or demanding review. |
-| `gpt-5.6-sol` | `high` | Security work and security-focused review. |
+| `gpt-5.6-luna` | `high` | Default bounded work, including Explorer/discovery, ordinary implementation, QA, and deterministic rechecks; raise Luna effort before changing models. |
+| `gpt-5.6-terra` | `high` | Only evidence-backed genuinely complex non-security implementation, cross-cutting analysis, demanding review, or planning that benefits from Terra. |
+| `gpt-5.6-sol` | `high` | Security work and security-focused review only. |
 <!-- END GENERATED CORTEX MODEL ROUTING -->
+
+Use Luna first for discovery and ordinary work, including the `explorer`
+profile. Explorer gathers repository relationships and affected surfaces for a
+later planner or implementer; it does not spend Terra on routine discovery.
+Raise effort on Luna when that is sufficient. Select Terra only when evidence
+shows genuinely complex non-security reasoning, cross-cutting implementation,
+or planning that benefits from its additional capacity. Reserve Sol for
+security-focused work and review. This is a coordinator choice per delegation,
+not an automatic escalation ladder.
 
 Every native dispatch carries the selected `reasoning_effort` and uses
 `fork_turns="none"`. Luna is the configured native default, so omit the native
@@ -639,6 +659,15 @@ non-callable evidence, not completion receipts; use the compact `report_ref`
 for public report inputs. A normal bounded
 report may use single-call submission. For a large report:
 
+The handoff summary must contain the operational variables needed for the next
+safe decision: current stage/state, outcome, next owner and action, pipeline or
+gate delta, changed surfaces or verification scope, exact report reference and
+manifest digest when returned, and any residual risk or unrun check. Keep the
+summary concise and English. The coordinator consumes this summary and report
+reference for routine progression; it does not call `read_reports` merely to
+reconstruct a completed report. A worker that genuinely needs evidence reads
+the declared finalized report itself with its consuming delegation reference.
+
 1. `begin` creates one assembling report and returns its exact `report_ref`;
 2. `append` writes sequential, non-overlapping chunks with stable section names
    and the next exact chunk index;
@@ -697,12 +726,17 @@ are derived host-private human views, never authority or recovery state. Before
 publishing a projection, require successful current freshness and digest
 verification plus an absolute contained path returned by the active tool.
 Every projection file must remain ordinary readable Markdown: plans and reports
-are structured documents with labeled headings, normal lists, and paragraphs,
-not raw nested field dumps. Preserve authored task/report Markdown verbatim: do
-not add backslashes, entity-escape HTML, or otherwise rewrite it. Do not embed
-serialized JSON objects/arrays, script blocks, `<pre>` blocks, or entity-encoded
-payloads in a view; structured JSON is retained in SQLite and only summarized
-for human reading.
+are structured documents with renderer-owned labeled headings, normal lists,
+and paragraphs, not raw nested field dumps. Treat ordinary authored task/report
+strings as data, not executable Markdown. Sanitize them context-sensitively so
+headings, lists, tables, blockquotes, HTML, rules, and fences cannot inject
+structure while readable punctuation remains readable. Only explicitly typed
+blocks (such as code blocks) emit intended formatting. Parse the optional
+`cortex/report-view/v1` envelope only at render time; malformed, unknown, and
+legacy content use the safe generic fallback and never alter report acceptance
+or persistence. Do not embed serialized JSON objects/arrays, script blocks,
+`<pre>` blocks, or entity-encoded payloads in a view; structured JSON is retained
+in SQLite and only summarized for human reading.
 The user-facing projection set is intentionally narrow: materialize only the
 current plan, immutable plan revisions, and finalized report links. Task,
 decision, delegation, initiative, closure, governance, handoff, index, and

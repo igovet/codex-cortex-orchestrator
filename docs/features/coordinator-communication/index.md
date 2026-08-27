@@ -17,6 +17,12 @@ material fact. Coordinator-to-worker messages, native worker transcripts,
 reports, decision normalization, ledger prose, and human-view source content
 remain English; exact original user text remains only in its designated field.
 
+For a Russian latest meaningful user message, coordinator-to-user communication
+is Russian while preserving the same outcome-first, progressively detailed
+shape. Russian is a user-facing localization rule only: worker, inter-worker,
+ledger, and report content remains English and opaque internal identifiers stay
+hidden by default.
+
 The canonical source is the bundled
 [coordinator-communication skill](../../../plugins/cortex/skills/coordinator-communication/SKILL.md).
 It is integrated with the packaged orchestrator, control, and progress-accounting

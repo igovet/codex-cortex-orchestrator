@@ -801,6 +801,13 @@ apply.
    through the existing task-linked initiative plus delegation/report/decision
    graph; completed reports remain immutable. It never reopens project
    artifacts, reruns checks, or writes the project plan.
+   The standard Codex To-Do projection mirrors only current pipeline stages and
+   gate state; it is refreshed whenever either changes and never becomes a
+   worker-subtask checklist or report-body mirror. Worker handoff summaries
+   carry the current stage/state, outcome, next owner/action, pipeline/gate
+   delta, changed or verified surface, exact report ref/digest, and residual
+   risk or unrun checks, so routine coordinator report-body reads are not
+   needed.
 8. **Project initiatives when useful.** Multiple tasks with a shared long-lived
    goal, risk, milestone, or dependency can be linked through an initiative.
    The model owns its status, relationships, and interpretation.
@@ -1033,9 +1040,14 @@ Only finalized reports and plans are materialized. They are human-readable
 documents with a title, state, labeled headings, normal lists, paragraphs, and
 report sections; they are not raw nested field dumps and do not expose task IDs,
 timeline history, delegation details, decision records, or other SQLite ledger
-data. Caller-authored Markdown is preserved verbatim: the renderer adds no
-backslash escapes, HTML entities, JSON, or `<pre>` blocks. When a ready view is
-useful, the coordinator publishes only the
+data. The renderer owns the document hierarchy: ordinary caller-authored
+strings are treated as data and sanitized context-sensitively so headings,
+lists, tables, blockquotes, HTML, rules, and fences cannot inject structure.
+Readable punctuation is retained; only explicitly typed blocks (such as a
+code block) emit their intended formatting. An optional
+`cortex/report-view/v1` envelope is parsed only at render time; malformed,
+unknown, or legacy content uses the safe generic fallback and never changes
+report submission or persistence. When a ready view is useful, the coordinator publishes only the
 exact returned report or plan path as a localized clickable Markdown link, for
 example `[Открыть план](</absolute/path/to/t_ref/plans/current.md>)`; it never
 constructs, wraps, or line-breaks that destination.
@@ -1297,9 +1309,9 @@ every delegation. Governance mode does not choose a single pair for the task.
 
 | Exact model | Recommended effort | Choose for |
 | --- | --- | --- |
-| `gpt-5.6-luna` | `high` | Default bounded work, including discovery, ordinary implementation, QA, and deterministic rechecks |
-| `gpt-5.6-terra` | `high` | Genuinely complex non-security implementation, cross-cutting analysis, or demanding review |
-| `gpt-5.6-sol` | `high` | Security work and security-focused review |
+| `gpt-5.6-luna` | `high` | Default bounded work, including Explorer/discovery, ordinary implementation, QA, and deterministic rechecks; raise Luna effort before changing models |
+| `gpt-5.6-terra` | `high` | Only evidence-backed genuinely complex non-security implementation, cross-cutting analysis, demanding review, or planning that benefits from Terra |
+| `gpt-5.6-sol` | `high` | Security work and security-focused review only |
 
 All three models support `low`, `medium`, `high`, `xhigh`, and `max`. Those
 values are a native transport support boundary, not a backend policy matrix.
@@ -1318,6 +1330,9 @@ native-dispatch payload; one durable delegation maps to exactly one host spawn:
 The backend validates but never derives or rewrites a coordinator-selected
 pair. There is no server-owned Luna → Terra → Sol escalation. A replacement
 delegation always receives a fresh coordinator choice.
+Explorer and ordinary discovery always use Luna. Terra is selected only when
+genuinely complex non-security work or planning is evidenced; Sol remains
+reserved for security-focused work and review.
 
 ---
 
@@ -1381,8 +1396,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_marketplace_release
 
 `sync-cortex.sh` validates package metadata, synchronizes `cortex@cortex`,
 enables `multi_agent_v2`, and enforces the required Luna default while
-preserving unrelated configuration. It does not import, clean, migrate, or
-modify user V11 ledgers or unrelated plugin data.
+preserving unrelated configuration. In normal synchronization mode it also
+removes only disposable Python bytecode beneath `plugins/cortex` and refreshes
+the marked orchestrator routing table from `profiles.json`; read-only modes do
+not rewrite source state. It does not import, migrate, or modify user V11
+ledgers or unrelated plugin data.
 
 To select another Python interpreter:
 
@@ -1562,6 +1580,10 @@ interactive `codex` session inside tmux; do **not** use `codex exec`:
 tmux new-session -s cortex-v12-smoke
 codex
 ```
+
+Keep live checks narrowly targeted to the modified function, tool, or contract;
+do not substitute an exec-mode wrapper or detached session. Record the exact
+session command, scope, outcome, and any unrun checks.
 
 After installation or update, run exactly one fresh interactive Cortex session
 first. Require worker-verified acceptance and an advisory `ready` closure with

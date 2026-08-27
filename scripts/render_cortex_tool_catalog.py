@@ -18,12 +18,15 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL_RELATIVE = Path("plugins/cortex/skills/cortex-control/SKILL.md")
 ORCHESTRATOR_RELATIVE = Path("plugins/cortex/skills/orchestrator/SKILL.md")
+MODEL_ROUTING_BEGIN = "<!-- BEGIN GENERATED CORTEX MODEL ROUTING -->"
+MODEL_ROUTING_END = "<!-- END GENERATED CORTEX MODEL ROUTING -->"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT, help="repository tree")
     parser.add_argument("--check", action="store_true", help="fail when bundled catalogues drift from their registries")
+    parser.add_argument("--write", action="store_true", help="update the marked generated routing block from profiles.json")
     return parser.parse_args()
 
 
@@ -107,6 +110,29 @@ def render_model_routing(rows: tuple[tuple[str, str, str], ...]) -> str:
     return "\n".join(lines)
 
 
+def update_model_routing(markdown: str, rows: tuple[tuple[str, str, str], ...]) -> str:
+    """Replace the marked generated routing table without touching surrounding guidance."""
+    block_pattern = re.compile(
+        rf"(?ms)^(?P<begin>{re.escape(MODEL_ROUTING_BEGIN)}\n)(?P<body>.*?)(?P<end>^{re.escape(MODEL_ROUTING_END)}$)"
+    )
+    table_pattern = re.compile(
+        r"(?ms)^\| Exact model \| Recommended effort \| Recommend for \|\n"
+        r"^\| --- \| --- \| --- \|\n(?:^\|.*\n?)+"
+    )
+
+    def replace_block(match: re.Match[str]) -> str:
+        body = match.group("body")
+        updated_body, count = table_pattern.subn(render_model_routing(rows) + "\n", body, count=1)
+        if count != 1:
+            raise ValueError("orchestrator model-routing table is missing or duplicated")
+        return match.group("begin") + updated_body + match.group("end")
+
+    updated, count = block_pattern.subn(replace_block, markdown, count=1)
+    if count != 1:
+        raise ValueError("orchestrator model-routing generated markers are missing or duplicated")
+    return updated
+
+
 def catalog_names(markdown: str) -> tuple[str, ...]:
     catalog = section(markdown, "Public semantic catalog")
     return tuple(re.findall(r"^\|\s*`([^`]+)`\s*\|", catalog, re.MULTILINE))
@@ -144,6 +170,18 @@ def main() -> int:
     try:
         contracts = load_contracts(root)
         routing = load_routing(root)
+        orchestrator_path = root / ORCHESTRATOR_RELATIVE
+        if args.write:
+            if orchestrator_path.is_symlink() or not orchestrator_path.is_file():
+                raise ValueError("orchestrator skill must be a regular file for catalogue updates")
+            original = orchestrator_path.read_text(encoding="utf-8")
+            updated = update_model_routing(original, routing)
+            if updated != original:
+                orchestrator_path.write_text(updated, encoding="utf-8")
+                print("Updated orchestrator model-routing catalogue from profiles.json")
+            # A write operation is also a verification operation; avoid
+            # dumping the full catalogue into sync workflow output.
+            args.check = True
         if args.check:
             errors = verify(root)
             if errors:

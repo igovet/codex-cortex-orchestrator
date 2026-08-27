@@ -266,6 +266,13 @@ Coordinator-classified reads are useful only for exceptional reconciliation
 and are never worker-read proof. A downstream worker may read the body when its
 declared work genuinely requires it.
 
+The concise handoff summary carries the variables required for downstream
+coordination: current stage/state, outcome, next owner/action, pipeline or gate
+change, changed surface or verification scope, exact report reference and
+manifest digest, and residual risks or unrun checks. The coordinator uses those
+variables for routine progression and reads report bodies only when reconciliation
+or a declared evidence need requires it.
+
 Worker report reads are limited to the exact finalized `input_report_refs` on
 that worker's own delegation. The coordinator supplies those opaque references
 to `create_delegation` byte-for-byte from a successful server result; it never
@@ -378,6 +385,21 @@ retry, or parent-link rework stages; completed reports stay immutable. Load the
 `adaptive-pipeline` overlay on such evidence changes, and load the relevant
 validation/documentation/harvest overlay only when its trigger applies.
 
+The coordinator keeps the standard Codex To-Do projection aligned with this
+model-owned pipeline. It contains only current stages and gate state, such as
+discovery, plan approval, implementation, verification, and documentation
+impact. It is not a worker task list. To-Do entries are never worker subtasks,
+implementation checklists, or report bodies. Refresh it whenever a stage or gate changes, and
+keep it concise and consistent with the latest persisted initiative revision.
+The initiative and linked reports remain the durable source of truth; To-Do is a
+live progress projection only.
+
+Model routing is per delegation. Luna is the default for Explorer, discovery,
+ordinary implementation, QA, and deterministic rechecks; increase its effort
+before changing models. Terra is reserved for evidence-backed genuinely complex
+non-security work or planning, and Sol is reserved for security-focused work
+and review. There is no automatic Luna-to-Terra escalation ladder.
+
 ## Human-readable projections
 
 The database is canonical. Per-task Markdown files are derived host-private
@@ -386,12 +408,18 @@ report ID identifies evidence; a verified absolute Markdown path is a human
 link. They are not interchangeable.
 
 Human views must be ordinary readable Markdown. Render plans and reports as
-structured documents with labeled headings, normal lists, and paragraphs, not
-raw nested field dumps. Preserve authored task/report Markdown verbatim: do not
-add backslashes, entity-escape HTML, or otherwise rewrite it. Never dump a JSON
-object/array, serialized payload, script block, `<pre>` block, or entity-encoded
-payload into a `.md` view; JSON belongs in the canonical database. The view is
-a presentation of that data, not a JSON export and never a recovery source.
+structured documents with renderer-owned labeled headings, normal lists, and
+paragraphs, not raw nested field dumps. Treat ordinary authored task/report
+strings as data, not executable Markdown, and sanitize them context-sensitively
+so headings, lists, tables, blockquotes, HTML, rules, and fences cannot inject
+structure while readable punctuation remains readable. Only explicitly typed
+blocks (such as code blocks) emit intended formatting. Parse the optional
+`cortex/report-view/v1` envelope only at render time; malformed, unknown, and
+legacy content use the safe generic fallback and never alter report acceptance
+or persistence. Never dump a JSON object/array, serialized payload, script block,
+`<pre>` block, or entity-encoded payload into a `.md` view; JSON belongs in the
+canonical database. The view is a presentation of that data, not a JSON export
+and never a recovery source.
 Only plan and report links are user-facing Markdown artifacts: the current plan,
 immutable plan revisions, and finalized reports. Task, decision, delegation,
 initiative, closure, governance, handoff, index, and timeline data remain

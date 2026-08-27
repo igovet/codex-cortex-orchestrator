@@ -142,9 +142,15 @@ while canonical durable report IDs remain ledger/evidence fields.
 Task, decision, delegation, initiative, closure, governance, handoff, index,
 and timeline records remain in SQLite and are not emitted as user-facing
 Markdown. Plan and report views must be ordinary readable Markdown rather than
-JSON ledger exports: use labeled headings, normal lists, and paragraphs rather
-than raw nested field dumps; preserve authored Markdown verbatim with no JSON,
-`<pre>`, HTML entities, or added backslash escapes.
+JSON ledger exports: use renderer-owned labeled headings, normal lists, and
+paragraphs rather than raw nested field dumps. Treat authored strings as data
+and sanitize them context-sensitively so headings, lists, tables, blockquotes,
+HTML, rules, and fences cannot inject structure while ordinary punctuation stays
+readable. Only explicitly typed blocks (such as code blocks) emit intended
+formatting. The optional `cortex/report-view/v1` envelope is render-time only;
+malformed, unknown, and legacy content must use the safe generic fallback and
+must not change report submission or persistence. Do not emit JSON, `<pre>`,
+or opaque serialized payloads in views.
 
 Use the compact `task_ref` (`t_<12-hex>`) only for the task-view directory;
 canonical full IDs remain in SQLite and rendered evidence. Verify lazy migration
@@ -226,8 +232,10 @@ model is a failure.
 - no backend profile, governance mode, or recovery policy rewrites the pair.
 
 Canonical recommendations in `profiles.json` are `high` for all three models.
-Do not encode a one-off development team's assignment policy in the product
-contract.
+The product-level routing policy is Luna-first: Explorer always uses Luna,
+Terra requires evidence of genuinely complex non-security work or planning,
+and Sol is reserved for security. Raise Luna effort before changing models; do
+not encode an automatic escalation ladder.
 
 ## Skill/profile contract acceptance
 
@@ -271,6 +279,9 @@ runtime import closure, exact bundled skills and profiles, public documentation
 closure, hook absence, and release metadata.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
 GitHub Marketplace installation flow and not proof of an installed cache.
+Normal `sync-cortex.sh` mode removes only disposable bytecode under the packaged
+plugin before validation and regenerates the marked orchestrator model-routing
+table from `profiles.json`; `--dry-run` and `--check` remain read-only.
 
 Before publication, verify the committed candidate:
 
@@ -307,6 +318,11 @@ After installation or source synchronization, run exactly one fresh interactive
 Cortex task first. It must reach worker-verified acceptance and an advisory
 `ready` closure without a coordinator boundary violation. Only after that
 single-session pass may concurrent multi-session smoke begin.
+
+Live tests are narrow and must exercise only the modified function, tool, or
+contract in the active session. Do not use `codex exec`, an exec-mode wrapper,
+or a detached substitute for the interactive tmux Codex session. Record the
+session command, test scope, outcome, and unrun checks.
 
 Exercise several explicit `$cortex:orchestrator` tasks:
 
@@ -378,6 +394,16 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     `adaptive-pipeline`; evidence can add, remove, reorder, retry, or
     parent-link rework unstarted stages while completed evidence remains
     immutable.
+24. The coordinator's standard Codex To-Do projection contains only current
+    pipeline stages and gate state, is refreshed whenever either changes, and
+    never becomes a worker-subtask checklist or report-body mirror. The concise
+    worker handoff includes current stage/state, outcome, next owner/action,
+    pipeline/gate delta, changed or verified surface, exact report ref/digest,
+    and residual risk or unrun checks so routine coordinator report-body reads
+    are unnecessary.
+25. Russian coordinator-to-user updates lead with result, impact, and next
+    safe step and reveal technical detail progressively, while all worker,
+    inter-worker, ledger, and report content remains English.
 
 Confirm native Luna dispatch omits the model override while Terra/Sol carry
 exact overrides and every selected effort is preserved. Confirm no hook trust,

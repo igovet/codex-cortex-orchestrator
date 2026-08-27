@@ -167,6 +167,9 @@
 - Choose one exact model/effort pair per delegation. Canonical recommendations
   are `high` for Luna, Terra, and Sol; all support `low`, `medium`, `high`,
   `xhigh`, and `max`.
+- Route Luna first, including Explorer and ordinary discovery; increase Luna
+  effort before changing models. Terra is for evidence-backed genuinely complex
+  non-security work or planning, while Sol is for security work and review.
 - For native dispatch use `fork_turns="none"` and preserve the exact effort.
   Omit the native `model` argument for logical Luna because it is the configured
   default; pass exact Terra or Sol overrides.
@@ -177,6 +180,12 @@
   message and explicit effort; never assemble an ad-hoc prompt, omit a spawn,
   dispatch twice, or reuse one worker for multiple delegations. Reconcile an
   ambiguous host result by exact native handle before replacement.
+- Keep the standard Codex To-Do projection limited to current pipeline stages
+  and gate state. Refresh it whenever either changes; never use it for worker
+  subtasks, implementation checklists, or report-body copies. Concise handoff
+  summaries carry current stage/state, outcome, next owner/action, pipeline or
+  gate delta, changed/verified surface, exact report ref/digest, and residual
+  risk or unrun checks so routine coordinator body reads are unnecessary.
 - Do not add a server-owned model fallback, worker recovery route, wave/gate
   state machine, plan approval, receipt protocol, host binding, or lifecycle
   authorization.
@@ -248,6 +257,9 @@
 - Delegate the smallest non-destructive checks that prove affected behavior,
   broaden in proportion to risk, and report every unrun release or live-host
   check.
+- Live tests use ordinary interactive Codex inside `tmux` only, never `codex
+  exec`; keep them narrowly targeted to the modified function, tool, or
+  contract and record the exact session command and outcome.
 - After behavior, interface, command, diagram, or version changes, delegate a
   documentation verifier to re-read README, SECURITY, release readiness, and
   all affected Markdown and validate links, Mermaid syntax, tool names, paths,

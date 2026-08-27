@@ -116,6 +116,13 @@ and final explicitly authorized checkout synchronization. It must not replace
 the public GitHub Marketplace instructions. `--dry-run` and `--check` are
 non-installing validation modes.
 
+The normal synchronization mode removes only disposable Python bytecode
+(`__pycache__`, `.pyc`, and `.pyo`) beneath `plugins/cortex` before validation,
+so a prior local interpreter run cannot make the workflow fail. It also refreshes
+the marked model-routing table in `orchestrator/SKILL.md` from `profiles.json`.
+Read-only `--dry-run` and `--check` never remove or rewrite source state and
+continue to report any residue or catalog drift.
+
 ## Validation requirements
 
 The release candidate must prove:

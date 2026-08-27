@@ -478,7 +478,22 @@ def _service_failure(error: V12ServiceError) -> dict[str, Any]:
 
 
 def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    details = _safe_details({"path": error.path, "expected": "advertised_input_schema"})
+    # Keep a closed-schema failure actionable without echoing arbitrary parser
+    # messages or caller values.  The schema validator itself records a safe
+    # JSON path; root-level required/additional-property failures need the
+    # bounded field name recovered from their fixed validator wording.
+    field: str | None = None
+    direct = re.fullmatch(r"\$\.([a-z][a-z0-9_]{0,63})", error.path)
+    if direct is not None:
+        field = direct.group(1)
+    else:
+        named = re.fullmatch(
+            r"(?:missing required|unsupported) property '([a-z][a-z0-9_]{0,63})'",
+            error.message,
+        )
+        if named is not None:
+            field = named.group(1)
+    details = _safe_details({"path": error.path, "field": field, "expected": "advertised_input_schema"})
     retryable, action = _recovery("validation_error", details)
     if tool_name == "create_delegation" and "delegation_id" in arguments:
         action = (
@@ -487,6 +502,25 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
             "with the emitted delegation_ref and durable sequence. For an exact mutation retry, "
             "reuse the original complete create_delegation payload with its returned retry_handle."
         )
+    elif tool_name == "set_governance_mode" and "governance_gate" in arguments:
+        action = (
+            "governance_gate is an output-only durable relation. Omit it from "
+            "set_governance_mode and use only its advertised input fields; a "
+            "successful receipt returns the gate for later evidence handling."
+        )
+    elif tool_name == "record_user_decision" and arguments.get("decision_type") == "approve":
+        required = (
+            "approval_handle",
+            "approval_view_content_digest",
+            "approval_view_source_sequence",
+        )
+        missing = [name for name in required if name not in arguments]
+        if missing:
+            action = (
+                "For decision_type=approve, copy "
+                + ", ".join(missing)
+                + " byte-for-byte from one ready approval_view, then correct the request."
+            )
     elif tool_name in {"inspect_task", "read_delegation", "inspect_governance"} and "limit" in arguments:
         action = (
             f"Use an integer limit from 1 through {MAX_PAGE_LIMIT}; limit={MAX_PAGE_LIMIT} is the maximum. "

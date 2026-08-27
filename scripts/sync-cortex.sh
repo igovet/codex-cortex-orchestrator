@@ -156,6 +156,58 @@ for part in target.parts[1:]:
 PY
 }
 
+clean_plugin_bytecode() {
+  # Python bytecode is disposable source-tree state. Remove only exact
+  # __pycache__ directories and .pyc/.pyo files beneath the packaged plugin,
+  # refusing symlinks so cleanup cannot escape the source tree.
+  if [[ "${mode}" == "check" || "${mode}" == "dry-run" ]]; then
+    return 0
+  fi
+  "${cortex_python}" -B - "${plugin_source}" <<'PY'
+import os
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).absolute()
+if root.is_symlink() or not root.is_dir():
+    raise SystemExit(f"error: plugin source must be a regular directory: {root}")
+for base, directories, files in os.walk(root, topdown=True, followlinks=False):
+    current = Path(base)
+    for name in [*directories, *files]:
+        path = current / name
+        if path.is_symlink():
+            raise SystemExit(f"error: refusing bytecode cleanup through symlink: {path.relative_to(root)}")
+    retained = []
+    for name in directories:
+        path = current / name
+        if name == "__pycache__":
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                raise SystemExit(f"error: bytecode state is not a directory: {path.relative_to(root)}")
+            print(f"removed Python bytecode state: {path.relative_to(root)}")
+            shutil.rmtree(path)
+        else:
+            retained.append(name)
+    directories[:] = retained
+    for name in files:
+        path = current / name
+        if path.suffix in {".pyc", ".pyo"}:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise SystemExit(f"error: bytecode state is not a regular file: {path.relative_to(root)}")
+            print(f"removed Python bytecode: {path.relative_to(root)}")
+            path.unlink()
+PY
+}
+
+sync_model_routing_catalog() {
+  if [[ "${mode}" == "install" ]]; then
+    "${cortex_python}" -B "${script_dir}/render_cortex_tool_catalog.py" --root "${project_dir}" --write
+  else
+    "${cortex_python}" -B "${script_dir}/render_cortex_tool_catalog.py" --root "${project_dir}" --check
+  fi
+}
+
 prepare_backup_directory() {
   local backup_dir="$1"
   validate_cleanup_target "${codex_home}" "backups/${plugin_name}-upgrade" "${backup_dir}" || return 1
@@ -762,6 +814,8 @@ install_or_check() {
 resolve_cortex_python
 validate_roots
 validate_global_config_path
+clean_plugin_bytecode
+sync_model_routing_catalog
 validate_sources
 status=0
 install_or_check || status=1

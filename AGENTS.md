@@ -39,6 +39,12 @@ runtime guarantees from those bundled sources without depending on this file.
   reports, or raw diagnostic logs. Do not claim a check was run when it was
   not. Follow `SECURITY.md` and the bundled Cortex content-safety/runtime
   contracts for sensitive data.
+- Live testing is allowed only through an interactive `tmux` session running
+  ordinary Codex (`tmux ...` then `codex`). Do not run live tests with
+  `codex exec`, an exec-mode wrapper, or a detached/non-interactive substitute.
+  Keep each live test narrowly targeted to the modified tool, function, or
+  contract; do not turn a focused smoke into a broad repository or release
+  run. Record the exact session command, scope, outcome, and any unrun checks.
 - Before finishing a change, run the smallest non-destructive check set that
   proves the affected behavior, then broaden validation in proportion to risk.
   State every unrun release gate or environmental limitation plainly.

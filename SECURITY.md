@@ -277,9 +277,14 @@ directories and exposes no ready path.
 Only current/immutable plan and finalized-report `.md` files are generated for
 user-facing publication. They are readable Markdown documents with labeled
 headings, normal lists, and paragraphs rather than raw nested field dumps.
-Caller-authored Markdown is preserved verbatim: the renderer does not add
-backslashes, entity-escape HTML, or otherwise rewrite Markdown text. It does
-not place JSON objects, JSON arrays, script blocks, `<pre>` blocks, or opaque
+The renderer owns the hierarchy. Ordinary caller-authored strings are treated
+as data and sanitized context-sensitively so headings, lists, tables,
+blockquotes, HTML, rules, and fences cannot inject Markdown structure; readable
+punctuation is retained. Only explicitly typed blocks (such as a code block)
+emit their intended formatting. An optional `cortex/report-view/v1` envelope is
+interpreted only while rendering; malformed, unknown, or legacy content uses a
+safe generic fallback and never changes report acceptance or persistence. It
+does not place JSON objects, JSON arrays, script blocks, `<pre>` blocks, or opaque
 serialized payloads in the view. Structured values remain in the canonical
 SQLite database. Task, decision, delegation, initiative, closure, governance,
 handoff, index, and timeline records are SQLite-only and have no user-facing
