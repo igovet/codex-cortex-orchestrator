@@ -636,10 +636,12 @@ Never guess a path, reuse stale metadata, publish a bare path/link or raw ID, or
 expose a private path in errors, logs, worker messages, or external messages.
 
 For user-facing plan review, progress, decisions, and the final response, emit
-only a clickable Markdown link in the exact form `[localized readable label](</exact returned absolute path>)`.
-The label is in the user's language; the destination is copied byte-for-byte
-from the current verified tool response. Never use a backticked or bare path,
-a code block, a constructed path, or a line break inside the link destination.
+only a clickable Markdown link in the exact form of the server-provided
+`markdown_link` from the current `ready` view, copied byte-for-byte. It is the
+exact Markdown link with its localized readable label
+and exact returned absolute path. Never reconstruct it from compact refs or
+path fields; never use a backticked or bare path, a code block, or a line break
+inside the link destination.
 
 For each of these user surfaces, pair every verified clickable absolute path
 with a localized summary and its effect or next step:

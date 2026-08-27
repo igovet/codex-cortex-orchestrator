@@ -255,12 +255,14 @@ override, and authorization decisions use the closest active decision type
 without replacing exact original wording. A stored authorization assertion is
 never a bearer token; ordinary live approval requirements remain in force.
 
-For a requested or necessary main plan, present the exact plan link and request
+For a requested or necessary main plan, present the exact server-provided
+`approval_view.markdown_link` and request
 explicit approve/revise/reject/cancel input in the user's language, then wait
 for a new response. For `approve`, use the existing bounded plan read or
 inspection until its explicit `approval_view` is `ready`; copy its exact
-`report_ref`, `delegation_ref`, path, report digest, view digest, source sequence,
-and server-issued approval handle byte-for-byte from the MCP response. Never
+`markdown_link`, `report_ref`, `delegation_ref`, path, report digest, view digest,
+source sequence, and server-issued approval handle byte-for-byte from the MCP
+response. Never
 construct, concatenate, shorten, substitute `native_task_name`, or infer a view
 path. Record `approve` only
 with that exact plan `report_ref`/digest, view digest/sequence, and approval
@@ -367,10 +369,11 @@ external channels. Projection failure returns no link, does not damage
 canonical rows, and never blocks a safe final answer.
 
 For user-facing plan review, progress, decisions, and the final response, emit
-only a clickable Markdown link in the exact form `[localized readable label](</exact returned absolute path>)`.
-The label is in the user's language; the destination is copied byte-for-byte
-from the current verified tool response. Never use a backticked or bare path,
-a code block, a constructed path, or a line break inside the link destination.
+only a clickable Markdown link in the exact form of the server-provided
+`markdown_link` from the current `ready` view, copied byte-for-byte. It has a
+readable label and the exact verified absolute destination. Never reconstruct it from compact refs or
+path fields; never use a backticked or bare path, a code block, or a line break
+inside the link destination.
 
 ## Closure field and ordering contract
 

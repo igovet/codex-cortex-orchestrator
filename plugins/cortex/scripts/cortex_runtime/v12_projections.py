@@ -29,6 +29,12 @@ def _digest_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def _markdown_link(relative: str, path: str) -> str:
+    """Format an exact copyable link only after the path has been verified."""
+    label = "current plan" if relative == "plans/current.md" else "plan revision" if relative.startswith("plans/revisions/") else "report"
+    return f"[Open {label}]({path})"
+
+
 def _markdown_text(value: object) -> str:
     """Preserve caller-provided text verbatim in a readable Markdown view.
 
@@ -85,7 +91,17 @@ def _text(value: object) -> str:
 
 def _field_title(value: object) -> str:
     """Turn storage-oriented field names into readable Markdown headings."""
-    return _markdown_text(str(value).replace("_", " ").replace("-", " ").strip().title())
+    labels = {
+        "implementation_work_breakdown": "Implementation Work Breakdown",
+        "ordered_verification": "Ordered Verification",
+        "test_acceptance_matrix": "Test Acceptance Matrix",
+        "observed_baseline": "Observed Baseline",
+        "requirements_and_boundaries": "Requirements & Boundaries",
+        "contradictions_and_risks": "Contradictions & Risks",
+        "consumed_inputs": "Consumed Inputs",
+    }
+    key = str(value).strip()
+    return _markdown_text(labels.get(key, key.replace("_", " ").replace("-", " ").title()))
 
 
 _ITEM_TITLE_FIELDS = ("stage", "title", "name", "objective", "test", "command")
@@ -119,7 +135,9 @@ def _report_content(value: object, heading_level: int = 3, *, ordered: bool = Fa
                 continue
             lines.extend((f"{'#' * level} {_field_title(key)}", ""))
             if isinstance(item, Mapping):
-                lines.extend(_report_content(item, heading_level + 1, ordered=False, compact=compact))
+                # Keep scalar leaves compact beneath their parent heading;
+                # headings are reserved for nested structured values.
+                lines.extend(_report_content(item, heading_level + 1, ordered=False, compact=True))
             elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
                 # Verification plans are naturally read in order; other
                 # sequences retain ordinary unordered Markdown list semantics.
@@ -333,7 +351,14 @@ def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
             return {"status": "conflict", "path": None}
         except OSError:
             return {"status": "unavailable", "path": None}
-        return {"status": "ready", "path": str(path), "source_sequence": source_sequence, "content_digest": digest}
+        verified_path = str(path)
+        return {
+            "status": "ready",
+            "path": verified_path,
+            "markdown_link": _markdown_link(relative, verified_path),
+            "source_sequence": source_sequence,
+            "content_digest": digest,
+        }
     try:
         return store._read(read)
     except Exception:
@@ -394,7 +419,8 @@ def _render_report(store: Any, report: Mapping[str, Any]) -> bytes:
         state = "ABORTED — NOT FINAL EVIDENCE"
     lines = [f"# {title}", "", f"**Status:** {state}", ""]
     for chunk in chunks:
-        lines.extend((f"## {_text(chunk['section'])}", "", *_report_content(chunk["content"])))
+        section = "Content" if str(chunk["section"]).strip().lower() == "body" else _text(chunk["section"])
+        lines.extend((f"## {section}", "", *_report_content(chunk["content"])))
     return ("\n".join(lines)).encode("utf-8")
 
 

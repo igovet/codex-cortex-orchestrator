@@ -352,6 +352,7 @@ _REPORT_CONSUMPTION_RECEIPT_SCHEMA = _result_object("Immutable structural eviden
 _HUMAN_VIEW_SCHEMA = _result_object("Volatile host-private derived-view status; it never changes canonical ledger evidence.", {
     "status": _string(enum=("ready", "stale", "conflict", "unavailable", "disabled"), maximum=16, description="Current derived-view availability state."),
     "path": {"type": ["string", "null"], "description": "Verified absolute host-private view path only when status is ready; otherwise null."},
+    "markdown_link": {"type": "string", "description": "Server-formatted exact Markdown link, present only when status=ready and path exists. Copy byte-for-byte; never reconstruct it from compact refs."},
     "source_sequence": {"type": "integer", "minimum": 0, "description": "Timeline sequence used to verify a ready derived view."},
     "content_digest": _opaque_digest("SHA-256 digest of verified ready view content.", nullable=True),
 })
@@ -361,6 +362,7 @@ _APPROVAL_VIEW_SCHEMA = _result_object("Exact server-verified plan-review view f
     "report_content_digest": _opaque_digest("Exact immutable plan report manifest digest required by record_user_decision."),
     "status": _string(enum=("ready", "stale", "conflict", "unavailable", "disabled"), maximum=16, description="Only ready permits presenting the returned path for approval."),
     "path": {"type": ["string", "null"], "description": "Exact verified host-private plan path when status is ready; otherwise null. Never construct this value."},
+    "markdown_link": {"type": "string", "description": "Server-formatted exact Markdown plan link, present only when status=ready and path exists. Copy byte-for-byte; never reconstruct it from compact refs."},
     "source_sequence": {"type": ["integer", "null"], "minimum": 0, "description": "Exact ledger sequence used to verify the returned path, or null when not ready."},
     "content_digest": _opaque_digest("Exact verified derived-view digest when status is ready; otherwise null.", nullable=True),
     "approval_handle": _string(maximum=IDENTIFIER_MAX_LENGTH, pattern=IDENTIFIER_PATTERN, description="Server-issued opaque relation for this exact ready report/view/request snapshot; null unless status is ready.") | {"type": ["string", "null"]},

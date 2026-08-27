@@ -76,8 +76,10 @@ reply; a replay rechecks the current file. The state is one of:
 | `unavailable` | No verified view can currently be offered, for example after a materialization failure. |
 | `disabled` | Human-readable views are disabled for this task or host. |
 
-Only `ready` may include a file path, and that path is an absolute path to the
-verified artifact. Cortex does not return a guessed, relative, stale, missing,
+Only `ready` may include a file path and a server-formatted `markdown_link`, and
+both identify the same absolute verified artifact. Copy `markdown_link`
+byte-for-byte into user-facing messages; never reconstruct a link from compact
+refs. Cortex does not return a guessed, relative, stale, missing,
 or conflicting path as if it were clickable evidence. Before a view is exposed
 as ready, Cortex verifies that it is a regular file rather than a symlink,
 checks the stored digest, and confirms that its embedded/canonical
@@ -128,11 +130,11 @@ means the coordinator has confirmed the matching `ready` response and used the
 exact absolute path it returned. The accompanying summary is localized to the
 user's language and explains what evidence the particular page contains.
 
-The published form is a clickable Markdown link such as
-`[План задачи](</absolute/path/to/t_ref/plans/current.md>)`: its readable label is
-localized, and its destination is the exact returned verified path. Cortex never
-uses a bare or backticked path, a code block, a constructed path, or a line
-break inside the destination.
+The published form is the server-provided `markdown_link` field copied
+byte-for-byte, such as `[Open plan](/absolute/path/to/t_ref/plans/current.md)`:
+its readable label and destination are already bound to the verified artifact.
+Cortex never uses a bare or backticked path, a code block, a constructed path,
+or a line break inside the destination.
 
 If a requested plan or report view is `stale`, `conflict`, `unavailable`, or
 `disabled`, the coordinator says so in the user's language and summarizes the

@@ -10,7 +10,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from cortex_runtime.v12_projections import _inert, _render_report  # noqa: E402
+from cortex_runtime.v12_projections import _inert, _markdown_link, _render_report  # noqa: E402
+from cortex_runtime.mcp_api import _public_view  # noqa: E402
 
 
 class ProjectionMarkdownTests(unittest.TestCase):
@@ -94,6 +95,10 @@ class ProjectionMarkdownTests(unittest.TestCase):
                             "test": "projection rendering",
                             "acceptance": "No JSON dump is emitted",
                         }],
+                        "observed_baseline": {
+                            "branch": "feature/rendering",
+                            "evidence": "Focused regression test",
+                        },
                     },
                 }]
 
@@ -108,12 +113,26 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertIn("### Test Acceptance Matrix", rendered)
         self.assertIn("#### projection rendering", rendered)
         self.assertIn("- **Acceptance:** No JSON dump is emitted", rendered)
+        self.assertIn("### Observed Baseline", rendered)
+        self.assertIn("- **Branch:** feature/rendering", rendered)
+        self.assertIn("- **Evidence:** Focused regression test", rendered)
+        self.assertNotIn("#### Branch", rendered)
         self.assertNotIn("\n-\n", rendered)
         self.assertNotIn("\n  #", rendered)
         self.assertNotIn("<pre>", rendered)
         self.assertNotIn('"implementation_work_breakdown"', rendered)
         self.assertNotIn("&lt;", rendered)
         self.assertNotIn("\\", rendered)
+
+    def test_ready_view_exposes_exact_server_link_and_non_ready_view_does_not(self) -> None:
+        canonical = "/private/tasks/t_ref/plans/revisions/report-full-canonical-id.md"
+        link = _markdown_link("plans/revisions/report-full-canonical-id.md", canonical)
+        ready = _public_view({"status": "ready", "path": canonical, "markdown_link": link}, approval=False)
+        stale = _public_view({"status": "stale", "path": None, "markdown_link": link}, approval=False)
+
+        self.assertEqual(ready["markdown_link"], f"[Open plan revision]({canonical})")
+        self.assertIn("report-full-canonical-id.md", ready["markdown_link"])
+        self.assertNotIn("markdown_link", stale)
 
 
 if __name__ == "__main__":

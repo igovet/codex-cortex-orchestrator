@@ -512,11 +512,14 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
     if not isinstance(value, Mapping):
         return None
     if not approval:
-        return {
+        result = {
             field: value[field]
             for field in ("status", "path", "source_sequence", "content_digest")
             if field in value
         }
+        if value.get("status") == "ready" and isinstance(value.get("path"), str) and value.get("path") and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
+            result["markdown_link"] = value["markdown_link"]
+        return result
     result = {
         field: value[field]
         for field in (
@@ -529,6 +532,8 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
         )
         if field in value
     }
+    if value.get("status") == "ready" and isinstance(value.get("path"), str) and value.get("path") and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
+        result["markdown_link"] = value["markdown_link"]
     fallback: Mapping[str, Any] = {}
     if owner is not None and isinstance(owner.get("reports"), list):
         for report in owner["reports"]:

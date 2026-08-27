@@ -256,9 +256,10 @@ host-private V12 shard, never under `project_root`. A returned Markdown path is
 publishable only when the active tool returns it `ready` after verifying
 containment, regular-file type, current source sequence, and content digest.
 The task directory is `tasks/<task_ref>/`, never a canonical full task ID;
-full IDs remain in SQLite and the rendered evidence. Pair a verified clickable
-path with a localized summary and its effect or next step in the exact Markdown
-form `[localized readable label](</exact returned absolute path>)`. Do not
+full IDs remain in SQLite and the rendered evidence. Pair the server-provided
+`markdown_link` from a verified ready view with a localized summary and its
+effect or next step; copy that exact Markdown link byte-for-byte instead of
+constructing a destination. Do not
 publish guessed, constructed, backticked, code-block, line-broken, stale,
 conflicted, unavailable, or bare paths; a projection failure leaves the
 canonical ledger unchanged and must not block safe coordination or an honest

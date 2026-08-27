@@ -153,6 +153,7 @@ def _ready_approval_view(store: V12Store, report: Mapping[str, Any]) -> dict[str
         "approval_handle": None,
     }
     if view.get("status") == "ready":
+        approval["markdown_link"] = view.get("markdown_link")
         try:
             approval["approval_handle"] = store.ready_approval_handle(
                 task_id=task_id,
