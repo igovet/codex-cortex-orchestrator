@@ -57,6 +57,19 @@ runtime guarantees from those bundled sources without depending on this file.
 - Legacy compatibility must never be added or retained unless the user
   explicitly directs it.
 
+## Post-task requirements
+
+- After every completed task, update only the repository's cache version in the
+  plugin settings through the supported `./scripts/sync-cortex.sh` workflow.
+  This requirement applies even when the task changes documentation only. For
+  this cache-version action, never install, reinstall, synchronize, or otherwise
+  update the user's Cortex plugin; any such plugin action requires explicit
+  user direction.
+- After every completed task, run a small, targeted live-dev test that
+  exercises the user's completed change. Use the interactive `tmux`/ordinary
+  `codex` workflow required above, keep the scope limited to the changed
+  behavior, and record the exact command, outcome, and any unrun checks.
+
 ## Local diagnostics and project knowledge
 
 - The MCP tool-error log is private per-user data, not repository state. For
