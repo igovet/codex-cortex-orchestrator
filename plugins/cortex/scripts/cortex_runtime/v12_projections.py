@@ -30,16 +30,32 @@ def _digest_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-_MARKDOWN_PUNCTUATION = re.compile(r"([\\`*_{}\[\]()#+.!|>~-])")
+_INLINE_MARKDOWN_PUNCTUATION = re.compile(r"([\\`*\[\]])")
 
 
 def _markdown_text(value: object) -> str:
     """Escape untrusted text so it remains readable, inert Markdown prose."""
-    escaped = html.escape(str(value), quote=False)
-    escaped = _MARKDOWN_PUNCTUATION.sub(r"\\\1", escaped)
-    # A user-controlled newline must not be able to turn the remainder into a
-    # new list item or heading.  Markdown's hard-break syntax keeps it prose.
-    return escaped.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "  \n")
+    normalized = html.escape(str(value), quote=False).replace("\r\n", "\n").replace("\r", "\n")
+
+    def render_line(line: str) -> str:
+        escaped = _INLINE_MARKDOWN_PUNCTUATION.sub(r"\\\1", line)
+        # Escape only Markdown syntax that is meaningful at the start of a
+        # line. Ordinary identifiers (``task_id``, ``task-123``) and prose
+        # retain their underscores, hyphens, and dots without visual noise.
+        prefix = re.match(r"^(\s*)", escaped).group(1)
+        body = escaped[len(prefix):]
+        if body.startswith(("#", ">")):
+            return prefix + "\\" + body
+        if re.match(r"[-+*]\s", body):
+            return prefix + "\\" + body
+        ordered = re.match(r"(\d+)([.)])(\s)", body)
+        if ordered is not None:
+            return prefix + ordered.group(1) + "\\" + ordered.group(2) + body[ordered.end(2):]
+        return escaped
+
+    # A user-controlled newline must not be able to create a heading or list.
+    # Hard breaks retain readable multi-line prose in a single list field.
+    return "  \n".join(render_line(line) for line in normalized.split("\n"))
 
 
 def _markdown_value(value: object, indent: str = "") -> list[str]:

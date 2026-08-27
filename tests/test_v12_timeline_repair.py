@@ -26,13 +26,13 @@ from cortex_runtime.v12_contract import task_ref  # noqa: E402
 def _markdown_timeline_index(path: Path) -> tuple[int, list[dict[str, object]]]:
     """Read only the server-shaped fields from the human Markdown index."""
     text = path.read_text(encoding="utf-8")
-    latest = re.search(r"^\s*- \*\*latest\\_sequence:\*\* (\d+)$", text, re.MULTILINE)
+    latest = re.search(r"^\s*- \*\*latest_sequence:\*\* (\d+)$", text, re.MULTILINE)
     if latest is None:
         raise AssertionError("Markdown timeline index has no latest sequence")
     pages: list[dict[str, object]] = []
     current: dict[str, object] | None = None
     for line in text.splitlines():
-        path_match = re.search(r"\*\*path[^*]*\*\*\s+(pages/\d+)\\-(\d+)\\\.md", line)
+        path_match = re.search(r"\*\*path[^*]*\*\*\s+(pages/\d+)-(\d+)\.md", line)
         if path_match:
             current = {"path": f"pages/{path_match.group(1).split('/')[-1]}-{path_match.group(2)}.md"}
             pages.append(current)

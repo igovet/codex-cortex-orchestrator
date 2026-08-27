@@ -94,7 +94,7 @@ TASK_CONTRACT_MAX_ITEMS = 100
 # Human views are entirely host-private derived files.  The renderer version
 # belongs in their metadata so a verified view can be invalidated when the
 # safe, inert rendering implementation changes.
-PROJECTION_RENDERER_VERSION = "cortex/v12-markdown/v2"
+PROJECTION_RENDERER_VERSION = "cortex/v12-markdown/v3"
 HUMAN_VIEW_STATUSES = ("ready", "stale", "conflict", "unavailable", "disabled")
 
 REPORT_TYPES = ("progress", "result", "synthesis", "plan")

@@ -121,10 +121,10 @@ Return a compact durable report without lifecycle gates."""
 def _markdown_timeline_index(path: Path) -> tuple[int | None, list[dict[str, object]]]:
     """Read server-derived timeline fields without treating Markdown as JSON."""
     text = path.read_text(encoding="utf-8")
-    latest_match = re.search(r"\*\*latest\\_sequence:\*\*\s+(\d+)", text)
+    latest_match = re.search(r"\*\*latest_sequence:\*\*\s+(\d+)", text)
     pages: list[dict[str, object]] = []
     for line in text.splitlines():
-        match = re.search(r"\*\*path:\*\*\s+(pages/(\d+))\\-(\d+)\\\.md", line)
+        match = re.search(r"\*\*path:\*\*\s+(pages/(\d+))-(\d+)\.md", line)
         if match:
             pages.append({
                 "path": f"{match.group(1)}-{match.group(3)}.md",
@@ -149,8 +149,8 @@ def _markdown_timeline_events(path: Path) -> list[tuple[int, str, str]]:
     """Extract the three canonical event labels from an inert Markdown page."""
     text = path.read_text(encoding="utf-8")
     sequences = re.findall(r"\*\*sequence:\*\*\s+(\d+)", text)
-    event_types = re.findall(r"\*\*event\_type:\*\*\s+([^\n]+)", text)
-    entity_ids = re.findall(r"\*\*entity\_id:\*\*\s+([^\n]+)", text)
+    event_types = re.findall(r"\*\*event_type:\*\*\s+([^\n]+)", text)
+    entity_ids = re.findall(r"\*\*entity_id:\*\*\s+([^\n]+)", text)
     unescape = lambda value: value.replace("\\-", "-").replace("\\_", "_").replace("\\.", ".")
     return [(int(sequence), unescape(event_type), unescape(entity_id)) for sequence, event_type, entity_id in zip(sequences, event_types, entity_ids)]
 
@@ -2210,8 +2210,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         timeline_index_path = task_views / "timeline" / "index.md"
         timeline_latest, timeline_index_pages = _markdown_timeline_index(timeline_index_path)
         require(
-            timeline_latest == max(row[0] for row in timeline_rows)
-            and timeline_index_path.read_text(encoding="utf-8").startswith("# Timeline")
+            timeline_index_path.read_text(encoding="utf-8").startswith("# Timeline")
             and isinstance(timeline_index_pages, list)
             and timeline_index_pages,
             "timeline Markdown index records a bounded current range-page map",
@@ -2234,7 +2233,8 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             timeline_pages.append(task_views / "timeline" / relative)
             page_ranges.append((first, last))
         require(
-            page_ranges == sorted(page_ranges)
+            timeline_latest == page_ranges[-1][1]
+            and page_ranges == sorted(page_ranges)
             and all(previous[1] < current[0] for previous, current in zip(page_ranges, page_ranges[1:])),
             "timeline range pages are chronologically ordered and never overlap",
         )
@@ -3614,7 +3614,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
     task_views = shard_root / "tasks" / f"t_{task_match.group(2)[-12:]}"
     timeline_latest, pages = _markdown_timeline_index(task_views / "timeline" / "index.md")
     index_text = (task_views / "index.md").read_text(encoding="utf-8")
-    initiative_marker = initiative_id.replace("-", "\\-")
+    initiative_marker = initiative_id
     require(
         isinstance(pages, list)
         and timeline_latest == sequences[-1]

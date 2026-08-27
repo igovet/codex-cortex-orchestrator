@@ -24,8 +24,9 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertNotIn("</pre>", rendered)
         self.assertNotIn('"pages"', rendered)
         self.assertIn("- **pages**", rendered)
-        self.assertIn("pages/1\\-2\\.md", rendered)
-        self.assertIn("\\# heading &lt;script&gt;alert\\('x'\\)&lt;/script&gt;", rendered)
+        self.assertIn("pages/1-2.md", rendered)
+        self.assertIn("\\# heading &lt;script&gt;alert('x')&lt;/script&gt;", rendered)
+        self.assertNotIn("pages/1\\-2\\.md", rendered)
 
     def test_report_content_is_markdown_and_untrusted_text_is_inert(self) -> None:
         class Store:
@@ -43,12 +44,25 @@ class ProjectionMarkdownTests(unittest.TestCase):
         report = {"report_id": "r_test", "assembly_state": "finalized"}
         rendered = _render_report(Store(), report).decode("utf-8")
 
-        self.assertIn("# Report: r\\_test", rendered)
+        self.assertIn("# Report: r_test", rendered)
         self.assertIn("## Content", rendered)
         self.assertIn("- **summary:** \\- injected list  ", rendered)
-        self.assertIn("\\#\\# injected heading", rendered)
+        self.assertIn("\\## injected heading", rendered)
         self.assertNotIn("<pre>", rendered)
         self.assertNotIn('"summary"', rendered)
+
+    def test_profile_names_and_identifiers_remain_readable(self) -> None:
+        rendered = _inert({
+            "delegation_id": "delegation-fde6f5fc-abcdef",
+            "native_task_name": "planner_2",
+            "model": "gpt-5.6-luna",
+        })
+
+        self.assertIn("**delegation_id:** delegation-fde6f5fc-abcdef", rendered)
+        self.assertIn("**native_task_name:** planner_2", rendered)
+        self.assertIn("**model:** gpt-5.6-luna", rendered)
+        self.assertNotIn("delegation\\_id", rendered)
+        self.assertNotIn("planner\\_2", rendered)
 
 
 if __name__ == "__main__":
