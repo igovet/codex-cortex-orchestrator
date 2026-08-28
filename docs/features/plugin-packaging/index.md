@@ -43,6 +43,12 @@ with no `structuredContent`; server-state faults use sanitized JSON-RPC internal
 errors. The server is a storage/integrity sidecar and contains no V11
 control-plane route.
 
+The standard MCP `tools/list` response uses opaque `nextCursor` pagination when
+the complete catalog would exceed the 256 KiB physical JSONL frame bound. Each
+page contains complete tool definitions and is measured as its final JSON-RPC
+envelope; clients must follow `nextCursor` to receive the unchanged eleven-tool
+catalogue.
+
 Only `create_task` accepts explicit `project_root`; it stores the canonical
 project association and returns a compact `task_ref` for later task-anchored
 calls. The durable `task_id` in results and ledger evidence is non-callable.
@@ -62,19 +68,40 @@ execution belongs in `instructions`. Exact model and effort are required
 together. Closure selects the existing subject with `subject_type` plus the
 compact `subject_ref`; durable `subject_id` is evidence only.
 
-Reports support `single`, `begin`, `append`, `finalize`, and `abort` under
-bounded chunk, assembling, retained-content, and response limits. Plan reports
+The package keeps finalized-report evidence separate from advisory bookkeeping.
+`inspect_task` exposes `execution_outcome` with exact fields `evidence_status`,
+`finalized_report_count`, `completed_report_count`, and `outcome`. The finalized
+count covers every finalized report. The completed count and nullable
+`completed`/`incomplete` outcome derive only from semantically valid canonical
+finalized results and make no native-lifecycle claim. It also exposes
+`advisory_closure` with the current record status. After sufficient evidence,
+the coordinator selects `ready`, `ready_with_risks`, or `not_ready`, then
+automatically attempts the advisory write and intended bounded inspection;
+`ready_with_risks` never requires user confirmation. The closure result returns
+`closure_confirmation` with `inspection_status`, `reason`, and `attempts`.
+At most one same-idempotency retry is made for a verified transient persistence
+or inspection failure. An `unconfirmed` advisory result is disclosed without
+changing `execution_outcome` evidence.
+
+New reports support bounded one-chunk `single` submission or `begin`,
+sequential `append`, `finalize`, and `abort` under bounded chunk, assembling,
+retained-content, and response limits. Plan reports
 carry informational/required review policy and immutable digest identity.
-Product-facing reports use the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
-schemas. They may carry one optional unchanged `source_text` value, with no
-language tag or translated/original duplicate. Storage-valid legacy and
-semantic-invalid reports remain immutable evidence; only a finalized,
-completed, semantic-valid canonical plan receives a ready approval relation.
+Product-facing reports support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
+schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas. V2
+retains structured effective-contract coverage, deviations, unresolved items,
+risks, and verification. They may carry one optional unchanged `source_text`
+value, with no language tag or translated/original duplicate. Storage-valid
+legacy and semantic-invalid reports remain immutable evidence; only a
+finalized, completed, semantic-valid canonical plan receives a ready approval
+relation.
 Planner-authored microtask fields are evidence for the model-owned DAG only;
 they do not create backend jobs, scheduling gates, or worker-subtask To-Do
 entries.
-`record_user_decision` appends coordinator-attributed original/English evidence
-for an exact subject using one closed canonical field set. Plan/report decisions
+`record_user_decision` appends coordinator-attributed exact original-language
+evidence for an exact subject using one closed canonical field set: neutral
+`prompt`, exact `response_original`, and `user_language`; retired `prompt_en`
+and `response_en` are not accepted. Plan/report decisions
 require the immutable subject digest; plan approval additionally requires the
 matching ready-view handle, view digest, and source sequence copied from one
 returned relation. Missing or mixed fields fail before mutation. Neither review
@@ -161,7 +188,7 @@ The release candidate must prove:
   concurrency, and ordered report reads;
 - bounded incremental inspection with compact report references and bodies or
   whole chunks only through bounded `read_reports`;
-- single/chunked report lifecycle, manifest digest and quota enforcement, plan
+- assembled report lifecycle, manifest digest and aggregate quota enforcement, plan
   review metadata, append-only digest-bound user decisions, safe resume, and
   task-scoped `report_chunk_appended` chronology/backfill behavior;
 - host-private projection layout, owner-only modes, atomic writes, tamper
@@ -212,9 +239,10 @@ closure.
 Package evidence must not treat a generated Markdown view as canonical, a
 delegation view as worker input, a user decision as cryptographic attestation,
 or a plan-review pause as a backend permission gate. All worker-authored
-internal/durable operational content is English. Existing task and decision
-contracts retain verbatim user language in their labeled original fields beside
-English normalizations; canonical product-facing report and handoff payloads
+internal/durable operational content is English. Existing task contracts retain
+verbatim user language in labeled original fields; decision records retain the
+exact `response_original` without English duplicate fields. Canonical
+product-facing report and handoff payloads
 carry any needed user-authored source material once in optional unchanged
 `source_text`, without language tags or translated/original pairs. Coordinator
 summaries and verified ready links follow the user's language.

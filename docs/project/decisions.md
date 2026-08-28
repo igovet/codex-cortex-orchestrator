@@ -113,9 +113,9 @@ report type. A plan's review policy is `informational` or `required`.
 explains the review, requests an unambiguous approve/revise/cancel response,
 and ends the turn. It is ordinary-chat model policy, not a backend gate.
 
-Reports use one immutable lifecycle: `single`, or `begin` followed by sequential
-`append` calls and `finalize`, or `begin` followed by `abort`. A single report is
-limited to 65,536 bytes; an appended chunk to 32,768 bytes; a report to 256
+New reports use either an atomic bounded `single` lifecycle or an assembled
+`begin` followed by sequential `append` calls and `finalize`, or `begin`
+followed by `abort`. An appended chunk is limited to 32,768 bytes; a report to 256
 chunks and 8 MiB. A failed or interrupted assembly resumes from its stored
 manifest and next index. It is never restarted at zero, overwritten, or treated
 as finalized; a replacement explicitly supersedes its predecessor. Compact
@@ -134,7 +134,7 @@ return compact report references, and expose `timeline`, `next_sequence`, and
 
 `record_user_decision` appends a coordinator-asserted ordinary-chat decision
 against an existing task, delegation, plan, report, or same-project initiative.
-It retains `prompt_en`, exact `response_original`, English `response_en`, user
+It retains neutral `prompt`, exact arbitrary-Unicode `response_original`, user
 language, subject identity, immutable plan/report digest where applicable, and
 optional supersession. The recorded `user_via_coordinator` attribution is
 durable evidence only: the backend verifies scope and binding, but does not
@@ -166,9 +166,26 @@ rows preserve warnings and revised recommendations without silently replacing
 the user's choice. Earlier statements remain available for audit, and there is
 no stale-revision rejection.
 
-Closure verdicts—`ready`, `ready_with_risks`, and `not_ready`—are recommendations
-from the model. Missing closure or `not_ready` may influence the explanation but
-cannot prevent rework, report access, or a final answer.
+Closure verdicts—`ready`, `ready_with_risks`, and `not_ready`—are coordinator
+recommendations selected from sufficient finalized worker evidence. After the
+selection, the coordinator automatically attempts the advisory closure and
+inspects the intended record. `ready_with_risks` is not a user-confirmation
+request; any actual user decision remains ordinary-chat policy. Missing closure
+or `not_ready` may influence the explanation but cannot prevent rework, report
+access, or a final answer.
+
+The public task projection keeps its report-derived outcome separate from
+governance: `execution_outcome` contains exactly `evidence_status`,
+`finalized_report_count`, `completed_report_count`, and `outcome`. The finalized
+count covers every finalized report. The completed count and nullable
+`completed`/`incomplete` outcome derive only from semantically valid canonical
+finalized results; this does not claim native lifecycle.
+`advisory_closure` reports `record_status` and
+`latest_record` (or `null`). A closure write returns
+`closure_confirmation` with `inspection_status`, `reason`, and `attempts`.
+Only one same-idempotency retry is permitted for a verified transient
+persistence or inspection failure. `unconfirmed` advisory bookkeeping does not
+alter the independent neutral execution evidence.
 
 ## Project-level initiatives
 
@@ -204,9 +221,9 @@ V12 creates a fresh database family under
 version 1 and includes a database-family application ID plus project metadata.
 It is not an upgrade of V11.
 
-Every mutation can use an idempotency key. Same key and normalized payload
-replay the original result; a conflicting payload returns a non-mutating
-conflict. SQLite write transactions serialize concurrent revisions and keep
+The first mutation may omit an idempotency key and receives a server-issued
+`handles.idempotency_key`. The same key and normalized payload replay the
+original result; a conflicting payload returns a non-mutating conflict. SQLite write transactions serialize concurrent revisions and keep
 timeline order atomic.
 
 ## Canonical database and derived human views

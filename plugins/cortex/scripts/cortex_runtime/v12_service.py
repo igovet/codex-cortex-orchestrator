@@ -22,6 +22,38 @@ class V12ServiceError(ValueError):
         self.details = dict(details or {})
 
 
+def _normalize_execution_evidence(value: object) -> dict[str, Any]:
+    """Keep every closure response on the canonical execution-outcome shape."""
+    if isinstance(value, Mapping):
+        evidence_status = value.get("evidence_status")
+        finalized = value.get("finalized_report_count")
+        completed = value.get("completed_report_count")
+        outcome = value.get("outcome")
+        if (
+            evidence_status in {"finalized_reports_present", "no_finalized_reports"}
+            and isinstance(finalized, int) and not isinstance(finalized, bool) and finalized >= 0
+            and isinstance(completed, int) and not isinstance(completed, bool)
+            and 0 <= completed <= finalized
+            and outcome in {None, "completed", "incomplete"}
+            and (finalized > 0) == (evidence_status == "finalized_reports_present")
+            and (finalized > 0 or (completed == 0 and outcome is None))
+            and (completed == 0 or outcome is not None)
+            and (outcome != "completed" or completed > 0)
+        ):
+            return {
+                "evidence_status": evidence_status,
+                "finalized_report_count": finalized,
+                "completed_report_count": completed,
+                "outcome": outcome,
+            }
+    return {
+        "evidence_status": "no_finalized_reports",
+        "finalized_report_count": 0,
+        "completed_report_count": 0,
+        "outcome": None,
+    }
+
+
 def _validate_report_read_budget(value: object) -> int:
     """Validate the one canonical integer read budget at the service boundary."""
     if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= REPORT_READ_MAX_BYTES:
@@ -112,7 +144,14 @@ def _mutation_store(store: V12Store, operation: str, **arguments: Any) -> dict[s
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
     if not isinstance(result, dict):  # Defensive only: store results are JSON objects by contract.
         raise V12ServiceError("V12 storage returned an invalid result", code="storage_unavailable")
-    return _with_human_view(store, dict(result)) | {"replayed": bool(replayed)}
+    # The public retry input is named idempotency_key.  Preserve that exact
+    # callable name in every mutation receipt instead of requiring callers to
+    # translate a server implementation detail back into an input.
+    idempotency_key = arguments.get("idempotency_key")
+    result_with_retry = dict(result) | {"replayed": bool(replayed)}
+    if isinstance(idempotency_key, str):
+        result_with_retry["idempotency_key"] = idempotency_key
+    return _with_human_view(store, result_with_retry)
 
 
 def _ready_approval_view(store: V12Store, report: Mapping[str, Any]) -> dict[str, Any]:
@@ -288,6 +327,7 @@ def create_delegation(
     parent_delegation_ref: str | None = None,
     input_report_refs: list[str] | None = None,
     input_decision_refs: list[str] | None = None,
+    outcome_assignments: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Persist a coordinator-supplied delegation without selecting a route."""
     store, canonical = _task_store(task_ref)
@@ -305,6 +345,7 @@ def create_delegation(
         parent_delegation_id=_record_in_task(store, parent_delegation_ref, label="delegation_id"),
         input_report_ids=input_report_ids,
         input_decision_ids=input_decision_ids,
+        outcome_assignments=outcome_assignments,
         model=model,
         reasoning_effort=reasoning_effort,
         idempotency_key=idempotency_key,
@@ -357,12 +398,22 @@ def submit_report(
 
 
 def read_reports(*, report_refs: list[str], sections: list[str] | None = None, cursor: str | None = None, max_bytes: int = REPORT_READ_MAX_BYTES, consumer_delegation_ref: str | None = None) -> dict[str, Any]:
-    """Read ordered report chunks and append classified structural receipts."""
+    """Read bounded immutable report evidence for a worker or coordinator.
+
+    A worker remains restricted to its declared predecessor reports.  A
+    coordinator read is deliberately a separate, auditable reader kind: it
+    can consume the authoritative body before a material orchestration
+    decision, but it cannot impersonate a worker handoff.
+    """
     if not isinstance(report_refs, list) or not report_refs:
         raise V12ServiceError("report_refs are invalid", code="invalid_argument", details={"field": "report_refs"})
     store, _canonical = _record_store(report_refs[0], label="report_id")
     canonical_reports = _record_list_in_task(store, report_refs, label="report_id")
-    consumer_delegation_id = _record_in_task(store, consumer_delegation_ref, label="delegation_id")
+    consumer_delegation_id = (
+        None
+        if consumer_delegation_ref is None
+        else _record_in_task(store, consumer_delegation_ref, label="delegation_id")
+    )
     return _call_task(canonical_reports[0], "read_reports", report_ids=canonical_reports, sections=sections, cursor=cursor, max_bytes=_validate_report_read_budget(max_bytes), consumer_delegation_id=consumer_delegation_id, reader_kind="worker" if consumer_delegation_id is not None else "coordinator", store=store)
 
 
@@ -455,7 +506,7 @@ def submit_governance_closure(
     completion_notes: Any = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Record a closure statement; it is informational and opens no gate."""
+    """Attempt advisory bookkeeping without changing neutral report evidence."""
     store, canonical = _task_store(task_ref)
     if subject_type == "task":
         if subject_ref != task_ref or subject_ref != compact_task_ref(canonical):
@@ -464,20 +515,53 @@ def submit_governance_closure(
                 code="cross_project_reference",
                 details={"field": "subject_ref"},
             )
-    return _mutation_store(
-        store,
-        "submit_governance_closure",
-        task_id=canonical,
-        subject_type=subject_type,
-        subject_id=canonical if subject_type == "task" else _record_in_task(store, subject_ref, label="initiative_id"),
-        verdict=verdict,
-        evidence=evidence,
-        unresolved_risks=unresolved_risks,
-        follow_ups=follow_ups,
-        initiative_status=initiative_status,
-        completion_notes=completion_notes,
-        idempotency_key=idempotency_key,
-    )
+    subject_id = canonical if subject_type == "task" else _record_in_task(store, subject_ref, label="initiative_id")
+    try:
+        evidence = _normalize_execution_evidence(_call_task(canonical, "inspect_task", task_id=canonical, after_sequence=0, limit=1, store=store)["execution_outcome"])
+    except V12ServiceError:
+        # Do not fabricate success if both inspection and persistence are down.
+        evidence = _normalize_execution_evidence(None)
+    arguments = {
+        "task_id": canonical, "subject_type": subject_type, "subject_id": subject_id,
+        "verdict": verdict, "evidence": evidence, "unresolved_risks": unresolved_risks,
+        "follow_ups": follow_ups, "initiative_status": initiative_status,
+        "completion_notes": completion_notes, "idempotency_key": idempotency_key,
+    }
+    persisted: dict[str, Any] | None = None
+    for attempt in (1, 2):
+        try:
+            persisted = _mutation_store(store, "submit_governance_closure", **arguments)
+            break
+        except V12ServiceError as error:
+            if error.code not in {"storage_busy", "storage_unavailable"}:
+                raise
+            if attempt == 2:
+                return {"closure": None, "initiative": None, "warnings": [], "next_action": {"task_ref": compact_task_ref(canonical)}, "execution_outcome": evidence, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "persistence_unavailable", "attempts": attempt}, "replayed": False}
+    assert persisted is not None
+    evidence = _normalize_execution_evidence(persisted.get("execution_outcome", evidence))
+    closure = persisted.get("closure")
+    closure_id = closure.get("closure_id") if isinstance(closure, Mapping) else None
+    for attempt in (1, 2):
+        try:
+            task_inspection = _call_task(canonical, "inspect_task", task_id=canonical, after_sequence=0, limit=1, store=store)
+            if subject_type == "task":
+                advisory = task_inspection.get("advisory_closure")
+                latest = advisory.get("latest_record") if isinstance(advisory, Mapping) else None
+                observed = isinstance(latest, Mapping) and latest.get("closure_id") == closure_id
+            else:
+                governance = _call_task(canonical, "inspect_governance", task_id=canonical, initiative_id=subject_id, after_sequence=0, limit=200, store=store)
+                observed = any(isinstance(item, Mapping) and item.get("closure_id") == closure_id for item in governance.get("closures", []))
+            confirmation = "confirmed" if observed else "unconfirmed"
+            reason = "record_inspected" if observed else "record_not_observed"
+            return persisted | {
+                "execution_outcome": _normalize_execution_evidence(task_inspection.get("execution_outcome", evidence)),
+                "conformance_review": task_inspection.get("conformance_review"),
+                "closure_confirmation": {"inspection_status": confirmation, "reason": reason, "attempts": attempt},
+            }
+        except V12ServiceError:
+            if attempt == 2:
+                return persisted | {"execution_outcome": evidence, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "inspection_unavailable", "attempts": attempt}}
+    raise AssertionError("bounded advisory inspection did not return")
 
 
 def record_user_decision(
@@ -486,9 +570,8 @@ def record_user_decision(
     subject_type: str,
     subject_ref: str,
     decision_type: str,
-    prompt_en: Any,
+    prompt: Any,
     response_original: Any,
-    response_en: Any,
     user_language: Any,
     subject_digest: str | None = None,
     approval_handle: str | None = None,
@@ -496,9 +579,16 @@ def record_user_decision(
     approval_view_source_sequence: int | None = None,
     idempotency_key: str | None = None,
     supersedes_decision_ref: str | None = None,
+    steering_delta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist an asserted ordinary-chat user decision as non-authoritative evidence."""
     store, canonical = _task_store(task_ref)
+    if subject_type == "task" and subject_ref != task_ref:
+        raise V12ServiceError(
+            "task decision subject_ref must equal task_ref",
+            code="invalid_decision_subject",
+            details={"field": "subject_ref", "expected": "task_ref"},
+        )
     approval_fields = (approval_handle, approval_view_content_digest, approval_view_source_sequence)
     if subject_type == "plan" and decision_type == "approve" and any(value is None for value in approval_fields):
         raise V12ServiceError(
@@ -514,14 +604,14 @@ def record_user_decision(
         subject_id=canonical if subject_type == "task" else _record_in_task(store, subject_ref, label={"plan": "report_id", "report": "report_id", "delegation": "delegation_id", "initiative": "initiative_id"}.get(subject_type, "subject_id")),
         subject_digest=subject_digest,
         decision_type=decision_type,
-        prompt_en=prompt_en,
+        prompt=prompt,
         response_original=response_original,
-        response_en=response_en,
         user_language=user_language,
         approval_handle=approval_handle,
         approval_view_content_digest=approval_view_content_digest,
         approval_view_source_sequence=approval_view_source_sequence,
         supersedes_decision_id=_record_in_task(store, supersedes_decision_ref, label="decision_id"),
+        steering_delta=steering_delta,
         idempotency_key=idempotency_key,
     )
 

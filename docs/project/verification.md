@@ -68,22 +68,57 @@ The V12 protocol evidence must prove:
   recovery after host reconciliation;
 - `submit_governance_closure` requires `subject_type` plus the existing compact
   task or initiative `subject_ref`; durable `subject_id` is evidence only;
+- after sufficient finalized worker evidence, coordinator policy selects only
+  `ready`, `ready_with_risks`, or `not_ready`, automatically attempts the
+  advisory write, and performs bounded inspection of the intended record;
+  `ready_with_risks` does not request user confirmation;
+- `inspect_task` exposes independent `execution_outcome` and
+  `advisory_closure` projections. `execution_outcome` contains exactly
+  `evidence_status`, `finalized_report_count`, `completed_report_count`, and
+  `outcome`; the finalized count covers every finalized report, while only
+  semantically valid canonical finalized results contribute to the completed
+  count and determine the nullable `completed`/`incomplete` outcome. It makes no
+  native-lifecycle claim;
+  `advisory_closure` contains `record_status` and `latest_record` (or `null`);
+  a closure record cannot turn report evidence into a completion claim;
+- `submit_governance_closure` returns `closure_confirmation` with
+  `inspection_status`, `reason`, and `attempts` (1 or 2), and retries at most
+  once with the same idempotency key for a verified transient persistence or
+  inspection failure. An `unconfirmed` result preserves and reports the
+  independent `execution_outcome` evidence;
 - `submit_report` accepts the immutable types `progress`, `result`, `synthesis`,
   and `plan`, with `informational`/`required` review policy for plans; it
-  supports `single`, `begin`, sequential `append`, `finalize`, and `abort`, and
-  enforces 65,536-byte single reports, 32,768-byte chunks, 256 chunks, and 8 MiB
+  supports bounded one-chunk `single` reports and assembled `begin`, sequential
+  `append`, `finalize`, and `abort`, and
+  enforces 32,768-byte chunks, 256 chunks, and 8 MiB
   per report;
-- canonical report bodies use the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
-  schemas with one optional unchanged `source_text` value and no language tag
-  or translated/original duplicate; storage-valid legacy and semantic-invalid
+- canonical report bodies support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
+  schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas;
+  v2 coverage names only effective-contract items assigned to the reporting
+  delegation and carries deviations, unresolved items, risks, and verification.
+  One optional unchanged `source_text` value is allowed, with no language tag or
+  translated/original duplicate; storage-valid legacy and semantic-invalid
   bodies remain evidence, while only completed semantic-valid canonical plans
   receive ready approval relations;
+- `inspect_task` exposes the revisioned effective contract and aggregate
+  coverage. Verify stable active item references, one current owner per item,
+  allowed contributing/evidence-producing roles, completed/partial/unverified/
+  stale/contradictory coverage classification, and a user-steer revision that
+  retires only affected items while preserving unaffected coverage;
+- advisory conformance evidence links the current contract revision, decisions,
+  finalized report manifest digests, completed coordinator-report consumption,
+  and aggregate coverage without becoming a dispatch, reporting, or closure
+  admission gate;
 - interrupted report assembly resumes from manifest and `next_chunk_index`,
   rejects gaps, post-finalize/abort appends, and overwrites, and uses explicit
   supersession for a replacement;
 - `read_reports` accepts 1–20 known compact `report_refs`, preserves requested
   order, supports named sections, obeys the 65,536-byte content budget, returns a scope-bound
   cursor for exact resumption, and supports `max_bytes=0` metadata-only reads;
+- report-read request/response aggregation is preflighted before body
+  materialization (including report/chunk counts and the 224 KiB response cap),
+  and projection rendering preflights its aggregate 512-file/32 MiB output
+  budget plus the 10 MiB per-file cap without partial writes;
 - `inspect_task`, `read_delegation`, and `inspect_governance` bound incremental
   reads with `after_sequence` default 0 plus `limit` default 50/range 1–200,
   return `timeline`, `next_sequence`, and `has_more`, and expose only compact
@@ -95,7 +130,7 @@ The V12 protocol evidence must prove:
 - `record_user_decision` accepts only an existing in-scope task, delegation,
   plan, report, or same-project initiative subject; accepts the complete
   canonical field set (`task_ref`, subject type/ref, decision type,
-  `prompt_en`, exact `response_original`, English `response_en`, and
+  neutral `prompt`, exact `response_original`, and
   `user_language`, with `subject_digest` for plan/report subjects only);
   preserves attribution and supersession; and requires/validates the exact
   immutable digest for plan and report subjects;
@@ -110,7 +145,7 @@ The V12 protocol evidence must prove:
   clarification, pause, revision, cancellation, and plan review remain
   coordinator-owned ordinary-chat policy, never a backend gate or
   authorization claim;
-- missing closure, `not_ready`, open initiative, unfinished linked work,
+- missing closure, `not_ready`, initiative status, unfinished linked work,
   unresolved/cyclic dependency, and missing worker report do not block a new
   delegation, report, synthesis, rework, or final answer;
 - mode assessments append, the latest user override remains effective across
@@ -380,8 +415,11 @@ Exercise several explicit `$cortex:orchestrator` tasks:
 4. `not_ready` closure followed by model-owned rework.
 5. A project initiative linking several tasks/reports and closing with an
    unresolved dependency disclosed as residual risk.
-6. A task whose closure is absent or unavailable but still receives a complete
-   final answer.
+6. A task with sufficient completed evidence whose advisory closure is absent
+   or unavailable still receives a complete final answer; when the closure
+   attempt returns `closure_confirmation.inspection_status=unconfirmed`, the
+   coordinator discloses that bookkeeping limitation without changing or
+   reopening the independent execution-outcome evidence.
 7. A material verified change followed by a documentation-sync worker and a
    separate documentation-verifier worker before closure.
 8. A verified no-impact task whose existing finalized reports either contain an

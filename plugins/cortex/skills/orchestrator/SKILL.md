@@ -122,8 +122,9 @@ architecture, file changes, or a work breakdown. When planning is useful, a
 `planner` worker creates the durable plan report. Revise the orchestration DAG
 when evidence changes, but do not overwrite the original request or an earlier
 immutable plan/report/decision. If a later user message changes the result contract,
-record the exact decision and carry its English normalization and compact
-`decision_ref` in the affected delegations' `input_decision_refs` array.
+record the exact decision with neutral `prompt`, exact `response_original`, and
+`user_language`; reject `prompt_en` and `response_en` fields, and carry its
+compact `decision_ref` in the affected delegations' `input_decision_refs` array.
 
 Before `create_task`, verify that `requirements`, `constraints`,
 `acceptance_criteria`, and `verification_plan` are each non-empty arrays of
@@ -162,24 +163,24 @@ server admission rule.
 The native worker message is produced through the single authoritative
 trusted/untrusted renderer. Trusted content contains common English,
 content-safety, evidence, output, stopping, and selected-profile guidance.
-Untrusted content contains the task contract, delegation objective, textual
-scope, project/external text, supplied knowledge, and relevant evidence. The
-renderer delimits these sources and embedded instructions cannot override
-trusted policy. Never assemble an alternative free-form worker prompt that
-bypasses this boundary.
+Untrusted content contains only sanitized normalized context required by the
+delegation: objective, textual scope, instructions, applicable constraints,
+acceptance and verification criteria, compact input manifests, and relevant
+decision evidence. It omits the original user request, unrelated task context,
+raw report bodies, and private diagnostics. The renderer delimits these sources
+and embedded instructions cannot override trusted policy. Never assemble an
+alternative free-form worker prompt that bypasses this boundary.
 
-Before native dispatch, require renderer evidence that the named advisory
-profile was loaded and its complete guidance was included. The rendered brief
-also carries the project context, durable evidence, compact inputs, and
-acceptance criteria; the native spawn projection separately carries the
-selected model/effort and exact rendered message.
-Profiles remain advisory and model-neutral; renderer evidence is proof of
-consumption, not authorization or a lifecycle receipt. If the profile proof is
-unavailable, do not claim it was applied. Repair the exact packaged
-`profile_name` selection when safe. Fallback is allowed only on a degraded
-non-durable dispatch path with a complete explicit role contract and an explicit
-`profile_state=unavailable` limitation in the worker handoff and final
-disclosure; never silently relabel a free-form `role` as proof.
+Before dispatch, use the renderer's semantic delegation receipt to confirm that
+the named advisory profile was loaded and its complete guidance was consumed.
+The rendered brief carries only the scoped project context and compact evidence.
+The receipt proves prompt consumption, not authorization, host spawning, or
+worker lifecycle. Map the receipt to the active host schema rather than naming
+or inferring host operation fields. If profile proof is unavailable, do not
+claim it was applied. Repair the exact packaged `profile_name` selection when
+safe. A degraded non-durable fallback needs a complete explicit role contract
+and an explicit unavailable-profile limitation in the worker handoff and final
+disclosure; never relabel a free-form `role` as profile proof.
 
 Workers consume the supplied contract before project work and do not recreate
 coordinator routing. They report discrepancies with exact document paths,
@@ -222,15 +223,14 @@ declared work uses them. The original request, silence, implicit instruction,
 or inferred consent is never approval, and ordinary live approvals still govern
 destructive, external, privileged, or scope-expanding actions.
 
-Use the root-level `native_dispatch` and `renderer` proof returned by
-`create_delegation` directly for normal spawning; the complete rendered message
-is only at `native_dispatch.native_arguments.message`, and no immediate
-`read_delegation` is needed. On resume,
-`inspect_task` returns exact persisted continuation dispatches with
-`dispatch_state=ledger_unknown`. Reconcile the exact native identity with the
-host: resume or wait when present, spawn once only when absence is proven, and
-never spawn while host state is ambiguous. Native child prose is not durable
-plan, approval, report, decision, or lifecycle evidence.
+Use the delegation receipt and renderer proof returned by `create_delegation`
+for normal spawning. The active host schema is authoritative for the actual
+spawn projection and any later host capability; do not copy an assumed native
+operation name, argument shape, lifecycle state, or byte-level dispatch claim
+into policy. On resume, reconcile the host only when necessary and treat native
+child prose as neither durable evidence nor lifecycle proof. A host result that
+is absent or ambiguous is an external limitation, not authority to invent a
+replacement lifecycle.
 
 Use structured report content for findings: stable finding key, severity,
 affected surface, evidence, impact, recommendation, disposition, and any exact
@@ -439,14 +439,11 @@ or planning that benefits from its additional capacity. Reserve Sol for
 security-focused work and review. This is a coordinator choice per delegation,
 not an automatic escalation ladder.
 
-Every native dispatch carries the selected `reasoning_effort` and uses
-`fork_turns="none"`. Luna is the configured native default, so omit the native
-`model` argument for Luna. Pass the exact model argument for Terra and Sol.
-These are literal host-call fields copied from the returned native-dispatch
-payload: never omit the effort, use inherited/default `fork_turns`, pass an
-explicit Luna model override, or omit the Terra/Sol model override. Never
-silently replace a selected pair. The backend and advisory profile never
-select, promote, or substitute it.
+The active host schema determines how the coordinator projects its selected
+model and effort into a native spawn. Keep those selections separate from
+profiles and from the delegation receipt, and do not hand-write a host argument
+inventory, compatibility rule, or inferred default in policy. The backend and
+advisory profile never select, promote, or substitute the coordinator's choice.
 
 ## Plan and clarification holds
 
@@ -458,8 +455,9 @@ inspect it. Copy the verified view link and complete approval relation
 byte-for-byte, present it with a localized summary and explicit
 approve/revise/cancel choices (or reject), then end the turn. Silence,
 unrelated text, or a ledger row is not approval. Record the exact user decision
-through the active decision tool; preserve its original wording and English
-normalization. The ready relation proves only that the view existed before the
+through the active decision tool with neutral `prompt`, exact
+`response_original`, and `user_language`; reject `prompt_en` and `response_en`
+fields. The ready relation proves only that the view existed before the
 decision write; MCP has no host-authenticated user-turn receipt, so the
 new-user-response requirement remains coordinator policy. When work is
 plan-dependent, carry the returned decision reference as an ordinary
@@ -472,15 +470,17 @@ above to compile a planner delegation; it must not run a project search or
 state/artifact check to improve, confirm, or preview the plan.
 
 Record the next unambiguous response with the active decision tool against the
-exact immutable plan evidence. Approval additionally uses the current ready
+exact immutable plan evidence, using neutral `prompt`, exact
+`response_original`, and `user_language`; reject `prompt_en` and `response_en`
+fields. Approval additionally uses the current ready
 approval relation; revision and cancellation preserve the finalized plan
 evidence without volatile view binding, so intervening non-plan timeline events
 cannot block saving feedback. Approval applies only to that exact revision.
 Revision preserves the feedback verbatim, creates a parent-linked planner
-replacement and a new immutable plan/digest, and requires a new review.
-Rejection or revision preserves feedback verbatim, resumes the same live planner
-with `followup_task` and the exact decision ref when safe, and requires a superseding
-plan report plus a new review; otherwise use a parent-linked planner replacement.
+replacement and a new immutable plan/digest, and uses a new advisory review.
+Rejection or revision preserves feedback verbatim and, when supported by the
+active host schema, steers the same existing live planner with the decision.
+Otherwise report the host limitation and use a parent-linked planner replacement.
 Cancellation stops future dispatch by coordinator policy, not backend state. If
 persistence fails, do not invent approval. A C1 task may skip planning when the
 user did not request one and the coordinator's evidence-based assessment finds
@@ -496,21 +496,25 @@ guarantees same-child continuation across a stopped or resumed chat.
 Ask a question only for a genuine product, requirement, scope, acceptance, or
 external/destructive authorization decision. Workers report unresolved ambiguity
 with evidence; the coordinator must not decide it as project/product work. Ask
-one complete localized question, record its exact answer via
-`record_user_decision`, and use `followup_task` to resume the same live worker
-with the compact `decision_ref`. For plan-dependent delegation, put that ref in
-`input_decision_refs` (an array). Never turn ledger, retry, worker, report, dependency,
-initiative, or closure state into a user question.
+one complete localized question and record its exact answer via the active
+decision tool. When the host supports steering, deliver that decision through
+the existing live task without changing its identity; otherwise report the host
+limitation and use ordinary evidence-backed rework. Never turn ledger, retry,
+worker, report, dependency, initiative, or closure state into a user question.
 
 ### Continuous orchestration and turn completion
 
 The coordinator should continue orchestration while safe meaningful work
 remains and until the requested outcome is reached or a material limitation is
-honestly disclosed. After required evidence settles, a completed Cortex task
-must attempt its supported closure and verify the intended inspection before it
-is described as closure-confirmed. A write or inspection outage remains
-nonblocking for a truthful answer, but must be disclosed as
-`closure_unconfirmed`; never silently omit the attempt or call it closed/ready.
+honestly disclosed. After sufficient completed outcome evidence settles, the
+coordinator independently chooses exactly one advisory verdict: `ready`,
+`ready_with_risks`, or `not_ready`. It then automatically attempts the
+supported `submit_governance_closure` operation and its supported scoped
+inspection. This advisory sequence is never a user-facing blocker or question:
+in particular, `ready_with_risks` never asks the user to confirm, approve, or
+reclassify the result. A storage or inspection outage is nonblocking for a
+truthful answer; preserve the outcome and disclose `closure_unconfirmed` when
+the automatic attempt or inspection cannot be confirmed.
 Ending a turn
 before the outcome is reached is permitted after one genuine user question
 whose answer materially changes requirements, scope, acceptance, or grants
@@ -523,8 +527,11 @@ reported honestly when no safe progress remains.
 After each non-terminal event, reconcile the exact durable state and
 automatically dispatch, follow up, replace, or otherwise advance the next safe
 stage according to the pipeline and ordinary safety approvals. After a
-completed worker, use its concise native summary and exact report reference;
-do not call the report reader merely to continue orchestration. A genuine user
+completed worker, use its concise native summary and exact report reference for
+notification and routing. Before a material report-dependent decision—plan
+approval or revision, pipeline adaptation, rework, verification classification,
+documentation impact, closure, or final conformance—read the authoritative body
+through the existing report reader and complete its bounded cursor chain. A genuine user
 question creates an intentional pause; otherwise, once safe work is complete
 or the remaining limitation is disclosed, the coordinator may answer even when
 an advisory closure write, inspection, or projection is unavailable.
@@ -533,23 +540,22 @@ For a worker question or a blocked/partial report, use this exact sequence:
 
 1. Use the worker's native final handoff: it must contain a concise English
    `Summary` and the exact server-returned `Report ref`/manifest digest. Do not
-   reread the report body merely to understand a completed handoff. If the
+   treat the handoff as a second semantic transport; read the authoritative
+   body before a material report-dependent decision. If the
    handoff is missing or the reference cannot be verified, reconcile the exact
    delegation and obtain a corrected handoff before proceeding.
-2. Ask the user in the task's current user language, then record the exact
-   answer (the exact original answer and English normalization) with
-   `record_user_decision` bound to the exact subject; include the immutable
-   digest when the subject is a plan or report.
-3. Send `followup_task` to the same persisted `native_task_name`, carrying the
-   exact decision ref plus report refs/digests. Do this only when the host still
-   recognizes that exact live handle for the non-root worker and its ownership
-   is known.
-4. Require that same worker to submit a finalized or explicitly superseding
-   report and return its concise summary plus exact report reference before
-   any downstream delegation. A downstream worker must receive the exact
-   report ref/digest and use the active report reader with its declared
-   consuming delegation; its receipt records the returned chunk indexes and
-   cursor chain in the ledger.
+2. Ask the user in the task's current user language, then record the neutral
+   `prompt`, exact `response_original`, and `user_language` with
+   `record_user_decision` bound to the exact subject; do not generate or accept
+   `prompt_en` or `response_en`. Include the immutable digest when the subject
+   is a plan or report.
+3. If the active host supports it, steer the same existing live task with the
+   decision and relevant evidence. Do not create a synthetic lifecycle or
+   substitute task identity. If host support is unavailable or ambiguous,
+   disclose that external limitation and choose ordinary evidence-backed rework.
+4. Obtain an owned finalized or explicitly superseding report before a
+   downstream delegation consumes its evidence. The downstream worker receives
+   compact evidence through its declared input handoff and reads it itself.
 
 Cortex does not guarantee same-child continuation across a stopped or resumed
 chat; never claim that Cortex guarantees same-child continuation. If the exact
@@ -572,10 +578,10 @@ that a long-running worker is stuck or permission to start downstream work.
 
 For a quiet durable delegation, send an English `send_message` after the first
 quiet interval and inspect/list host status after later quiet intervals. If the
-worker remains running, keep bounded waiting and provide a concise user update.
-Interrupt the same worker, then follow it up for a bounded report/handoff, only
-on explicit failed/unavailable/idle-without-work evidence, a host-confirmed
-no-progress condition, or user cancellation. Do not infer liveness from a
+worker remains running, keep bounded waiting without an unchanged user-facing
+update. Publish progress only for a requested checkpoint, meaningful change,
+result, blocker, or user decision. Host interruption or follow-up depends on
+the active host schema and confirmed host state; do not infer lifecycle from a
 stable name, synthesize a report, skip a planner predecessor, or silently
 dispatch downstream work.
 
@@ -595,15 +601,17 @@ native handoff. Every successful worker completion must return a bounded
 when supplied), without copying the report body. Durable report IDs are
 non-callable evidence, not completion receipts; use the compact `report_ref`
 for public report inputs. A normal bounded
-report may use single-call submission. For a large report:
+follow the active registry's report-assembly protocol for every new report.
+Stored historical evidence may retain immutable read/open compatibility. For a
+large report:
 
 The handoff summary must contain the operational variables needed for the next
 safe decision: current stage/state, outcome, next owner and action, pipeline or
 review delta, changed surfaces or verification scope, exact report reference and
 manifest digest when returned, and any residual risk or unrun check. Keep the
 summary concise and English. The coordinator consumes this summary and report
-reference for routine progression; it does not call `read_reports` merely to
-reconstruct a completed report. A worker that genuinely needs evidence reads
+reference for routine progression; it calls the existing `read_reports` path
+before a material report-dependent decision. A worker that genuinely needs evidence reads
 the declared finalized report itself with its consuming delegation reference.
 
 Use the active report assembly operations in their returned order. Keep chunks
@@ -616,10 +624,10 @@ assembly from returned metadata rather than guessing or restarting it. A
 replacement report uses explicit supersession rather than overwriting its
 predecessor.
 
-Use the active report reader as the only full-body path for a downstream worker
-that actually needs report content. The coordinator must not call it merely to
-inspect a completed worker report when the handoff already contains its summary
-and exact report reference. Select only relevant declared evidence and sections,
+Use the active report reader as the only full-body path for authoritative report
+content. The coordinator must call it before every material report-dependent
+decision; routine notification remains the minimal handoff summary. Select only
+relevant declared evidence and sections,
 respect the active byte budget and continuation cursor, and continue until the
 selection is complete. Metadata-only reads may recover manifests without bodies.
 The ledger rejects reports outside a worker's declared inputs and records each
@@ -718,12 +726,11 @@ or block useful coordination.
 
 ## Final documentation assessment
 
-After implementation and project verification evidence have settled, but
-before advisory closure and the final answer, make a documentation-impact
-decision from bounded knowledge-route context and verified worker reports. This
-is a model-owned outcome obligation, not backend phase order or permission. The
-coordinator does not inspect source, diffs, or additional documentation to
-decide.
+When implementation or verification evidence makes it useful, make a
+documentation-impact decision from bounded knowledge-route context and verified
+worker reports. This is advisory model judgment, not a backend phase order,
+closure prerequisite, or permission. The coordinator does not inspect source,
+diffs, or additional documentation to decide.
 
 If durable behavior, architecture, interfaces, commands, verification,
 conventions, feature ownership, public usage, or operating expectations
@@ -733,10 +740,10 @@ updated documentation against source, tests, commands, links, and reported
 behavior. Use bounded discovery for a missing/stale index; use harvest only
 when explicitly activated.
 
-If no durable documentation changed, require one finalized worker-owned report
-with an explicit English documentation-impact section and material/no-impact
-rationale. An already-finalized implementation or verification report may serve
-as that documentation-impact report only when it contains the explicit section.
+If no durable documentation changed, use a finalized worker-owned report with
+an explicit English `Documentation impact` status, rationale, and affected
+surfaces. An implementation or verification report may supply this no-impact
+evidence directly, avoiding redundant synthesis or an empty documentation edit.
 The phrase “documentation-impact report ID” refers only to a durable
 `report_id` in evidence; public calls use the compact `report_ref`.
 Otherwise create a bounded English evidence-synthesis/documentation-impact
@@ -758,65 +765,49 @@ not a request to copy canonical IDs or invent a degraded native fallback. Do
 this before creating a closure; an initiative may be recorded earlier for
 planning, but it cannot make the assessment optional.
 
-For this no-documentation-impact path, settle every required worker report
-before closure. Then create or update one initiative linking the exact task and
-every finalized report required for implementation, verification, and the
-documentation-impact rationale, including the finalized documentation-impact
-report. Use the active closure operation with the exact returned initiative
-reference and cite the same evidence and returned digests. A bare
-`documentation_not_required` assertion without that linked and cited worker
-report is invalid.
-After the initiative closure write succeeds, use its returned next action only
-when an optional distinct task closure is useful; copy returned values
-byte-for-byte. Inspect governance when useful at both task and initiative
-scope, using only the exact returned references. Verify the views surface the
-task relationship, required report links, and the latest closure before
-claiming a durable `ready` closure. A task-subject closure may also be recorded
-with the exact task reference when a distinct task verdict is useful; when used,
-confirm the task closure succeeds before calling it durably recorded. Neither
-initiative nor task closure is a backend completion gate. A report-only final
-initiative remains invalid evidence for this route, and the coordinator must
-not invent a closure digest.
+When documentation-impact evidence is used, link the exact task and relevant
+finalized reports in an initiative when that relationship helps later review.
+Use only active-registry shapes and returned references for the automatic
+advisory closure attempt after sufficient completed outcome evidence. A bare
+`documentation_not_required` assertion is not evidence. The resulting advisory
+record is never a completion gate; failed closure storage or inspection is an
+honest limitation, not a reason to block safe work or a final answer.
 The legacy statement “This distinct task closure is mandatory whenever the
 task has an initiative” is not an active V12 rule; task and initiative closure
 remain optional advisory evidence.
 
 ## Closure confirmation and final answer
 
-After required worker, verification, and documentation-impact evidence settles,
-attempt the supported closure and verify it with the intended scoped inspection
-before a Cortex task is described as closure-confirmed. When initiatives are
-relevant, use only active-registry shapes and exact returned handles; a
-suggested subject is not a complete callable payload. There is no invented
-initiative-before-task order. An initiative-only closure cannot support a
-task_closed claim: the distinct supported task closure and inspection provide
-that evidence when task closure is selected.
-Closure remains advisory, but evidence integrity is mandatory: do not claim a
-durable `ready` or `ready_with_risks` closure while required worker evidence is
-assembling, missing, unread, or unsettled. Use only a subject type supported by
-the active registry and the exact compact reference returned for that subject;
-durable identities are evidence only. Preserve opaque completion notes without
-interpretation. Initiative-only properties stay confined to initiative closure;
-never invent a closure digest or subject digest. If the active registry does not
-support a subject or operation, do not attempt it.
+After sufficient completed outcome evidence settles, the coordinator chooses
+`ready`, `ready_with_risks`, or `not_ready` from that evidence and automatically
+attempts `submit_governance_closure` for every supported relevant subject. It
+then performs the supported scoped inspection needed to confirm the intended
+record. When initiatives are relevant, use only active-registry shapes and
+exact returned handles; a suggested subject is not a complete callable payload.
+There is no invented initiative-before-task order. Closure remains advisory: it
+records the coordinator's evidence-based recommendation but never blocks
+delegation or an honest final answer. It never becomes a user question, and
+`ready_with_risks` never requires user confirmation. Use only a supported
+subject and returned compact reference; durable identities are evidence only.
+Preserve opaque notes without interpretation. If the active registry lacks a
+subject or operation, do not claim the advisory record was written.
 
-Use `ready`, `ready_with_risks`, or `not_ready` as the model's recommendation.
-Claim a closure as durable only when its write and any intended scoped
-inspection succeed and show the expected subject, evidence lineage, and
-verdict; otherwise describe it as unavailable or unverified. Missing or failed
-closure inspection, `not_ready`, open/cyclic initiatives, unresolved
-dependencies, unfinished linked tasks, assembling/aborted/missing reports, and
-any ledger or projection outage never block safe delegation or an honest final
+An advisory record is confirmed only when its write and intended scoped
+inspection succeed and show the expected subject, evidence lineage, and verdict.
+Otherwise preserve the completed project outcome and disclose
+`closure_unconfirmed`. A missing or failed inspection, `not_ready`, incomplete
+or cyclic initiatives, unresolved dependencies, unfinished linked tasks,
+assembling/aborted/missing reports, and any ledger or projection outage never
+make the work user-facing open, block safe delegation, or block an honest final
 answer. Disclose the actual advisory limitation and continue safe work when
-possible. A `ready` claim is durable only when the relevant closure write and
-intended inspection agree; when a task closure is recorded, task inspection may
-surface `task_closed`, but that state is advisory and not required for a final
-answer.
+possible.
 
-On a closure storage or inspection failure, preserve the project outcome but
-label the Cortex state `closure_unconfirmed`. Retry only a verified transient
-failure with the exact returned retry handle; schema, reference, or evidence
-errors require correction. This never becomes a backend workflow gate.
+For a verified transient storage or inspection failure, make one bounded safe
+retry with the exact returned retry handle and unchanged idempotency semantics.
+If that retry or the supported inspection remains unavailable, retain the
+outcome and disclose `closure_unconfirmed`; schema, reference, or evidence
+errors require correction rather than an unchanged retry. This never becomes a
+backend workflow gate.
 
 ## Event-selected cognitive overlays
 

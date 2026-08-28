@@ -64,6 +64,11 @@ CANONICAL_REPORT_SCHEMAS = {
     "synthesis": "cortex/report/synthesis/v1",
     "plan": "cortex/report/plan/v1",
 }
+CANONICAL_REPORT_V2_SCHEMAS = {
+    "result": "cortex/report/result/v2",
+    "synthesis": "cortex/report/synthesis/v2",
+    "plan": "cortex/report/plan/v2",
+}
 REPORT_SEMANTIC_STATUSES = ("pending", "semantic_valid", "semantic_invalid", "legacy")
 REPORT_SINGLE_MAX_BYTES = 65_536
 REPORT_CHUNK_MAX_BYTES = 32_768
@@ -78,6 +83,10 @@ REPORT_SECTION_MAX_LENGTH = 128
 REPORT_SECTION_PATTERN = r"^[a-z][a-z0-9_.-]{0,127}$"
 REPORT_SECTION_RE = re.compile(REPORT_SECTION_PATTERN)
 REPORT_ASSEMBLY_STATES = ("assembling", "finalized", "aborted")
+# ``single`` remains the compact, atomic alternative to the assembled upload
+# path.  It is intentionally part of the public discriminator rather than a
+# legacy storage escape hatch: callers can safely submit one bounded report
+# without inventing a begin/append/finalize sequence.
 REPORT_MODES = ("single", "begin", "append", "finalize", "abort")
 PLAN_REVIEW_POLICIES = ("informational", "required")
 
@@ -112,7 +121,7 @@ CLOSURE_SUBJECTS = ("task", "initiative")
 DECISION_SUBJECTS = ("task", "plan", "initiative", "delegation", "report")
 DECISION_TYPES = (
     "approve", "reject", "request_revision", "clarification", "cancel",
-    "accept_risk", "override",
+    "accept_risk", "override", "steer",
 )
 DECISION_ATTRIBUTION = "user_via_coordinator"
 DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
@@ -126,6 +135,28 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
     if not isinstance(content, Mapping):
         return "legacy"
     schema = content.get("schema")
+    # V2 is deliberately additive: v1/legacy evidence stays immutable and
+    # readable, while the newer forms carry structured outcome coverage.
+    if schema == CANONICAL_REPORT_V2_SCHEMAS.get(report_type):
+        base = {
+            "result": ("summary", "outcome", "changes", "verification", "risks"),
+            "synthesis": ("summary", "findings", "recommendations"),
+            "plan": ("summary", "scope", "stages", "verification"),
+        }[report_type]
+        required = {*base, "contract_coverage", "deviations", "unresolved", "risks", "verification"}
+        if any(not isinstance(key, str) or key not in {"schema", "source_text", *required} for key in content):
+            return "semantic_invalid"
+        if not isinstance(content.get("summary"), str) or not content["summary"].strip():
+            return "semantic_invalid"
+        if "source_text" in content and not isinstance(content["source_text"], str):
+            return "semantic_invalid"
+        if report_type == "result" and not isinstance(content.get("outcome"), str):
+            return "semantic_invalid"
+        if any(not isinstance(content.get(key), list) for key in required - {"summary", "outcome"}):
+            return "semantic_invalid"
+        if any(not isinstance(item, Mapping) or not isinstance(item.get("item_ref"), str) or not isinstance(item.get("status"), str) for item in content["contract_coverage"]):
+            return "semantic_invalid"
+        return "semantic_valid"
     if schema != CANONICAL_REPORT_SCHEMAS[report_type]:
         return "legacy" if schema is None else "semantic_invalid"
     fields: dict[str, tuple[str, ...]] = {

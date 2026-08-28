@@ -135,7 +135,8 @@ object-shaped scope is invalid. Delegation `model` and `reasoning_effort` are
 required together and retained exactly. `profile_name` is an exact packaged
 enum distinct from the bounded human-readable `role`, and its renderer proof
 must be loaded. The returned native arguments preserve the exact rendered
-message and selection for one matching host spawn. Normal spawning consumes
+message and selection for one matching host spawn. This semantic delegation
+receipt proves packaged profile and dispatch data, not host lifecycle. Normal spawning consumes
 that receipt directly; recovery uses `inspect_task` continuation data only
 after host reconciliation. Continuations never attest lifecycle, and native
 commentary alone is never durable progression: a recovered child needs a
@@ -146,16 +147,16 @@ and does not gate safe work or a truthful user-facing answer.
 
 `record_user_decision` is the durable record of an ordinary-chat decision. It
 requires one canonical field set: `task_ref`, subject type/ref/digest, decision
-type, English prompt context, exact `response_original`, English `response_en`,
-and `user_language`. A plan decision binds only that completed, finalized plan
+type, neutral `prompt`, exact arbitrary-Unicode `response_original`, and
+`user_language`. A plan decision binds only that completed, finalized plan
 revision. An `approve` decision additionally requires the complete exact ready
 approval-view relation returned together by Cortex: the report ref/digest,
 approval handle, view digest, and view source sequence. Missing, legacy, or
 mixed fields are rejected before the service mutation. The record may supersede
 a prior decision on the same subject, but it never replaces original wording or
 acts as a bearer approval token.
-The mutation response is compact: it may include at most a 512-character
-English response excerpt and never returns `response_original`.
+The mutation response is compact and never repeats the private
+`response_original` value.
 
 Expected failures return bounded error codes and structural details only.
 Errors must not contain task objectives, delegation instructions, report
@@ -163,9 +164,19 @@ content, governance notes, personal data, credentials, raw exception state,
 database rows, or private filesystem content. Unknown runtime failures collapse
 to a sanitized ledger or validation error.
 
+For example, an unsupported `submit_report.report_type` returns structural
+diagnostics such as `Field: report_type. Expected:
+progress|result|synthesis|plan. Reason: enum.` An invalid fifth
+`read_reports.report_refs` entry returns `Field: report_refs. Expected:
+r_[0-9a-f]{12}. Reason: pattern.` These messages never echo the supplied
+value, and either validation failure leaves the ledger unchanged.
+
 The stdio transport bounds one JSON frame at 256 KiB. An oversized frame is
 fully drained and returns a sanitized parse error so the next valid
 `ping`/`tools/list` request can succeed; it must not desynchronize the server.
+When the full tool catalog cannot fit that physical bound, `tools/list` returns
+only complete definitions and an opaque `nextCursor`; clients continue until no
+cursor remains. Cortex never splits or truncates a definition to fit a frame.
 
 ## Data handling
 
@@ -180,8 +191,9 @@ raw diagnostic logs, or unnecessarily sensitive operational details in:
 
 Use English for every native worker commentary/update, inter-worker message,
 final response, tool-authored durable string, objective, requirement,
-instruction, worker-authored report narrative, governance record, and English
-decision normalization. Acceptance covers complete child threads, not only
+instruction, worker-authored report narrative, and governance record. Decision
+records instead use neutral `prompt`, exact `response_original`, and
+`user_language`; retired `prompt_en` and `response_en` fields are rejected. Acceptance covers complete child threads, not only
 final messages or database rows. Canonical product-facing reports and handoffs
 may carry one optional unchanged `source_text` value as inert source material,
 without a language tag or translated/original duplicate. Existing task and
@@ -190,8 +202,8 @@ designated `user_request_original` or `response_original` fields with
 `user_language`; never overwrite or silently translate that source text.
 
 Reports may contain material engineering evidence, so exact emitted report refs should be
-passed to later workers instead of copying full reports into prompts. A small
-report may use `single`; a large report uses `begin`, sequential indexed
+passed to later workers instead of copying full reports into prompts. One
+bounded report uses `single`; a larger report uses `begin`, sequential indexed
 `append` calls with bounded lowercase section labels, then `finalize` with the
 expected chunk count and whole-report digest, or `abort` with a sanitized
 English reason. Chunks are immutable and ordered; finalized or aborted reports
@@ -200,10 +212,23 @@ its predecessor. The types are `progress`, `result`, `synthesis`, and `plan`;
 a `plan` report can declare `informational` or coordinator-owned `required`
 review policy without creating a backend gate.
 
+Canonical reports support the v1 schemas for all four report types and the
+additive v2 result, synthesis, and plan schemas. V2 adds structured coverage
+for assigned effective-contract items plus deviations, unresolved items, risks,
+and verification. The immutable original task contract is represented as a
+revisioned effective contract with stable `o_` item references. Delegations may
+own, contribute to, or produce evidence for an item; each active item has no
+more than one owner. Aggregate coverage reports missing, partial, unverified,
+stale, or contradictory evidence. A user steering decision revises only the
+named active items; it does not rewrite unrelated evidence. This evidence and
+the linked conformance projection guide model reasoning but never become a
+backend authorization or lifecycle gate.
+
 Ordinary delegation/task inspection creates no receipt or lifecycle fact.
 `read_reports` returns at most 20 unique known reports in the exact requested
-order and is the only report body/chunk reader. A worker handoff read made with
-`reader_kind="worker"` and its exact consuming delegation creates an immutable
+order and is the only report body/chunk reader. Coordinator calls return
+metadata/manifests only. A worker body read made with an exact consuming
+delegation (which declares every input) creates an immutable
 page receipt (digest, chunk indexes, byte count, and cursor chain); a
 coordinator-classified read does not substitute for that evidence. A
 coordinator does not call it merely to summarize a completed worker report: the
@@ -215,6 +240,12 @@ selection-scoped cursor for resume; `max_bytes=0` returns metadata only and no
 bodies. Inspection tools use
 `after_sequence` plus `limit`, return compact
 references and bounded timeline pages, and expose `next_sequence`/`has_more`.
+`handles.after_sequence`, `handles.chunk_index`, and
+`handles.idempotency_key` are copied unchanged into their matching literal
+inputs. `handles.cursor` is the separate opaque `read_reports` continuation
+value. Root-level `next_sequence` and `next_chunk_index` are informational
+receipt fields, not aliases inside `handles`; neither they nor `retry_handle`
+may be substituted for a callable handle.
 
 Private tool-error logs are same-user sensitive data. Inspect only a bounded
 tail when necessary, extract sanitized correlation metadata, and never paste
@@ -235,8 +266,8 @@ paths. The database and adjacent WAL/SHM files are reconciled to `0600`. SQLite
 identifies the database family with an application ID, verifies schema version
 1, and checks the project metadata against the derived project hash. A normal,
 path-bearing `create_task` open automatically upgrades only the exact released
-pre-human-view V12 shape to the ordered `v12-initial` plus
-`v12-schema-v1-human-views` history in one transaction; it preserves legacy
+pre-human-view V12 shape through the complete ordered additive history ending
+at `v12-effective-outcome-coverage` in one transaction; it preserves legacy
 rows and fails closed for an unknown or future layout. No V11 database is ever
 opened or used as migration input.
 
@@ -249,7 +280,8 @@ The schema stores:
 - `initiatives` and append-only `initiative_revisions`;
 - current `initiative_links` plus link history inside revisions;
 - immutable `governance_closures`;
-- immutable `user_decisions` with exact-original and English-normalized fields;
+- immutable `user_decisions` with neutral `prompt`, exact `response_original`,
+  and `user_language`; retired `prompt_en` and `response_en` fields are rejected;
 - the ordered `timeline`;
 - operation-scoped `idempotency` records;
 - bounded projection job and projection-file metadata; and
@@ -491,8 +523,8 @@ A useful report includes:
    `profile_name` stays distinct from human `role`, model/effort are required
    together, closure requires `subject_type` plus matching `subject_ref`,
    and user decisions bind the correct subject and digest. For a plan approval,
-   verify the complete canonical decision payload: exact `response_original`,
-   separate English `response_en`, `prompt_en`, `user_language`, the finalized
+   verify the complete canonical decision payload: neutral `prompt`, exact
+   `response_original`, `user_language`, the finalized
    plan ref/digest, and the matching ready-view handle, view digest, and source
    sequence; malformed or mixed fields must fail without a mutation.
 4. Run the self-contained skill/profile lint and isolated V12 release/protocol

@@ -59,6 +59,8 @@ _ADVISORY_GOVERNANCE_MIGRATION_VERSION = 8
 _ADVISORY_GOVERNANCE_MIGRATION_NAME = "v12-advisory-governance"
 _REPORT_SEMANTICS_MIGRATION_VERSION = 9
 _REPORT_SEMANTICS_MIGRATION_NAME = "v12-canonical-report-semantics"
+_OUTCOME_COVERAGE_MIGRATION_VERSION = 10
+_OUTCOME_COVERAGE_MIGRATION_NAME = "v12-effective-outcome-coverage"
 _APPLICATION_ID = 0x43563132
 _TIMELINE_BACKFILL_METADATA_KEY = "timeline_backfill_v1"
 _TIMELINE_BACKFILL_VERSION = "cortex/v12-timeline-backfill/v1"
@@ -661,6 +663,7 @@ class V12Store:
                         self._migrate_ready_approval_handles(connection)
                         self._migrate_advisory_governance(connection)
                         self._migrate_canonical_report_semantics(connection)
+                        self._migrate_effective_outcome_coverage(connection)
                         self._validate_existing(connection)
                         self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                     except BaseException:
@@ -681,6 +684,7 @@ class V12Store:
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_hash', ?)", (self.project_hash,))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_root_digest', ?)", (hashlib.sha256(str(self.project_root).encode("utf-8")).hexdigest(),))
                     except BaseException:
@@ -1067,6 +1071,46 @@ class V12Store:
         except sqlite3.DatabaseError as exc:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
 
+    def _migrate_effective_outcome_coverage(self, connection: sqlite3.Connection) -> None:
+        """Materialize revisioned outcome items without changing task history."""
+        migration = connection.execute("SELECT name FROM schema_migrations WHERE version=?", (_OUTCOME_COVERAGE_MIGRATION_VERSION,)).fetchone()
+        if migration is not None:
+            if str(migration[0]) != _OUTCOME_COVERAGE_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        expected = [
+            (SCHEMA_VERSION, MIGRATION_NAME), (_EXPANSION_MIGRATION_VERSION, _EXPANSION_MIGRATION_NAME),
+            (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
+            (_NATIVE_TASK_NAME_MIGRATION_VERSION, _NATIVE_TASK_NAME_MIGRATION_NAME),
+            (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
+            (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
+            (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
+            (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
+        ]
+        if [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()] != expected:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            connection.execute("CREATE TABLE effective_contract_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id),revision INTEGER NOT NULL,decision_id TEXT REFERENCES user_decisions(decision_id),created_sequence INTEGER NOT NULL,PRIMARY KEY(task_id,revision))")
+            connection.execute("CREATE TABLE effective_contract_items(item_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),category TEXT NOT NULL,ordinal INTEGER NOT NULL,text TEXT NOT NULL,created_revision INTEGER NOT NULL,retired_revision INTEGER,UNIQUE(task_id,category,ordinal,created_revision))")
+            connection.execute("CREATE TABLE delegation_outcome_assignments(delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),assignment_role TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(delegation_id,item_id,assignment_role))")
+            connection.execute("CREATE UNIQUE INDEX outcome_owned_current ON delegation_outcome_assignments(item_id) WHERE assignment_role='owned'")
+            connection.execute("CREATE TABLE report_contract_coverage(report_id TEXT NOT NULL REFERENCES reports(report_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),status TEXT NOT NULL,verification_json TEXT NOT NULL,PRIMARY KEY(report_id,item_id))")
+            connection.execute("CREATE INDEX outcome_items_task_current ON effective_contract_items(task_id,retired_revision,category,ordinal)")
+            for task in connection.execute("SELECT task_id,project_hash,requirements_json,constraints_json,acceptance_criteria_json,verification_plan_json,created_sequence FROM tasks").fetchall():
+                task_id = str(task["task_id"])
+                connection.execute("INSERT INTO effective_contract_revisions(task_id,revision,decision_id,created_sequence) VALUES (?, 1, NULL, ?)", (task_id, int(task["created_sequence"])))
+                for category, column in (("requirement", "requirements_json"), ("constraint", "constraints_json"), ("acceptance", "acceptance_criteria_json"), ("verification", "verification_plan_json")):
+                    values = _load_json(str(task[column]), label="task contract")
+                    for ordinal, text in enumerate(values if isinstance(values, list) else []):
+                        connection.execute("INSERT INTO effective_contract_items(item_id,project_hash,task_id,category,ordinal,text,created_revision,retired_revision) VALUES (?, ?, ?, ?, ?, ?, 1, NULL)", ("outcome-" + uuid.uuid4().hex, str(task["project_hash"]), task_id, category, ordinal, str(text)))
+            connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME, _now()))
+            expected_post_migration = [*expected, (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME)]
+            if [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()] != expected_post_migration:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
     def _validate_existing(self, connection: sqlite3.Connection) -> None:
         if int(connection.execute("PRAGMA application_id").fetchone()[0]) != _APPLICATION_ID or int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
@@ -1082,6 +1126,7 @@ class V12Store:
             (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
             (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
             (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
+            (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME),
         ] or metadata is None or str(metadata[0]) != self.project_hash:
             raise V12StoreError("reference belongs to another project", code="cross_project_reference")
         required_columns = {
@@ -1096,6 +1141,10 @@ class V12Store:
             "projection_files": {"task_id", "relative_path", "content_digest", "status"},
             "report_consumption_receipts": {"task_id", "consumer_delegation_id", "reader_kind", "report_id", "observed_content_digest", "sections_json", "input_cursor", "output_cursor", "chunk_indexes_json", "returned_content_bytes", "has_more", "created_sequence"},
             "approval_handles": {"approval_handle", "task_id", "report_id", "report_content_digest", "view_relative_path", "view_content_digest", "view_source_sequence", "request_digest", "created_sequence", "consumed_decision_id"},
+            "effective_contract_revisions": {"task_id", "revision", "created_sequence"},
+            "effective_contract_items": {"item_id", "task_id", "category", "ordinal", "text", "created_revision", "retired_revision"},
+            "delegation_outcome_assignments": {"delegation_id", "item_id", "assignment_role", "revision"},
+            "report_contract_coverage": {"report_id", "item_id", "status", "verification_json"},
         }
         for table, columns in required_columns.items():
             if not columns.issubset(self._column_names(connection, table)):
@@ -1588,6 +1637,7 @@ class V12Store:
                     self._migrate_ready_approval_handles(connection)
                     self._migrate_advisory_governance(connection)
                     self._migrate_canonical_report_semantics(connection)
+                    self._migrate_effective_outcome_coverage(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1634,6 +1684,7 @@ class V12Store:
                     self._migrate_ready_approval_handles(connection)
                     self._migrate_advisory_governance(connection)
                     self._migrate_canonical_report_semantics(connection)
+                    self._migrate_effective_outcome_coverage(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1681,6 +1732,10 @@ class V12Store:
         CREATE TABLE approval_handles(approval_handle TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),report_id TEXT NOT NULL REFERENCES reports(report_id),report_content_digest TEXT NOT NULL,view_relative_path TEXT NOT NULL,view_content_digest TEXT NOT NULL,view_source_sequence INTEGER NOT NULL,request_digest TEXT NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,consumed_decision_id TEXT REFERENCES user_decisions(decision_id),UNIQUE(task_id,report_id,report_content_digest,view_content_digest,view_source_sequence));
         CREATE TABLE projection_jobs(job_id INTEGER PRIMARY KEY AUTOINCREMENT,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),source_sequence INTEGER NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,lease_token TEXT,lease_expires_at TEXT,last_error_code TEXT,attempt_count INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(task_id,source_sequence,reason));
         CREATE TABLE projection_files(task_id TEXT NOT NULL REFERENCES tasks(task_id),relative_path TEXT NOT NULL,source_sequence INTEGER NOT NULL,renderer_version TEXT NOT NULL,content_digest TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(task_id,relative_path));
+        CREATE TABLE effective_contract_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id),revision INTEGER NOT NULL,decision_id TEXT REFERENCES user_decisions(decision_id),created_sequence INTEGER NOT NULL,PRIMARY KEY(task_id,revision));
+        CREATE TABLE effective_contract_items(item_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),category TEXT NOT NULL,ordinal INTEGER NOT NULL,text TEXT NOT NULL,created_revision INTEGER NOT NULL,retired_revision INTEGER,UNIQUE(task_id,category,ordinal,created_revision));
+        CREATE TABLE delegation_outcome_assignments(delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),assignment_role TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(delegation_id,item_id,assignment_role));
+        CREATE TABLE report_contract_coverage(report_id TEXT NOT NULL REFERENCES reports(report_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),status TEXT NOT NULL,verification_json TEXT NOT NULL,PRIMARY KEY(report_id,item_id));
         CREATE TABLE idempotency(operation TEXT NOT NULL,idempotency_key TEXT NOT NULL,payload_digest TEXT NOT NULL,result_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(operation,idempotency_key));
         CREATE INDEX timeline_task_sequence ON timeline(task_id,sequence);
         CREATE INDEX timeline_delegation_sequence ON timeline(delegation_id,sequence);
@@ -1696,6 +1751,8 @@ class V12Store:
         CREATE INDEX approval_handles_task_report ON approval_handles(task_id,report_id,created_sequence);
         CREATE INDEX timeline_decision_sequence ON timeline(decision_id,sequence);
         CREATE INDEX projection_jobs_pending ON projection_jobs(status,lease_expires_at,job_id);
+        CREATE UNIQUE INDEX outcome_owned_current ON delegation_outcome_assignments(item_id) WHERE assignment_role='owned';
+        CREATE INDEX outcome_items_task_current ON effective_contract_items(task_id,retired_revision,category,ordinal);
         """
         for statement in statements.split(";"):
             if statement.strip():
@@ -1782,8 +1839,13 @@ class V12Store:
     def _mutation(self, operation: str, payload: Mapping[str, Any], key: Any, call: Callable[[sqlite3.Connection], dict[str, Any]]) -> tuple[dict[str, Any], bool]:
         normalized = _strict_json(dict(payload), label="mutation payload")
         digest = hashlib.sha256(_canonical_json(normalized, label="mutation payload").encode("utf-8")).hexdigest()
-        client_key = None if key is None else _required_text(key, label="idempotency_key", maximum=IDEMPOTENCY_KEY_MAX_LENGTH)
-        retry_handle = client_key or f"retry-{uuid.uuid4().hex}"
+        # A first mutation may omit retry material. Mint an opaque server key
+        # before the write and return it verbatim, so a caller can make an
+        # exact retry without turning its own content into authority.
+        client_key = uuid.uuid4().hex if key is None else _required_text(
+            key, label="idempotency_key", maximum=IDEMPOTENCY_KEY_MAX_LENGTH
+        )
+        retry_handle = client_key
         idempotency = hashlib.sha256(_canonical_json({"operation": operation, "retry_handle": retry_handle}, label="idempotency operation key").encode("utf-8")).hexdigest()
         def transact(connection: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
             previous = connection.execute("SELECT payload_digest,result_json FROM idempotency WHERE operation=? AND idempotency_key=?", (operation, idempotency)).fetchone()
@@ -1804,9 +1866,7 @@ class V12Store:
             if isinstance(projection_task, str):
                 sequence = connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM timeline WHERE task_id=?", (projection_task,)).fetchone()[0]
                 connection.execute("INSERT INTO projection_jobs(project_hash,task_id,source_sequence,reason,status,created_at,updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(task_id,source_sequence,reason) DO UPDATE SET status='pending',last_error_code=NULL,updated_at=excluded.updated_at", (self.project_hash, projection_task, int(sequence), operation, _now(), _now()))
-            value = dict(value) | {"retry_handle": retry_handle}
-            if client_key is not None:
-                value["idempotency_key"] = client_key
+            value = dict(value) | {"retry_handle": retry_handle, "idempotency_key": client_key}
             connection.execute("INSERT INTO idempotency(operation,idempotency_key,payload_digest,result_json,created_at) VALUES (?, ?, ?, ?, ?)", (operation, idempotency, digest, _canonical_json(value, label="mutation result"), _now()))
             return value, False
         result, replayed = self._write(transact)
@@ -1942,12 +2002,33 @@ class V12Store:
         if compact_ref is None:
             raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
         found["task_ref"] = compact_ref
-        closure = self._task_closure(connection, identifier)
-        found["closure_state"] = "task_closed" if closure is not None else "open"
-        found["task_closure_ref"] = None if closure is None else self._closure_ref(str(closure["closure_id"]))
-        found["task_closure_verdict"] = None if closure is None else str(closure["verdict"])
-        found["task_closure_sequence"] = None if closure is None else int(closure["created_sequence"])
         return found
+
+    def _execution_evidence(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+        """Derive neutral execution evidence from canonical finalized reports."""
+        finalized = int(connection.execute(
+            "SELECT COUNT(*) FROM reports WHERE project_hash=? AND task_id=? AND assembly_state='finalized'",
+            (self.project_hash, task_id),
+        ).fetchone()[0])
+        completed = int(connection.execute(
+            "SELECT COUNT(*) FROM reports WHERE project_hash=? AND task_id=? AND assembly_state='finalized' AND report_type='result' AND semantic_status='semantic_valid' AND status='completed'",
+            (self.project_hash, task_id),
+        ).fetchone()[0])
+        latest_result = connection.execute(
+            "SELECT status FROM reports WHERE project_hash=? AND task_id=? AND assembly_state='finalized' AND report_type='result' AND semantic_status='semantic_valid' ORDER BY finalized_sequence DESC, report_id DESC LIMIT 1",
+            (self.project_hash, task_id),
+        ).fetchone()
+        return {
+            "evidence_status": "finalized_reports_present" if finalized else "no_finalized_reports",
+            "finalized_report_count": finalized,
+            "completed_report_count": completed,
+            "outcome": None if latest_result is None else ("completed" if str(latest_result[0]) == "completed" else "incomplete"),
+        }
+
+    def _advisory_closure(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+        """Return task-relevant advisory bookkeeping separately from outcome."""
+        closure = self._task_closure(connection, task_id)
+        return {"record_status": "not_recorded" if closure is None else "recorded", "latest_record": None if closure is None else self._closure(connection, str(closure["closure_id"]))}
 
     @staticmethod
     def _closure_ref(closure_id: str) -> str:
@@ -2046,7 +2127,7 @@ class V12Store:
         notes = found.pop("completion_notes_json")
         found["completion_notes"] = None if notes is None else _load_json(str(notes), label="closure notes")
         found["closure_ref"] = self._closure_ref(str(found["closure_id"]))
-        found["closure_state"] = "task_closed" if found["subject_type"] == "task" else "initiative_closed"
+        found["record_status"] = "recorded"
         return found
 
     @staticmethod
@@ -2059,6 +2140,107 @@ class V12Store:
     @staticmethod
     def _compact_delegation(delegation: Mapping[str, Any]) -> dict[str, Any]:
         return {key: delegation[key] for key in ("delegation_id", "project_hash", "task_id", "parent_delegation_id", "native_task_name", "objective", "role", "profile_name", "scope", "model", "reasoning_effort", "created_at", "created_sequence")}
+
+    @staticmethod
+    def _outcome_ref(item_id: str) -> str:
+        if not re.fullmatch(r"outcome-[0-9a-f]{32}", item_id):
+            raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
+        return "o_" + item_id[-12:]
+
+    def _effective_contract(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+        revision_row = connection.execute("SELECT revision FROM effective_contract_revisions WHERE task_id=? ORDER BY revision DESC LIMIT 1", (task_id,)).fetchone()
+        revision = 0 if revision_row is None else int(revision_row[0])
+        rows = connection.execute("SELECT * FROM effective_contract_items WHERE task_id=? AND (retired_revision IS NULL OR retired_revision>?) ORDER BY category,ordinal,item_id", (task_id, revision)).fetchall()
+        items = [{"item_ref": self._outcome_ref(str(row["item_id"])), "category": str(row["category"]), "ordinal": int(row["ordinal"]), "text": str(row["text"]), "created_revision": int(row["created_revision"])} for row in rows]
+        return {"revision": revision, "items": items}
+
+    def _aggregate_coverage(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+        contract = self._effective_contract(connection, task_id)
+        rows = []
+        for item in contract["items"]:
+            suffix = str(item["item_ref"])[2:]
+            item_id = str(connection.execute("SELECT item_id FROM effective_contract_items WHERE task_id=? AND item_id LIKE ?", (task_id, "%" + suffix)).fetchone()[0])
+            owner = connection.execute("SELECT delegation_id FROM delegation_outcome_assignments WHERE item_id=? AND assignment_role='owned'", (item_id,)).fetchone()
+            claims = connection.execute(
+                "SELECT c.status AS claim_status,c.verification_json,r.report_id,r.status AS report_status "
+                "FROM report_contract_coverage c JOIN reports r ON r.report_id=c.report_id "
+                "WHERE c.item_id=? AND r.assembly_state='finalized' "
+                "ORDER BY r.finalized_sequence,r.report_id",
+                (item_id,),
+            ).fetchall()
+            statuses = {str(row["claim_status"]) for row in claims}
+            if owner is None:
+                status, reason = "missing", "no_owned_delegation"
+            elif not claims:
+                status, reason = "missing", "no_finalized_coverage"
+            elif len(statuses) > 1:
+                status, reason = "contradictory", "conflicting_claims"
+            elif "not_applicable" in statuses:
+                status, reason = "stale", "not_applicable_claim"
+            elif any(str(row["report_status"]) != "completed" for row in claims):
+                status, reason = "partial", "non_completed_report"
+            elif "partial" in statuses:
+                status, reason = "partial", "partial_claim"
+            elif "unverified" in statuses or any(not _load_json(str(row["verification_json"]), label="coverage verification") for row in claims):
+                status, reason = "unverified", "unverified_claim"
+            else:
+                status, reason = "complete", "current_verified_claim"
+            rows.append({"item_ref": item["item_ref"], "status": status, "reason": reason, "report_refs": [record_ref(str(row["report_id"])) for row in claims]})
+        statuses = {str(row["status"]) for row in rows}
+        if rows and statuses == {"complete"}:
+            overall = "ready"
+        elif rows and statuses <= {"complete", "unverified"}:
+            overall = "ready_with_risks"
+        else:
+            overall = "rework"
+        return {"status": overall, "items": rows}
+
+    def _conformance_review(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+        """Build advisory closure evidence from immutable current-ledger records.
+
+        This is deliberately a projection, not a backend gate: callers see why
+        current evidence is ready, risky, or requires rework without changing
+        report/delegation lifecycle or mutating historic v1 evidence.
+        """
+        contract = self._effective_contract(connection, task_id)
+        coverage = self._aggregate_coverage(connection, task_id)
+        decisions = [record_ref(str(row[0])) for row in connection.execute(
+            "SELECT decision_id FROM user_decisions WHERE task_id=? ORDER BY created_sequence,decision_id", (task_id,)
+        ).fetchall()]
+        reports = [
+            {"report_ref": record_ref(str(row["report_id"])), "content_digest": str(row["content_digest"])}
+            for row in connection.execute(
+                "SELECT report_id,content_digest FROM reports WHERE task_id=? AND assembly_state='finalized' "
+                "ORDER BY finalized_sequence,report_id", (task_id,)
+            ).fetchall()
+        ]
+        consumed_digests = [str(row[0]) for row in connection.execute(
+            "SELECT DISTINCT observed_content_digest FROM report_consumption_receipts "
+            "WHERE task_id=? AND reader_kind='coordinator' AND has_more=0 ORDER BY observed_content_digest", (task_id,)
+        ).fetchall()]
+        status = {"ready": "ready", "ready_with_risks": "ready_with_risks"}.get(coverage["status"], "not_ready")
+        return {
+            "effective_revision": contract["revision"],
+            "status": status,
+            "recommendation": "ready" if status == "ready" else "ready_with_risks" if status == "ready_with_risks" else "rework",
+            "decision_refs": decisions,
+            "aggregate_coverage": coverage,
+            "report_manifests": reports,
+            "consumed_report_digests": consumed_digests,
+        }
+
+    def _outcome_item_id(self, connection: sqlite3.Connection, task_id: str, value: Any) -> str:
+        if not isinstance(value, str) or re.fullmatch(r"o_[0-9a-f]{12}", value) is None:
+            raise V12StoreError("outcome item reference is invalid", code="invalid_argument", details={"field": "outcome_item_refs"})
+        rows = connection.execute("SELECT item_id FROM effective_contract_items WHERE task_id=? AND item_id LIKE ?", (task_id, "%" + value[2:])).fetchall()
+        if len(rows) != 1:
+            raise V12StoreError("outcome item was not found", code="outcome_item_not_found")
+        item_id = str(rows[0][0])
+        current = self._effective_contract(connection, task_id)["revision"]
+        row = connection.execute("SELECT retired_revision FROM effective_contract_items WHERE item_id=?", (item_id,)).fetchone()
+        if row is None or (row[0] is not None and int(row[0]) <= current):
+            raise V12StoreError("outcome item is stale", code="outcome_item_stale")
+        return item_id
 
     @staticmethod
     def _next_native_task_name(connection: sqlite3.Connection, *, task_id: str, profile_name: str) -> str:
@@ -2087,7 +2269,6 @@ class V12Store:
     @staticmethod
     def _compact_decision(decision: Mapping[str, Any]) -> dict[str, Any]:
         value = {key: decision.get(key) for key in ("decision_id", "task_id", "subject_type", "subject_id", "subject_digest", "decision_type", "user_language", "attribution", "supersedes_decision_id", "created_at", "created_sequence")}
-        value["response_en_excerpt"] = str(decision.get("response_en") or "")[:512]
         return value
 
     def create_task(self, *, objective: Any, user_request_original: Any, user_language: Any, requirements: Any, constraints: Any, acceptance_criteria: Any, verification_plan: Any, context: Any = None, task_id: Any = None, idempotency_key: Any = None, task_contract_version: Any = TASK_CONTRACT_VERSION) -> tuple[dict[str, Any], bool]:
@@ -2116,15 +2297,30 @@ class V12Store:
                 "INSERT INTO tasks(task_id,project_hash,project_root,objective,user_request_original,user_language,task_contract_version,requirements_json,constraints_json,acceptance_criteria_json,verification_plan_json,context_json,created_at,updated_at,created_sequence,updated_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (identifier, self.project_hash, str(self.project_root), payload["objective"], payload["user_request_original"], payload["user_language"], payload["task_contract_version"], _canonical_json(payload["requirements"], label="requirements"), _canonical_json(payload["constraints"], label="constraints"), _canonical_json(payload["acceptance_criteria"], label="acceptance_criteria"), _canonical_json(payload["verification_plan"], label="verification_plan"), _canonical_json(payload["context"], label="context"), timestamp, timestamp, sequence, sequence),
             )
+            connection.execute("INSERT INTO effective_contract_revisions(task_id,revision,decision_id,created_sequence) VALUES (?, 1, NULL, ?)", (identifier, sequence))
+            for category, values in (("requirement", payload["requirements"]), ("constraint", payload["constraints"]), ("acceptance", payload["acceptance_criteria"]), ("verification", payload["verification_plan"])):
+                for ordinal, text in enumerate(values):
+                    connection.execute("INSERT INTO effective_contract_items(item_id,project_hash,task_id,category,ordinal,text,created_revision,retired_revision) VALUES (?, ?, ?, ?, ?, ?, 1, NULL)", ("outcome-" + uuid.uuid4().hex, self.project_hash, identifier, category, ordinal, text))
             return {"task": self._task(connection, identifier)}
         return self._mutation("create_task", payload, idempotency_key, write)
 
-    def create_delegation(self, *, task_id: Any, objective: Any, role: Any, profile_name: Any, scope: Any, instructions: Any, delegation_id: Any = None, parent_delegation_id: Any = None, input_report_ids: Any = None, input_decision_ids: Any = None, model: Any = None, reasoning_effort: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
+    def create_delegation(self, *, task_id: Any, objective: Any, role: Any, profile_name: Any, scope: Any, instructions: Any, delegation_id: Any = None, parent_delegation_id: Any = None, input_report_ids: Any = None, input_decision_ids: Any = None, outcome_assignments: Any = None, model: Any = None, reasoning_effort: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
         try:
             selection = validate_model_selection(model, reasoning_effort)
         except ValueError as exc:
             raise V12StoreError("model selection is invalid", code="invalid_model_selection") from exc
-        payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "model": selection.model, "reasoning_effort": selection.reasoning_effort}
+        if outcome_assignments is None:
+            assignments: dict[str, list[str]] = {"owned": [], "contributing": [], "evidence_producing": []}
+        elif isinstance(outcome_assignments, Mapping) and set(outcome_assignments).issubset({"owned", "contributing", "evidence_producing"}):
+            assignments = {}
+            for kind in ("owned", "contributing", "evidence_producing"):
+                values = outcome_assignments.get(kind, [])
+                if not isinstance(values, list) or len(values) > TASK_CONTRACT_MAX_ITEMS or len(set(values)) != len(values) or any(not isinstance(item, str) for item in values):
+                    raise V12StoreError("outcome assignments are invalid", code="invalid_argument", details={"field": "outcome_assignments"})
+                assignments[kind] = list(values)
+        else:
+            raise V12StoreError("outcome assignments are invalid", code="invalid_argument", details={"field": "outcome_assignments"})
+        payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "outcome_assignments": assignments, "model": selection.model, "reasoning_effort": selection.reasoning_effort}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
             if payload["parent_delegation_id"] is not None:
@@ -2135,6 +2331,7 @@ class V12Store:
                     raise V12StoreError("input handoff report is not finalized", code="report_state_conflict")
             for decision_id in payload["input_decision_ids"]:
                 self._decision(connection, decision_id, task_id=task["task_id"])
+            assignment_ids = {kind: [self._outcome_item_id(connection, str(task["task_id"]), item) for item in values] for kind, values in payload["outcome_assignments"].items()}
             identifier = str(payload["delegation_id"] or new_sharded_id("delegation", self.project_hash))
             if connection.execute("SELECT 1 FROM delegations WHERE delegation_id=?", (identifier,)).fetchone() is not None:
                 raise V12StoreError("delegation_id already exists", code="delegation_exists")
@@ -2145,6 +2342,14 @@ class V12Store:
             )
             sequence = self._timeline(connection, event_type="delegation_created", entity_type="delegation", entity_id=identifier, payload={"delegation_id": identifier, "task_id": task["task_id"], "native_task_name": native_name}, task_id=task["task_id"], delegation_id=identifier)
             connection.execute("INSERT INTO delegations(delegation_id,project_hash,task_id,parent_delegation_id,native_task_name,objective,role,profile_name,scope,instructions,input_report_ids_json,input_decision_ids_json,model,reasoning_effort,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, task["task_id"], payload["parent_delegation_id"], native_name, payload["objective"], payload["role"], payload["profile_name"], payload["scope"], payload["instructions"], _canonical_json(payload["input_report_ids"], label="input_report_ids"), _canonical_json(payload["input_decision_ids"], label="input_decision_ids"), payload["model"], payload["reasoning_effort"], _now(), sequence))
+            revision = self._effective_contract(connection, str(task["task_id"]))["revision"]
+            for kind, items in assignment_ids.items():
+                role_name = "evidence" if kind == "evidence_producing" else kind
+                for item_id in items:
+                    try:
+                        connection.execute("INSERT INTO delegation_outcome_assignments(delegation_id,item_id,assignment_role,revision) VALUES (?, ?, ?, ?)", (identifier, item_id, role_name, revision))
+                    except sqlite3.IntegrityError as exc:
+                        raise V12StoreError("outcome item already has an owner", code="outcome_assignment_conflict") from exc
             delegation = self._delegation(connection, identifier, task_id=task["task_id"])
             # Creation must be immediately dispatchable, but must not echo the
             # full recovery brief as well as its native message.  Retain that
@@ -2206,7 +2411,7 @@ class V12Store:
             "input_report_refs": report_refs,
             "input_decision_ids": list(delegation["input_decision_ids"]),
             "input_decisions": [
-                {key: item[key] for key in ("decision_id", "subject_type", "subject_id", "subject_digest", "decision_type", "response_en", "user_language")}
+                {key: item[key] for key in ("decision_id", "subject_type", "subject_id", "subject_digest", "decision_type", "user_language")}
                 for item in decisions
             ],
             "model": delegation["model"], "reasoning_effort": delegation["reasoning_effort"],
@@ -2291,8 +2496,8 @@ class V12Store:
         if mode_value == "append":
             if not isinstance(chunk_index, int) or isinstance(chunk_index, bool) or chunk_index < 0:
                 raise V12StoreError("chunk_index is invalid", code="invalid_report_operation")
-            if not isinstance(section, str) or not section or len(section) > REPORT_SECTION_MAX_LENGTH:
-                raise V12StoreError("section is invalid", code="invalid_report_operation")
+            if not isinstance(section, str) or REPORT_SECTION_RE.fullmatch(section) is None:
+                raise V12StoreError("section is invalid", code="invalid_report_operation", details={"field": "section"})
         if mode_value == "finalize":
             if not isinstance(expected_chunk_count, int) or isinstance(expected_chunk_count, bool) or not 1 <= expected_chunk_count <= REPORT_MAX_CHUNKS:
                 raise V12StoreError("expected_chunk_count is invalid", code="invalid_report_operation")
@@ -2360,6 +2565,25 @@ class V12Store:
                 arguments = (*arguments[:5], None, semantic_status, *arguments[6:])
                 connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", arguments)
 
+        def record_coverage(connection: sqlite3.Connection, task: Mapping[str, Any], owner: Mapping[str, Any], report_value: str, semantic: str, canonical_content: object) -> None:
+            if semantic != "semantic_valid" or not isinstance(canonical_content, Mapping):
+                return
+            claims = canonical_content.get("contract_coverage")
+            if not isinstance(claims, list):
+                return
+            revision = self._effective_contract(connection, str(task["task_id"]))["revision"]
+            for claim in claims:
+                assert isinstance(claim, Mapping)
+                item_id = self._outcome_item_id(connection, str(task["task_id"]), claim.get("item_ref"))
+                allowed = connection.execute("SELECT 1 FROM delegation_outcome_assignments WHERE delegation_id=? AND item_id=? AND revision=?", (owner["delegation_id"], item_id, revision)).fetchone()
+                if allowed is None:
+                    raise V12StoreError("report coverage item is not assigned to this delegation", code="outcome_coverage_unassigned")
+                status = claim.get("status")
+                if status not in {"complete", "partial", "unverified", "not_applicable"}:
+                    raise V12StoreError("report coverage status is invalid", code="invalid_report")
+                verification = claim.get("verification", [])
+                connection.execute("INSERT INTO report_contract_coverage(report_id,item_id,status,verification_json) VALUES (?, ?, ?, ?)", (report_value, item_id, status, _canonical_json(verification, label="coverage verification")))
+
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
             owner = self._delegation(connection, delegation, task_id=task["task_id"])
@@ -2385,6 +2609,7 @@ class V12Store:
                 digest = self._report_digest(connection, value)
                 semantic = canonical_report_semantic_status(str(type_value), chunk[0])
                 connection.execute("UPDATE reports SET next_chunk_index=1,total_chunks=1,total_bytes=?,content_digest=?,assembly_state='finalized',status=?,semantic_status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (chunk[2], digest, status_value, semantic, _now(), sequence, value))
+                record_coverage(connection, task, owner, value, semantic, chunk[0])
                 state["total_retained_bytes"] += chunk[2]
                 update_usage(connection, str(task["task_id"]), state)
                 return {"report": self._compact_report(self._report(connection, value, task_id=task["task_id"]))}
@@ -2447,6 +2672,7 @@ class V12Store:
                     canonical_content = merged or None
                 semantic = canonical_report_semantic_status(str(report["report_type"]), canonical_content)
                 connection.execute("UPDATE reports SET assembly_state='finalized',status=?,semantic_status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (status_value, semantic, _now(), sequence, identifier))
+                record_coverage(connection, task, owner, identifier, semantic, canonical_content)
                 state["assembling_bytes"] -= int(report["total_bytes"])
                 state["assembling_reports"] -= 1
                 update_usage(connection, str(task["task_id"]), state)
@@ -2464,7 +2690,7 @@ class V12Store:
             return {"report": self._compact_report(self._report(connection, identifier, task_id=task["task_id"]))}
         return self._mutation("submit_report", payload, idempotency_key, write)
 
-    def record_user_decision(self, *, task_id: Any, subject_type: Any, subject_id: Any, subject_digest: Any = None, decision_type: Any = None, prompt_en: Any = None, response_original: Any = None, response_en: Any = None, user_language: Any = None, approval_handle: Any = None, approval_view_content_digest: Any = None, approval_view_source_sequence: Any = None, supersedes_decision_id: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
+    def record_user_decision(self, *, task_id: Any, subject_type: Any, subject_id: Any, subject_digest: Any = None, decision_type: Any = None, prompt: Any = None, response_original: Any = None, user_language: Any = None, approval_handle: Any = None, approval_view_content_digest: Any = None, approval_view_source_sequence: Any = None, supersedes_decision_id: Any = None, steering_delta: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
         """Append a user-origin decision with exact immutable subject binding.
 
         Attribution is intentionally an honest coordinator assertion, never an
@@ -2482,14 +2708,14 @@ class V12Store:
             "task_id": anchor, "subject_type": kind, "subject_id": subject,
             "subject_digest": _digest(subject_digest, required=kind in {"plan", "report"}),
             "decision_type": decision,
-            "prompt_en": _optional_text(prompt_en, label="prompt_en") or "",
+            "prompt": _optional_text(prompt, label="prompt") or "",
             "response_original": _optional_text(response_original, label="response_original") or "",
-            "response_en": _optional_text(response_en, label="response_en") or "",
             "user_language": _language(user_language),
             "approval_handle": None if approval_handle is None else _required_text(approval_handle, label="approval_handle", maximum=160),
             "approval_view_content_digest": _digest(approval_view_content_digest, label="approval_view_content_digest"),
             "approval_view_source_sequence": approval_view_source_sequence,
             "supersedes_decision_id": None if supersedes_decision_id is None else self._record_identifier(supersedes_decision_id, label="supersedes_decision_id"),
+            "steering_delta": steering_delta,
         }
         requires_plan_approval_view = kind == "plan" and decision == "approve"
         if requires_plan_approval_view and payload["approval_handle"] is not None and IDENTIFIER_RE.fullmatch(payload["approval_handle"]) is None:
@@ -2567,7 +2793,28 @@ class V12Store:
                     raise V12StoreError("superseded decision has a different subject", code="cross_project_reference")
             identifier = new_sharded_id("decision", self.project_hash)
             sequence = self._timeline(connection, event_type="user_decision_recorded", entity_type="user_decision", entity_id=identifier, payload={"decision_id": identifier, "subject_type": kind, "subject_id": subject, "subject_digest": bound_digest, "decision_type": decision}, task_id=anchor, decision_id=identifier)
-            connection.execute("INSERT INTO user_decisions(decision_id,project_hash,task_id,subject_type,subject_id,subject_digest,decision_type,prompt_en,response_original,response_en,user_language,attribution,supersedes_decision_id,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, anchor, kind, subject, bound_digest, decision, payload["prompt_en"], payload["response_original"], payload["response_en"], payload["user_language"], DECISION_ATTRIBUTION, payload["supersedes_decision_id"], _now(), sequence))
+            # Retain the historical columns for opening immutable pre-rework
+            # rows. New writes map the neutral prompt into the old storage
+            # slot and leave the retired English normalization empty; neither
+            # field is part of the public contract or compact projections.
+            connection.execute("INSERT INTO user_decisions(decision_id,project_hash,task_id,subject_type,subject_id,subject_digest,decision_type,prompt_en,response_original,response_en,user_language,attribution,supersedes_decision_id,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, anchor, kind, subject, bound_digest, decision, payload["prompt"], payload["response_original"], "", payload["user_language"], DECISION_ATTRIBUTION, payload["supersedes_decision_id"], _now(), sequence))
+            if decision == "steer":
+                delta = {} if payload["steering_delta"] is None else payload["steering_delta"]
+                if not isinstance(delta, Mapping) or not set(delta).issubset({"retire_item_refs", "add"}):
+                    raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+                retired = delta.get("retire_item_refs", [])
+                additions = delta.get("add", [])
+                if not isinstance(retired, list) or not isinstance(additions, list) or any(not isinstance(value, str) for value in retired):
+                    raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+                revision = self._effective_contract(connection, anchor)["revision"] + 1
+                item_ids = [self._outcome_item_id(connection, anchor, value) for value in retired]
+                for item_id in item_ids:
+                    connection.execute("UPDATE effective_contract_items SET retired_revision=? WHERE item_id=? AND retired_revision IS NULL", (revision, item_id))
+                for ordinal, addition in enumerate(additions):
+                    if not isinstance(addition, Mapping) or addition.get("category") not in {"requirement", "constraint", "acceptance", "verification"} or not isinstance(addition.get("text"), str) or not addition["text"].strip():
+                        raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+                    connection.execute("INSERT INTO effective_contract_items(item_id,project_hash,task_id,category,ordinal,text,created_revision,retired_revision) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)", ("outcome-" + uuid.uuid4().hex, self.project_hash, anchor, addition["category"], ordinal, addition["text"], revision))
+                connection.execute("INSERT INTO effective_contract_revisions(task_id,revision,decision_id,created_sequence) VALUES (?, ?, ?, ?)", (anchor, revision, identifier, sequence))
             if approval_handle is not None:
                 cursor = connection.execute("UPDATE approval_handles SET consumed_decision_id=? WHERE approval_handle=? AND consumed_decision_id IS NULL", (identifier, payload["approval_handle"]))
                 if cursor.rowcount != 1:
@@ -2798,7 +3045,8 @@ class V12Store:
                         "closure": self._closure(connection, str(existing["closure_id"])),
                         "initiative": None,
                         "warnings": [],
-                        "next_action": {"state": "task_closed", "task_ref": task_ref(anchor)},
+                        "next_action": {"advisory_status": "recorded", "task_ref": task_ref(anchor)},
+                        "execution_outcome": self._execution_evidence(connection, anchor),
                     }
             initiative: dict[str, Any] | None = None
             closure_task, closure_initiative = (anchor, None) if kind == "task" else (None, subject)
@@ -2825,9 +3073,9 @@ class V12Store:
             next_action = (
                 {"tool": "submit_governance_closure", "suggested_subject": {"task_ref": task_ref(anchor), "subject_type": "task", "subject_ref": task_ref(anchor)}}
                 if kind == "initiative"
-                else {"state": "task_closed", "task_ref": task_ref(anchor)}
+                else {"advisory_status": "recorded", "task_ref": task_ref(anchor)}
             )
-            return {"closure": self._closure(connection, closure_id), "initiative": initiative, "warnings": self._warning_values(links), "next_action": next_action}
+            return {"closure": self._closure(connection, closure_id), "initiative": initiative, "warnings": self._warning_values(links), "next_action": next_action, "execution_outcome": self._execution_evidence(connection, anchor)}
         return self._mutation("submit_governance_closure", payload, idempotency_key, write)
 
     def _initiative_links(self, connection: sqlite3.Connection, initiatives: Sequence[str] | None = None) -> list[dict[str, Any]]:
@@ -2966,7 +3214,7 @@ class V12Store:
             reports = [self._compact_report(self._report(connection, item, task_id=anchor)) for item in self._ids(timeline, "report_id")]
             decisions = [self._compact_decision(self._decision(connection, item, task_id=anchor)) for item in self._ids(timeline, "decision_id")]
             receipts = self._consumption_receipts(connection, task_id=anchor, sequences=[int(item["sequence"]) for item in timeline])
-            return {"task": task, "delegations": delegations, "continuations": continuations, "reports": reports, "decisions": decisions, "consumption_receipts": receipts, "timeline": timeline, "next_sequence": next_sequence, "has_more": has_more}
+            return {"task": task, "effective_contract": self._effective_contract(connection, anchor), "aggregate_coverage": self._aggregate_coverage(connection, anchor), "conformance_review": self._conformance_review(connection, anchor), "execution_outcome": self._execution_evidence(connection, anchor), "advisory_closure": self._advisory_closure(connection, anchor), "delegations": delegations, "continuations": continuations, "reports": reports, "decisions": decisions, "consumption_receipts": receipts, "timeline": timeline, "next_sequence": next_sequence, "has_more": has_more}
         return self._read(read)
 
     def read_delegation(self, *, delegation_id: Any, after_sequence: Any, limit: Any = DEFAULT_PAGE_LIMIT, task_id: Any = None) -> dict[str, Any]:
@@ -2997,7 +3245,7 @@ class V12Store:
         else:
             if not isinstance(sections, list) or not 1 <= len(sections) <= 32 or len(set(sections)) != len(sections):
                 raise V12StoreError("sections are invalid", code="invalid_argument", details={"field": "sections"})
-            if any(not isinstance(item, str) or not item or len(item) > REPORT_SECTION_MAX_LENGTH for item in sections):
+            if any(not isinstance(item, str) or REPORT_SECTION_RE.fullmatch(item) is None for item in sections):
                 raise V12StoreError("sections are invalid", code="invalid_argument", details={"field": "sections"})
             selected_sections = list(sections)
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 0 <= max_bytes <= REPORT_READ_MAX_BYTES:
@@ -3084,6 +3332,36 @@ class V12Store:
                     chunks = compact["chunks"]
                     indexes = [int(chunk["chunk_index"]) for chunk in chunks]
                     bytes_value = sum(int(chunk["content_bytes"]) for chunk in chunks)
+                    # Immutable evidence can be reused safely only after a
+                    # complete read of the same manifest and section set.
+                    # Incomplete/cursor reads deliberately never match this
+                    # lookup, so a caller must finish them before relying on
+                    # the receipt for a material decision.
+                    if kind == "coordinator" and not more and cursor is None:
+                        prior = connection.execute(
+                            "SELECT receipt_id,chunk_indexes_json,returned_content_bytes,created_sequence "
+                            "FROM report_consumption_receipts WHERE project_hash=? AND task_id=? "
+                            "AND consumer_delegation_id IS NULL AND reader_kind='coordinator' "
+                            "AND report_id=? AND observed_content_digest=? AND sections_json=? "
+                            "AND input_cursor IS NULL AND output_cursor IS NULL AND has_more=0 "
+                            "ORDER BY created_sequence DESC,receipt_id DESC LIMIT 1",
+                            (
+                                self.project_hash, anchor, report["report_id"], report["content_digest"],
+                                _canonical_json(selected_sections, label="report read sections"),
+                            ),
+                        ).fetchone()
+                        if prior is not None:
+                            receipts.append({
+                                "receipt_id": int(prior["receipt_id"]), "report_id": report["report_id"],
+                                "consumer_delegation_id": None, "reader_kind": "coordinator",
+                                "observed_content_digest": report["content_digest"],
+                                "chunk_indexes": _load_json(str(prior["chunk_indexes_json"]), label="report receipt chunks"),
+                                "input_cursor": None, "output_cursor": None,
+                                "returned_content_bytes": int(prior["returned_content_bytes"]),
+                                "has_more": False, "created_sequence": int(prior["created_sequence"]),
+                                "reused": True,
+                            })
+                            continue
                     sequence = self._timeline(
                         connection,
                         event_type="report_read",
@@ -3110,7 +3388,10 @@ class V12Store:
                     receipts.append({"receipt_id": int(cursor_value.lastrowid), "report_id": report["report_id"], "consumer_delegation_id": None if consuming is None else consuming["delegation_id"], "reader_kind": kind, "observed_content_digest": report["content_digest"], "chunk_indexes": indexes, "input_cursor": cursor, "output_cursor": next_cursor, "returned_content_bytes": bytes_value, "has_more": more, "created_sequence": sequence})
                 return {"reports": result_reports, "returned_content_bytes": returned_bytes, "next_cursor": next_cursor, "has_more": more, "consumption_receipts": receipts}
             if max_bytes == 0:
-                return receipt_result(0, None, False)
+                # Metadata-only inspection is deliberately not a complete
+                # authoritative body consumption and cannot satisfy or reuse
+                # a material-decision receipt.
+                return {"reports": result_reports, "returned_content_bytes": 0, "next_cursor": None, "has_more": False, "consumption_receipts": []}
             returned = 0
             position, current_index, more = start_report, start_chunk, False
             while position < len(report_rows):

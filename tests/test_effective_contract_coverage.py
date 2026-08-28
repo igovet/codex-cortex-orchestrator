@@ -1,0 +1,104 @@
+"""Focused regression tests for advisory outcome coverage and conformance."""
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
+if str(SCRIPTS) not in __import__("sys").path:
+    __import__("sys").path.insert(0, str(SCRIPTS))
+
+from cortex_runtime.v12_store import V12Store  # noqa: E402
+
+
+class EffectiveContractCoverageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="cortex-v12-coverage-")
+        root = Path(self.temporary.name)
+        self.home = root / "home"
+        self.project = root / "project"
+        self.home.mkdir()
+        self.project.mkdir()
+        self.environment = mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=False)
+        self.environment.start()
+        os.environ.pop("CORTEX_HOST_STATE_DIR", None)
+        os.environ.pop("CODEX_HOME", None)
+        self.store = V12Store(self.project)
+        self.task = self.store.create_task(
+            objective="Aggregate evidence.", user_request_original="Aggregate evidence.", user_language="en",
+            task_contract_version="cortex/task-contract/v1", requirements=["Cover the requirement."],
+            constraints=["Preserve compatibility."], acceptance_criteria=["Expose advisory conformance."],
+            verification_plan=["Run focused tests."], context={}, idempotency_key="coverage-task",
+        )[0]["task"]["task_id"]
+        self.items = [item["item_ref"] for item in self.store.inspect_task(task_id=self.task, after_sequence=0)["effective_contract"]["items"]]
+        self.item = self.items[0]
+        self.delegation = self.store.create_delegation(
+            task_id=self.task, objective="Own one item.", role="worker", profile_name="general",
+            scope="One effective item.", instructions="Submit v2 evidence.", model="gpt-5.6-luna",
+            reasoning_effort="high", outcome_assignments={"owned": self.items}, idempotency_key="coverage-delegation",
+        )[0]["delegation"]["delegation_id"]
+
+    def tearDown(self) -> None:
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def _submit(self, *, key: str, coverage_status: str, verification: list[str], report_status: str = "completed") -> None:
+        self.store.submit_report(
+            task_id=self.task, delegation_id=self.delegation, mode="single", report_type="result", status=report_status,
+            content={
+                "schema": "cortex/report/result/v2", "summary": "V2 evidence.", "outcome": "recorded",
+                "changes": [], "verification": ["Focused suite."], "risks": [], "deviations": [], "unresolved": [],
+                "contract_coverage": [{"item_ref": item, "status": coverage_status, "verification": verification} for item in self.items],
+            }, idempotency_key=key,
+        )
+
+    def test_unverified_and_contradictory_claims_drive_advisory_signals(self) -> None:
+        self._submit(key="unverified", coverage_status="complete", verification=[])
+        initial = self.store.inspect_task(task_id=self.task, after_sequence=0)
+        self.assertEqual(initial["aggregate_coverage"]["status"], "ready_with_risks")
+        self.assertEqual(initial["aggregate_coverage"]["items"][0]["status"], "unverified")
+        self.assertEqual(initial["conformance_review"]["status"], "ready_with_risks")
+        self.assertEqual(initial["conformance_review"]["effective_revision"], 1)
+
+        self._submit(key="partial", coverage_status="partial", verification=["Observed failure."])
+        contradictory = self.store.inspect_task(task_id=self.task, after_sequence=0)
+        self.assertEqual(contradictory["aggregate_coverage"]["items"][0]["status"], "contradictory")
+        self.assertEqual(contradictory["conformance_review"]["recommendation"], "rework")
+
+    def test_non_completed_and_not_applicable_reports_do_not_make_coverage_ready(self) -> None:
+        self._submit(key="partial-report", coverage_status="complete", verification=["Observed."], report_status="partial")
+        partial = self.store.inspect_task(task_id=self.task, after_sequence=0)
+        self.assertEqual(partial["aggregate_coverage"]["items"][0]["status"], "partial")
+
+        stale_task = self.store.create_task(
+            objective="Detect stale coverage.", user_request_original="Detect stale coverage.", user_language="en",
+            task_contract_version="cortex/task-contract/v1", requirements=["Require current coverage."],
+            constraints=["Preserve evidence."], acceptance_criteria=["Show stale evidence."],
+            verification_plan=["Inspect aggregate."], context={}, idempotency_key="stale-task",
+        )[0]["task"]["task_id"]
+        stale_item = self.store.inspect_task(task_id=stale_task, after_sequence=0)["effective_contract"]["items"][0]["item_ref"]
+        stale_delegation = self.store.create_delegation(
+            task_id=stale_task, objective="Own stale item.", role="worker", profile_name="general",
+            scope="One item.", instructions="Submit stale evidence.", model="gpt-5.6-luna", reasoning_effort="high",
+            outcome_assignments={"owned": [stale_item]}, idempotency_key="stale-delegation",
+        )[0]["delegation"]["delegation_id"]
+        self.store.submit_report(
+            task_id=stale_task, delegation_id=stale_delegation, mode="single", report_type="result", status="completed",
+            content={"schema": "cortex/report/result/v2", "summary": "Stale evidence.", "outcome": "not applicable", "changes": [], "verification": [], "risks": [], "deviations": [], "unresolved": [], "contract_coverage": [{"item_ref": stale_item, "status": "not_applicable", "verification": []}]},
+            idempotency_key="stale-report",
+        )
+        stale = self.store.inspect_task(task_id=stale_task, after_sequence=0)
+        self.assertEqual(stale["aggregate_coverage"]["items"][0]["status"], "stale")
+        self.assertEqual(stale["conformance_review"]["status"], "not_ready")
+
+        with self.assertRaises(Exception):
+            # A distinct current owner cannot be introduced for the same item.
+            self.store.create_delegation(
+                task_id=self.task, objective="Duplicate owner.", role="worker", profile_name="general",
+                scope="Invalid overlap.", instructions="Do not run.", model="gpt-5.6-luna", reasoning_effort="high",
+                outcome_assignments={"owned": [self.item]}, idempotency_key="duplicate-owner",
+            )

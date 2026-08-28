@@ -171,7 +171,7 @@ PROMPT_SCHEMA_PATTERNS = (
     ("MCP schema vocabulary", re.compile(r"\b(?:inputSchema|outputSchema|JSON\s+Schema)\b", re.I)),
 )
 
-PROMPT_SCHEMA_TARGETS = (ORCHESTRATOR, CONTROL, AGENTS / "planner.toml")
+PROMPT_SCHEMA_TARGETS = (ORCHESTRATOR, CONTROL, *sorted(AGENTS.glob("*.toml")))
 
 PROMPT_SCHEMA_FIXTURES = (
     ("embedded JSON request example", '```json\n{"project_root":"/tmp"}\n```'),
@@ -396,6 +396,32 @@ COORDINATOR_PROTOCOL_PATTERNS = (
             re.I,
         ),
     ),
+    (
+        "advisory closure turned into a user-confirmation hold",
+        re.compile(
+            r"\b(?:coordinator|model)\b(?:(?![.!?]).){0,180}"
+            r"\b(?:may|can|should|must|is\s+allowed\s+to|is\s+authorized\s+to)\s+"
+            r"(?!not\b|never\b)(?:ask|request|wait)\b(?:(?![.!?]).){0,120}"
+            r"\b(?:user|confirmation|approval)\b(?:(?![.!?]).){0,120}"
+            r"\b(?:advisory\s+closure|closure|ready_with_risks)\b",
+            re.I,
+        ),
+    ),
+    (
+        "missing advisory closure labels completed work open",
+        re.compile(
+            r"\b(?:coordinator|model)\b(?:(?![.!?]).){0,180}"
+            r"\b(?:may|can|should|must|is\s+allowed\s+to|is\s+authorized\s+to)\s+"
+            r"(?!not\b|never\b)(?:label|describe|treat|call)\b"
+            r"(?:(?![.!?]).){0,100}\b(?:work|outcome|task)\b"
+            r"(?:(?![.!?]).){0,80}\bopen\b(?:(?![.!?]).){0,120}"
+            r"\b(?:"
+            r"(?:missing|unavailable|unconfirmed|no)\b(?:(?![.!?]).){0,80}\b(?:advisory\s+)?closure\b"
+            r"|(?:advisory\s+)?closure\b(?:(?![.!?]).){0,80}\b(?:missing|unavailable|unconfirmed|no)\b"
+            r")",
+            re.I,
+        ),
+    ),
 )
 
 PROTOCOL_MUTATION_FIXTURES = (
@@ -455,6 +481,14 @@ PROTOCOL_MUTATION_FIXTURES = (
         "free-form role used as profile proof",
         "The coordinator may use a free-form role label as loaded profile proof.",
     ),
+    (
+        "advisory closure turned into a user-confirmation hold",
+        "The coordinator may ask the user to confirm ready_with_risks before returning the completed outcome.",
+    ),
+    (
+        "missing advisory closure labels completed work open",
+        "The coordinator may label the completed work open because a missing advisory closure has no confirmation.",
+    ),
 )
 
 PROTOCOL_SAFE_FIXTURES = (
@@ -472,6 +506,8 @@ PROTOCOL_SAFE_FIXTURES = (
     "A native worker must never localize commentary or final responses into the user's Russian language.",
     "The coordinator must never assert documentation_not_required without a worker-owned documentation-impact report.",
     "The coordinator must never use a free-form role label as loaded profile proof.",
+    "The coordinator must never ask the user to confirm ready_with_risks before returning the completed outcome.",
+    "The coordinator must never label completed work open because advisory closure confirmation is unavailable.",
 )
 
 
@@ -981,7 +1017,7 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
     require_concepts(
         section(orchestrator, "Delegation knowledge contract"),
         ORCHESTRATOR,
-        "one complete knowledge and trusted/untrusted worker-message contract",
+        "scoped trusted/untrusted worker-message contract",
         (
             ("coordinator alone compiles",),
             ("concise text string", "textual scope"),
@@ -994,17 +1030,19 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("advisory",),
             ("single authoritative",),
             ("trusted/untrusted",),
-            ("task contract",),
+            ("sanitized normalized context",),
+            ("original user request",),
+            ("unrelated task context",),
             ("cannot override trusted policy",),
             ("complete guidance",),
             ("loaded",),
             ("included", "consumed"),
             ("packaged advisory profile",),
             ("free-form job label", "free-form `role`"),
-            ("profile_state=unavailable",),
+            ("unavailable-profile",),
             ("complete explicit role contract",),
             ("final disclosure",),
-            ("native spawn",),
+            ("active host schema",),
         ),
         issues,
     )
@@ -1085,27 +1123,21 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         + section(orchestrator, "Per-delegation model selection")
         + section(control, "Worker-message boundary"),
         ORCHESTRATOR,
-        "one-to-one byte-exact native dispatch provenance",
+        "semantic delegation receipt and active-host dispatch boundary",
         (
-            ("exactly one native host spawn", "exactly one corresponding host spawn"),
+            ("one corresponding host spawn",),
             ("durable delegation",),
-            ("byte-for-byte",),
-            ("returned native-dispatch payload", "returns one native-dispatch payload"),
-            ("exact rendered message",),
+            ("semantic delegation receipt",),
+            ("active host schema",),
+            ("rendered message",),
             ("task and delegation anchors", "task/delegation anchors"),
-            ("input-report references",),
+            ("input evidence",),
             ("profile proof",),
-            ("logical model/effort", "selected exact model/effort"),
+            ("selected model/effort",),
             ("ad-hoc",),
             ("one native worker for multiple", "one worker for multiple"),
-            ("ambiguous outcome",),
-            ('`fork_turns="none"`',),
-            ("effort is explicit", "never omit the effort"),
-            ("Luna",),
-            ("omit",),
-            ("Terra and Sol",),
-            ("explicit",),
-            ("same worker's own finalized report", "exact worker's own report"),
+            ("ambiguous host result",),
+            ("does not assert",),
         ),
         issues,
     )
@@ -1190,41 +1222,51 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         issues,
     )
     require_concepts(
+        section(orchestrator, "Continuous orchestration and turn completion")
+        + section(orchestrator, "Closure confirmation and final answer")
+        + section(control, "Closure field and ordering contract")
+        + texts[PROGRESS]
+        + texts[OUTPUT_VALIDATION],
+        ORCHESTRATOR,
+        "automatic nonblocking advisory closure confirmation",
+        (
+            ("sufficient completed outcome evidence",),
+            ("`ready`",), ("`ready_with_risks`",), ("`not_ready`",),
+            ("automatically attempts", "automatically attempt"),
+            ("`submit_governance_closure`",),
+            ("supported scoped inspection", "supported inspection"),
+            ("never a user-facing blocker or question", "never becomes a user question"),
+            ("never requires user confirmation", "never asks the user to confirm"),
+            ("one bounded safe retry",),
+            ("unchanged idempotency semantics",),
+            ("`closure_unconfirmed`",),
+            ("user-facing open", "work as open", "work open"),
+        ),
+        issues,
+    )
+    require_concepts(
         section(orchestrator, "Final documentation assessment")
         + section(orchestrator, "Closure confirmation and final answer")
         + section(control, "Closure field and ordering contract")
         + texts[DOCUMENTATION],
         ORCHESTRATOR,
-        "worker-owned documentation rationale and distinct initiative/task closure sequence",
+        "worker-owned documentation rationale and advisory closure sequence",
         (
             ("worker-owned evidence", "worker-owned English rationale", "finalized worker-owned report"),
             ("evidence-synthesis/documentation-impact delegation",),
             ("worker-submitted", "worker to submit"),
             ("documentation-impact report ID",),
-            ("explicit English documentation-impact section",),
-            ("material/no-impact rationale",),
-            ("closure `evidence`",),
-            ("self-asserted", "self-assert"),
+            ("Documentation impact",),
+            ("status",),
+            ("rationale",),
+            ("affected surfaces",),
             ("documentation_not_required",),
-            ("every required worker report", "all required evidence settles"),
             ("initiative",),
             ("exact task",),
-            ("finalized report refs", "every finalized report"),
-            ("task relationship",),
-            ("report-only final initiative",),
-            ("initiative closure",),
-            ("task-scoped", "task scope"),
-            ("initiative-scoped", "initiative scope"),
-            ("inspect_governance", "inspect governance"),
-            ("returned `next_action`",),
-            ("task-subject closure",),
-            ("task closure succeeds",),
-            ("task_closed",),
-            ("initiative-only",),
-            ("no subject-digest", "never invent a closure digest", "not invent a closure digest"),
-            ("never claim that `ready`", "`ready` claim is durable only"),
-            ("closure write",),
-            ("inspection",),
+            ("finalized reports",),
+            ("optional advisory context", "optional `context`", "bounded knowledge-route context"),
+            ("never a completion gate",),
+            ("honest limitation",),
         ),
         issues,
     )
@@ -1308,11 +1350,10 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
     require_concepts(
         model_section,
         ORCHESTRATOR,
-        "exact native dispatch semantics",
+        "model-routing advice without a native field inventory",
         (("`low`",), ("`medium`",), ("`high`",), ("`xhigh`",), ("`max`",),
-         ("independently per delegation",), ("`reasoning_effort`",),
-         ('`fork_turns="none"`',), ("omit the native",), ("for Luna",),
-         ("Terra and Sol",), ("Never silently replace",)),
+         ("independently per delegation",), ("active host schema",),
+         ("host argument inventory",), ("profiles",), ("delegation receipt",)),
         issues,
     )
     return profiles

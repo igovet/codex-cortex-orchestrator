@@ -58,8 +58,13 @@ change the acceptance classification.
 Project verification precedes the conditional documentation stage. The
 coordinator uses bounded knowledge-route context and these worker reports only;
 it delegates any documentation inspection, synchronization, and material
-independent verification before advisory closure or the final answer. When the
-task has an initiative, validate the durable close handoff: initiative closure
-first, then a distinct task-subject closure anchored by the exact task_ref. Do
-not accept a final claim until task inspection reports task_closed and the task
-closure verdict.
+independent verification before the advisory closure attempt or final answer.
+Once sufficient completed outcome evidence is available, the coordinator
+chooses `ready`, `ready_with_risks`, or `not_ready` and automatically attempts
+supported closure plus its supported inspection. That evidence-based verdict is
+not a user confirmation step: `ready_with_risks` never asks for confirmation.
+An unavailable advisory record never prevents an honest final claim. For a
+verified transient closure storage or inspection failure, make one bounded safe
+retry with the exact returned retry handle and unchanged idempotency semantics;
+if it remains unavailable, preserve the outcome and disclose
+`closure_unconfirmed` rather than presenting completed work as open.

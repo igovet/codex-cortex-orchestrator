@@ -25,6 +25,8 @@ from cortex_runtime.report_presenters import merge_report_payloads, render_repor
 
 
 _MAX_RENDER_BYTES = 10 * 1024 * 1024
+_MAX_RENDER_FILES = 512
+_MAX_RENDER_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 def _digest_bytes(value: bytes) -> str:
@@ -370,6 +372,15 @@ def materialize_task(store: Any, task_id: str) -> dict[str, Any]:
     """Best-effort materialize one task; canonical rows are never rolled back."""
     try:
         files, source_sequence, task_ref_value = _render_files(store, task_id)
+        # Preflight the complete batch before resolving a target or writing a
+        # temporary file.  Per-file validation in _safe_write remains a
+        # defense in depth, but an admitted batch must never partially
+        # materialize merely because its aggregate output is unsafe.
+        if len(files) > _MAX_RENDER_FILES:
+            raise OSError("projection file count exceeds the aggregate limit")
+        total_bytes = sum(len(body) for body in files.values())
+        if total_bytes > _MAX_RENDER_TOTAL_BYTES or any(len(body) > _MAX_RENDER_BYTES for body in files.values()):
+            raise OSError("projection output exceeds the aggregate limit")
         task_directory = _migrate_legacy_task_directory(store, task_id, task_ref_value)
         ordered = sorted(files)
         outcomes: dict[str, str] = {}

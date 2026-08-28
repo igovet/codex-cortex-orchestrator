@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -34,6 +35,7 @@ class V12CompatibilityTests(unittest.TestCase):
         self.project.mkdir()
         self.home_patch = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         self.home_patch.start()
+        self._mutation_counter = 0
         os.environ.pop("CORTEX_HOST_STATE_DIR", None)
         os.environ.pop("CODEX_HOME", None)
 
@@ -52,6 +54,7 @@ class V12CompatibilityTests(unittest.TestCase):
             acceptance_criteria=["Only canonical public fields are accepted."],
             verification_plan=["Run focused tests."],
             context={},
+            idempotency_key=f"plan-task-{objective}",
         )[0]["task"]["task_id"]
         delegation = store.create_delegation(
             task_id=task,
@@ -62,16 +65,29 @@ class V12CompatibilityTests(unittest.TestCase):
             instructions="Return the bounded plan.",
             model="gpt-5.6-luna",
             reasoning_effort="high",
+            idempotency_key=f"plan-delegation-{objective}",
         )[0]["delegation"]["delegation_id"]
-        report = store.submit_report(
+        started = store.submit_report(
             task_id=task,
             delegation_id=delegation,
-            mode="single",
+            mode="begin",
             report_type="plan",
-            status="completed",
+            idempotency_key=f"plan-begin-{objective}",
+        )[0]
+        report_id = str(started["report"]["report_id"])
+        appended = store.submit_report(
+            task_id=task, delegation_id=delegation, mode="append", report_id=report_id,
+            chunk_index=0, section="body",
             content={"schema": "cortex/report/plan/v1", "summary": "Compatibility plan", "scope": [], "stages": [], "verification": []},
-        )[0]["report"]
-        return task, str(report["report_id"])
+            idempotency_key=f"plan-append-{objective}",
+        )[0]
+        store.submit_report(
+            task_id=task, delegation_id=delegation, mode="finalize", report_id=report_id,
+            status="completed", expected_chunk_count=appended["expected_chunk_count"],
+            expected_content_digest=appended["expected_content_digest"],
+            idempotency_key=f"plan-finalize-{objective}",
+        )
+        return task, report_id
 
     def _public_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         """Invoke one actual public MCP call through its schema gate."""
@@ -89,11 +105,16 @@ class V12CompatibilityTests(unittest.TestCase):
             serve_stdio(public_tools=PUBLIC_TOOLS, server_version=SERVER_VERSION, instructions=SERVER_INSTRUCTIONS)
         replies = [json.loads(line) for line in output.getvalue().splitlines()]
         reply = next(item for item in replies if item.get("id") == 2)
+        self.assertNotIn("error", reply, "public tools/call must not degrade into a JSON-RPC error")
         result = reply.get("result")
         self.assertIsInstance(result, dict)
         return result
 
     def _successful_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if name in {"create_task", "create_delegation", "submit_report", "set_governance_mode", "record_initiative", "submit_governance_closure", "record_user_decision"}:
+            arguments = dict(arguments)
+            self._mutation_counter += 1
+            arguments.setdefault("idempotency_key", f"test-{name}-{self._mutation_counter}")
         result = self._public_tool(name, arguments)
         self.assertIsNot(result.get("isError"), True, result)
         structured = result.get("structuredContent")
@@ -118,7 +139,7 @@ class V12CompatibilityTests(unittest.TestCase):
             retired_index = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='index' AND name='governance_gates_assessment'"
             ).fetchone()
-        self.assertEqual(migrations[-1], (9, "v12-canonical-report-semantics"))
+        self.assertEqual(migrations[-1], (10, "v12-effective-outcome-coverage"))
         self.assertIsNone(retired_table)
         self.assertIsNone(retired_index)
 
@@ -134,6 +155,7 @@ class V12CompatibilityTests(unittest.TestCase):
             acceptance_criteria=["Omitted mode is rejected before mutation."],
             verification_plan=["Run the focused negative test."],
             context={},
+            idempotency_key="explicit-mode-task",
         )[0]["task"]["task_id"]
         delegation = store.create_delegation(
             task_id=task,
@@ -144,6 +166,7 @@ class V12CompatibilityTests(unittest.TestCase):
             instructions="Submit one explicit report operation.",
             model="gpt-5.6-luna",
             reasoning_effort="high",
+            idempotency_key="explicit-mode-delegation",
         )[0]["delegation"]["delegation_id"]
         before = store.inspect_task(task_id=task, after_sequence=0)["timeline"]
         with self.assertRaises(V12StoreError) as rejected:
@@ -159,15 +182,84 @@ class V12CompatibilityTests(unittest.TestCase):
         after = store.inspect_task(task_id=task, after_sequence=0)["timeline"]
         self.assertEqual(after, before)
 
+    def test_direct_store_mints_a_retry_key_for_an_unkeyed_first_mutation(self) -> None:
+        """A first mutation returns the only retry identity a caller may reuse."""
+        store = V12Store(self.project)
+        arguments = {
+            "objective": "Reject an unkeyed direct mutation.",
+            "user_request_original": "Reject an unkeyed direct mutation.",
+            "user_language": "en",
+            "task_contract_version": "cortex/task-contract/v1",
+            "requirements": ["Require a caller-owned key."],
+            "constraints": ["Do not commit an unkeyed mutation."],
+            "acceptance_criteria": ["No token or timeline row is created."],
+            "verification_plan": ["Inspect the write guard and durable state."],
+            "context": {},
+        }
+        first, replayed = store.create_task(**arguments)
+        minted_key = first["idempotency_key"]
+        self.assertFalse(replayed)
+        self.assertIsInstance(minted_key, str)
+        self.assertTrue(minted_key)
+        self.assertEqual(first["retry_handle"], minted_key)
+        replay, replayed = store.create_task(**(arguments | {"idempotency_key": minted_key}))
+        self.assertTrue(replayed)
+        self.assertEqual(replay, first)
+        before = store.inspect_task(task_id=first["task"]["task_id"], after_sequence=0)["timeline"]
+        with self.assertRaises(V12StoreError) as conflict:
+            store.create_task(**(arguments | {"objective": "Changed direct store payload.", "idempotency_key": minted_key}))
+        self.assertEqual(conflict.exception.code, "idempotency_conflict")
+        self.assertEqual(store.inspect_task(task_id=first["task"]["task_id"], after_sequence=0)["timeline"], before)
+
+    def test_direct_store_idempotency_replays_exactly_and_conflicts_without_mutation(self) -> None:
+        store = V12Store(self.project)
+        arguments = {
+            "objective": "Replay one direct store mutation.",
+            "user_request_original": "Replay one direct store mutation.",
+            "user_language": "en",
+            "task_contract_version": "cortex/task-contract/v1",
+            "requirements": ["Use one stable caller key."],
+            "constraints": ["Preserve replay bytes."],
+            "acceptance_criteria": ["Equal payloads replay; changed payloads conflict."],
+            "verification_plan": ["Compare the returned values and timeline."],
+            "context": {},
+            "idempotency_key": "direct-replay-key",
+        }
+        first, first_replayed = store.create_task(**arguments)
+        second, second_replayed = store.create_task(**arguments)
+        self.assertFalse(first_replayed)
+        self.assertTrue(second_replayed)
+        self.assertEqual(second, first)
+        before = store.inspect_task(task_id=first["task"]["task_id"], after_sequence=0)["timeline"]
+        with self.assertRaises(V12StoreError) as conflict:
+            store.create_task(**(arguments | {"objective": "Changed direct store payload."}))
+        self.assertEqual(conflict.exception.code, "idempotency_conflict")
+        after = store.inspect_task(task_id=first["task"]["task_id"], after_sequence=0)["timeline"]
+        self.assertEqual(after, before)
+
     def test_advisory_closure_contract_does_not_require_initiative_order(self) -> None:
         contracts = build_public_contracts()
         closure_description = contracts["submit_governance_closure"]["description"]
-        self.assertIn("must attempt closure", closure_description)
-        self.assertIn("never claim confirmation", closure_description)
-        self.assertIn("does not prohibit safe work", closure_description)
+        self.assertIn("automatically inspect", closure_description)
+        self.assertIn("same-idempotency retry", closure_description)
+        self.assertIn("remains intact", closure_description)
+        self.assertIn("Governance remains nonblocking", closure_description)
         self.assertNotIn("first requires a finalized", closure_description)
         next_action = contracts["submit_governance_closure"]["outputSchema"]["properties"]["next_action"]
         self.assertIn("not a complete callable payload", next_action["description"])
+        self.assertIn("closure=null must omit", next_action["description"])
+        closure_relations = contracts["submit_governance_closure"]["outputSchema"]["oneOf"]
+        self.assertEqual(closure_relations[0]["properties"]["closure"]["type"], "null")
+        self.assertEqual(closure_relations[0]["properties"]["next_action"]["not"], {"required": ["advisory_status"]})
+        self.assertEqual(closure_relations[1]["properties"]["closure"]["type"], "object")
+        for tool in ("inspect_task", "submit_governance_closure"):
+            execution_outcome = contracts[tool]["outputSchema"]["properties"]["execution_outcome"]
+            self.assertEqual(
+                set(execution_outcome["properties"]),
+                {"evidence_status", "finalized_report_count", "completed_report_count", "outcome"},
+            )
+            self.assertEqual(execution_outcome["properties"]["outcome"]["type"], ["string", "null"])
+            self.assertEqual(set(execution_outcome["properties"]["outcome"]["enum"]), {"completed", "incomplete", None})
 
     def test_schema_failures_name_output_only_and_approval_relation_fields(self) -> None:
         task = self._successful_tool("create_task", {
@@ -181,6 +273,7 @@ class V12CompatibilityTests(unittest.TestCase):
             "verification_plan": ["Exercise the MCP schema boundary."],
         })
         task_ref = task["handles"]["task_ref"]
+        before = self._successful_tool("inspect_task", {"task_ref": task_ref})["timeline"]
         self.assertIsInstance(task_ref, str)
         before = self._successful_tool("inspect_task", {"task_ref": task_ref})
 
@@ -188,6 +281,7 @@ class V12CompatibilityTests(unittest.TestCase):
             "task_ref": task_ref,
             "mode": "minimal",
             "governance_gate": {},
+            "idempotency_key": "removed-gate",
         })
         gate_text = rejected_gate["content"][0]["text"]
         self.assertIn("governance_gate is a removed workflow projection", gate_text)
@@ -207,9 +301,8 @@ class V12CompatibilityTests(unittest.TestCase):
             "subject_ref": "r_000000000000",
             "subject_digest": "sha256:" + ("0" * 64),
             "decision_type": "approve",
-            "prompt_en": "Approve?",
+            "prompt": "Approve?",
             "response_original": "Approve.",
-            "response_en": "I approve.",
             "user_language": "en",
         })
         approval_text = rejected_approval["content"][0]["text"]
@@ -259,14 +352,21 @@ class V12CompatibilityTests(unittest.TestCase):
             "report_type": "plan",
             "status": "completed",
             "content": {"steps": ["Mode is required."]},
+            "idempotency_key": "missing-mode",
         })
         self.assertIn("mode", omitted_mode["content"][0]["text"])
-        plan = self._successful_tool("submit_report", {
-            "delegation_ref": delegation_ref,
-            "mode": "single",
-            "report_type": "plan",
-            "status": "completed",
+        started = self._successful_tool("submit_report", {
+            "delegation_ref": delegation_ref, "mode": "begin", "report_type": "plan",
+        })
+        appended = self._successful_tool("submit_report", {
+            "delegation_ref": delegation_ref, "mode": "append", "report_ref": started["handles"]["report_ref"],
+            "chunk_index": started["handles"]["chunk_index"], "section": "body",
             "content": {"schema": "cortex/report/plan/v1", "summary": "Canonical public fields", "scope": [], "stages": [], "verification": []},
+        })
+        plan = self._successful_tool("submit_report", {
+            "delegation_ref": delegation_ref, "mode": "finalize", "report_ref": started["handles"]["report_ref"],
+            "status": "completed", "expected_chunk_count": appended["handles"]["expected_chunk_count"],
+            "expected_content_digest": appended["handles"]["expected_content_digest"],
         })
         # Context recovery must accept the same complete, server-issued
         # relation shape returned from a bounded plan read, not only the
@@ -283,6 +383,7 @@ class V12CompatibilityTests(unittest.TestCase):
             key: value for key, value in binding.items()
             if key not in {"approval_handle", "approval_view_content_digest", "approval_view_source_sequence"}
         }
+        canonical_decision_refs = []
         for decision_type, original, normalized in (
             ("request_revision", "Please revise stage two.", "Please revise stage two."),
             ("cancel", "Cancel this plan.", "Cancel this plan."),
@@ -290,25 +391,33 @@ class V12CompatibilityTests(unittest.TestCase):
             first_attempt = dict(non_approval)
             first_attempt.update({
                 "decision_type": decision_type,
-                "prompt_en": "Record the user decision.",
+                "prompt": "Record the user decision.",
                 "response_original": original,
-                "response_en": normalized,
                 "user_language": "en",
             })
             persisted = self._successful_tool("record_user_decision", first_attempt)
             self.assertEqual(persisted["decision"]["subject_digest"], first_attempt["subject_digest"])
+            canonical_decision_refs.append(persisted["handles"]["decision_ref"])
         valid = dict(binding)
         valid.update({
             "decision_type": "approve",
-            "prompt_en": "Approve this canonical plan?",
+            "prompt": "Approve this canonical plan?",
             "response_original": "Одобряю план.",
-            "response_en": "I approve the plan.",
             "user_language": "ru",
         })
         accepted = self._successful_tool("record_user_decision", valid)
+        canonical_decision_refs.append(accepted["handles"]["decision_ref"])
         self.assertEqual(accepted["decision"]["subject_digest"], valid["subject_digest"])
-        self.assertEqual(accepted["decision"]["response_en_excerpt"], valid["response_en"])
+        self.assertNotIn("response_en_excerpt", accepted["decision"])
         self.assertNotIn("response_original", accepted["decision"])
+        steering = self._successful_tool("record_user_decision", {
+            "task_ref": task_ref, "subject_type": "task", "subject_ref": task_ref,
+            "decision_type": "steer", "prompt": "Choose the next safe action.",
+            "response_original": "Continue with focused verification.",
+            "user_language": "en",
+        })
+        self.assertEqual(steering["decision"]["decision_type"], "steer")
+        canonical_decision_refs.append(steering["handles"]["decision_ref"])
 
         successor = self._successful_tool("create_delegation", {
             "task_ref": task_ref,
@@ -327,9 +436,20 @@ class V12CompatibilityTests(unittest.TestCase):
             "consumer_delegation_ref": successor["handles"]["delegation_ref"],
         })
         self.assertEqual(same_task_read["consumption_receipts"][0]["reader_kind"], "worker")
+        coordinator_read = self._successful_tool("read_reports", {"report_refs": [valid["subject_ref"]]})
+        self.assertTrue(coordinator_read["reports"][0]["chunks"])
+        self.assertEqual(coordinator_read["consumption_receipts"][0]["reader_kind"], "coordinator")
 
         before = self._successful_tool("inspect_task", {"task_ref": task_ref})
         before_count = len(before["decisions"])
+        conformance_review = before.get("conformance_review")
+        self.assertIsInstance(conformance_review, dict)
+        decision_refs = conformance_review.get("decision_refs")
+        self.assertEqual(
+            decision_refs,
+            canonical_decision_refs,
+        )
+        self.assertTrue(all(isinstance(ref, str) and re.fullmatch(r"u_[0-9a-f]{12}", ref) for ref in decision_refs))
         invalid_inputs = (
             {name: value for name, value in valid.items() if name != "task_ref"},
             valid | {"decision": "approve"},
@@ -364,9 +484,17 @@ class V12CompatibilityTests(unittest.TestCase):
             "role": "writer", "profile_name": "technical_writer", "scope": "One advisory report.",
             "instructions": "Submit a bounded plan report.", "model": "gpt-5.6-luna", "reasoning_effort": "high",
         })
+        started = self._successful_tool("submit_report", {
+            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "begin", "report_type": "plan",
+        })
+        appended = self._successful_tool("submit_report", {
+            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "append", "report_ref": started["handles"]["report_ref"],
+            "chunk_index": 0, "section": "body", "content": {"advisory": True},
+        })
         invalid = self._successful_tool("submit_report", {
-            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "single", "report_type": "plan",
-            "status": "completed", "content": {"advisory": True},
+            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "finalize", "report_ref": started["handles"]["report_ref"],
+            "status": "completed", "expected_chunk_count": appended["handles"]["expected_chunk_count"],
+            "expected_content_digest": appended["handles"]["expected_content_digest"],
         })
         self.assertEqual(invalid["report"]["storage_status"], "storage_valid")
         self.assertEqual(invalid["report"]["semantic_status"], "legacy")
@@ -401,7 +529,7 @@ class V12CompatibilityTests(unittest.TestCase):
         })
         self.assertEqual(recovered["worker_brief"]["native_dispatch"], created["native_dispatch"])
 
-    def test_completed_task_closure_is_schema_safe_and_confirmable(self) -> None:
+    def test_task_closure_is_schema_safe_and_confirmable(self) -> None:
         task = self._successful_tool("create_task", {
             "project_root": str(self.project), "objective": "Confirm completed-task closure.",
             "user_request_original": "Confirm completed-task closure.", "user_language": "en",
@@ -412,14 +540,24 @@ class V12CompatibilityTests(unittest.TestCase):
         })
         task_ref_value = task["handles"]["task_ref"]
         before = self._successful_tool("inspect_task", {"task_ref": task_ref_value})
+        self.assertEqual(before["execution_outcome"]["evidence_status"], "no_finalized_reports")
+        self.assertEqual(before["execution_outcome"]["finalized_report_count"], 0)
+        self.assertEqual(before["execution_outcome"]["completed_report_count"], 0)
+        self.assertIsNone(before["execution_outcome"]["outcome"])
+        self.assertEqual(
+            set(before["execution_outcome"]),
+            {"evidence_status", "finalized_report_count", "completed_report_count", "outcome"},
+        )
+        self.assertEqual(before["advisory_closure"]["record_status"], "not_recorded")
+        self.assertNotIn("closure_state", before["task"])
         invalid_ref = self._rejected_tool("submit_governance_closure", {
             "task_ref": task_ref_value, "subject_type": "task", "subject_ref": "i_000000000000",
-            "verdict": "ready", "evidence": {"completed": True},
+            "verdict": "ready", "evidence": {"completed": True}, "idempotency_key": "invalid-closure-ref",
         })
         self.assertIn("subject_ref", invalid_ref["content"][0]["text"])
         invalid_status = self._rejected_tool("submit_governance_closure", {
             "task_ref": task_ref_value, "subject_type": "task", "subject_ref": task_ref_value,
-            "verdict": "ready", "evidence": {"completed": True}, "initiative_status": "closed",
+            "verdict": "ready", "evidence": {"completed": True}, "initiative_status": "closed", "idempotency_key": "invalid-closure-status",
         })
         self.assertIn("initiative_status", invalid_status["content"][0]["text"])
         self.assertEqual(self._successful_tool("inspect_task", {"task_ref": task_ref_value})["timeline"], before["timeline"])
@@ -443,9 +581,137 @@ class V12CompatibilityTests(unittest.TestCase):
             "task_ref": task_ref_value, "subject_type": "task", "subject_ref": task_ref_value,
             "verdict": "ready", "evidence": {"completed": True, "closure_attempt": "verified"},
         })
-        self.assertEqual(task_closure["next_action"]["state"], "task_closed")
+        self.assertEqual(task_closure["next_action"]["advisory_status"], "recorded")
+        self.assertEqual(task_closure["closure_confirmation"]["inspection_status"], "confirmed")
+        self.assertEqual(task_closure["closure_confirmation"]["reason"], "record_inspected")
+        self.assertEqual(task_closure["execution_outcome"], before["execution_outcome"])
+        self.assertNotIn("closure_state", task_closure["closure"])
+        self.assertNotIn("task_closed", json.dumps(task_closure, sort_keys=True))
         inspected = self._successful_tool("inspect_governance", {"task_ref": task_ref_value})
         self.assertTrue(any(item["closure_id"] == task_closure["closure"]["closure_id"] for item in inspected["closures"]))
+
+    def test_finalized_reports_expose_neutral_execution_evidence_independent_of_advice(self) -> None:
+        def exercise(verdict: str) -> dict[str, object]:
+            task = self._successful_tool("create_task", {
+                "project_root": str(self.project), "objective": f"Separate {verdict} outcome.",
+                "user_request_original": f"Separate {verdict} outcome.", "user_language": "en",
+                "requirements": ["Keep execution and advice separate."],
+                "constraints": ["Closure is nonblocking."],
+                "acceptance_criteria": ["Finalized evidence survives advisory state."],
+                "verification_plan": ["Inspect the public projections."],
+            })
+            task_ref_value = task["handles"]["task_ref"]
+            before = self._successful_tool("inspect_task", {"task_ref": task_ref_value})
+            self.assertEqual(before["advisory_closure"]["record_status"], "not_recorded")
+            delegation = self._successful_tool("create_delegation", {
+                "task_ref": task_ref_value, "objective": "Provide completed evidence.", "role": "worker",
+                "profile_name": "general", "scope": "Own one completed result.",
+                "instructions": "Submit the completed result evidence.", "model": "gpt-5.6-luna", "reasoning_effort": "high",
+            })
+            started = self._successful_tool("submit_report", {"delegation_ref": delegation["handles"]["delegation_ref"], "mode": "begin", "report_type": "result"})
+            appended = self._successful_tool("submit_report", {
+                "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "append", "report_ref": started["handles"]["report_ref"],
+                "chunk_index": 0, "section": "body", "content": {"schema": "cortex/report/result/v1", "summary": "Recorded evidence", "outcome": "evidence_recorded", "changes": [], "verification": [], "risks": []},
+            })
+            self._successful_tool("submit_report", {
+                "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "finalize", "report_ref": started["handles"]["report_ref"], "status": "completed",
+                "expected_chunk_count": appended["handles"]["expected_chunk_count"], "expected_content_digest": appended["handles"]["expected_content_digest"],
+            })
+            completed = self._successful_tool("inspect_task", {"task_ref": task_ref_value})
+            self.assertEqual(completed["execution_outcome"]["evidence_status"], "finalized_reports_present")
+            self.assertEqual(completed["execution_outcome"]["finalized_report_count"], 1)
+            self.assertEqual(completed["execution_outcome"]["completed_report_count"], 1)
+            self.assertEqual(completed["execution_outcome"]["outcome"], "completed")
+            self.assertEqual(
+                set(completed["execution_outcome"]),
+                {"evidence_status", "finalized_report_count", "completed_report_count", "outcome"},
+            )
+            closure = self._successful_tool("submit_governance_closure", {
+                "task_ref": task_ref_value, "subject_type": "task", "subject_ref": task_ref_value,
+                "verdict": verdict, "evidence": {"result": "completed"},
+            })
+            self.assertEqual(closure["execution_outcome"], completed["execution_outcome"])
+            self.assertEqual(closure["closure_confirmation"]["inspection_status"], "confirmed")
+            return closure
+
+        self.assertEqual(exercise("ready")["closure"]["verdict"], "ready")
+        self.assertEqual(exercise("ready_with_risks")["closure"]["verdict"], "ready_with_risks")
+        self.assertEqual(exercise("not_ready")["closure"]["verdict"], "not_ready")
+
+    def test_public_first_mutation_mints_callable_idempotency_key_and_schema_errors_are_safe(self) -> None:
+        first_arguments = {
+            "project_root": str(self.project), "objective": "Mint a first-call retry key.",
+            "user_request_original": "Mint a first-call retry key.", "user_language": "en",
+            "requirements": ["Permit omitted retry material."], "constraints": ["Keep replay exact."],
+            "acceptance_criteria": ["Return a callable minted key."], "verification_plan": ["Replay and conflict."],
+        }
+        first = self._public_tool("create_task", first_arguments)
+        self.assertIsNot(first.get("isError"), True, first)
+        structured = first["structuredContent"]
+        key = structured["handles"]["idempotency_key"]
+        self.assertEqual(key, structured["idempotency_key"])
+        self.assertEqual(structured["retry_handle"], key)
+        self.assertNotIn("retry_handle", structured["handles"])
+        replay = self._public_tool("create_task", first_arguments | {"idempotency_key": key})
+        self.assertTrue(replay["structuredContent"]["replayed"])
+        # A retry has the same durable result but its public replay marker changes.
+        self.assertEqual(replay["structuredContent"]["task"], structured["task"])
+        conflict = self._public_tool("create_task", first_arguments | {"objective": "Changed first-call payload.", "idempotency_key": key})
+        self.assertIs(conflict.get("isError"), True)
+        self.assertIn("idempotency_conflict", conflict["content"][0]["text"])
+
+        contracts = build_public_contracts()
+        submit_section = contracts["submit_report"]["inputSchema"]["properties"]["section"]
+        read_section = contracts["read_reports"]["inputSchema"]["properties"]["sections"]["items"]
+        self.assertEqual(submit_section["type"], read_section["type"])
+        self.assertEqual(submit_section["maxLength"], read_section["maxLength"])
+        self.assertEqual(submit_section["pattern"], read_section["pattern"])
+        rejected = self._rejected_tool("submit_report", {
+            "delegation_ref": "d_000000000000", "mode": "append", "report_ref": "r_000000000000",
+            "chunk_index": 0, "section": "Unsafe Section", "content": {},
+        })
+        diagnostic = rejected["content"][0]["text"]
+        self.assertIn("Field: section.", diagnostic)
+        self.assertIn("Reason: pattern.", diagnostic)
+        self.assertIn("Expected: lowercase_section_label.", diagnostic)
+        self.assertNotIn("Unsafe Section", diagnostic)
+
+    def test_schema_diagnostics_have_safe_field_specific_reason_classes(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project), "objective": "Exercise safe schema diagnostics.",
+            "user_request_original": "Exercise safe schema diagnostics.", "user_language": "en",
+            "requirements": ["Use bounded diagnostics."], "constraints": ["Do not echo inputs."],
+            "acceptance_criteria": ["Every requested reason is actionable."], "verification_plan": ["Call the public boundary."],
+        })
+        task_ref = task["handles"]["task_ref"]
+        before = self._successful_tool("inspect_task", {"task_ref": task_ref})["timeline"]
+        create_arguments = {
+            "project_root": str(self.project), "objective": "Valid diagnostic baseline.",
+            "user_request_original": "Valid diagnostic baseline.", "user_language": "en",
+            "requirements": ["Use bounded diagnostics."], "constraints": ["No input echo."],
+            "acceptance_criteria": ["Diagnose the exact public field."], "verification_plan": ["Call the boundary."],
+        }
+        cases = (
+            ("create_task", create_arguments | {"objective": 7}, "type", "string", "objective"),
+            ("set_governance_mode", {"task_ref": task_ref, "mode": "unbounded"}, "enum", "permitted_value", "mode"),
+            ("create_task", create_arguments | {"user_language": "bad!tag"}, "pattern", "permitted_value", "user_language"),
+            ("create_task", create_arguments | {"objective": ""}, "length", "bounded_length", "objective"),
+            ("record_initiative", {"task_ref": task_ref, "goal": "Detect duplicates.", "linked_task_refs": [task_ref, task_ref]}, "unique_items", "unique_items", "linked_task_refs"),
+            ("submit_report", {"delegation_ref": "d_000000000000", "mode": "begin", "report_type": "result", "content": {}}, "conditional_shape", "permitted_input_shape", "content"),
+            ("submit_report", {"delegation_ref": "d_000000000000", "mode": "single", "report_type": "unsafe", "status": "completed", "content": {}}, "enum", "progress|result|synthesis|plan", "report_type"),
+            ("read_reports", {"report_refs": ["r_000000000001", "r_000000000002", "r_000000000003", "r_000000000004", "unsafe"]}, "pattern", "r_[0-9a-f]{12}", "report_refs"),
+        )
+        for tool_name, arguments, reason, expected, field in cases:
+            rejected = self._rejected_tool(tool_name, arguments)
+            text = rejected["content"][0]["text"]
+            self.assertIn(f"Field: {field}.", text)
+            self.assertIn(f"Reason: {reason}.", text)
+            self.assertIn(f"Expected: {expected}.", text)
+            self.assertNotIn("advertised_input_schema", text)
+            self.assertNotIn("Traceback", text)
+            self.assertNotIn(str(self.project), text)
+        after = self._successful_tool("inspect_task", {"task_ref": task_ref})["timeline"]
+        self.assertEqual(after, before)
 
     def test_report_continuation_and_reader_mode_are_unambiguous(self) -> None:
         task = self._successful_tool("create_task", {
@@ -462,7 +728,7 @@ class V12CompatibilityTests(unittest.TestCase):
         started = self._successful_tool("submit_report", {"delegation_ref": delegated["handles"]["delegation_ref"], "mode": "begin", "report_type": "result"})
         appended = self._successful_tool("submit_report", {
             "delegation_ref": delegated["handles"]["delegation_ref"], "mode": "append", "report_ref": started["handles"]["report_ref"],
-            "chunk_index": started["handles"]["next_chunk_index"], "section": "body", "content": {"done": True},
+            "chunk_index": started["handles"]["chunk_index"], "section": "body", "content": {"evidence": True},
         })
         self.assertEqual(appended["handles"]["expected_chunk_count"], appended["expected_chunk_count"])
         self.assertEqual(appended["handles"]["expected_content_digest"], appended["expected_content_digest"])
@@ -479,6 +745,12 @@ class V12CompatibilityTests(unittest.TestCase):
         })
         read = self._successful_tool("read_reports", {"report_refs": [finalized["handles"]["report_ref"]], "consumer_delegation_ref": consumer["handles"]["delegation_ref"]})
         self.assertEqual(read["consumption_receipts"][0]["reader_kind"], "worker")
+        coordinator = self._successful_tool("read_reports", {"report_refs": [finalized["handles"]["report_ref"]]})
+        self.assertGreater(coordinator["returned_content_bytes"], 0)
+        self.assertEqual(coordinator["consumption_receipts"][0]["reader_kind"], "coordinator")
+        reused = self._successful_tool("read_reports", {"report_refs": [finalized["handles"]["report_ref"]]})
+        self.assertEqual(reused["consumption_receipts"][0]["receipt_id"], coordinator["consumption_receipts"][0]["receipt_id"])
+        self.assertTrue(reused["consumption_receipts"][0]["reused"])
 
     def test_storage_unavailable_preserves_pending_decision_and_mutates_nothing(self) -> None:
         store = V12Store(self.project)
@@ -487,8 +759,8 @@ class V12CompatibilityTests(unittest.TestCase):
         before = store.inspect_task(task_id=task_id, after_sequence=0)["decisions"]
         pending = {
             "task_ref": task_ref(task_id), "subject_type": "plan", "subject_ref": record_ref(report_id),
-            "subject_digest": report["content_digest"], "decision_type": "approve", "prompt_en": "Approve?",
-            "response_original": "Approve.", "response_en": "I approve.", "user_language": "en",
+            "subject_digest": report["content_digest"], "decision_type": "approve", "prompt": "Approve?",
+            "response_original": "Approve.", "user_language": "en",
             "approval_handle": "approval-unavailable", "approval_view_content_digest": "sha256:" + "0" * 64,
             "approval_view_source_sequence": 0,
         }
@@ -505,6 +777,9 @@ class V12CompatibilityTests(unittest.TestCase):
         read_schema = contracts["read_reports"]["inputSchema"]
         governance_schema = contracts["set_governance_mode"]["inputSchema"]
         self.assertIn("oneOf", decision_schema)
+        self.assertIn("prompt", decision_schema["properties"])
+        self.assertNotIn("prompt_en", decision_schema["properties"])
+        self.assertNotIn("response_en", decision_schema["properties"])
         self.assertNotIn("subject_digest", decision_schema["required"])
         self.assertNotIn("report_ref", decision_schema["properties"])
         self.assertNotIn("byte_budget", read_schema["properties"])
@@ -514,6 +789,43 @@ class V12CompatibilityTests(unittest.TestCase):
             _validate_schema(read_schema, {"report_refs": ["r_000000000000"], "max_bytes": "0"})
         with self.assertRaises(_SchemaError):
             _validate_schema(read_schema, {"report_refs": ["r_000000000000"], "byte_budget": 0})
+
+    def test_decision_preserves_original_unicode_without_translated_duplicate(self) -> None:
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project),
+            "objective": "Verify exact decision response preservation.",
+            "user_request_original": "Verify exact decision response preservation.",
+            "user_language": "en",
+            "requirements": ["Keep user decisions exact."],
+            "constraints": ["Do not translate responses."],
+            "acceptance_criteria": ["Russian and Japanese responses survive unchanged."],
+            "verification_plan": ["Inspect the durable decision rows."],
+        })
+        task_ref = task["handles"]["task_ref"]
+        russian = "Одобряю план без изменений."
+        japanese = "次の安全な手順へ進めてください。"
+        for response, language, key in ((russian, "ru", "unicode-ru"), (japanese, "ja", "unicode-ja")):
+            result = self._successful_tool("record_user_decision", {
+                "task_ref": task_ref,
+                "subject_type": "task",
+                "subject_ref": task_ref,
+                "decision_type": "steer",
+                "prompt": "Choose the next safe action.",
+                "response_original": response,
+                "user_language": language,
+                "idempotency_key": key,
+            })
+            self.assertNotIn("response_en", result["decision"])
+            self.assertNotIn("response_en_excerpt", result["decision"])
+        store = V12Store.for_task_ref(task_ref)[0]
+        rows = store._read(lambda connection: connection.execute(
+            "SELECT prompt_en,response_original,response_en,user_language FROM user_decisions WHERE task_id=? ORDER BY created_sequence",
+            (V12Store.for_task_ref(task_ref)[1],),
+        ).fetchall())
+        self.assertEqual([row["response_original"] for row in rows], [russian, japanese])
+        self.assertEqual([row["user_language"] for row in rows], ["ru", "ja"])
+        self.assertEqual([row["response_en"] for row in rows], ["", ""])
+        self.assertEqual([row["prompt_en"] for row in rows], ["Choose the next safe action."] * 2)
 
     def test_approval_survives_unrelated_timeline_but_not_changed_file(self) -> None:
         store = V12Store(self.project)
@@ -541,13 +853,13 @@ class V12CompatibilityTests(unittest.TestCase):
                 subject_ref=record_ref(report_id),
                 subject_digest="sha256:" + "0" * 64,
                 decision_type="approve",
-                prompt_en="Approve this plan?",
+                prompt="Approve this plan?",
                 response_original="I approve this plan.",
-                response_en="I approve this plan.",
                 user_language="en",
                 approval_handle=handle,
                 approval_view_content_digest=view["content_digest"],
                 approval_view_source_sequence=view["source_sequence"],
+                idempotency_key="digest-mismatch",
             )
         self.assertEqual(mismatch.exception.code, "decision_subject_digest_mismatch")
         store.record_initiative(
@@ -561,7 +873,7 @@ class V12CompatibilityTests(unittest.TestCase):
             linked_task_ids=[task_id],
             linked_report_ids=[],
             notes=[],
-            idempotency_key=None,
+            idempotency_key="approval-freshness-initiative",
         )
         approved, _ = store.record_user_decision(
             task_id=task_id,
@@ -569,15 +881,14 @@ class V12CompatibilityTests(unittest.TestCase):
             subject_id=report_id,
             subject_digest=report["content_digest"],
             decision_type="approve",
-            prompt_en="Approve this plan?",
+            prompt="Approve this plan?",
             response_original="I approve this plan.",
-            response_en="I approve this plan.",
             user_language="en",
             approval_handle=handle,
             approval_view_content_digest=view["content_digest"],
             approval_view_source_sequence=view["source_sequence"],
             supersedes_decision_id=None,
-            idempotency_key=None,
+            idempotency_key="approval-freshness-decision",
         )
         self.assertEqual(approved["decision"]["decision_type"], "approve")
 
@@ -605,14 +916,69 @@ class V12CompatibilityTests(unittest.TestCase):
                 subject_ref=record_ref(report2),
                 subject_digest=report2_row["content_digest"],
                 decision_type="approve",
-                prompt_en="Approve this plan?",
+                prompt="Approve this plan?",
                 response_original="I approve this plan.",
-                response_en="I approve this plan.",
                 user_language="en",
                 approval_handle=handle2,
                 approval_view_content_digest=view2["content_digest"],
                 approval_view_source_sequence=view2["source_sequence"],
             )
+
+    def test_public_stdio_hardening_keeps_single_sections_and_callable_handles(self) -> None:
+        """Exercise the published contract through the JSON-RPC stdio boundary."""
+        task = self._successful_tool("create_task", {
+            "project_root": str(self.project), "objective": "Harden one public report.",
+            "user_request_original": "Harden one public report.", "user_language": "en",
+            "requirements": ["Keep the five report modes."], "constraints": ["Reject mixed task subjects."],
+            "acceptance_criteria": ["A bounded single report is callable."], "verification_plan": ["Use the public stdio tool."],
+        })
+        task_ref_value = task["handles"]["task_ref"]
+        self.assertEqual(task["handles"]["idempotency_key"], task["idempotency_key"])
+        inspection = self._successful_tool("inspect_task", {"task_ref": task_ref_value})
+        self.assertEqual(inspection["handles"]["after_sequence"], inspection["next_sequence"])
+        self.assertNotIn("next_sequence", inspection["handles"])
+        delegation = self._successful_tool("create_delegation", {
+            "task_ref": task_ref_value, "objective": "Publish one report.", "role": "writer",
+            "profile_name": "technical_writer", "scope": "One bounded report.", "instructions": "Submit evidence.",
+            "model": "gpt-5.6-luna", "reasoning_effort": "high",
+        })
+        single = self._successful_tool("submit_report", {
+            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "single", "report_type": "result",
+            "status": "completed", "content": {"schema": "cortex/report/result/v1", "summary": "Bounded result."},
+        })
+        self.assertEqual(single["report"]["assembly_state"], "finalized")
+        started = self._successful_tool("submit_report", {
+            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "begin", "report_type": "result",
+        })
+        self.assertEqual(started["handles"]["chunk_index"], 0)
+        self.assertNotIn("next_chunk_index", started["handles"])
+        rejected_section = self._rejected_tool("submit_report", {
+            "delegation_ref": delegation["handles"]["delegation_ref"], "mode": "append",
+            "report_ref": started["handles"]["report_ref"], "chunk_index": started["handles"]["chunk_index"],
+            "section": "Bad Section", "content": {"summary": "invalid"}, "idempotency_key": "bad-section",
+        })
+        self.assertIn("section", rejected_section["content"][0]["text"])
+        other = self._successful_tool("create_task", {
+            "project_root": str(self.project), "objective": "Other task.", "user_request_original": "Other task.", "user_language": "en",
+            "requirements": ["Keep tasks isolated."], "constraints": ["No crossed subjects."],
+            "acceptance_criteria": ["Crossed decision fails."], "verification_plan": ["Call decision API."],
+        })
+        crossed = self._rejected_tool("record_user_decision", {
+            "task_ref": task_ref_value, "subject_type": "task", "subject_ref": other["handles"]["task_ref"],
+            "decision_type": "steer", "prompt": "Next step?", "response_original": "Continue.",
+            "user_language": "en", "idempotency_key": "crossed-task-subject",
+        })
+        self.assertIn("subject_ref", crossed["content"][0]["text"])
+
+    def test_initialize_counteroffers_the_supported_protocol_version(self) -> None:
+        request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2099-01-01", "capabilities": {}, "clientInfo": {"name": "counteroffer-test", "version": "1"},
+        }}
+        output = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(request) + "\n")), mock.patch("sys.stdout", output):
+            serve_stdio(public_tools=PUBLIC_TOOLS, server_version=SERVER_VERSION, instructions=SERVER_INSTRUCTIONS)
+        response = json.loads(output.getvalue())
+        self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
 
 
 if __name__ == "__main__":

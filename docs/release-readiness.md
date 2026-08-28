@@ -47,6 +47,12 @@ success is transported as JSON text plus `structuredContent` with
 `isError=true` results with no `structuredContent`; server-state failures are
 sanitized JSON-RPC internal errors.
 
+When the complete catalog would exceed the 256 KiB physical JSONL frame bound,
+the standard `tools/list` response returns complete definitions on opaque
+`nextCursor` continuation pages. Clients follow the cursor until absent to
+recover the unchanged ordered eleven-tool catalog; a definition is never split
+or truncated to make a frame fit.
+
 Only `create_task` accepts the exact resolved `project_root` and stores the
 canonical project association; it is the sole public project-root boundary. It
 returns compact `task_ref` for the seven task-anchored tools. The durable
@@ -77,8 +83,8 @@ and the complete rendered message occurs only once at
 matching host spawn. `read_delegation` retains the verbose brief and bounded
 chronology for recovery and is not required on the healthy path.
 `record_user_decision` uses one closed canonical request containing the task and
-subject refs, decision type, English prompt, exact original response, English
-response normalization, and user language; `subject_digest` is required only
+subject refs, decision type, neutral `prompt`, exact original response, and user
+language; `subject_digest` is required only
 for plan/report subjects. Plan approval additionally
 requires the matching ready-view handle, view digest, and source sequence from
 one returned relation; missing, renamed, extra, or cross-mixed fields fail
@@ -135,11 +141,11 @@ V12 creates one database per resolved project root:
 ```
 
 The database must identify the V12 family, report `PRAGMA user_version = 1`,
-contain the ordered `v12-initial` and `v12-schema-v1-human-views` additive
-migration rows, and retain matching project-hash metadata. The schema contains
+contain the complete ordered additive migration history through
+`v12-effective-outcome-coverage`, and retain matching project-hash metadata. The schema contains
 tasks, delegations, immutable reports and report
 chunks, append-only governance assessments, user decisions that preserve exact
-original text beside English normalization, initiatives, append-only initiative
+original text and neutral prompt, initiatives, append-only initiative
 revisions, current initiative links, immutable closures, an ordered timeline,
 idempotency records, bounded projection jobs/files, and minimal metadata.
 
@@ -159,16 +165,28 @@ Release evidence must prove:
 - identical idempotent replay returns the original record;
 - conflicting replay returns non-mutating `idempotency_conflict`;
 - report types include `progress`, `result`, `synthesis`, and `plan`; a report
-  supports `single`, `begin`, `append`, `finalize`, and `abort`, with immutable
+  supports bounded one-chunk `single` or assembled `begin`, sequential `append`,
+  `finalize`, and `abort` writes, with immutable
   sequential chunks, terminal finalization/abort, and explicit supersession;
 - each chunk is bounded to 32 KiB; report assembly is bounded to 256 chunks and
   8 MiB; its final digest binds the complete immutable manifest;
+- v1 reports remain readable, while additive v2 result, synthesis, and plan
+  reports retain structured contract coverage, deviations, unresolved items,
+  risks, and verification;
 - `read_reports` preserves requested order for 1–20 known compact `report_refs`, returns only
   complete chunks within a 65,536-byte budget, and returns a selection-scoped
   cursor without duplication; `max_bytes=0` returns only assembly metadata;
 - inspection pages use `after_sequence` plus `limit`, return stable
   `next_sequence`/`has_more`, and expose compact report references while
   `read_reports` remains the only bounded report body/chunk reader;
+- effective-contract item references remain stable across requirements,
+  constraints, acceptance criteria, and verification expectations; current
+  ownership is non-overlapping, finalized report coverage detects missing,
+  partial, unverified, stale, and contradictory evidence, and user steering
+  revises only affected items;
+- advisory conformance review relates the active effective-contract revision,
+  user decisions, finalized report manifests, completed coordinator-read
+  digests, and aggregate coverage without becoming a lifecycle gate;
 - task/report/initiative links do not cross project ledgers;
 - errors never expose raw task or report content;
 - state/project directories are `0700`, database/WAL/SHM files are `0600`, and
@@ -183,10 +201,9 @@ Release evidence must prove:
 coordinator asserts that the user made one. The request selects the subject
 with compact `subject_ref`; the returned durable `subject_id` is evidence only.
 The record keeps subject type and
-a subject digest when applicable, a decision type, English prompt context,
-exact arbitrary-Unicode `response_original`, English `response_en`, user
-language, attribution, and optional supersession. The English value supports
-durable internal work; it never replaces the original response. Plan and report
+a subject digest when applicable, a decision type, neutral `prompt`, exact
+arbitrary-Unicode `response_original`, user language, attribution, and optional
+supersession. Plan and report
 decisions require the exact immutable digest; a plan decision also requires a
 completed, finalized `plan` report. Only plan `approve` additionally requires a
 current ready approval view and opaque approval handle. Plan `request_revision`
@@ -195,10 +212,9 @@ volatile view binding, so intervening non-plan timeline events cannot block
 feedback. The record binds evidence and scope but is not authentication, a
 bearer approval token, or a backend lifecycle gate.
 
-The current decision shape and the deprecated complete legacy plan-decision
-shape are mutually exclusive. The legacy compatibility path requires all of
-its fields; partial or mixed current/legacy input is rejected by the public
-schema.
+`record_user_decision` has one closed canonical request shape. Retired
+`prompt_en` and `response_en` aliases, partial inputs, and mixed shapes are
+rejected by the public schema before mutation.
 
 `report_type=plan` provides immutable plan evidence without adding a twelfth
 tool. `review_policy=required` expresses a coordinator-owned ordinary-chat

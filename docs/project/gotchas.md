@@ -61,23 +61,26 @@
   appear exactly once, in order, and contain delegation-specific values. Missing,
   empty, TODO/TBD/unknown, or generic placeholder sections are invalid.
 - Reports are immutable `progress`, `result`, `synthesis`, or `plan` evidence,
-  not lifecycle completion or acceptance. A plan has `informational` or
+  not lifecycle completion or acceptance. New reports use bounded `single`, or
+  `begin` → sequential `append` → `finalize`, or `begin` → `abort`. A plan has `informational` or
   `required` review policy. The coordinator owns the ordinary-chat review hold;
   the backend never makes it a gate.
 - The owning native worker alone calls `submit_report`. The coordinator never
   fills in a missing plan, result, verification, synthesis, or documentation
   rationale; it follows up, reworks, or creates a parent-linked replacement.
 - Large reports use `begin`, sequential `append`, and `finalize`, or `abort`.
-  A single report is at most 65,536 bytes, appended chunks are at most 32,768
-  bytes, and one report has at most 256 chunks/8 MiB. Resume with the stored
+  Appended chunks are at most 32,768 bytes, and one report has at most 256
+  chunks/8 MiB. Resume with the stored
   manifest and `next_chunk_index`; do not restart, skip an index, append after
   finalization/abort, or overwrite an immutable report. Supersede explicitly.
 - `read_reports` accepts no more than 20 distinct known compact `report_refs` and
-  returns them in request order. Select only needed sections, observe its 65,536-byte read
-  integer `max_bytes` budget, and continue with its scope-bound cursor. `max_bytes=0` is
-  metadata-only recovery. Task and delegation
-  inspections intentionally return
-  compact references instead of full report bodies.
+  returns them in request order. Select only needed sections, observe its
+  65,536-byte read integer `max_bytes` budget, and continue with its scope-bound
+  cursor. `max_bytes=0` is metadata-only. Coordinator reads are metadata-only;
+  a worker body read requires its exact consuming `consumer_delegation_ref` and
+  declared finalized inputs, and yields a consumption receipt. Task and
+  delegation inspections intentionally return compact references instead of full
+  report bodies.
 - Bound every inspection with `after_sequence` plus `limit`, and continue only
   while `has_more` using the returned `next_sequence`.
 - A worker may end without a report. The coordinator can disclose the evidence
@@ -132,6 +135,23 @@
   `not_ready` does not disable `create_delegation` or require a repair wave.
 - Missing closure never blocks a final answer. Disclose material missing
   evidence rather than an internal ledger ceremony.
+- After sufficient finalized worker evidence, the coordinator selects the
+  verdict and automatically attempts the advisory write plus bounded
+  inspection. `ready_with_risks` never asks for user confirmation. Do not
+  conflate the independent `execution_outcome` with advisory bookkeeping.
+- `inspect_task.execution_outcome` has exactly `evidence_status`,
+  `finalized_report_count`, `completed_report_count`, and `outcome`. The
+  finalized count covers every finalized report; the completed count covers
+  semantically valid canonical finalized results with status `completed`.
+  `outcome` is `null` before the first such result and then follows the latest
+  such result as `completed` or `incomplete`; it is not a native-lifecycle
+  claim. `advisory_closure` separately reports `record_status` and
+  `latest_record`. Closure bookkeeping cannot change execution evidence.
+- `submit_governance_closure` returns `closure_confirmation` with
+  `inspection_status`, `reason`, and `attempts`. The service allows at most one
+  same-idempotency retry for a verified transient persistence or inspection
+  failure. If confirmation remains `unconfirmed`, disclose that advisory
+  limitation while retaining the independent `execution_outcome` evidence.
 - `submit_governance_closure` needs `subject_type`, the exact existing task or
   task-related initiative `subject_ref`, one `verdict`, and bounded opaque JSON
   `evidence`; neither compact ref is inferred. A durable `subject_id` may appear
@@ -140,9 +160,9 @@
 - Do not mix subject fields: task closures omit initiative status/completion
   fields, while initiative closures use the exact returned compact
   `initiative_ref`. The closure call has no subject digest argument.
-- `record_user_decision` is coordinator-asserted evidence. Preserve the exact
-  ordinary-chat response in `response_original` and a separate English
-  normalization in `response_en`; bind plan/report decisions to the exact
+- `record_user_decision` is coordinator-asserted evidence. Use neutral `prompt`
+  and preserve the exact ordinary-chat response in `response_original`; do not
+  send retired `prompt_en`/`response_en` duplicate fields. Bind plan/report decisions to the exact
   immutable digest. Only plan `approve` also requires a current ready approval
   view and opaque handle. Plan `request_revision` and `cancel` deliberately do
   not use volatile view binding, so non-plan timeline events cannot block saved

@@ -26,6 +26,7 @@ _MAX_TOOLS = 11
 MAX_PHYSICAL_JSONL_FRAME_BYTES = 256 * 1024
 _FRAME_READ_LIMIT = MAX_PHYSICAL_JSONL_FRAME_BYTES + 1
 _MAX_REQUEST_ID_BYTES = 512
+_TOOLS_LIST_CURSOR_PREFIX = "cortex-tools-list-v1:"
 _SERVER_STATE_CODES = frozenset({"storage_unavailable", "ledger_corrupt", "schema_unsupported", "ledger_error"})
 _RECOVERY_ACTIONS = {
     "validation_error": "Do not retry a shortened or UI-ellipsized value. For task-anchored tools, reuse structuredContent.handles.task_ref from the last success, then correct any remaining field shape.",
@@ -131,7 +132,17 @@ _PUBLIC_ERROR_MESSAGES = {
 _PUBLIC_SERVICE_CODES = frozenset((*_RECOVERY_ACTIONS, *_SERVER_STATE_CODES, "project_root_invalid", "storage_busy"))
 _SAFE_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_PATH_RE = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}|\[[0-9]{1,4}\]){0,16}$")
-_SAFE_EXPECTED_VALUES = frozenset({"restart_without_cursor", "advertised_input_schema"})
+_SAFE_EXPECTED_VALUES = frozenset({
+    "restart_without_cursor", "task_ref", "required_field", "no_extra_properties",
+    "string", "integer", "object", "array", "permitted_value", "constant",
+    "bounded_length", "bounded_range", "lowercase_section_label", "unique_items",
+    "permitted_input_shape", "bounded_json_value", "r_[0-9a-f]{12}",
+    "progress|result|synthesis|plan",
+})
+_SAFE_VALIDATION_REASONS = frozenset({
+    "required", "additional_property", "type", "enum", "constant", "length",
+    "range", "pattern", "unique_items", "conditional_shape", "encoded_size",
+})
 
 
 class _RpcError(Exception):
@@ -250,11 +261,38 @@ def _read_physical_jsonl_frame(stream: Any) -> tuple[str | None, bool]:
     return chunk, False
 
 
+def _tools_list_cursor(offset: int) -> str:
+    """Return the opaque continuation cursor for one catalog position."""
+    return f"{_TOOLS_LIST_CURSOR_PREFIX}{offset}"
+
+
+def _tools_list_offset(cursor: object, total: int) -> int | None:
+    """Resolve one tools/list cursor without accepting alternate spellings."""
+    if cursor is None or cursor == "":
+        return 0
+    if not isinstance(cursor, str) or not cursor.startswith(_TOOLS_LIST_CURSOR_PREFIX):
+        return None
+    suffix = cursor.removeprefix(_TOOLS_LIST_CURSOR_PREFIX)
+    if not suffix.isascii() or not suffix.isdecimal():
+        return None
+    offset = int(suffix)
+    return offset if 0 < offset < total else None
+
+
 def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") -> None:
     """Validate the compact JSON-Schema subset used by the V12 public API."""
     const = schema.get("const")
     if "const" in schema and value != const:
         raise _SchemaError(path, "value does not match the required constant")
+    # Validate the outer object shape before a discriminated union.  Without
+    # this ordering, an omitted common field (for example ``mode`` or the
+    # decision prose fields) can be reported as a misleading field from the
+    # first non-matching variant, forcing callers into trial-and-error.
+    if isinstance(value, Mapping):
+        required = schema.get("required")
+        for name in required if isinstance(required, list) else []:
+            if name not in value:
+                raise _SchemaError(f"{path}.{name}", f"missing required property {name!r}")
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
         for item in all_of:
@@ -405,6 +443,9 @@ def _safe_details(value: object) -> dict[str, object]:
     expected = value.get("expected")
     if isinstance(expected, str) and expected in _SAFE_EXPECTED_VALUES:
         details["expected"] = expected
+    reason = value.get("reason")
+    if isinstance(reason, str) and reason in _SAFE_VALIDATION_REASONS:
+        details["reason"] = reason
     retry_after_ms = value.get("retry_after_ms")
     if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool) and 0 <= retry_after_ms <= 60_000:
         details["retry_after_ms"] = retry_after_ms
@@ -451,12 +492,15 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
         path = details.get("path")
         field = details.get("field")
         expected = details.get("expected")
+        reason = details.get("reason")
         if isinstance(path, str) and not (path == "$" and isinstance(field, str)):
             parts.append(f"Location: {path}.")
         if isinstance(field, str):
             parts.append(f"Field: {field}.")
         if isinstance(expected, str):
             parts.append(f"Expected: {expected[:256]}.")
+        if isinstance(reason, str):
+            parts.append(f"Reason: {reason}.")
         retry_after_ms = details.get("retry_after_ms")
         if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool):
             parts.append(f"Retry after: {retry_after_ms} ms.")
@@ -493,20 +537,42 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
     if direct is not None:
         field = direct.group(1)
     else:
+        nested = re.search(r"\.([a-z][a-z0-9_]{0,63})(?:\[[0-9]{1,4}\])?$", error.path)
+        if nested is not None:
+            field = nested.group(1)
+    if field is None:
         named = re.fullmatch(
             r"(?:missing required|unsupported) property '([a-z][a-z0-9_]{0,63})'|property '([a-z][a-z0-9_]{0,63})' is not permitted for this input shape",
             error.message,
         )
         if named is not None:
             field = named.group(1) or named.group(2)
-    details = _safe_details({"path": error.path, "field": field, "expected": "advertised_input_schema"})
+    message = error.message
+    reason, expected = ("conditional_shape", "permitted_input_shape")
+    for prefix, mapped_reason, mapped_expected in (
+        ("missing required", "required", "required_field"),
+        ("unsupported", "additional_property", "no_extra_properties"),
+        ("value has the wrong type", "type", "string"),
+        ("value is not one", "enum", "progress|result|synthesis|plan" if field == "report_type" else "permitted_value"),
+        ("value does not match the required constant", "constant", "constant"),
+        ("string is ", "length", "bounded_length"),
+        ("number is ", "range", "bounded_range"),
+        ("string does not match", "pattern", "lowercase_section_label" if field == "section" else "r_[0-9a-f]{12}" if field == "report_refs" else "permitted_value"),
+        ("array has ", "length", "bounded_length"),
+        ("array items must", "unique_items", "unique_items"),
+        ("JSON value exceeds", "encoded_size", "bounded_json_value"),
+    ):
+        if message.startswith(prefix):
+            reason, expected = mapped_reason, mapped_expected
+            break
+    details = _safe_details({"path": error.path, "field": field, "reason": reason, "expected": expected})
     retryable, action = _recovery("validation_error", details)
     if tool_name == "create_delegation" and "delegation_id" in arguments:
         action = (
             "create_delegation is creation-only: never pass delegation_id to it. "
             "For retrieval, call read_delegation({delegation_ref, after_sequence}) exactly "
             "with the emitted delegation_ref and durable sequence. For an exact mutation retry, "
-            "reuse the original complete create_delegation payload with its returned retry_handle."
+            "reuse the original complete create_delegation payload with its returned idempotency_key."
         )
     elif tool_name == "set_governance_mode" and "governance_gate" in arguments:
         action = (
@@ -609,7 +675,7 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     for an authoritative durable identifier.
     """
     result: dict[str, Any] = {}
-    for field in ("idempotency_key", "retry_handle"):
+    for field in ("idempotency_key",):
         candidate = value.get(field)
         if isinstance(candidate, str) and candidate:
             result[field] = candidate
@@ -650,8 +716,11 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
         result["cursor"] = cursor
     sequence = value.get("next_sequence")
     if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
-        result["next_sequence"] = sequence
-    for field in ("next_chunk_index", "expected_chunk_count", "expected_content_digest"):
+        result["after_sequence"] = sequence
+    next_chunk_index = value.get("next_chunk_index")
+    if isinstance(next_chunk_index, int) and not isinstance(next_chunk_index, bool) and next_chunk_index >= 0:
+        result["chunk_index"] = next_chunk_index
+    for field in ("expected_chunk_count", "expected_content_digest"):
         candidate = value.get(field)
         if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
             result[field] = candidate
@@ -750,6 +819,16 @@ def serve_stdio(
         ):
             raise RuntimeError("Cortex v12 public tool binding is invalid")
 
+    catalog_tools = tuple(
+        {
+            "name": name,
+            "description": str(contract["description"]),
+            "inputSchema": dict(contract["inputSchema"]),
+            "outputSchema": dict(contract["outputSchema"]),
+        }
+        for name, contract in public_tools.items()
+    )
+
     def render(value: Mapping[str, Any]) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
@@ -775,6 +854,41 @@ def serve_stdio(
             })
             return
         write(payload)
+
+    def tools_list_page(request_id: object, cursor: object) -> Mapping[str, Any] | None:
+        """Build the largest complete catalog page that fits one JSONL frame.
+
+        MCP defines ``tools/list`` pagination through ``nextCursor``. The
+        public catalog can grow independently of the fixed physical JSONL
+        safety limit, so page selection measures the final JSON-RPC envelope
+        rather than relying on an incidental per-schema estimate.
+        """
+        start = _tools_list_offset(cursor, len(catalog_tools))
+        if start is None:
+            return None
+        page: list[Mapping[str, Any]] = []
+        for offset in range(start, len(catalog_tools)):
+            candidate = [*page, catalog_tools[offset]]
+            next_offset = offset + 1
+            result: dict[str, Any] = {"tools": candidate}
+            if next_offset < len(catalog_tools):
+                result["nextCursor"] = _tools_list_cursor(next_offset)
+            payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+            if len(render(payload).encode("utf-8")) > MAX_PHYSICAL_JSONL_FRAME_BYTES:
+                if not page:
+                    # One declared tool cannot be safely represented at the
+                    # transport boundary. Keep the established sanitized
+                    # server error rather than emitting an oversized frame.
+                    return {"tools": candidate}
+                break
+            page = candidate
+        if not page:
+            return {"tools": []}
+        next_offset = start + len(page)
+        result = {"tools": page}
+        if next_offset < len(catalog_tools):
+            result["nextCursor"] = _tools_list_cursor(next_offset)
+        return result
 
     def rpc_error(request_id: object, code: int, message: str, *, data: Mapping[str, Any] | None = None) -> None:
         error: dict[str, Any] = {"code": code, "message": message}
@@ -827,8 +941,15 @@ def serve_stdio(
                 if set(params) - {"protocolVersion", "capabilities", "clientInfo", "_meta"}:
                     raise _RpcError(-32602, "Invalid params")
                 client_info = params.get("clientInfo")
+                # Initialize is the only phase in which a server can select a
+                # compatible protocol.  Keep a valid client request live and
+                # counter-offer the one supported V12 version in the normal
+                # initialize result instead of failing the entire session for
+                # a version string the client can replace immediately.
                 if (
-                    params.get("protocolVersion") != MCP_PROTOCOL_VERSION
+                    not isinstance(params.get("protocolVersion"), str)
+                    or not params["protocolVersion"]
+                    or len(params["protocolVersion"].encode("utf-8")) > 64
                     or not isinstance(params.get("capabilities"), Mapping)
                     or not isinstance(client_info, Mapping)
                     or not isinstance(client_info.get("name"), str)
@@ -865,17 +986,10 @@ def serve_stdio(
                 if set(params) - {"cursor", "_meta"}:
                     raise _RpcError(-32602, "Invalid params")
                 cursor = params.get("cursor")
-                if cursor not in {None, ""}:
+                result = tools_list_page(request_id, cursor)
+                if result is None:
                     raise _RpcError(-32602, "Invalid params")
-                reply(request_id, {"tools": [
-                    {
-                        "name": name,
-                        "description": str(contract["description"]),
-                        "inputSchema": dict(contract["inputSchema"]),
-                        "outputSchema": dict(contract["outputSchema"]),
-                    }
-                    for name, contract in public_tools.items()
-                ]})
+                reply(request_id, result)
                 continue
             if method != "tools/call":
                 raise _RpcError(-32601, "Method not found")

@@ -284,6 +284,26 @@ class ProjectionMarkdownTests(unittest.TestCase):
             rendered = render_report(report_type=report_type, content=content, report={**report, "report_type": report_type})
             self.assertEqual(rendered, (fixture_root / f"{name}.md").read_text(encoding="utf-8"), name)
 
+    def test_v2_contract_evidence_has_dedicated_safe_sections(self) -> None:
+        common = {
+            "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "complete", "verification": ["Focused test"]}],
+            "deviations": ["No migration was needed."],
+            "unresolved": ["Live smoke remains with verification."],
+            "risks": ["One residual risk."],
+            "verification": ["Run focused suite."],
+        }
+        cases = {
+            "result": {"schema": "cortex/report/result/v2", "summary": "Result v2.", "outcome": "implemented", "changes": [], **common},
+            "plan": {"schema": "cortex/report/plan/v2", "summary": "Plan v2.", "scope": [], "stages": [], **common},
+            "synthesis": {"schema": "cortex/report/synthesis/v2", "summary": "Synthesis v2.", "findings": [], "recommendations": [], **common},
+        }
+        for report_type, content in cases.items():
+            rendered = render_report(report_type=report_type, content=content, report={"report_type": report_type, "assembly_state": "finalized", "status": "completed"})
+            self.assertIn("## Contract coverage", rendered)
+            self.assertIn("## Unresolved items", rendered)
+            self.assertIn("o_0123456789ab", rendered)
+            self.assertNotIn("## Additional details", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
