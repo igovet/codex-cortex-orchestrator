@@ -126,11 +126,12 @@ risk decision is needed. It never changes public-tool availability.
 
 `record_user_decision` appends `user_via_coordinator` evidence for an exact
 task, plan, initiative, delegation, or report through one closed canonical
-request containing the task and subject refs, decision type, English prompt,
-exact original response, English response normalization, and asserted user
-language; include `subject_digest` only for plan and report subjects. Decision
+request containing the task and subject refs, decision type, neutral `prompt`,
+exact arbitrary-Unicode `response_original`, and asserted user language; include
+`subject_digest` only for plan and report subjects. Retired `prompt_en` and
+`response_en` fields are rejected. Decision
 types are `approve`, `reject`, `request_revision`,
-`clarification`, `cancel`, `accept_risk`, and `override`. Plan/report decisions
+`clarification`, `cancel`, `accept_risk`, `override`, and `steer`. Plan/report decisions
 require the canonical `sha256:<64-lowercase-hex>` subject digest; a plan must
 already be finalized and completed. Only plan `approve` additionally requires a
 current ready `approval_view` with its exact opaque handle, view digest, and
@@ -190,6 +191,39 @@ initiative closure can aggregate task/report evidence, achieved goals,
 unfinished milestones, accepted exceptions, residual risk, retrospective, and
 recommended future work.
 
+The coordinator chooses the verdict from sufficient completed worker-report
+evidence after the documentation-impact stage. It then automatically attempts
+the advisory write and inspects the intended task or initiative record. This is
+an evidence-and-inspection convention owned by the coordinator; the backend
+does not infer completion from a closure, require a closure before a final
+answer, or make a closure a lifecycle gate. In particular,
+`ready_with_risks` is a coordinator verdict and never requires user
+confirmation. User confirmation belongs only to an applicable ordinary-chat
+product or plan-review decision.
+
+The public result keeps execution and bookkeeping separate. `inspect_task`
+returns:
+
+- `execution_outcome`, with exact fields `evidence_status`,
+  `finalized_report_count`, `completed_report_count`, and `outcome`. The
+  finalized count covers every finalized report. The completed count and
+  nullable `completed`/`incomplete` outcome derive only from semantically valid
+  canonical finalized results and make no native-lifecycle claim. The projection
+  remains independent of the closure record;
+- `advisory_closure`, with `record_status` (`recorded` or `not_recorded`) and
+  `latest_record` (the latest advisory closure object or `null`).
+
+`submit_governance_closure` automatically follows its write with bounded
+inspection and returns `closure_confirmation`. Its `inspection_status` is
+`confirmed` when the intended record is observed, or `unconfirmed` with one of
+`record_inspected`, `persistence_unavailable`, `inspection_unavailable`, or
+`record_not_observed` as `reason`; `attempts` is always 1 or 2. Cortex makes at
+most one same-idempotency retry for a verified transient persistence or
+inspection failure. If the write or inspection remains unavailable, the
+coordinator reports the unconfirmed advisory bookkeeping and retains the
+independent neutral execution evidence; the advisory limitation does not alter
+the closure verdict.
+
 After `not_ready`, the model may create rework, delegate a specialist, request a
 real user decision, or provide a final answer that clearly discloses the
 limitation. The backend never chooses that route. An initiative may close with
@@ -248,7 +282,13 @@ The release/protocol test must prove append-only mode history, preservation of a
 user override, free initiative status transitions, unresolved/cyclic warning
 retention, initiative closure with residual dependency risk, rework after
 `not_ready`, plan/report digest binding, decision append-only behavior, and
-final-answer availability without closure or a current view. The self-contained
+final-answer availability without closure or a current view. It must also prove
+that finalized worker-report evidence yields the same independent
+`execution_outcome` even without an advisory record, that `inspect_task` exposes the separate
+`advisory_closure` projection, that closure automatically performs intended
+inspection, and that one transient persistence/inspection retry yields a
+bounded `closure_confirmation` without changing execution evidence. The
+`ready_with_risks` path must complete without a user-confirmation request. The self-contained
 skill/profile lint checks the structural governance, coordinator-only, textual
 scope, language, plan-review, opaque-identity, worker-only report ownership,
 skill-resource, evidence-ordering, final-initiative-link, and

@@ -169,6 +169,35 @@ def _append(sections: list[Section], title: str, blocks: Sequence[Block]) -> Non
         sections.append(value)
 
 
+def _append_contract_evidence(
+    sections: list[Section], data: Mapping[str, Any], known: set[str], *, include_standard: bool = True,
+    include_deviations: bool = True,
+) -> None:
+    """Render canonical v2 outcome evidence as named, inert typed sections.
+
+    V2 reports deliberately carry the same evidence shape across result, plan,
+    and synthesis reports.  Keeping the rendering here prevents a valid v2
+    payload from falling through to a generic JSON-like "details" section and
+    makes legacy v1 payloads unchanged when the fields are absent.
+    """
+    fields: tuple[tuple[str, tuple[str, ...], str], ...] = (
+        ("Contract coverage", ("contract_coverage",), "bullets"),
+        ("Deviations", ("deviations",), "bullets"),
+        ("Unresolved items", ("unresolved", "unresolved_items"), "bullets"),
+        ("Risks", ("risks",), "bullets"),
+        ("Verification", ("verification",), "ordered"),
+    )
+    if not include_standard:
+        fields = fields[:3]
+    if not include_deviations:
+        fields = tuple(field for field in fields if field[0] != "Deviations")
+    for title, names, style in fields:
+        value = _lookup(data, *names, default=_MISSING)
+        if value is not _MISSING:
+            _append(sections, title, _blocks(value, style=style))
+            known.update(_normal_key(name) for name in names)
+
+
 def _finding(item: object, index: int, *, prefix: str = "Finding") -> Finding | None:
     if isinstance(item, Mapping):
         title_value = _lookup(item, "title", "name", "key", "id", "stage", default=f"{prefix} {index}")
@@ -457,6 +486,7 @@ class PlanPresenter:
         if details is not _MISSING:
             _append(sections, "Technical details", _blocks(details))
             known.update({"technical_details", "technical"})
+        _append_contract_evidence(sections, data, known, include_standard=False)
         remainder = _known_remainder(data, known)
         if remainder:
             _append(sections, "Technical details", _blocks(remainder))
@@ -515,6 +545,7 @@ class ResultPresenter:
             if value is not _MISSING:
                 _append(sections, title, _blocks(value, style=style))
                 known.update(_normal_key(name) for name in names)
+        _append_contract_evidence(sections, data, known, include_standard=False, include_deviations=False)
         remainder = _known_remainder(data, known)
         if remainder:
             _append(sections, "Additional details", _blocks(remainder))
@@ -551,6 +582,7 @@ class SynthesisPresenter:
         _append(sections, "Dependencies", _blocks(_lookup(data, "dependencies", "related_surfaces", default=_MISSING)))
         _append(sections, "Recommendations", _blocks(_lookup(data, "recommendations", "next", "next_actions", default=_MISSING)))
         _append(sections, "Coverage", _blocks(_lookup(data, "coverage", default=_MISSING)))
+        _append_contract_evidence(sections, data, set())
         return _document(_title_value(data, None, "Discovery synthesis"), report, summary=summary, sections=sections)
 
     def _review(self, data: Mapping[str, Any], report: Mapping[str, Any], title: str) -> Document:

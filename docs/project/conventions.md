@@ -95,18 +95,38 @@
   the exact returned `initiative_ref` as `subject_ref`.
   Durable `subject_id` values are evidence only. Never invent a closure digest
   field.
+- After sufficient finalized worker evidence, select `ready`,
+  `ready_with_risks`, or `not_ready`, then let the closure call automatically
+  attempt the advisory write and inspect the intended record. `ready_with_risks`
+  never requires user confirmation. Keep the independent `execution_outcome`
+  projection separate from `advisory_closure` bookkeeping.
+- `inspect_task` exposes the exact four-field `execution_outcome`:
+  `evidence_status`, `finalized_report_count`, `completed_report_count`, and
+  `outcome`. The finalized count covers every finalized report; the completed
+  count covers semantically valid canonical finalized results with status
+  `completed`. `outcome` is `null` before the first semantically valid canonical
+  finalized result and then reflects the latest such result as `completed` or
+  `incomplete`, without claiming native lifecycle. It exposes
+  `advisory_closure` with `record_status` and `latest_record`. A closure cannot
+  change execution evidence. `submit_governance_closure` returns
+  `closure_confirmation` with `inspection_status`, `reason`, and `attempts`;
+  only one same-idempotency retry is allowed for a verified transient
+  persistence or inspection failure. If the result is `unconfirmed`, disclose
+  advisory uncertainty without changing the evidence projection.
 - Reuse returned compact task/entity refs and every digest/cursor byte-for-byte.
   Durable `*_id` values are opaque non-callable evidence, not bearer
   capabilities. Never parse, concatenate, reconstruct, normalize, reformat, or
   append a suffix to any ref or ID.
 - Treat the `task_ref` on initiative operations only as the locator for the
   saved project ledger, never as governance permission or a lifecycle gate.
-- Use idempotency keys for retried writes. Same normalized payload returns the
-  original record; conflicting content must fail without mutation.
+- The first ledger mutation may omit an operation-scoped idempotency key. Copy
+  the returned server-issued `handles.idempotency_key` unchanged only for an
+  exact normalized-payload retry; the same payload replays the original result
+  and conflicting content returns a non-mutating `idempotency_conflict`.
 - Treat reports as immutable evidence. Pass only finalized relevant report refs
   and their exact manifest digests to later delegations. Worker consumption is
-  evidenced only by a `read_reports` call with `reader_kind="worker"` and the
-  consuming worker's own exact `consumer_delegation_ref`, plus its receipt;
+  evidenced by a `read_reports` call with the consuming worker's own exact
+  `consumer_delegation_ref` (the delegation must declare the input), plus its receipt;
   coordinator reads never substitute for that evidence.
 - The owning native worker alone calls `submit_report` for its plan, result,
   verification, synthesis, or documentation-impact evidence. Its completion
@@ -119,9 +139,10 @@
   coordinator-owned ordinary-chat hold, never a backend gate. A required review
   needs an explicit unambiguous response to that exact finalized plan digest;
   silence and unrelated text are not approval.
-- Use `single`, `begin`, sequential `append`, `finalize`, and `abort` report
-  modes. A single report is at most 65,536 bytes; each appended chunk is at most
-  32,768 bytes; a report has at most 256 chunks and 8 MiB total. Resume an
+- Use bounded `single` for one report, or `begin`, sequential `append`,
+  `finalize`, and `abort` for an assembled report. Each
+  appended chunk is at most 32,768 bytes; a report has at most 256 chunks and
+  8 MiB total. Resume an
   interrupted assembly from its manifest and `next_chunk_index`; never restart,
   skip, overwrite, or append after finalization/abort. Use an explicit
   superseding report for replacement.
@@ -134,8 +155,9 @@
   transitions. Bound task/delegation/governance inspection with `after_sequence`
   plus `limit` and preserve `next_sequence`/`has_more`.
 - Use `record_user_decision` only when coordinator policy has identified an
-  ordinary-chat response as a direct user decision. Append the exact response in
-  `response_original`, retain `response_en` as English normalization, and bind
+  ordinary-chat response as a direct user decision. Use neutral `prompt`, append
+  the exact original-language response in `response_original`, and retain no
+  `prompt_en`/`response_en` duplicate fields. Bind
   plan/report decisions to the exact canonical digest. Only plan `approve`
   additionally binds a current ready approval view and opaque approval handle;
   plan `request_revision` and `cancel` retain the exact plan digest/response
@@ -157,8 +179,8 @@
   dependencies, links, and closure interpretation.
 - Accept any transition among `proposed`, `active`, `paused`, `completed`,
   `closed`, and `cancelled`. Preserve unresolved/cyclic dependency warnings.
-- Treat `ready`, `ready_with_risks`, and `not_ready` as model-authored advisory
-  verdicts, never backend lifecycle outcomes.
+- Treat `ready`, `ready_with_risks`, and `not_ready` as coordinator-selected
+  advisory verdicts, never execution outcomes or backend lifecycle states.
 - Keep agent profiles advisory. Profiles describe roles and quality bars but do
   not select models, pin efforts, authorize tools, or enforce capabilities.
 - Select one exact packaged `profile_name` for every ordinary delegation and

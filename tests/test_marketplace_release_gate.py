@@ -24,6 +24,7 @@ import threading
 import time
 import tomllib
 from typing import Any, Mapping
+from unittest.mock import patch
 
 
 EXPECTED_TOOLS = (
@@ -49,7 +50,8 @@ EXPECTED_INPUT_FIELDS = {
     "inspect_task": {"task_ref", "after_sequence", "limit"},
     "create_delegation": {
         "task_ref", "objective", "role", "profile_name", "scope", "instructions",
-        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "model", "reasoning_effort",
+        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "outcome_assignments",
+        "model", "reasoning_effort",
         "idempotency_key",
     },
     "read_delegation": {"delegation_ref", "after_sequence", "limit"},
@@ -72,9 +74,9 @@ EXPECTED_INPUT_FIELDS = {
         "initiative_status", "completion_notes", "idempotency_key",
     },
     "record_user_decision": {
-        "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en",
-        "response_original", "response_en", "user_language", "approval_handle", "approval_view_content_digest",
-        "approval_view_source_sequence", "supersedes_decision_ref", "idempotency_key",
+        "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt",
+        "response_original", "user_language", "approval_handle", "approval_view_content_digest",
+        "approval_view_source_sequence", "supersedes_decision_ref", "idempotency_key", "steering_delta",
     },
 }
 
@@ -87,7 +89,7 @@ EXPECTED_REQUIRED_FIELDS = {
     "inspect_task": {"task_ref"},
     "create_delegation": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"},
     "read_delegation": {"delegation_ref"},
-    "submit_report": {"delegation_ref"},
+    "submit_report": {"delegation_ref", "mode"},
     "read_reports": {"report_refs"},
     "set_governance_mode": {"task_ref", "mode"},
     "record_initiative": {"task_ref"},
@@ -95,7 +97,7 @@ EXPECTED_REQUIRED_FIELDS = {
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
     "record_user_decision": {
         "task_ref", "subject_type", "subject_ref", "decision_type",
-        "prompt_en", "response_original", "response_en", "user_language",
+        "prompt", "response_original", "user_language",
     },
 }
 
@@ -231,6 +233,13 @@ def _public_arguments(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]
             "subject_ref",
             _task_ref(subject) if result.get("subject_type") == "task" else _record_ref(subject, "initiative" if result.get("subject_type") == "initiative" else "report" if result.get("subject_type") in {"plan", "report"} else "delegation"),
         )
+    # Historical fixtures used translated prompt/response fields.  The V12
+    # contract now stores the neutral prompt and exact original response only;
+    # keep the fixture conversion at this test boundary so schema assertions
+    # exercise the current public API.
+    if "prompt_en" in result:
+        result.setdefault("prompt", result.pop("prompt_en"))
+    result.pop("response_en", None)
     return result
 
 
@@ -254,6 +263,7 @@ class McpServer:
         self._selector.register(self._process.stdout, selectors.EVENT_READ)
         self._counter = 0
         self._output_schemas: dict[str, Mapping[str, Any]] = {}
+        self._last_response_frame_bytes = 0
         initialized = self.rpc(
             "initialize",
             {
@@ -304,6 +314,7 @@ class McpServer:
             payload = json.loads(line)
             if payload.get("id") == request_id:
                 require(isinstance(payload, dict), "MCP response is an object")
+                self._last_response_frame_bytes = len(line.encode("utf-8"))
                 return payload
         raise AssertionError(f"MCP request timed out: {method}")
 
@@ -536,11 +547,26 @@ def _require_idempotency_conflict(server: McpServer, name: str, arguments: Mappi
 
 
 def _list_tools(server: McpServer) -> dict[str, Mapping[str, Any]]:
-    response = server.rpc("tools/list", {})
-    result = response.get("result")
-    require(isinstance(result, Mapping), "tools/list returns MCP result")
-    raw_tools = result.get("tools")
-    require(isinstance(raw_tools, list), "tools/list returns tool list")
+    cursor: str | None = None
+    raw_tools: list[Any] = []
+    page_count = 0
+    while True:
+        response = server.rpc("tools/list", {} if cursor is None else {"cursor": cursor})
+        result = response.get("result")
+        require(isinstance(result, Mapping), "tools/list returns MCP result")
+        page = result.get("tools")
+        require(isinstance(page, list) and page, "tools/list returns a nonempty catalog page")
+        require(
+            server._last_response_frame_bytes <= 256 * 1024,
+            "every tools/list catalog page fits the physical JSONL frame limit",
+        )
+        raw_tools.extend(page)
+        next_cursor = result.get("nextCursor")
+        page_count += 1
+        if next_cursor is None:
+            break
+        require(isinstance(next_cursor, str) and next_cursor and page_count <= len(EXPECTED_TOOLS), "tools/list uses bounded opaque pagination")
+        cursor = next_cursor
     by_name = {
         item.get("name"): item
         for item in raw_tools
@@ -548,6 +574,7 @@ def _list_tools(server: McpServer) -> dict[str, Mapping[str, Any]]:
     }
     require(tuple(by_name) == EXPECTED_TOOLS, "tools/list order is the canonical V12 catalog")
     require(len(raw_tools) == len(EXPECTED_TOOLS), "tools/list contains exactly eleven V12 tools")
+    require(page_count > 1, "the complete eleven-tool catalog paginates before exceeding the JSONL frame limit")
     output_schemas = {
         name: item.get("outputSchema")
         for name, item in by_name.items()
@@ -817,6 +844,100 @@ def _task_payload(project_root: str | Path, *, objective: str, key: str, origina
     }
 
 
+def test_advisory_closure_outages_preserve_outcome_and_bound_same_key_retry() -> None:
+    """Keep execution truth intact when advisory bookkeeping is unavailable.
+
+    The public MCP release scenarios exercise durable writes.  This focused
+    service-facade fixture covers the two transient branches that cannot be
+    made deterministic through a subprocess-only black-box test: one
+    persistence retry that recovers, a persistence outage that exhausts the
+    retry budget, and an inspection outage after the closure write succeeds.
+    """
+    from cortex_runtime import v12_service
+
+    task_ref = "task-ref"
+    store = object()
+    report_evidence = {
+        "evidence_status": "finalized_reports_present",
+        "finalized_report_count": 1,
+        "completed_report_count": 1,
+        "outcome": "completed",
+    }
+    persisted = {
+        "closure": {"closure_id": "closure-test"},
+        "initiative": None,
+        "warnings": [],
+        "next_action": {"advisory_status": "recorded", "task_ref": task_ref},
+        "execution_outcome": report_evidence,
+        "replayed": False,
+    }
+
+    def invoke(*, mutation_side_effect: object, call_side_effect: object) -> dict[str, Any]:
+        with (
+            patch.object(v12_service, "_task_store", return_value=(store, "canonical-task")),
+            patch.object(v12_service, "compact_task_ref", return_value=task_ref),
+            patch.object(v12_service, "_mutation_store", side_effect=mutation_side_effect) as mutation,
+            patch.object(v12_service, "_call_task", side_effect=call_side_effect) as inspect,
+        ):
+            result = v12_service.submit_governance_closure(
+                task_ref=task_ref,
+                subject_type="task",
+                subject_ref=task_ref,
+                verdict="ready",
+                evidence={"result": "completed"},
+                idempotency_key="closure-same-key",
+            )
+            result["_mutation_calls"] = mutation.call_args_list
+            result["_inspection_calls"] = inspect.call_count
+            return result
+
+    recovered = invoke(
+        mutation_side_effect=[
+            v12_service.V12ServiceError("busy", code="storage_busy"),
+            persisted,
+        ],
+        call_side_effect=[{"execution_outcome": report_evidence}, {"advisory_closure": {"latest_record": {"closure_id": "closure-test"}}, "execution_outcome": report_evidence}],
+    )
+    require(
+        recovered["closure_confirmation"] == {"inspection_status": "confirmed", "reason": "record_inspected", "attempts": 1}
+        and recovered["execution_outcome"] == report_evidence
+        and len(recovered["_mutation_calls"]) == 2
+        and all(call.kwargs["idempotency_key"] == "closure-same-key" for call in recovered["_mutation_calls"]),
+        "a transient persistence failure retries exactly once with unchanged idempotency and confirms the advisory record",
+    )
+
+    persistence_unavailable = invoke(
+        mutation_side_effect=[
+            v12_service.V12ServiceError("busy", code="storage_busy"),
+            v12_service.V12ServiceError("unavailable", code="storage_unavailable"),
+        ],
+        call_side_effect=[{"execution_outcome": report_evidence}],
+    )
+    require(
+        persistence_unavailable["closure"] is None
+        and "advisory_status" not in persistence_unavailable["next_action"]
+        and persistence_unavailable["execution_outcome"] == report_evidence
+        and persistence_unavailable["closure_confirmation"] == {"inspection_status": "unconfirmed", "reason": "persistence_unavailable", "attempts": 2}
+        and len(persistence_unavailable["_mutation_calls"]) == 2,
+        "an exhausted persistence outage retains neutral finalized-report evidence and reports bounded unconfirmed advisory bookkeeping",
+    )
+
+    inspection_unavailable = invoke(
+        mutation_side_effect=[persisted],
+        call_side_effect=[
+            {"execution_outcome": report_evidence},
+            v12_service.V12ServiceError("inspection unavailable", code="storage_unavailable"),
+            v12_service.V12ServiceError("inspection unavailable", code="storage_unavailable"),
+        ],
+    )
+    require(
+        inspection_unavailable["closure_confirmation"] == {"inspection_status": "unconfirmed", "reason": "inspection_unavailable", "attempts": 2}
+        and inspection_unavailable["execution_outcome"] == report_evidence
+        and inspection_unavailable["_inspection_calls"] == 3,
+        "an inspection outage after persistence preserves neutral report evidence and performs only the bounded two inspections",
+    )
+
+
 def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> None:
     source_repository = Path(__file__).resolve().parents[1]
     support_scripts = source_repository / "scripts"
@@ -1003,8 +1124,6 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         "Use task-scoped or entity-scoped calls only with the exact compact handle returned",
         "The active MCP registry decides which scope and reference each operation accepts",
         "only a clickable Markdown link in the exact form",
-        "After the initiative closure write succeeds, use its returned next action only",
-        "This distinct task closure is mandatory whenever the task has an initiative",
         "documentation-impact delegation is still an ordinary post-approval delegation",
     ):
         require(marker in coordinator_skill, f"orchestrator preserves current knowledge and worker-only invariant: {marker}")
@@ -1019,12 +1138,13 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         "opaque immutable return data for every model caller",
         "The coordinator never calls `submit_report`",
         "Never create a report-only final initiative.",
-        "Each successful `create_delegation` returns root-level `native_dispatch` and",
-        "makes exactly one corresponding host spawn",
-            "copying `native_dispatch.task_name` and the nested native arguments byte-for-byte.",
+        "Each successful `create_delegation` returns renderer proof and a semantic",
+        "then makes one corresponding host spawn using the active host schema",
         "Every native worker commentary/update, inter-worker message, final response, tool-authored durable string, and report is English",
         "The coordinator selects an exact packaged `profile_name` independently from the bounded human-readable `role`",
         "self-asserted `documentation_not_required` value without linked and cited worker evidence is invalid",
+        "The active host schema, not bundled prose, determines the host task name and spawn arguments",
+        "The receipt does not assert that the host started, waited for, continued, steered, or observed a worker",
     ):
         require(marker in control_skill, f"control skill preserves current task-root and knowledge-contract authority: {marker}")
 
@@ -1168,6 +1288,23 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         require(_task_id(replayed_task) == task_a and replayed_task.get("replayed") is True, "task replay returns original task")
         _require_idempotency_conflict(
             server, "create_task", {**task_args, "objective": "Different payload for the same idempotency key."},
+        )
+        initial_projection = server.tool("inspect_task", {"task_id": task_a, "limit": 100})
+        initial_outcome = initial_projection.get("execution_outcome")
+        initial_advisory = initial_projection.get("advisory_closure")
+        require(
+            isinstance(initial_outcome, Mapping)
+            and initial_outcome == {
+                "evidence_status": "no_finalized_reports",
+                "finalized_report_count": 0,
+                "completed_report_count": 0,
+                "outcome": None,
+            }
+            and isinstance(initial_advisory, Mapping)
+            and initial_advisory.get("record_status") == "not_recorded"
+            and "closure_state" not in (initial_projection.get("task") or {})
+            and "open" not in json.dumps(initial_outcome, sort_keys=True),
+            "a task with no advisory closure reports neutral empty report evidence without a legacy task-state label",
         )
 
         ledger_database = home / ".codex" / "cortex" / "v12" / "projects" / f"p-{hashlib.sha256(canonical_project_a.encode('utf-8')).hexdigest()}" / "cortex.db"
@@ -1482,88 +1619,17 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         plan_digest = plan_chunk_one.get("expected_content_digest")
         require(isinstance(plan_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", plan_digest), "chunk append returns the whole immutable manifest digest")
 
-        plan_first_page = server.tool(
-            "read_reports",
-            {"task_id": task_a, "report_ids": [plan_id], "max_bytes": plan_chunk_zero.get("chunk_bytes")},
+        plan_metadata = server.tool(
+            "read_reports", {"task_id": task_a, "report_ids": [plan_id], "max_bytes": 0},
         )
+        plan_metadata_record = plan_metadata.get("reports", [{}])[0]
         require(
-            plan_first_page.get("has_more") is True
-            and isinstance(plan_first_page.get("next_cursor"), str)
-            and plan_first_page.get("returned_content_bytes") == plan_chunk_zero.get("chunk_bytes"),
-            "bounded report reads stop before the next complete JSON chunk and issue a scoped cursor",
-        )
-        plan_second_page = server.tool(
-            "read_reports",
-            {"task_id": task_a, "report_ids": [plan_id], "cursor": plan_first_page["next_cursor"], "max_bytes": 65_536},
-        )
-        second_chunks = plan_second_page.get("reports", [{}])[0].get("chunks") if isinstance(plan_second_page.get("reports"), list) else []
-        require(
-            isinstance(second_chunks, list) and [item.get("chunk_index") for item in second_chunks if isinstance(item, Mapping)] == [1],
-            "report cursor resumes from the next complete chunk without duplication",
-        )
-        mismatched_cursor, _ = server.tool_error(
-            "read_reports",
-            {
-                "task_id": task_a, "report_ids": [plan_id], "sections": ["plan.verification"],
-                "cursor": plan_first_page["next_cursor"], "max_bytes": 65_536,
-            },
-        )
-        require(_error_code(mismatched_cursor) == "report_cursor_scope_mismatch", "report cursors cannot be reused for a different section scope")
-
-        cursor_report = _report_id(server.tool(
-            "submit_report",
-            {
-                "task_id": task_a, "delegation_id": delegation_b, "mode": "begin", "report_type": "result",
-                "idempotency_key": "cursor-stale-begin",
-            },
-        ))
-        cursor_chunk_zero = server.tool(
-            "submit_report",
-            {
-                "task_id": task_a, "delegation_id": delegation_b, "mode": "append", "report_id": cursor_report,
-                "chunk_index": 0, "section": "cursor.first", "content": {"part": "first"},
-                "idempotency_key": "cursor-stale-append-zero",
-            },
-        )
-        server.tool(
-            "submit_report",
-            {
-                "task_id": task_a, "delegation_id": delegation_b, "mode": "append", "report_id": cursor_report,
-                "chunk_index": 1, "section": "cursor.second", "content": {"part": "second"},
-                "idempotency_key": "cursor-stale-append-one",
-            },
-        )
-        cursor_first_page = server.tool(
-            "read_reports",
-            {"task_id": task_a, "report_ids": [cursor_report], "max_bytes": cursor_chunk_zero["chunk_bytes"]},
-        )
-        cursor_token = cursor_first_page.get("next_cursor")
-        require(isinstance(cursor_token, str) and cursor_first_page.get("has_more") is True, "paged report reads bind an opaque v2 snapshot cursor")
-        server.tool(
-            "submit_report",
-            {
-                "task_id": task_a, "delegation_id": delegation_b, "mode": "append", "report_id": cursor_report,
-                "chunk_index": 2, "section": "cursor.third", "content": {"part": "third"},
-                "idempotency_key": "cursor-stale-append-two",
-            },
-        )
-        stale_cursor, stale_cursor_text = server.tool_error(
-            "read_reports",
-            {"task_id": task_a, "report_ids": [cursor_report], "cursor": cursor_token, "max_bytes": 65_536},
-        )
-        require(
-            _error_code(stale_cursor) == "report_cursor_stale"
-            and "Field: cursor." in stale_cursor_text
-            and "Expected: restart_without_cursor." in stale_cursor_text
-            and "Action: Restart read_reports without cursor" in stale_cursor_text,
-            "a changed selected report invalidates the bound continuation cursor with corrective restart guidance",
-        )
-        restarted_cursor_read = server.tool(
-            "read_reports", {"task_id": task_a, "report_ids": [cursor_report], "max_bytes": 65_536},
-        )
-        require(
-            [item.get("chunk_index") for item in restarted_cursor_read.get("reports", [{}])[0].get("chunks", []) if isinstance(item, Mapping)] == [0, 1, 2],
-            "restart without a stale cursor returns the current report snapshot without a gap",
+            isinstance(plan_metadata_record, Mapping)
+            and plan_metadata_record.get("assembly_state") == "assembling"
+            and plan_metadata_record.get("next_chunk_index") == 2
+            and plan_metadata_record.get("chunks") == []
+            and plan_metadata.get("returned_content_bytes") == 0,
+            "coordinator report reads expose assembling metadata without leaking chunk bodies",
         )
 
         incomplete_plan = server.tool("read_reports", {"task_id": task_a, "report_ids": [plan_id], "max_bytes": 0})
@@ -1599,6 +1665,56 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "plan finalization atomically binds status, chunk count, and manifest digest",
         )
         require(server.tool("submit_report", plan_finalize_args).get("replayed") is True, "finalized plan acknowledgement is idempotent")
+        plan_consumer = server.tool(
+            "create_delegation",
+            {
+                **_delegation_payload(task_a, model="gpt-5.6-terra", effort="high", key="delegation-plan-consumer", profile_name="qa_engineer"),
+                "role": "plan-consumer", "scope": "Read the finalized plan as declared worker input.",
+                "input_report_ids": [plan_id],
+            },
+        )
+        plan_body_read = server.tool(
+            "read_reports",
+            {"task_id": task_a, "report_ids": [plan_id], "consumer_delegation_id": _delegation_id(plan_consumer), "max_bytes": 65_536},
+        )
+        require(
+            [item.get("chunk_index") for item in plan_body_read.get("reports", [{}])[0].get("chunks", []) if isinstance(item, Mapping)] == [0, 1],
+            "declared worker reads expose both finalized plan chunks in canonical order",
+        )
+        plan_first_page = server.tool(
+            "read_reports",
+            {
+                "task_id": task_a, "report_ids": [plan_id], "consumer_delegation_id": _delegation_id(plan_consumer),
+                "max_bytes": plan_chunk_zero.get("chunk_bytes"),
+            },
+        )
+        require(
+            plan_first_page.get("has_more") is True
+            and isinstance(plan_first_page.get("next_cursor"), str)
+            and plan_first_page.get("returned_content_bytes") == plan_chunk_zero.get("chunk_bytes"),
+            "bounded worker report reads stop before the next complete JSON chunk and issue a scoped cursor",
+        )
+        plan_second_page = server.tool(
+            "read_reports",
+            {
+                "task_id": task_a, "report_ids": [plan_id], "consumer_delegation_id": _delegation_id(plan_consumer),
+                "cursor": plan_first_page["next_cursor"], "max_bytes": 65_536,
+            },
+        )
+        second_chunks = plan_second_page.get("reports", [{}])[0].get("chunks") if isinstance(plan_second_page.get("reports"), list) else []
+        require(
+            isinstance(second_chunks, list) and [item.get("chunk_index") for item in second_chunks if isinstance(item, Mapping)] == [1],
+            "worker report cursor resumes from the next complete chunk without duplication",
+        )
+        mismatched_cursor, _ = server.tool_error(
+            "read_reports",
+            {
+                "task_id": task_a, "report_ids": [plan_id], "sections": ["plan.verification"],
+                "consumer_delegation_id": _delegation_id(plan_consumer),
+                "cursor": plan_first_page["next_cursor"], "max_bytes": 65_536,
+            },
+        )
+        require(_error_code(mismatched_cursor) == "report_cursor_scope_mismatch", "worker report cursors cannot be reused for a different section scope")
         append_after_finalize, _ = server.tool_error("submit_report", plan_chunk_one_args | {"idempotency_key": "plan-append-after-finalize"})
         require(_error_code(append_after_finalize) == "report_state_conflict", "terminal reports reject later chunk appends")
 
@@ -1739,7 +1855,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "response_en": "Yes, approved.", "user_language": "ru", "idempotency_key": "plan-decision-approve",
         }
         plan_decision_args.update(_approval_binding(server.tool(
-            "read_reports", {"task_id": task_a, "report_ids": [plan_id], "max_bytes": 65_536},
+            "read_reports", {"task_id": task_a, "report_ids": [plan_id], "max_bytes": 0},
         )))
         wrong_plan_digest, _ = server.tool_error(
             "record_user_decision",
@@ -1755,13 +1871,14 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
         require(
             isinstance(decision_record, Mapping)
             and decision_record.get("attribution") == "user_via_coordinator"
-            and decision_record.get("response_en_excerpt") == plan_decision_args["response_en"]
+            and "response_en_excerpt" not in decision_record
+            and "response_en" not in decision_record
             and "response_original" not in decision_record
             and plan_decision_args["response_original"] not in json.dumps(decision_record, ensure_ascii=False),
-            "user-decision receipts preserve safe attribution and English context without echoing verbatim original user wording",
+            "user-decision receipts preserve safe attribution without echoing translated or original response wording",
         )
         require(server.tool("record_user_decision", plan_decision_args).get("replayed") is True, "user decision replay is idempotent")
-        _require_idempotency_conflict(server, "record_user_decision", plan_decision_args | {"response_en": "No."})
+        _require_idempotency_conflict(server, "record_user_decision", plan_decision_args | {"response_original": "No."})
         revised_plan = server.tool(
             "submit_report",
             {
@@ -1808,11 +1925,11 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             and brief_decisions[0].get("decision_id") == decision_id
             and brief_decisions[0].get("subject_type") == "plan"
             and brief_decisions[0].get("subject_id") == plan_id
-            and brief_decisions[0].get("response_en") == plan_decision_args["response_en"]
             and brief_decisions[0].get("user_language") == "ru"
+            and "response_en" not in brief_decisions[0]
             and "response_original" not in brief_decisions[0]
             and plan_decision_args["response_original"] not in json.dumps(brief_decisions, ensure_ascii=False),
-            "worker brief carries only selected English-normalized user-decision evidence, never verbatim original wording",
+            "worker brief carries only selected decision metadata, never translated or original response wording",
         )
         decision_message = decision_brief.get("worker_message") if isinstance(decision_brief, Mapping) else None
         decision_renderer = decision_brief.get("renderer") if isinstance(decision_brief, Mapping) else None
@@ -1820,8 +1937,8 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             isinstance(decision_message, str)
             and "selected_user_decisions" in decision_message
             and plan_decision_args["response_original"] not in decision_message
-            and plan_decision_args["response_en"] in decision_message,
-            "trusted renderer labels selected decisions as untrusted data and excludes their original-language response",
+            and plan_decision_args["response_en"] not in decision_message,
+            "trusted renderer labels selected decisions as untrusted data and excludes response wording",
         )
         require(
             isinstance(decision_renderer, Mapping)
@@ -1832,7 +1949,19 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
 
         read_delegation = server.tool("read_delegation", {"delegation_id": delegation_a, "after_sequence": 0})
         require(read_delegation.get("delegation", {}).get("delegation_id") == delegation_a, "read_delegation returns requested delegation")
-        requested_order = server.tool("read_reports", {"task_id": task_a, "report_ids": [report_b, report_a]})
+        report_consumer = server.tool(
+            "create_delegation",
+            {
+                **_delegation_payload(task_a, model="gpt-5.6-terra", effort="high", key="delegation-report-consumer", profile_name="qa_engineer"),
+                "role": "report-consumer", "scope": "Read only the declared finalized result inputs.",
+                "input_report_ids": [report_b, report_a],
+            },
+        )
+        report_consumer_id = _delegation_id(report_consumer)
+        requested_order = server.tool(
+            "read_reports",
+            {"task_id": task_a, "report_ids": [report_b, report_a], "consumer_delegation_id": report_consumer_id},
+        )
         ordered_reports = requested_order.get("reports")
         require(isinstance(ordered_reports, list), "read_reports returns reports")
         require([item.get("report_id") for item in ordered_reports if isinstance(item, Mapping)] == [report_b, report_a], "read_reports preserves requested report order")
@@ -1932,7 +2061,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "idempotency_key": "plan-decision-approve-after-full",
         }
         post_full_plan_decision_args.update(_approval_binding(server.tool(
-            "read_reports", {"task_id": task_a, "report_ids": [plan_id], "max_bytes": 65_536},
+            "read_reports", {"task_id": task_a, "report_ids": [plan_id], "max_bytes": 0},
         )))
         post_full_decision_id = _decision_id(server.tool("record_user_decision", post_full_plan_decision_args))
 
@@ -2080,7 +2209,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                 "idempotency_key": "closure-docs-report",
             },
         ))
-        server.tool("read_reports", {"task_id": task_a, "report_ids": [docs_closure_report]})
+        server.tool("read_reports", {"task_id": task_a, "report_ids": [docs_closure_report], "max_bytes": 0})
 
         initiative_closure = server.tool(
             "submit_governance_closure",
@@ -2237,7 +2366,9 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "only reports and plans become user-facing Markdown projections",
         )
 
-        verified_report = server.tool("read_reports", {"task_id": task_a, "report_ids": [report_a]})
+        verified_report = server.tool(
+            "read_reports", {"task_id": task_a, "report_ids": [report_a], "consumer_delegation_id": report_consumer_id},
+        )
         report_view = verified_report.get("human_view")
         require(
             isinstance(report_view, Mapping)
@@ -2260,7 +2391,9 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "idempotent canonical replay dynamically re-observes an altered derived view as conflict",
         )
         require(altered_report_view.read_bytes() == altered_bytes, "projection conflict preserves the externally altered Markdown file")
-        conflict_read = server.tool("read_reports", {"task_id": task_a, "report_ids": [report_a]})
+        conflict_read = server.tool(
+            "read_reports", {"task_id": task_a, "report_ids": [report_a], "consumer_delegation_id": report_consumer_id},
+        )
         require(
             conflict_read.get("reports", [{}])[0].get("content") == first_report_args["content"],
             "projection conflict never rolls back or blocks canonical report reads",
@@ -2484,8 +2617,22 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             "create_task",
             _task_payload(legacy_project_root, objective="Second idempotent migration-open task.", key="legacy-migrate-two"),
         ))
-        require(len({legacy_task_id, migrated_task_one, migrated_task_two}) == 3, "automatic migration preserves legacy and newly allocated task identities")
-        migrated = legacy_server.tool("read_reports", {"task_id": legacy_task_id, "report_ids": [legacy_report_id]})
+        require(
+            len({legacy_task_id, migrated_task_one, migrated_task_two}) == 3,
+            "the public create_task upgrade succeeds without a schema_unsupported JSON-RPC error and preserves legacy/new task identities",
+        )
+        legacy_consumer = _delegation_id(legacy_server.tool(
+            "create_delegation",
+            {
+                **_delegation_payload(legacy_task_id, model="gpt-5.6-luna", effort="high", key="legacy-report-consumer", profile_name="qa_engineer"),
+                "role": "legacy-consumer", "scope": "Read the migrated finalized report as declared worker input.",
+                "input_report_ids": [legacy_report_id],
+            },
+        ))
+        migrated = legacy_server.tool(
+            "read_reports",
+            {"task_id": legacy_task_id, "report_ids": [legacy_report_id], "consumer_delegation_id": legacy_consumer},
+        )
         migrated_report = migrated.get("reports", [{}])[0]
         require(
             migrated_report.get("assembly_state") == "finalized"
@@ -2539,6 +2686,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
             (7, "v12-ready-approval-handles"),
             (8, "v12-advisory-governance"),
             (9, "v12-canonical-report-semantics"),
+            (10, "v12-effective-outcome-coverage"),
             ],
         "legacy V12 shard records each additive V12 migration exactly once",
     )
@@ -2610,6 +2758,7 @@ def test_cortex_v12_plugin_is_publishable_and_nonblocking(tmp_path: Path) -> Non
                 (7, "v12-ready-approval-handles"),
                 (8, "v12-advisory-governance"),
                 (9, "v12-canonical-report-semantics"),
+                (10, "v12-effective-outcome-coverage"),
             ]
         and concurrent_task_count == (3,)
         and concurrent_integrity == ("ok",)
@@ -3189,14 +3338,15 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
             },
         )
         require(isinstance((primary_assessment.get("assessment") or {}).get("assessment_id"), str), "primary governance write has a durable identity")
-        plan_read = server.tool("read_reports", {"task_id": task_id, "report_ids": [plan_id], "max_bytes": 65_536})
+        plan_read = server.tool("read_reports", {"task_id": task_id, "report_ids": [plan_id], "max_bytes": 0})
         plan_record = (plan_read.get("reports") or [{}])[0]
         require(
             isinstance(plan_record, Mapping)
             and plan_record.get("content_digest") == plan_digest
-            and [item.get("chunk_index") for item in plan_record.get("chunks") or [] if isinstance(item, Mapping)] == [0, 1],
-                "only the report reader exposes both verified chunks in canonical order",
-            )
+            and plan_record.get("chunks") == []
+            and plan_read.get("returned_content_bytes") == 0,
+                "coordinator reads expose finalized plan metadata without report bodies",
+        )
         production_approval_binding = _approval_binding(plan_read)
 
         decision = server.tool(
@@ -3412,7 +3562,11 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
                 "idempotency_key": "production-task-closure",
             },
         )
-        require((task_closure.get("next_action") or {}).get("state") == "task_closed", "initiative closure is followed by its distinct task closure")
+        require(
+            (task_closure.get("next_action") or {}).get("advisory_status") == "recorded"
+            and (task_closure.get("closure_confirmation") or {}).get("inspection_status") == "confirmed",
+            "initiative closure returns separate advisory bookkeeping with confirmed scoped inspection",
+        )
 
         def concurrent_governance(index: int) -> str:
             child = McpServer(entrypoint=entrypoint, cwd=project, env=_runtime_environment(home))
@@ -3586,7 +3740,7 @@ def test_v12_production_task_acceptance_reconciles_live_task_failures(tmp_path: 
     )
     expected_prefix = [
         "task_created", "delegation_created", "report_started", "report_chunk_appended", "report_chunk_appended", "report_submitted",
-        "governance_mode_set", "report_read", "user_decision_recorded", "delegation_created", "report_submitted",
+        "governance_mode_set", "user_decision_recorded", "delegation_created", "report_submitted",
         "delegation_created", "report_read", "report_read", "report_submitted", "delegation_created",
             "report_read", "report_read", "report_read", "report_submitted", "delegation_created",
         "report_submitted", "initiative_created", "initiative_revised_by_closure", "governance_closure_submitted",
@@ -3736,7 +3890,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
             {"task_id": task_id, "mode": "full", "source": "model", "rationale": "Retained task requires an advisory repair audit.", "idempotency_key": "backfill-governance"},
         )
         backfill_approval_binding = _approval_binding(server.tool(
-            "read_reports", {"task_id": task_id, "report_ids": [plan_id], "max_bytes": 65_536},
+            "read_reports", {"task_id": task_id, "report_ids": [plan_id], "max_bytes": 0},
         ))
         decision_id = _decision_id(server.tool(
             "record_user_decision",
@@ -3838,7 +3992,7 @@ def test_v12_public_timeline_backfill_repairs_only_unambiguous_live_shape(tmp_pa
                 "idempotency_key": "backfill-task-closure",
             },
         ).get("closure") or {}).get("closure_id")
-        require(isinstance(task_closure_id, str), "legacy-shaped fixture has the distinct mandatory task closure")
+        require(isinstance(task_closure_id, str), "legacy-shaped fixture preserves an optional advisory task record")
     finally:
         server.close()
 

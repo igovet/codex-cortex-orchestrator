@@ -63,7 +63,8 @@ EXPECTED_TOOL_FIELDS = {
     "inspect_task": {"task_ref", "after_sequence", "limit"},
     "create_delegation": {
         "task_ref", "objective", "role", "profile_name", "scope", "instructions",
-        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "model", "reasoning_effort",
+        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "outcome_assignments",
+        "model", "reasoning_effort",
         "idempotency_key",
     },
     "read_delegation": {"delegation_ref", "after_sequence", "limit"},
@@ -98,7 +99,7 @@ EXPECTED_TOOL_REQUIRED = {
     "inspect_task": {"task_ref"},
     "create_delegation": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"},
     "read_delegation": {"delegation_ref"},
-    "submit_report": {"delegation_ref"},
+    "submit_report": {"delegation_ref", "mode"},
     "read_reports": {"report_refs"},
     "set_governance_mode": {"task_ref", "mode"},
     "record_initiative": {"task_ref"},
@@ -106,14 +107,14 @@ EXPECTED_TOOL_REQUIRED = {
     "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
     "record_user_decision": {
         "task_ref", "subject_type", "subject_ref", "decision_type",
-        "prompt_en", "response_original", "response_en", "user_language",
+        "prompt", "response_original", "user_language",
     },
 }
 EXPECTED_DECISION_FIELDS = {
-    "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt_en",
-    "response_original", "response_en", "user_language", "approval_handle",
+    "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt",
+    "response_original", "user_language", "approval_handle",
     "approval_view_content_digest", "approval_view_source_sequence", "supersedes_decision_ref",
-    "idempotency_key",
+    "idempotency_key", "steering_delta",
 }
 ACTIVE_RUNTIME_FILES = {
     "__init__.py",
@@ -356,8 +357,18 @@ def validate_skills(plugin: Path) -> None:
         if f"\nname: {name}\n" not in content:
             fail(f"skill frontmatter must identify {name}")
     orchestrator = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-    if "gpt-5.6-luna" not in orchestrator or "fork_turns=\"none\"" not in orchestrator:
-        fail("orchestrator guidance must preserve the native Luna/default dispatch rule")
+    # Native argument names and lifecycle fields belong to the active host
+    # schema, not to the packaged prose.  Keep the semantic boundary in the
+    # release gate while allowing the host to evolve its concrete fields.
+    orchestrator_semantics = " ".join(orchestrator.split()).lower()
+    lifecycle_markers = (
+        "active host schema is authoritative for the actual spawn projection",
+        "do not copy an assumed native operation name, argument shape, lifecycle state",
+        "a host result that is absent or ambiguous is an external limitation",
+        "do not infer lifecycle from a stable name",
+    )
+    if "gpt-5.6-luna" not in orchestrator_semantics or any(marker not in orchestrator_semantics for marker in lifecycle_markers):
+        fail("orchestrator guidance must describe host-schema-owned native lifecycle semantics")
     required_safety_markers = (
         "deterministically matches the actual user message",
         "must not inject a contradictory target language",
@@ -494,6 +505,15 @@ def validate_runtime(plugin: Path) -> None:
                 or "byte_budget" in properties
             ):
                 fail("read_reports must expose only the canonical integer max_bytes field")
+            submit_section = contracts["submit_report"]["inputSchema"]["properties"].get("section")
+            read_sections = properties.get("sections")
+            read_section = read_sections.get("items") if isinstance(read_sections, dict) else None
+            if not (
+                isinstance(submit_section, dict)
+                and isinstance(read_section, dict)
+                and all(submit_section.get(item) == read_section.get(item) for item in ("type", "maxLength", "pattern"))
+            ):
+                fail("submit_report.section and read_reports.sections items must share the canonical bounded section schema")
         if name == "create_delegation":
             scope = properties.get("scope")
             if (
@@ -544,7 +564,7 @@ def validate_runtime(plugin: Path) -> None:
                 or not isinstance(decision_type, dict)
                 or decision_type.get("type") != "string"
                 or decision_type.get("enum") != [
-                    "approve", "reject", "request_revision", "clarification", "cancel", "accept_risk", "override",
+                    "approve", "reject", "request_revision", "clarification", "cancel", "accept_risk", "override", "steer",
                 ]
             ):
                 fail("record_user_decision must preserve the canonical V12 subject and decision enums")

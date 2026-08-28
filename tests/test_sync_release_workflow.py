@@ -111,7 +111,7 @@ exit 0
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
         after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
-        assert re.fullmatch(r"12\.0\.0\+codex\.\d{14}", after_version)
+        assert re.fullmatch(r"12\.1\.0\+codex\.\d{14}", after_version)
         assert after_version > before_version
         assert (codex_home / "plugins/cache/cortex/cortex" / after_version).is_dir()
         assert not bytecode.exists()

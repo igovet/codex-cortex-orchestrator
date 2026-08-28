@@ -522,7 +522,7 @@ flowchart TB
         W1 --> A1["Discover · inspect · analyze<br/>edit · build · test as authorized"]
         W2 --> A2["Independent project action<br/>within its textual ownership boundary"]
         WN --> AN["Specialist · reviewer · writer<br/>or replacement work"]
-        A1 --> P1["submit_report<br/>single or chunked begin · append · finalize<br/>progress · result · synthesis · plan<br/>opaque prose; compact report_ref returned"]
+        A1 --> P1["submit_report<br/>single, or begin · append · finalize (or abort)<br/>progress · result · synthesis · plan<br/>opaque prose; compact report_ref returned"]
         A2 --> P2["submit_report<br/>partial/completed/blocked/failed"]
         AN --> P3["submit_report<br/>evidence + limitations"]
         WN -. "may end without report" .-> MISS["Evidence gap<br/>no lifecycle blocker"]
@@ -532,7 +532,7 @@ flowchart TB
         VCHECK --> VP["submit_report<br/>verification evidence + limitations"]
 
         PLANDEL["Coordinator creates planner delegation"] --> PW["Planner worker<br/>English project solution plan report"]
-        PW --> PLANWRITE["submit_report type=plan<br/>single or begin · append · finalize<br/>stable ID · immutable manifest digest"]
+        PW --> PLANWRITE["submit_report type=plan<br/>single, or begin · append · finalize (or abort)<br/>stable ID · immutable manifest digest"]
         PLANWRITE --> PLANPOLICY{"review_policy + coordinator policy<br/>informational · required<br/>required review pauses only plan-dependent work"}
 
         DOCDEL["Coordinator creates documentation-sync delegation"] --> DW["Technical-writer worker<br/>update project + feature knowledge"]
@@ -572,7 +572,7 @@ flowchart TB
     REWORK --> SPLIT
     REVIEW -- "real product/scope decision" --> ASK["Ask user in ordinary chat<br/>in the user's latest meaningful language"]
     ASK --> REVIEW
-    P2 -- "blocked report or real worker question" --> QUESTION["Coordinator asks a complete localized question<br/>and records the user's exact response + English normalization"]
+    P2 -- "blocked report or real worker question" --> QUESTION["Coordinator asks a complete localized question<br/>and records the user's exact original response"]
     QUESTION --> SAMEWORKER{"Same persisted worker is live and safe to resume?"}
     SAMEWORKER -- "yes" --> RESUME["followup_task to exact native_task_name<br/>decision + report refs copied byte-for-byte"]
     SAMEWORKER -- "no / ambiguous" --> REWORK
@@ -584,7 +584,7 @@ flowchart TB
     PLANWRITE -. "finalized plan report is predecessor" .-> D1
     PLANPOLICY -- "required or light/full review relation" --> PLANLINK["Read ready approval_view; publish exact plan revision<br/>and plans/current.md as a localized clickable link"]
     PLANLINK --> UDEC{"User decision<br/>approve · reject · request_revision<br/>clarification · cancel · accept_risk · override"}
-    UDEC --> DECISION["record_user_decision<br/>append original + English normalization<br/>bind exact compact subject_ref<br/>and plan/report digest when applicable<br/>ready-view sequence and approval_handle for plan approve"]
+    UDEC --> DECISION["record_user_decision<br/>append neutral prompt + exact original response<br/>bind exact compact subject_ref<br/>and plan/report digest when applicable<br/>ready-view sequence and approval_handle for plan approve"]
     DECISION -- "approve exact revision" --> EVIDENCE
     DECISION -- "revision requested" --> REWORK
     DECISION -- "clarification only" --> PLANLINK
@@ -826,17 +826,32 @@ apply.
    knowledge paths, but never edits or verifies the documentation itself and
    never calls `submit_report`.
 10. **Advisory close and active publication.** After that conditional
-   documentation stage and settled finalized evidence, the model makes a best
-   effort to store a supported exact-subject closure. The no-impact route can
-   create or update an initiative with the exact task relationship, the exact
+   documentation stage and sufficient finalized worker evidence, the model
+   selects the advisory verdict `ready`, `ready_with_risks`, or `not_ready` and
+   automatically attempts `submit_governance_closure`, followed by bounded
+   inspection of the intended record. The no-impact route can create or update
+   an initiative with the exact task relationship, the exact
    documentation-impact report ref, and every other required report link; cite
    those refs and returned digests in closure evidence; and inspect task and
-   initiative governance when useful. A separate task closure may be recorded
-   when a distinct task verdict helps, but neither closure is a lifecycle gate.
-   The model claims durable `ready` only after the relevant write and inspection
-   agree; otherwise it gives the user a localized final answer with verified
-   host-private links and concise summaries, disclosing any closure or
-   projection limitation and summarizing canonical SQLite evidence inline.
+   initiative governance. A separate task closure may be recorded when a
+   distinct task verdict helps, but neither closure is a lifecycle gate and
+   `ready_with_risks` never asks the user for confirmation. The separate
+   `execution_outcome` projection contains exactly `evidence_status`,
+   `finalized_report_count`, `completed_report_count`, and `outcome`. The
+   finalized count covers every finalized report; the completed count and
+   nullable `completed`/`incomplete` outcome derive only from semantically valid
+   canonical finalized results. This evidence makes no native-lifecycle claim
+   and remains unchanged by advisory bookkeeping.
+   `submit_governance_closure` makes at most one same-idempotency retry for a
+   verified transient persistence or inspection failure. If confirmation still
+   cannot be established, it returns
+   `closure_confirmation.inspection_status`=`unconfirmed` with a reason such as
+   `persistence_unavailable` or `inspection_unavailable`; this discloses
+   advisory uncertainty without changing neutral finalized-report evidence. The
+   model gives the user a
+   localized final answer with verified host-private links and concise
+   summaries, disclosing any closure or projection limitation and summarizing
+   canonical SQLite evidence inline.
 
 ### V12 delegation and report protocol
 
@@ -844,8 +859,9 @@ A delegation is a durable, model-authored work record. Its required `scope` is
 a non-empty text string of at most 65,536 characters containing a concise
 boundary of worker ownership; detailed execution belongs in `instructions`, and
 object-valued scopes are invalid. `create_delegation` returns a stable
-compact `delegation_ref`, a compact root-level `native_dispatch` payload, and
-the loaded `renderer` proof. The complete rendered worker message appears only
+compact `delegation_ref`, a semantic delegation receipt consisting of the
+compact root-level `native_dispatch` payload and loaded `renderer` proof. The
+complete rendered worker message appears only
 once, at `native_dispatch.native_arguments.message`, so the coordinator copies
 that receipt directly into exactly one matching host spawn and does not call
 `read_delegation` on the healthy path. The coordinator selects one exact
@@ -869,16 +885,18 @@ value from a successful result or current inspection before every call. Never
 parse, concatenate, reconstruct, normalize, reformat, or append a suffix to one
 of these values, even when a validation error exposes its syntax.
 
-`submit_report` supports five modes without adding another public tool. Every
-submission must set its operation explicitly:
+`submit_report` supports one canonical write protocol without adding another
+public tool. A bounded report can use `single`; larger reports use the assembled
+operations explicitly:
 
-- `single` accepts one `progress`, `result`, `synthesis`, or `plan` JSON body up
-  to 64 KiB;
+- `single` stores one bounded complete report;
 - `begin` creates a stable assembling `report_ref`;
 - sequential `append` adds a labeled complete-JSON chunk up to 32 KiB;
 - `finalize` accepts only the exact chunk count and manifest digest, then stores
   the final status;
 - `abort` retains the existing chunks with an English reason.
+
+The assembled operations retain one stable report reference across the stream.
 
 Chunked reports allow at most 256 chunks and 8 MiB per report, eight assembling
 reports and 16 MiB of assembling content per task, and 128 MiB retained content
@@ -889,20 +907,26 @@ section filters, an opaque selection-scoped cursor, and `max_bytes` up to 65,536
 It returns ordered, complete JSON chunks
 within a 224 KiB response ceiling; `max_bytes=0` returns metadata only. A small complete one-chunk report may also
 expose legacy `content`. Task/delegation inspection never exposes bodies.
+The service preflights the complete accepted request and response budgets before
+materializing a page, so aggregate report counts/chunks and encoded response
+size fail deterministically without partial output. Human-view rendering also
+preflights the aggregate output: at most 512 files and 32 MiB total, with each
+file capped at 10 MiB.
 
 Later delegations receive only relevant finalized `report_refs` and their exact
 manifest digests, plus at most 20 selected user-decision refs. Before using a
-predecessor's full body, a worker calls `read_reports` with
-`reader_kind="worker"` and its
-own `consumer_delegation_ref`; the database records the exact returned digest,
+predecessor's full body, a worker calls `read_reports` with its own
+`consumer_delegation_ref`; that delegation must declare the predecessor report
+as an input. The database records the exact returned digest,
 chunk indexes, and input/output cursor chain. Coordinator reads are explicitly
 classified and do not prove downstream consumption. The worker brief exposes
-only each selected decision's English normalization, never the exact original
-response. Contradictory,
+only scoped decision metadata and never unnecessary original user material.
+Contradictory,
 partial, blocked, failed, assembling, or aborted evidence remains visible
 rather than being flattened into a server-owned verdict.
 
-There is no backend-enforced fixed `wait_agent`/read/continue sequence and no
+The active host schema, not the ledger, defines native spawn and follow-up
+arguments. There is no backend-enforced fixed `wait_agent`/read/continue sequence and no
 `SubagentStop` barrier. Native waiting is ordinary host coordination outside
 the ledger, but the coordinator still waits for or reconciles the exact spawned
 worker before consuming its worker-owned report. If it ends without a report,
@@ -920,9 +944,9 @@ rejected, cancelled, and superseded plans.
 `record_user_decision` appends coordinator-attributed `user_via_coordinator`
 evidence for a task, plan, initiative, delegation, or report. Its canonical
 request contains `task_ref`, `subject_type`, `subject_ref`, `decision_type`,
-`prompt_en`, exact `response_original`, English `response_en`, and
+neutral `prompt`, exact arbitrary-Unicode `response_original`, and
 `user_language`; it records one of `approve`, `reject`, `request_revision`,
-`clarification`, `cancel`, `accept_risk`, or `override`. Plan/report decisions
+`clarification`, `cancel`, `accept_risk`, `override`, or `steer`. Plan/report decisions
 require the exact `sha256:<64hex>` subject digest; task, delegation, and
 initiative decisions omit it, and a plan must already be
 finalized and completed. A plan `approve` additionally requires the exact
@@ -1003,8 +1027,9 @@ follow the latest meaningful user language. Every native worker commentary,
 update, inter-worker message, final response, tool-authored durable string,
 ledger record, and generated-view operational source is English; acceptance
 checks the entire child transcript, not only its final. Verbatim user language
-appears only in labeled original fields beside separate English-normalized
-fields for the task and decision contracts. Canonical product-facing report
+appears only in labeled original fields. Decision contracts use neutral
+`prompt`, exact `response_original`, and `user_language`; retired `prompt_en`
+and `response_en` fields are rejected. Canonical product-facing report
 and handoff payloads instead carry any needed user-authored source material
 once in optional `source_text`, unchanged and without a language tag or
 translated/original duplicate. A worker-authored product artifact may use
@@ -1025,10 +1050,15 @@ only report body/chunk reader. Large reports remain section- and byte-bounded
 rather than being returned as one unbounded body. The current MCP schema owns
 exact argument and response shapes.
 
-`handles.next_sequence` is a nonnegative timeline position copied only into
-`after_sequence`. `handles.cursor` is a string-only opaque `read_reports`
-continuation value. They are separate handles and must never be converted,
-concatenated, or substituted.
+`handles.after_sequence`, `handles.chunk_index`, and `handles.idempotency_key`
+are copied directly to the literal `after_sequence`, `chunk_index`, and
+`idempotency_key` inputs. `handles.cursor` is a string-only opaque
+`read_reports` continuation value. These are callable handles and must never be
+converted, concatenated, or substituted. Root-level `next_sequence` and
+`next_chunk_index` are informational receipt fields, not `handles` aliases.
+
+Canonical compact decision references match `u_[0-9a-f]{12}`. They are opaque
+evidence values: copy returned references exactly and never reconstruct them.
 
 Retained V12 rows receive a one-time, conservative task-scoped chronology repair
 on a normal store open when the V12 backfill marker is absent. It appends only
@@ -1132,11 +1162,10 @@ internal error rather than a second incompatible tool-error shape. No error may
 include task/report content, credentials, raw diagnostics, filesystem state, or
 private ledger records.
 
-Writes support optional bounded opaque idempotency tokens. Omit the token for a
-new mutation and retain only its returned retry handle for an exact retry;
-Cortex does not interpret client token text. Replaying the same operation/key with
-the same normalized payload returns the original record and `replayed=true`.
-Reusing it with a different payload returns a non-mutating
+First mutations may omit a bounded opaque idempotency token. Cortex returns a
+server-issued `handles.idempotency_key`; reuse that exact value only with the
+same operation and normalized payload to receive the original record with
+`replayed=true`. Reusing it with a different payload returns a non-mutating
 `idempotency_conflict`.
 
 Core coordination calls validate shapes, sizes, enumerations, compact-reference
@@ -1160,16 +1189,16 @@ from host metadata, thread identity, or process working directory.
 | Tool | Contract |
 | --- | --- |
 | `create_task` | Create one durable project-scoped task from explicit `project_root`, exact original request and concrete language, English objective, and four non-empty meaningful result-contract arrays; return compact `task_ref`. |
-| `inspect_task` | Use `task_ref` to read compact task history after `after_sequence`, bounded by `limit`, and exact persisted continuation dispatches. Continuations are lifecycle-unknown: reconcile the exact native identity with the host and obtain a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
+| `inspect_task` | Use `task_ref` to read compact task history after `after_sequence`, bounded by `limit`, and exact persisted continuation dispatches. The result exposes independent `execution_outcome` and task-relevant `advisory_closure` projections; neither is host lifecycle authority. Continuations are lifecycle-unknown: reconcile the exact native identity with the host, then obtain a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
 | `create_delegation` | Use `task_ref` to persist bounded work with separate human `role`, exact packaged `profile_name`, required textual `scope`, exact model/effort, and selected report/decision inputs; return root-level `native_dispatch` plus `renderer` proof. The complete message appears once in `native_dispatch.native_arguments.message`; use this receipt directly for normal spawning. `read_delegation` is recovery-only. |
 | `read_delegation` | Use `delegation_ref` plus `after_sequence` to resolve and read compact history without a receipt; do not supply `task_ref` or `task_id`. |
-| `submit_report` | Use `delegation_ref` for a single body or stable-reference `begin`/`append`/`finalize`/`abort` report: `progress`, `result`, `synthesis`, or `plan`; do not supply `task_ref` or `task_id`. |
-| `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and integer `max_bytes` budget. Do not supply `task_ref` or `task_id`. Worker handoff reads additionally name the exact consuming delegation reference and leave immutable page receipts. |
+| `submit_report` | Use `delegation_ref` for one bounded `single` report or assembled `begin`/`append`/`finalize`/`abort` reports: `progress`, `result`, `synthesis`, or `plan`. Do not supply `task_ref` or `task_id`. |
+| `read_reports` | Use `report_refs` to resolve bounded metadata or complete JSON chunks for 1–20 known reports, selected sections, opaque cursor, and integer `max_bytes` budget. Coordinator calls return metadata only; worker body reads additionally name the exact consuming delegation reference and declared input, leaving immutable page receipts. Do not supply `task_ref` or `task_id`. |
 | `set_governance_mode` | Use `task_ref` to append a `minimal`, `light`, or `full` assessment. |
 | `record_initiative` | Use `task_ref` as the project anchor and only `dependency_refs`, `linked_task_refs`, `linked_delegation_refs`, `linked_report_refs`, and `linked_decision_refs` for initiative relationships. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative governance history. |
-| `submit_governance_closure` | Use `task_ref` to append an advisory closure with required `subject_type` and matching compact `subject_ref`. It records evidence but never gates safe work or a truthful user-facing answer. |
-| `record_user_decision` | Use the canonical `task_ref`/subject-ref/decision/response field set to append coordinator-attributed original/English evidence; include `subject_digest` for plan/report subjects only. For plan `approve`, also copy the complete exact ready approval-view relation: report ref/digest, opaque handle, view digest, and source sequence. |
+| `submit_governance_closure` | After sufficient finalized evidence, use `task_ref` with required `subject_type`, matching compact `subject_ref`, and coordinator-selected `verdict` (`ready`, `ready_with_risks`, or `not_ready`). The call automatically attempts the advisory write and intended bounded inspection. It returns separate `execution_outcome` evidence and `closure_confirmation` projections; at most one same-idempotency retry is made for a verified transient persistence/inspection failure, and `unconfirmed` bookkeeping never changes the evidence or gates safe work. |
+| `record_user_decision` | Use the canonical `task_ref`/subject-ref/decision/response field set (`prompt`, exact `response_original`, `user_language`) to append coordinator-attributed evidence; retired English duplicate fields are rejected. Include `subject_digest` for plan/report subjects only. For plan `approve`, also copy the complete exact ready approval-view relation: report ref/digest, opaque handle, view digest, and source sequence. |
 
 There is no coordinator/worker audience filtering, capability matrix,
 host-bound lifecycle authority, receipt-gated lifecycle admission, action
@@ -1232,11 +1261,35 @@ dependency, task, and report relationships stay project-scoped. Missing or
 cyclic same-project dependencies are retained as warnings and do not block
 status updates or closure.
 
-Task and initiative closure verdicts are `ready`, `ready_with_risks`, and
-`not_ready`. The verdict belongs to the model. A closure may cite evidence,
-unresolved risks, follow-ups, completion notes, and—when applicable—an
-initiative status. The backend records the statement but never chooses what
-happens next.
+Task and initiative advisory closure verdicts are `ready`, `ready_with_risks`, and
+`not_ready`. The coordinator selects the verdict from sufficient completed
+worker evidence; it is an advisory recommendation, not a user-confirmation
+request or a backend gate. `ready_with_risks` therefore needs no user
+confirmation. A closure may cite evidence, unresolved risks, follow-ups,
+completion notes, and—when applicable—an initiative status. The backend
+records the statement but never chooses what happens next.
+
+`inspect_task` exposes exact independent projections. `execution_outcome`
+contains `evidence_status`, `finalized_report_count`, `completed_report_count`,
+and `outcome`. The finalized count covers every finalized report. The completed
+count covers semantically valid canonical finalized result reports whose status
+is `completed`; `outcome` is `null` before the first semantically valid canonical
+finalized result, then follows the latest such result as `completed` or
+`incomplete`. This projection does not claim native lifecycle.
+`advisory_closure`
+contains `record_status` (`recorded` or `not_recorded`) and `latest_record`,
+which is either the latest closure object or `null`. A closure record never
+rewrites `execution_outcome`.
+
+`submit_governance_closure` first attempts the advisory write and then inspects
+the intended task or initiative record. `closure_confirmation` reports
+`inspection_status` (`confirmed` or `unconfirmed`), a reason
+(`record_inspected`, `persistence_unavailable`, `inspection_unavailable`, or
+`record_not_observed`), and `attempts` (1 or 2). Only one same-idempotency retry
+is made for a verified transient persistence or inspection failure. If the
+record cannot be confirmed, the coordinator discloses the unconfirmed
+bookkeeping while preserving and reporting the independent user-work outcome;
+completed work is not described as open or undone.
 
 ### Why this is more reliable than ordinary multi-agent work
 
@@ -1393,6 +1446,7 @@ Important entry points:
 | `.agents/plugins/marketplace.json` | Repository-local Marketplace |
 | `scripts/sync-cortex.sh` | Synchronize and verify this local source checkout during development |
 | `scripts/cortex-dev` | Start an interactive Codex session in the persistent isolated `$HOME/.cortex-dev` candidate runtime |
+| `cortex-dev` | Repository-root convenience entry point delegating to `scripts/cortex-dev` |
 | `scripts/cortex-dev-reset` | Remove that candidate runtime only after explicit `--confirm` |
 
 Lifecycle hook code is not a V12 entry point and must be absent from the
@@ -1403,7 +1457,7 @@ installable release.
 Use the repository helper for interactive development. It resolves this
 checkout from the helper's own location, creates or reuses the dedicated
 `$HOME/.cortex-dev` directory with owner-only permissions, exports
-`HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.codex` inside that candidate
+`HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.cortex-dev/.codex` inside that candidate
 runtime, synchronizes the checkout there, and then starts ordinary interactive
 Codex. The candidate HOME, `CODEX_HOME`, plugin cache, configuration, and V12
 state are isolated from the stable runtime. The normal checkout synchronization
@@ -1414,6 +1468,9 @@ does not make the source checkout immutable.
 ```bash
 ./scripts/cortex-dev
 ```
+
+The equivalent repository-root convenience command is `./cortex-dev`; it
+delegates to the same launcher and accepts the same ordinary Codex arguments.
 
 The helper accepts ordinary Codex arguments after the script name. Its `--help`
 mode only prints usage. The candidate reset helper requires an explicit
@@ -1555,16 +1612,17 @@ compatible with V12.
   Canonical product-facing reports and handoff payloads use one optional
   unchanged `source_text` value when they carry user-authored source material;
   they do not require language tags or translated/original pairs. Existing
-  task and decision contracts retain their designated original/language and
-  English-normalized fields. Localize coordinator-to-user summaries and links.
-- Keep large report content behind the single/chunked `submit_report` protocol
+  task contracts retain their designated original/language fields; decisions
+  retain exact `response_original` without English duplicate fields. Localize
+  coordinator-to-user summaries and links.
+- Keep large report content behind the assembled `submit_report` protocol
   and bounded `read_reports` section/cursor/byte selection. Do not expose report
   bodies through task or delegation inspection. The owning native worker alone
   calls `submit_report`; the coordinator waits and consumes the worker's
   concise Summary plus exact Report ref. A downstream worker reads the body
   through `read_reports` only when its declared work requires it.
 - Treat `record_user_decision` as append-only coordinator-attributed evidence.
-  Bind plan/report decisions to exact canonical digests. Preserve the single
+  Bind plan/report decisions to exact canonical digests. Preserve the one
   documented light/full plan-approval relation; never add approval, rejection,
   cancellation, or missing-review admission rules beyond it.
 - Keep human-readable Markdown host-private beside the canonical database.

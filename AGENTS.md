@@ -47,44 +47,90 @@ runtime guarantees from those bundled sources without depending on this file.
   before launching ordinary Codex. Never install, reinstall, update, or
   synchronize the user's real installed plugin; do not use `sync-cortex.sh`
   directly as a live-dev mechanism.
+- The repository-root `./cortex-dev` command is a convenience forwarding
+  wrapper for `./scripts/cortex-dev`; it uses the same isolated
+  `HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.cortex-dev/.codex` runtime
+  and must retain the same ordinary interactive Codex and no-`codex exec`
+  constraints.
 - Live testing is allowed only through an interactive `tmux` session running
   ordinary Codex. Create a fresh named session in the background, and deliver
   every workload command directly with `tmux send-keys`; do not open or drive a
   foreground console, use `codex exec`, an exec-mode wrapper, or a
-  detached/non-interactive Codex substitute. `tmux` uses `$TMUX` to locate the
-  server for commands issued from an existing tmux pane. On hosts where that
-  nested-server path is denied with `Operation not permitted`, use a separate
-  tmux server socket and remove `$TMUX` only for the tmux management commands;
-  this keeps the Codex process interactive while avoiding the host's nested
-  terminal restriction. The independent socket is a tmux namespace, not a
-  filesystem or plugin-install location. Use this bounded session sequence,
+  detached/non-interactive Codex substitute. Use the current user's default
+  tmux server so the named smoke session is visible to `tmux ls`; `tmux` uses
+  `$TMUX` to locate that server when commands are issued from an existing tmux
+  pane. If the default server or nested-server path is denied with
+  `Operation not permitted`, classify the smoke as failed or unverified and
+  report that terminal limitation; do not silently switch to an independent
+  socket. Use this session sequence,
   replacing `<repository-root>` with the exact checkout:
 
   ```bash
   session_name=cortex-v12-smoke
-  socket_name=cortex-v12-smoke
-  tmux_cmd=(env -u TMUX tmux -L "$socket_name" -f /dev/null)
+  tmux_cmd=(tmux -f /dev/null)
   "${tmux_cmd[@]}" has-session -t "=$session_name" 2>/dev/null && \
     "${tmux_cmd[@]}" kill-session -t "=$session_name" || true
   "${tmux_cmd[@]}" new-session -d -s "$session_name" -c "<repository-root>" bash
   "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" 'cd <repository-root> && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
-  # After the launcher is ready, inject only the narrow smoke input:
+  # Phase 1 ends here: return control to the coordinator while Codex starts.
+  # In phase 2, after a coordinator poll confirms the prompt is usable, inject
+  # only the narrow smoke input into the already-open session as a separate
+  # later action (do not execute this line in the phase-1 launcher batch):
   "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" '<targeted test input>' C-m
+  # Phase 3: give each fresh bounded snapshot back to the coordinator/LLM for
+  # interpretation and a decision to poll again, continue, or clean up.
   "${tmux_cmd[@]}" capture-pane -p -t "=$session_name:0.0" -S -200 -E -1
   "${tmux_cmd[@]}" kill-session -t "=$session_name" 2>/dev/null || true
   ```
 
+  If the bounded `capture-pane` result does not contain the launcher's target
+  and an interactive Codex prompt, or the Codex TUI redraws it away before the
+  result can be captured, use this output-only capture fallback. Start it
+  before sending the launcher; it records the PTY stream while Codex remains an
+  ordinary interactive process. This is not a shell pipe into Codex and must
+  not be used to feed input, replace `send-keys`, or run an exec-mode command.
+  The coordinator owns the three phases: launch and return; later send the
+  user message after a poll confirms a usable prompt; then repeatedly read a
+  bounded snapshot and give it to the coordinator/LLM for interpretation.
+
+  ```bash
+  capture_dir="$(mktemp -d "${TMPDIR:-/tmp}/cortex-v12-smoke.XXXXXX")"
+  capture_path="${capture_dir}/pane.raw"
+  (umask 077; : >"${capture_path}")
+  "${tmux_cmd[@]}" pipe-pane -t "=$session_name:0.0" "cat > '${capture_path}'"
+  # Phase 1: launch ordinary interactive Codex and return immediately.
+  "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" 'cd <repository-root> && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
+  # Do not put a readiness/result wait loop here. The coordinator performs
+  # separate bounded reads and sends the phase-2 input only after interpreting
+  # a usable prompt. Phase 3 repeats bounded reads while the session is alive;
+  # each snapshot is fed back to the coordinator/LLM, which decides whether to
+  # poll again, continue, or clean up. Unchanged output is not completion.
+  tail -c 20000 "${capture_path}"
+  "${tmux_cmd[@]}" pipe-pane -t "=$session_name:0.0"
+  "${tmux_cmd[@]}" kill-session -t "=$session_name" 2>/dev/null || true
+  rm -f -- "${capture_path}"
+  rmdir -- "${capture_dir}"
+  ```
+
+  The `pipe-pane` command is a fallback for TUI capture loss, not a readiness
+  signal by itself. A coordinator poll interprets the configured-MCP line and
+  the `configured Cortex MCP default_tools_approval_mode=approve` line plus
+  the interactive prompt before sending input; there is no launcher-side
+  readiness wait. The
+  20,000-byte tail is the only retained evidence. Keep the temporary directory
+  owner-only, remove it after inspection, and never paste raw output that
+  contains user prompts, tokens, or personal data.
+
   The first tmux management commands run from the controlling shell; the
   launcher and smoke commands themselves must be injected into the named pane.
-  `env -u TMUX` is scoped to tmux clients only and does not change the
-  candidate's `HOME`/`CODEX_HOME` or the environment inherited by Codex. The
-  `-L` socket is independent and must be used consistently for creation,
-  input, capture, and cleanup. `-f /dev/null` prevents an unrelated tmux
-  configuration from changing the smoke. Use bounded `capture-pane` output as
-  the result record. If either the normal socket or independent-socket form is
-  denied, do not fall back to a foreground console, `codex exec`, or a shell
-  pipe: classify the smoke as failed or unverified and report the host's
-  terminal/permission limitation. If the session exits early, the launcher
+  `-f /dev/null` prevents an unrelated tmux configuration from changing the
+  smoke while retaining the user's default tmux server. Use bounded
+  `capture-pane` output as
+  the result record. If the default socket is denied, do not fall back to a
+  foreground console, independent socket, `codex exec`, or a shell pipe:
+  classify the smoke as failed or unverified and report the host's
+  terminal/permission limitation; do not fall back to an independent socket.
+  If the session exits early, the launcher
   prints an error, the exit marker is non-zero, or the bounded capture has no
   usable result, report the live-dev test as failed or unverified from the
   capture; never infer success. Before the scoped smoke, record the candidate
@@ -94,8 +140,7 @@ runtime guarantees from those bundled sources without depending on this file.
   not turn a focused smoke into a broad repository or release run. Record the
   exact session and socket commands, isolated target, scope, outcome, cleanup,
   and any unrun checks. A successful smoke must end with the exact named
-  session gone; if the independent server has no other user sessions, also
-  run `"${tmux_cmd[@]}" kill-server` during cleanup.
+  session gone. Do not kill the user's default tmux server during cleanup.
 - Before finishing a change, run the smallest non-destructive check set that
   proves the affected behavior, then broaden validation in proportion to risk.
   State every unrun release gate or environmental limitation plainly.

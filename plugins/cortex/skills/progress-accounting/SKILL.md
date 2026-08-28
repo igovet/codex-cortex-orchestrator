@@ -40,21 +40,27 @@ use optional contextual humor only after the material fact when it is safe.
 Suppress unchanged waits, repeated summaries, routine pagination, chunk
 assembly, retry attempts, and internal worker-recovery chatter.
 
-Progress accounting does not authorize stopping orchestration. Once the
-requested outcome is evidenced, the coordinator must attempt supported closure
-and inspect the intended result before calling the Cortex task
-closure-confirmed. While the requested outcome or closure evidence is unfinished, the coordinator continues
-to reconcile state and advance the next safe worker or recovery stage. A
-completed worker, waiting or incomplete stage, technical/documentation/review
-error, Demo/production gate, or quiet interval is not terminal. The only
-early-turn pause is one genuine user question that materially changes
-requirements, scope, acceptance, or required external/destructive authority;
-after its answer, resume from the recorded decision. Record changed evidence
-and the next action without treating a progress update as completion.
+Progress accounting does not authorize stopping orchestration. Once sufficient
+completed outcome evidence is available, the coordinator independently selects
+`ready`, `ready_with_risks`, or `not_ready`, automatically attempts supported
+`submit_governance_closure`, and performs supported inspection of the intended
+record. `ready_with_risks` never creates a confirmation hold or any other
+user-facing question. While the requested outcome remains unfinished, the
+coordinator continues to reconcile state and advance the next safe worker or
+recovery stage. A completed worker, waiting or incomplete stage,
+technical/documentation/review error, Demo/production gate, or quiet interval
+is not terminal. The only early-turn pause is one genuine user question that
+materially changes requirements, scope, acceptance, or required
+external/destructive authority; after its answer, resume from the recorded
+decision. Record changed evidence and the next action without treating a
+progress update as completion.
 
-If closure storage or inspection is unavailable, record the attempt and an
-honest `closure_unconfirmed` limitation. Do not manufacture a closure result or
-silently omit the terminal attempt.
+For a verified transient closure storage or inspection failure, make one
+bounded safe retry with the exact returned retry handle and unchanged
+idempotency semantics. If it remains unavailable, preserve the completed
+outcome and record an honest `closure_unconfirmed` limitation. Do not
+manufacture a closure result, silently omit the automatic attempt, or describe
+completed work as open solely because advisory confirmation is unavailable.
 
 Workers must emit English checkpoints of at most five bullets/150 words and a
 final response of at most 300 words. A coordinator wait is at most 60 seconds.

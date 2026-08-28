@@ -7,6 +7,20 @@
 - Restricted ready plan approval relations to completed semantic-valid
   canonical plan reports while preserving legacy and invalid reports as
   immutable evidence.
+- Restored public bounded `single` submission alongside the assembled
+  `begin` → sequential `append` → `finalize` (or `abort`) report protocol.
+- Required caller-provided idempotency keys on every ledger mutation, with
+  byte-equivalent same-key replay and non-mutating different-payload conflicts.
+- Restricted report bodies/chunks to declared consuming workers through
+  `consumer_delegation_ref`; coordinator reads return metadata/manifests only,
+  while worker body reads produce structural consumption receipts.
+- Replaced language-suffixed decision fields with neutral `prompt` and exact
+  original-language `response_original`; retired `prompt_en` and `response_en`
+  are not accepted for new decisions.
+- Documented semantic delegation receipts, scoped worker context, aggregate
+  request/rendering budgets, host lifecycle/schema boundaries, and advisory
+  governance/closure behavior. Documentation impact was material and the
+  affected project/feature/security/help surfaces were synchronized.
 
 ## [12.0.0] - 2026-08-27
 
@@ -56,7 +70,7 @@
   Luna remains the default and omits a native model override; Terra and Sol
   pass exact overrides; all preserve `low`, `medium`, `high`, `xhigh`, or
   `max` effort with `fork_turns="none"`.
-- Add immutable single and chunked report submission. A stable report ID can
+- Add immutable one-chunk and chunked report submission. A stable report ID can
   move through `begin`, ordered labeled `append`, exact-manifest `finalize`, or
   `abort`; bounded `read_reports` returns only whole selected JSON chunks and
   metadata within cursor and byte limits. Task/delegation inspections expose

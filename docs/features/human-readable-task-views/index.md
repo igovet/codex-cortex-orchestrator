@@ -147,9 +147,38 @@ canonical SQLite evidence inline. The user still receives the substantive task
 state; view delivery is an aid, not a gate on planning, acceptance, decisions,
 or completion.
 
+## Task inspection and closure bookkeeping
+
+Task, delegation, governance, closure, decision, and timeline records are not
+rendered as Markdown views. Use `inspect_task` and `inspect_governance` for
+bounded human-readable inspection of those records. `inspect_task` exposes two
+separate projections: `execution_outcome`, which is neutral finalized-report
+evidence, and `advisory_closure`, which describes whether an advisory record is
+present. The execution projection contains exactly `evidence_status`,
+`finalized_report_count`, `completed_report_count`, and `outcome`. The finalized
+count covers every finalized report. The completed count and nullable
+`completed`/`incomplete` outcome derive only from semantically valid canonical
+finalized results; the projection makes no native-lifecycle claim. The
+closure projection contains `record_status`
+and `latest_record` (or `null`).
+Neither projection is a native-host lifecycle signal.
+
+After sufficient completed evidence, the coordinator selects `ready`,
+`ready_with_risks`, or `not_ready`, attempts the advisory closure, and inspects
+the intended record automatically. `ready_with_risks` is not a request for
+user confirmation. The closure result's `closure_confirmation` reports
+`inspection_status` (`confirmed` or `unconfirmed`), the exact reason
+(`record_inspected`, `persistence_unavailable`, `inspection_unavailable`, or
+`record_not_observed`), and `attempts` (1 or 2). At most one same-idempotency
+retry is made for a verified transient persistence or inspection failure. An
+unconfirmed advisory record is disclosed as bookkeeping uncertainty while the
+independent `execution_outcome` remains intact; advisory-view availability does
+not alter execution evidence.
+
 Durable worker-authored fields and generated view content are English. Existing
-task and decision original user language is retained in explicitly labelled
-`*_original` fields, with a separate English normalization. Canonical
+task original user language is retained in explicitly labelled `*_original`
+fields. Decision records retain exact `response_original` without an English
+duplicate. Canonical
 product-facing report/handoff payloads may instead carry one optional
 unchanged `source_text` value, rendered once as inert source material without
 a language tag or translated/original duplicate. The localized coordinator
@@ -167,10 +196,10 @@ content to the canonical report so review cannot silently drift to altered
 text.
 
 `record_user_decision` records `approve`, `reject`, `request_revision`,
-`clarification`, `cancel`, `accept_risk`, or `override` against an exact task,
+`clarification`, `cancel`, `accept_risk`, `override`, or `steer` against an exact task,
 plan, initiative, delegation, or report. Its closed canonical request preserves
-the task/subject refs, decision type, `prompt_en`, exact `response_original`,
-English `response_en`, and `user_language`; `subject_digest` is included for
+the task/subject refs, decision type, neutral `prompt`, exact
+`response_original`, and `user_language`; `subject_digest` is included for
 plan and report subjects only. For plan and report decisions, the decision is bound to the canonical
 `sha256:<64-lowercase-hex>` subject digest; a plan must be finalized and
 completed. Only `decision_type=approve` requires the exact server-issued
@@ -194,16 +223,16 @@ approval, and a revised plan's new report ID/digest needs a new decision.
 
 ## Chunked reports
 
-Large reports are stored and projected through an explicit lifecycle:
+One bounded report uses `single`. Large reports are stored and projected through
+an explicit lifecycle:
 
 ```text
-single
 begin → append* → finalize
 begin → abort
 ```
 
-`single` records one canonical JSON body up to 64 KiB. `begin` opens a stable
-report ID, `append` adds sequential labeled complete-JSON chunks up to 32 KiB,
+Large reports use `begin` to open a stable report ID, `append` to add sequential
+labeled complete-JSON chunks up to 32 KiB,
 and `finalize` requires the exact chunk count and manifest digest. `abort`
 retains an incomplete stream without pretending that it is complete. A report
 is limited to 256 chunks and 8 MiB; assembling and retained task totals are
@@ -228,6 +257,10 @@ just Markdown rendering. In particular, tests and review should demonstrate:
 - dynamic status handling that returns a path only for verified `ready` views;
 - plan revision/digest/review semantics, evidence-only user decisions, and
   bounded reads of complete chunked reports; and
+- separate `execution_outcome` and `advisory_closure` task-inspection
+  projections, automatic closure inspection after sufficient evidence,
+  bounded retry, and disclosure of `closure_confirmation`=`unconfirmed`
+  without changing neutral execution evidence; and
 - a Russian-user Luna/high scenario in which durable artifacts remain English,
   coordinator publication is localized, verified clickable links are used when
   ready, canonical evidence is summarized inline otherwise, and the project

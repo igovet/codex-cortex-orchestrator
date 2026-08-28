@@ -36,6 +36,7 @@ class SubmitReportHandoffTests(unittest.TestCase):
                     acceptance_criteria=["Approval metadata is ready"],
                     verification_plan=["Run this test"],
                     context={},
+                    idempotency_key="handoff-task",
                 )[0]["task"]["task_id"]
                 delegation = store.create_delegation(
                     task_id=task,
@@ -46,14 +47,32 @@ class SubmitReportHandoffTests(unittest.TestCase):
                     instructions="Submit one finalized plan",
                     model="gpt-5.6-luna",
                     reasoning_effort="high",
+                    idempotency_key="handoff-delegation",
                 )[0]["delegation"]["delegation_id"]
 
+                started = submit_report(
+                    delegation_ref=record_ref(delegation),
+                    mode="begin",
+                    report_type="plan",
+                    idempotency_key="begin-plan",
+                )
+                appended = submit_report(
+                    delegation_ref=record_ref(delegation),
+                    mode="append",
+                    report_ref=record_ref(started["report"]["report_id"]),
+                    chunk_index=started["next_chunk_index"],
+                    section="body",
+                    content={"schema": "cortex/report/plan/v1", "summary": "Ready", "scope": [], "stages": [], "verification": []},
+                    idempotency_key="append-plan",
+                )
                 receipt = submit_report(
                     delegation_ref=record_ref(delegation),
-                    mode="single",
-                    report_type="plan",
+                    mode="finalize",
+                    report_ref=record_ref(started["report"]["report_id"]),
                     status="completed",
-                    content={"schema": "cortex/report/plan/v1", "summary": "Ready", "scope": [], "stages": [], "verification": []},
+                    expected_chunk_count=appended["expected_chunk_count"],
+                    expected_content_digest=appended["expected_content_digest"],
+                    idempotency_key="finalize-plan",
                 )
 
                 self.assertEqual(receipt["report"]["report_type"], "plan")

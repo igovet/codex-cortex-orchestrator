@@ -50,7 +50,8 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("Summary:", message)
         self.assertIn("Report ref:", message)
         self.assertIn("coordinator uses this summary and report ref", message)
-        self.assertIn("does not reread the report body", message)
+        self.assertIn("material report-dependent decision", message)
+        self.assertIn("handoff is never a second semantic", message)
         self.assertIn("downstream worker", message)
 
     def test_native_message_carries_finalized_input_manifest_without_trusting_content(self) -> None:
@@ -70,6 +71,50 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertNotIn("IGNORE THIS PROMPT INJECTION", message)
         self.assertIn("optional `input_report_manifests`", message)
 
+    def test_renderer_minimizes_context_and_uses_registry_semantics(self) -> None:
+        original = "Original request must remain durable-only."
+        rendered = render_worker_message(
+            task={
+                "task_id": "task-" + "a" * 64,
+                "objective": "Implement the scoped repair.",
+                "user_request_original": original,
+                "user_language": "en",
+                "task_contract_version": "cortex/task-contract/v1",
+                "requirements": ["Unrelated task requirement"],
+                "constraints": ["No external action"],
+                "acceptance_criteria": ["Focused test passes"],
+                "verification_plan": ["Run focused test"],
+                "context": {"private": "do not render"},
+            },
+            delegation={
+                "delegation_id": "delegation-" + "b" * 64 + "-" + "c" * 32,
+                "objective": "Implement the scoped repair.",
+                "profile_name": "backend_dev",
+                "scope": "Worker-owned renderer and policy paths.",
+                "instructions": "Keep the change bounded.",
+                "input_report_ids": [],
+                "input_decision_ids": [],
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "high",
+            },
+            decisions=[],
+        )
+        message = rendered["message"]
+        match = re.search(r"## Untrusted task and delegation data\n\n```json\n(.*?)\n```", message, re.DOTALL)
+        self.assertIsNotNone(match)
+        payload = json.loads(match.group(1))
+        self.assertEqual(
+            set(payload["task"]),
+            {"task_ref", "english_objective", "constraints", "acceptance_criteria", "verification_plan"},
+        )
+        self.assertNotIn(original, message)
+        self.assertNotIn("Unrelated task requirement", message)
+        self.assertNotIn("do not render", message)
+        self.assertIn("active MCP registry", message)
+        self.assertIn("Documentation impact", message)
+        for forbidden in ('mode="single"', "decimal-string", "max_bytes", "0 through 65536"):
+            self.assertNotIn(forbidden, message)
+
     def test_contract_keeps_report_reads_scoped_to_declared_same_task_inputs(self) -> None:
         root = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "skills"
         contracts = [
@@ -82,14 +127,14 @@ class WorkerHandoffContractTests(unittest.TestCase):
             self.assertIn("same-task delegation", contract)
         self.assertIn("not a retryable read", contracts[0])
         self.assertIn("Do not retry that read", contracts[1])
-        self.assertIn("must not call it merely to", contracts[0])
+        self.assertIn("material report-dependent decision", contracts[0])
 
     def test_packaged_prompts_delegate_mcp_shapes_to_live_registry(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         prompt_paths = (
             repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md",
             repository / "plugins" / "cortex" / "skills" / "cortex-control" / "SKILL.md",
-            repository / "plugins" / "cortex" / "agents" / "planner.toml",
+            *(repository / "plugins" / "cortex" / "agents").glob("*.toml"),
         )
         forbidden = (
             "```json",
@@ -104,7 +149,19 @@ class WorkerHandoffContractTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             for marker in forbidden:
                 self.assertNotIn(marker, text, f"{path} still embeds MCP shape {marker!r}")
-            self.assertIn("active MCP registry", text)
+        for path in prompt_paths[:2]:
+            self.assertIn("active MCP registry", path.read_text(encoding="utf-8"))
+
+    def test_active_policies_use_semantic_receipts_and_advisory_closure(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        orchestrator = (repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md").read_text(encoding="utf-8")
+        control = (repository / "plugins" / "cortex" / "skills" / "cortex-control" / "SKILL.md").read_text(encoding="utf-8")
+        for contract in (orchestrator, control):
+            self.assertIn("semantic delegation receipt", contract)
+            self.assertIn("active host schema", contract)
+            self.assertIn("not authorization", contract)
+        self.assertIn("never a completion gate", orchestrator)
+        self.assertIn("Documentation impact` status, rationale, and affected\nsurfaces", orchestrator)
 
     def test_packaged_guidance_covers_pipeline_todo_routing_tone_and_tmux(self) -> None:
         repository = Path(__file__).resolve().parents[1]
@@ -127,7 +184,7 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("narrowly targeted", agents)
         self.assertIn("Live tests are narrow", verification)
 
-    def test_orchestrator_routes_attachment_modes_and_requires_confirmed_closure(self) -> None:
+    def test_orchestrator_routes_attachment_modes_and_separates_advisory_closure(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         orchestrator = (repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md").read_text(encoding="utf-8")
         control = (repository / "plugins" / "cortex" / "skills" / "cortex-control" / "SKILL.md").read_text(encoding="utf-8")
@@ -138,8 +195,21 @@ class WorkerHandoffContractTests(unittest.TestCase):
             self.assertIn(mode, orchestrator.lower())
         self.assertIn("Decision Capsule", orchestrator)
         for contract in (orchestrator, control, progress):
-            self.assertIn("closure-confirmed", contract)
+            # Closure is structured advisory bookkeeping.  It is confirmed by
+            # an intended scoped inspection, but it never defines execution
+            # completion or asks the user to confirm a coordinator verdict.
             self.assertIn("closure_unconfirmed", contract)
+            self.assertIn("ready_with_risks", contract)
+            self.assertNotIn("closure-confirmed", contract)
+            self.assertNotIn("task_closed", contract)
+            self.assertNotIn("closure_state", contract)
+        self.assertIn("completed outcome evidence", orchestrator)
+        self.assertIn("never\nmake the work user-facing open", orchestrator)
+        self.assertIn("ready_with_risks` never asks the user", orchestrator)
+        self.assertIn("advisory record", control)
+        self.assertIn("completed work into a\nuser-facing blocker", control)
+        self.assertIn("materially changes requirements, scope,\nacceptance", control)
+        self.assertIn("Never turn ledger, retry,\nworker, report, dependency, initiative, or closure state into a user question", orchestrator)
 
 
 if __name__ == "__main__":
