@@ -30,7 +30,7 @@ class SubmitReportHandoffTests(unittest.TestCase):
                     objective="Receipt handoff",
                     user_request_original="Receipt handoff",
                     user_language="en",
-                    task_contract_version="cortex/task-contract/v1",
+                    task_contract_version="cortex/task-contract/v2-criteria-derived",
                     requirements=["Return a receipt"],
                     constraints=["Do not mutate production"],
                     acceptance_criteria=["Approval metadata is ready"],
@@ -56,11 +56,10 @@ class SubmitReportHandoffTests(unittest.TestCase):
                     report_type="plan",
                     idempotency_key="begin-plan",
                 )
-                appended = submit_report(
+                submit_report(
                     delegation_ref=record_ref(delegation),
                     mode="append",
                     report_ref=record_ref(started["report"]["report_id"]),
-                    chunk_index=started["next_chunk_index"],
                     section="body",
                     content={"schema": "cortex/report/plan/v1", "summary": "Ready", "scope": [], "stages": [], "verification": []},
                     idempotency_key="append-plan",
@@ -70,8 +69,6 @@ class SubmitReportHandoffTests(unittest.TestCase):
                     mode="finalize",
                     report_ref=record_ref(started["report"]["report_id"]),
                     status="completed",
-                    expected_chunk_count=appended["expected_chunk_count"],
-                    expected_content_digest=appended["expected_content_digest"],
                     idempotency_key="finalize-plan",
                 )
 

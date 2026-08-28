@@ -340,25 +340,13 @@ COORDINATOR_PROTOCOL_PATTERNS = (
         ),
     ),
     (
-        "non-isolated or implicit-effort native dispatch",
+        "static host dispatch authority",
         re.compile(
             r"\bcoordinator\b(?:(?![.!?]).){0,180}"
             r"\b(?:may|can|should|must|is\s+allowed\s+to|is\s+authorized\s+to)\s+"
-            r"(?!not\b|never\b)(?:spawn|dispatch|call)\b(?:(?![.!?]).){0,160}"
-            r"(?:fork_turns\s*=?\s*(?:all|default)|omit\b(?:(?![.!?]).){0,50}"
-            r"(?:fork_turns|reasoning_effort)|inherit\b(?:(?![.!?]).){0,50}\bfork_turns\b)",
-            re.I,
-        ),
-    ),
-    (
-        "native model-override mismatch",
-        re.compile(
-            r"\bcoordinator\b(?:(?![.!?]).){0,180}"
-            r"\b(?:may|can|should|must|is\s+allowed\s+to|is\s+authorized\s+to)\s+"
-            r"(?!not\b|never\b)(?:"
-            r"omit\b(?:(?![.!?]).){0,60}\bmodel\b(?:(?![.!?]).){0,60}\b(?:terra|sol)\b|"
-            r"(?:pass|send|use)\b(?:(?![.!?]).){0,60}\b(?:explicit\s+)?(?:luna|gpt-5\.6-luna)\b"
-            r"(?:(?![.!?]).){0,60}\bmodel\b)",
+            r"(?!not\b|never\b)(?:treat|use|copy|dispatch)\b(?:(?![.!?]).){0,160}"
+            r"\b(?:dispatch[_ -]?brief|delegation receipt)\b(?:(?![.!?]).){0,120}"
+            r"\b(?:byte[- ]exact|host\s+arguments?|fork_turns|model override|luna omission)\b",
             re.I,
         ),
     ),
@@ -462,12 +450,8 @@ PROTOCOL_MUTATION_FIXTURES = (
         "The coordinator may reuse one native worker across multiple durable delegations.",
     ),
     (
-        "non-isolated or implicit-effort native dispatch",
-        "The coordinator may spawn a worker with fork_turns=all and omit reasoning_effort.",
-    ),
-    (
-        "native model-override mismatch",
-        "The coordinator may omit the model override for Terra.",
+        "static host dispatch authority",
+        "The coordinator may treat the dispatch brief as byte-exact host arguments.",
     ),
     (
         "non-English native-worker transcript",
@@ -501,8 +485,7 @@ PROTOCOL_SAFE_FIXTURES = (
     "The coordinator must never call create_task with empty requirements or verification arrays.",
     "The coordinator must never assemble an ad-hoc spawn or rewrite the returned native-dispatch payload.",
     "The coordinator must never reuse one native worker across multiple durable delegations.",
-    "The coordinator must never spawn with fork_turns=all or omit reasoning_effort.",
-    "The coordinator must never omit the model override for Terra or Sol and must not pass one for Luna.",
+    "The coordinator maps the host-neutral dispatch brief to the active host schema.",
     "A native worker must never localize commentary or final responses into the user's Russian language.",
     "The coordinator must never assert documentation_not_required without a worker-owned documentation-impact report.",
     "The coordinator must never use a free-form role label as loaded profile proof.",
@@ -864,6 +847,13 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         PROGRESS: read(PROGRESS, issues),
         COORDINATOR_COMMUNICATION: read(COORDINATOR_COMMUNICATION, issues),
     }
+    # Retired translated decision fields must not reappear in project-facing
+    # skills or worker prompts as pseudo-parameters. The advertised schema is
+    # the only source of MCP argument names and shapes.
+    for path, text in texts.items():
+        for forbidden in ("prompt_en", "response_en"):
+            if forbidden in text:
+                issues.append(f"{path.relative_to(ROOT)} documents retired MCP argument {forbidden}")
     orchestrator, control, compaction = (
         texts[ORCHESTRATOR], texts[CONTROL], texts[COMPACTION]
     )
@@ -873,12 +863,12 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
     catalog_tools = re.findall(r"^\|\s*`([a-z_]+)`\s*\|", catalog, re.M)
     if (
         len(tools_from_runtime) != 11
-        or "record_user_decision" not in tools_from_runtime
+        or "record_decision" not in tools_from_runtime
         or catalog_tools != tools_from_runtime
     ):
         issues.append(
             f"{CONTROL.relative_to(ROOT)} must mirror the canonical uniform "
-            f"eleven-tool registry: runtime={tools_from_runtime!r}, catalog={catalog_tools!r}"
+            f"eleven-tool semantic registry: runtime={tools_from_runtime!r}, catalog={catalog_tools!r}"
         )
 
     all_skill_text = "\n".join(texts.values())
@@ -926,6 +916,9 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("project source",),
             ("belong to workers",),
             ("AGENTS.md",),
+            ("host-injected",),
+            ("do not reread",),
+            ("nested", "override discovery"),
             ("docs/project/index.md",),
             ("docs/features/index.md",),
             ("harvest-refresh",),
@@ -1056,7 +1049,7 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("`read_mcp_resource`",),
             ("`resources/read`",),
             ("`skill://`",),
-            ("exactly eleven",),
+            ("exactly ten",),
             ("coordinator-to-worker",),
             ("inter-worker",),
             ("commentary",),
@@ -1123,21 +1116,21 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         + section(orchestrator, "Per-delegation model selection")
         + section(control, "Worker-message boundary"),
         ORCHESTRATOR,
-        "semantic delegation receipt and active-host dispatch boundary",
+        "host-neutral dispatch brief and active-host boundary",
         (
-            ("one corresponding host spawn",),
+            ("maps it once", "maps that brief once"),
             ("durable delegation",),
-            ("semantic delegation receipt",),
+            ("host-neutral dispatch brief",),
             ("active host schema",),
             ("rendered message",),
             ("task and delegation anchors", "task/delegation anchors"),
             ("input evidence",),
             ("profile proof",),
-            ("selected model/effort",),
+            ("model/effort recommendations",),
             ("ad-hoc",),
             ("one native worker for multiple", "one worker for multiple"),
             ("ambiguous host result",),
-            ("does not assert",),
+            ("no host lifecycle assertion",),
         ),
         issues,
     )

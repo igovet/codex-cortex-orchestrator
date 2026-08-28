@@ -31,7 +31,7 @@ class ExecutionOutcomeProjectionTests(unittest.TestCase):
                     objective="Expose neutral report evidence.",
                     user_request_original="Expose neutral report evidence.",
                     user_language="en",
-                    task_contract_version="cortex/task-contract/v1",
+                    task_contract_version="cortex/task-contract/v2-criteria-derived",
                     requirements=["Preserve neutral report evidence."],
                     constraints=["Keep advisory closure independent."],
                     acceptance_criteria=["Task and closure projections expose neutral counts."],
@@ -50,52 +50,47 @@ class ExecutionOutcomeProjectionTests(unittest.TestCase):
                     reasoning_effort="high",
                     idempotency_key="outcome-delegation",
                 )[0]["delegation"]["delegation_id"]
+                def submit(*, key: str, status: str, content: object) -> dict[str, object]:
+                    started = store.submit_report(task_id=task, delegation_id=delegation, mode="begin", report_type="result", idempotency_key=f"{key}-begin")[0]
+                    report_id = started["report"]["report_id"]
+                    store.submit_report(task_id=task, delegation_id=delegation, mode="append", report_id=report_id, section="result", content=content, idempotency_key=f"{key}-append")
+                    return store.submit_report(task_id=task, delegation_id=delegation, mode="finalize", report_id=report_id, status=status, idempotency_key=f"{key}-finalize")[0]
                 initial = store.inspect_task(task_id=task, after_sequence=0)
                 self.assertEqual(initial["execution_outcome"], {
                     "evidence_status": "no_finalized_reports",
                     "finalized_report_count": 0,
                     "completed_report_count": 0,
-                    "outcome": None,
+                    "effective_revision": 1,
+                    "coverage_status": "rework",
+                    "outcome": "incomplete",
                 })
-                store.submit_report(
-                    task_id=task,
-                    delegation_id=delegation,
-                    mode="single",
-                    report_type="result",
-                    status="completed",
-                    content={"schema": "not-canonical", "outcome": "ignored"},
-                    idempotency_key="outcome-noncanonical-report",
-                )
+                submit(key="outcome-noncanonical-report", status="completed", content={"schema": "not-canonical", "outcome": "ignored"})
                 noncanonical = store.inspect_task(task_id=task, after_sequence=0)
                 self.assertEqual(noncanonical["execution_outcome"], {
                     "evidence_status": "finalized_reports_present",
                     "finalized_report_count": 1,
                     "completed_report_count": 0,
-                    "outcome": None,
+                    "effective_revision": 1,
+                    "coverage_status": "rework",
+                    "outcome": "incomplete",
                 })
-                report = store.submit_report(
-                    task_id=task,
-                    delegation_id=delegation,
-                    mode="single",
-                    report_type="result",
-                    status="completed",
-                    content={
+                report = submit(key="outcome-report", status="completed", content={
                         "schema": "cortex/report/result/v1",
                         "summary": "The worker recorded result evidence.",
                         "outcome": "evidence_recorded",
                         "changes": [],
                         "verification": [],
                         "risks": [],
-                    },
-                    idempotency_key="outcome-report",
-                )[0]
+                    })
                 self.assertEqual(report["report"]["assembly_state"], "finalized")
                 inspected = store.inspect_task(task_id=task, after_sequence=0)
                 self.assertEqual(inspected["execution_outcome"], {
                     "evidence_status": "finalized_reports_present",
                     "finalized_report_count": 2,
                     "completed_report_count": 1,
-                    "outcome": "completed",
+                    "effective_revision": 1,
+                    "coverage_status": "rework",
+                    "outcome": "incomplete",
                 })
                 closure = store.submit_governance_closure(
                     task_id=task,
@@ -110,32 +105,26 @@ class ExecutionOutcomeProjectionTests(unittest.TestCase):
                     idempotency_key="outcome-closure",
                 )[0]
                 self.assertEqual(closure["execution_outcome"], inspected["execution_outcome"])
-                store.submit_report(
-                    task_id=task,
-                    delegation_id=delegation,
-                    mode="single",
-                    report_type="result",
-                    status="failed",
-                    content={
+                submit(key="outcome-failed-report", status="failed", content={
                         "schema": "cortex/report/result/v1",
                         "summary": "A later canonical result remained incomplete.",
                         "outcome": "worker_detail_not_exposed",
                         "changes": [],
                         "verification": [],
                         "risks": ["Acceptance remains incomplete."],
-                    },
-                    idempotency_key="outcome-failed-report",
-                )
+                    })
                 later_evidence = store.inspect_task(task_id=task, after_sequence=0)
                 self.assertEqual(later_evidence["execution_outcome"], {
                     "evidence_status": "finalized_reports_present",
                     "finalized_report_count": 3,
                     "completed_report_count": 1,
+                    "effective_revision": 1,
+                    "coverage_status": "rework",
                     "outcome": "incomplete",
                 })
                 self.assertEqual(
                     set(later_evidence["execution_outcome"]),
-                    {"evidence_status", "finalized_report_count", "completed_report_count", "outcome"},
+                    {"evidence_status", "finalized_report_count", "completed_report_count", "effective_revision", "coverage_status", "outcome"},
                 )
 
 

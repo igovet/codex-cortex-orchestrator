@@ -45,6 +45,11 @@ _MIGRATIONS = (
     (8, "v12-advisory-governance"),
     (9, "v12-canonical-report-semantics"),
     (10, "v12-effective-outcome-coverage"),
+    (11, "v12-report-coverage-diagnostics"),
+    (12, "v12-revisioned-outcome-assignments"),
+    (13, "v12-persisted-steering-delta"),
+    (14, "v14-atomic-report-operations"),
+    (15, "v15-durable-clarification-bindings"),
 )
 _BACKUP_FORMAT = "cortex/v12-maintenance-backup/v1"
 _BACKUP_ID_PREFIX = "backup-"
@@ -64,6 +69,7 @@ _REQUIRED_TABLES = frozenset(
         "delegations",
         "reports",
         "report_chunks",
+        "report_operations",
         "report_consumption_receipts",
         "report_usage",
         "governance_assessments",
@@ -75,6 +81,12 @@ _REQUIRED_TABLES = frozenset(
         "projection_jobs",
         "projection_files",
         "idempotency",
+        "approval_handles",
+        "clarification_bindings",
+        "effective_contract_revisions",
+        "effective_contract_items",
+        "delegation_outcome_assignments",
+        "report_contract_coverage",
     }
 )
 _REQUIRED_SCHEMA_OBJECTS = frozenset(
@@ -91,20 +103,38 @@ _REQUIRED_SCHEMA_OBJECTS = frozenset(
         "consumption_delegation_report",
         "timeline_decision_sequence",
         "projection_jobs_pending",
+        "approval_handles_task_report",
+        "clarification_bindings_task_pending",
+        "outcome_owned_current",
+        "outcome_assignment_current",
+        "outcome_items_task_current",
     }
 )
 _REQUIRED_COLUMNS = {
     "tasks": frozenset({"task_id", "project_hash", "project_root", "objective", "context_json"}),
     "delegations": frozenset({"delegation_id", "project_hash", "task_id", "native_task_name", "input_report_ids_json", "input_decision_ids_json"}),
-    "reports": frozenset({"report_id", "project_hash", "task_id", "delegation_id", "assembly_state", "content_digest"}),
+    "reports": frozenset({"report_id", "project_hash", "task_id", "delegation_id", "assembly_state", "content_digest", "semantic_status", "coverage_diagnostics_json"}),
     "report_chunks": frozenset({"report_id", "chunk_index", "content_json", "content_digest"}),
     "report_consumption_receipts": frozenset({"receipt_id", "project_hash", "task_id", "consumer_delegation_id", "reader_kind", "report_id", "observed_content_digest", "sections_json", "input_cursor", "output_cursor", "chunk_indexes_json", "returned_content_bytes", "has_more", "created_sequence"}),
     "report_usage": frozenset({"task_id", "total_retained_bytes", "assembling_bytes", "assembling_reports"}),
     "timeline": frozenset({"sequence", "task_id", "decision_id", "payload_json"}),
-    "user_decisions": frozenset({"decision_id", "task_id", "subject_type", "subject_id", "response_original", "response_en"}),
+    "user_decisions": frozenset({"decision_id", "task_id", "subject_type", "subject_id", "decision_type", "prompt_en", "response_original", "response_en", "steering_delta_json"}),
+    "effective_contract_revisions": frozenset({"task_id", "revision", "decision_id", "created_sequence"}),
+    "effective_contract_items": frozenset({"item_id", "project_hash", "task_id", "category", "ordinal", "text", "created_revision", "retired_revision"}),
+    "delegation_outcome_assignments": frozenset({"delegation_id", "item_id", "assignment_role", "revision", "superseded_by_delegation_id", "superseded_sequence"}),
+    "report_contract_coverage": frozenset({"report_id", "item_id", "status", "verification_json"}),
+    "clarification_bindings": frozenset({"clarification_binding", "project_hash", "task_id", "subject_type", "subject_id", "decision_type", "prompt_digest", "prompt", "prompt_language", "effective_contract_revision", "issue_sequence", "request_digest", "response_digest", "consumed_decision_id"}),
     "projection_jobs": frozenset({"job_id", "task_id", "source_sequence", "status"}),
     "projection_files": frozenset({"task_id", "relative_path", "content_digest", "status"}),
 }
+
+
+def _codex_home() -> Path:
+    """Use the explicit Codex state root, with the documented HOME fallback."""
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(os.environ.get("HOME") or str(Path.home())).expanduser() / ".codex"
 
 class V12MaintenanceError(RuntimeError):
     """A bounded error that is safe to render from the local CLI."""
@@ -188,8 +218,7 @@ def _target(task_id: object) -> _Target:
     compact_ref = task_ref(task_id)
     if project_hash is None or compact_ref is None:
         raise _failure("maintenance_task_id_invalid")
-    home = Path(os.environ.get("HOME") or str(Path.home())).expanduser()
-    codex = home / ".codex"
+    codex = _codex_home()
     cortex = codex / "cortex"
     v12 = cortex / "v12"
     projects = v12 / "projects"

@@ -43,11 +43,9 @@
 ## Delegations and reports
 
 - `create_delegation` records work; it does not spawn a native worker or create
-  host authority. Its successful response is dispatch-first: root-level
-  `native_dispatch` and `renderer` proof are returned, and the complete worker
-  message appears only once at
-  `native_dispatch.native_arguments.message`. Copy that payload byte-for-byte
-  into exactly one matching host spawn. Do not create an ad-hoc prompt, use
+  host authority. Its successful response returns a host-neutral `dispatch_brief`
+  and renderer/profile proof. Codex maps that semantic brief to the active host
+  spawn operation. Do not create an ad-hoc prompt, use
   fewer workers than durable delegations, reuse one worker across delegations,
   or silently inherit model/effort/fork settings.
 - Delegation `scope` is required non-empty text (maximum 65,536 characters) and
@@ -61,27 +59,26 @@
   appear exactly once, in order, and contain delegation-specific values. Missing,
   empty, TODO/TBD/unknown, or generic placeholder sections are invalid.
 - Reports are immutable `progress`, `result`, `synthesis`, or `plan` evidence,
-  not lifecycle completion or acceptance. New reports use bounded `single`, or
-  `begin` → sequential `append` → `finalize`, or `begin` → `abort`. A plan has `informational` or
+  not lifecycle completion or acceptance. Semantic publication owns storage and
+  completion atomically, with one terminal outcome per delegation/report-kind slot.
+  A plan has `informational` or
   `required` review policy. The coordinator owns the ordinary-chat review hold;
   the backend never makes it a gate.
 - The owning native worker alone calls `submit_report`. The coordinator never
   fills in a missing plan, result, verification, synthesis, or documentation
   rationale; it follows up, reworks, or creates a parent-linked replacement.
-- Large reports use `begin`, sequential `append`, and `finalize`, or `abort`.
-  Appended chunks are at most 32,768 bytes, and one report has at most 256
-  chunks/8 MiB. Resume with the stored
-  manifest and `next_chunk_index`; do not restart, skip an index, append after
-  finalization/abort, or overwrite an immutable report. Supersede explicitly.
+- Report storage and replay identity are server-owned. Exact ambiguous publication
+  retries replay; changed payloads conflict and require recovery/rework. Do not
+  restart, append after finalization/abort, or overwrite immutable evidence.
 - `read_reports` accepts no more than 20 distinct known compact `report_refs` and
   returns them in request order. Select only needed sections, observe its
-  65,536-byte read integer `max_bytes` budget, and continue with its scope-bound
-  cursor. `max_bytes=0` is metadata-only. Coordinator reads are metadata-only;
+  fixed 65,536-byte server page, and continue with its scope-bound
+  cursor. Coordinator reads are metadata-only;
   a worker body read requires its exact consuming `consumer_delegation_ref` and
   declared finalized inputs, and yields a consumption receipt. Task and
   delegation inspections intentionally return compact references instead of full
   report bodies.
-- Bound every inspection with `after_sequence` plus `limit`, and continue only
+- Continue every inspection with `after_sequence` and only while
   while `has_more` using the returned `next_sequence`.
 - A worker may end without a report. The coordinator can disclose the evidence
   gap and create a replacement; there is no backend recovery route.
@@ -98,7 +95,7 @@
 - Activated Cortex skills are supplied by the host, not by the ledger MCP.
   Never call `read_mcp_resource`, `resources/read`, or a Cortex tool for a
   `skill://` URI.
-- The bounded route covers applicable `AGENTS.md`, the project/feature indexes,
+- The bounded route uses the host-injected `AGENTS.md` context, then the project/feature indexes,
   and only task-relevant linked pages. The orchestrator alone owns its exact
   paths and six-part template: documents to consume first, applicable
   requirements, verification contract, ownership constraints, known
@@ -139,13 +136,11 @@
   verdict and automatically attempts the advisory write plus bounded
   inspection. `ready_with_risks` never asks for user confirmation. Do not
   conflate the independent `execution_outcome` with advisory bookkeeping.
-- `inspect_task.execution_outcome` has exactly `evidence_status`,
-  `finalized_report_count`, `completed_report_count`, and `outcome`. The
-  finalized count covers every finalized report; the completed count covers
-  semantically valid canonical finalized results with status `completed`.
-  `outcome` is `null` before the first such result and then follows the latest
-  such result as `completed` or `incomplete`; it is not a native-lifecycle
-  claim. `advisory_closure` separately reports `record_status` and
+- `inspect_task.execution_outcome` contains `evidence_status`,
+  `finalized_report_count`, `completed_report_count`, `effective_revision`,
+  `coverage_status`, and `outcome`. It derives deterministically from current
+  effective-contract coverage, not report arrival order or historical claims;
+  it is not a native-lifecycle claim. `advisory_closure` separately reports `record_status` and
   `latest_record`. Closure bookkeeping cannot change execution evidence.
 - `submit_governance_closure` returns `closure_confirmation` with
   `inspection_status`, `reason`, and `attempts`. The service allows at most one

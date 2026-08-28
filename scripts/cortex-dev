@@ -4,6 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 project_dir="$(cd -- "${script_dir}/.." && pwd -P)"
+caller_workdir="$(pwd -P)"
 original_home="$(cd -- "${HOME:?HOME is required}" && pwd -P)"
 dev_home="${original_home}/.cortex-dev"
 
@@ -48,4 +49,5 @@ export CODEX_HOME="${HOME}/.codex"
 cd -- "${project_dir}"
 printf 'Cortex isolated candidate target: HOME=%s CODEX_HOME=%s\n' "${HOME}" "${CODEX_HOME}"
 ./scripts/sync-cortex.sh
+cd -- "${caller_workdir}"
 exec codex "$@"

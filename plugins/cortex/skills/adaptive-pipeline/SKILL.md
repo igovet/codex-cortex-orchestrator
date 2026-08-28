@@ -175,7 +175,7 @@ When a genuine decision is required, ask one complete question in the language
 of the latest meaningful user message and end the turn. Silence is not an
 answer. Record the exact response in `response_original`, together with the
 neutral `prompt` and `user_language`, against the immutable subject/digest
-before using it; do not generate or accept `prompt_en` or `response_en`. Follow
+before using it; do not generate or accept translated or duplicate language-specific fields. Follow
 up the same native child only when its live handle and ownership are known and
 ordinary host follow-up is safe; otherwise create a parent-linked replacement.
 Cortex does not guarantee same-child continuation.

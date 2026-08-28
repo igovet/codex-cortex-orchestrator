@@ -6,23 +6,21 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from cortex_runtime.model_routing import native_spawn_arguments, validate_model_selection
+from cortex_runtime.model_routing import validate_model_selection
 
 
 def native_task_name(profile_name: object, instance: object = 1) -> str:
-    """Return a host-safe name that visibly identifies a worker profile.
+    """Return a stable human-readable task name for the host-facing brief.
 
     The first use of a profile keeps its exact packaged profile name. Later
     same-profile siblings receive a one-based suffix, which keeps each native
     worker addressable without hiding its role behind an opaque identifier.
     """
     if not isinstance(profile_name, str) or re.fullmatch(r"[a-z][a-z0-9_]*", profile_name) is None:
-        raise ValueError("profile_name must be a host-safe profile name")
+        raise ValueError("profile_name must be a packaged profile name")
     if isinstance(instance, bool) or not isinstance(instance, int) or instance < 1:
         raise ValueError("instance must be a positive integer")
     result = profile_name if instance == 1 else f"{profile_name}_{instance}"
-    if len(result) > 64:
-        raise ValueError("native task name exceeds the host limit")
     return result
 
 
@@ -57,29 +55,46 @@ def delegation_model_metadata(values: Mapping[str, object]) -> dict[str, str]:
     }
 
 
-def native_delegation_projection(
+def dispatch_brief_projection(
     *,
     task_name: object,
     message: object,
     model: object,
     reasoning_effort: object,
+    delegation_ref: object,
+    project_root: object,
+    semantic_objective: object,
+    profile_proof: Mapping[str, object],
+    effective_contract: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
-    """Project one coordinator-owned selection to a native spawn request.
+    """Return a host-neutral dispatch brief for the active coordinator.
 
-    The logical pair remains visible for durable audit while the nested native
-    arguments obey the Luna-default transport rule. No lifecycle, recovery, or
-    profile metadata is introduced.
+    The brief deliberately contains no static host argument object.  Codex is
+    responsible for mapping its semantic fields to the active spawn operation.
     """
     selection = delegation_model_metadata(
         {"model": model, "reasoning_effort": reasoning_effort},
     )
-    return {
+    if not isinstance(task_name, str) or not task_name:
+        raise ValueError("task_name must be non-empty")
+    if not isinstance(message, str) or not message:
+        raise ValueError("rendered_message must be non-empty")
+    if not isinstance(delegation_ref, str) or not delegation_ref:
+        raise ValueError("delegation_ref must be non-empty")
+    if not isinstance(project_root, str) or not project_root:
+        raise ValueError("project_root must be non-empty")
+    if not isinstance(semantic_objective, str) or not semantic_objective:
+        raise ValueError("semantic_objective must be non-empty")
+    result = {
         "task_name": task_name,
-        "selection": selection,
-        "native_arguments": native_spawn_arguments(
-            model=selection["model"],
-            reasoning_effort=selection["reasoning_effort"],
-            task_name=task_name,
-            message=message,
-        ),
+        "rendered_message": message,
+        "semantic_objective": semantic_objective,
+        "recommended_model": selection["model"],
+        "recommended_reasoning_effort": selection["reasoning_effort"],
+        "delegation_ref": delegation_ref,
+        "project_root": project_root,
+        "profile_proof": dict(profile_proof),
     }
+    if effective_contract is not None:
+        result["effective_contract"] = dict(effective_contract)
+    return result

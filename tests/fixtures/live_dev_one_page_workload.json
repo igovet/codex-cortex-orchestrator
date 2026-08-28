@@ -1,0 +1,21 @@
+{
+  "project": "simple-one-page-html",
+  "prompt": "The selected route is $cortex:orchestrator. In this live-dev session, use Cortex MCP tools for ledger evidence and native collaboration/subagents for worker-owned project work. The test project is a simple one-page HTML site. Complete the task contract and select full or light governance as appropriate. Dispatch a planner worker to produce an immutable plan. Ask exactly one genuine product-clarification question, wait for the driver's answer, record that decision, present the plan, and wait for explicit approval. After the driver approves, dispatch one implementation worker authorized to use local project tooling and create exactly one self-contained index.html in the test project. Dispatch an independent verification worker authorized to inspect that test project read-only and run proportionate local checks, then read the worker-owned report evidence. The coordinator must not run shell commands, inspect project source, or modify project files. Workers must not start nested live-dev or nested tmux; external actions remain forbidden. Complete the documentation-impact or no-impact stage, then record advisory closure. Do not repeat or replay a successful mutation; retry only an explicitly transport-ambiguous result when the advertised retry contract authorizes an exact retry. Emit exactly CORTEX_ONE_PAGE_OK only after every required stage succeeds with zero tool errors and zero unauthorized replays; otherwise do not emit the sentinel.",
+  "success_marker": "CORTEX_ONE_PAGE_OK",
+  "required_stages": [
+    "task contract",
+    "governance",
+    "planner worker",
+    "immutable plan",
+    "product clarification",
+    "driver answer",
+    "record decision",
+    "explicit approval",
+    "implementation worker",
+    "self-contained index.html",
+    "independent verification",
+    "worker-owned report evidence",
+    "documentation impact",
+    "advisory closure"
+  ]
+}

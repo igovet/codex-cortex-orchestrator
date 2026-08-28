@@ -112,7 +112,8 @@ not storage corruption or lifecycle rejection.
 
 ## Idempotency
 
-The first mutation may omit an operation-scoped idempotency key. Its receipt
+Every mutation requires a caller-generated operation-scoped idempotency key. Its
+exact key is retained for
 returns the server-issued key, and a normalized payload digest is stored with
 the original JSON result. An exact replay returns that result and marks it
 replayed; different content for the same operation/key

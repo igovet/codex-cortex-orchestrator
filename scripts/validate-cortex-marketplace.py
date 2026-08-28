@@ -19,8 +19,8 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_BASE_VERSION = "12.1.0"
-VERSION_PATTERN = re.compile(r"^12\.1\.0\+codex\.\d{14}$")
+EXPECTED_BASE_VERSION = "12.1.1"
+VERSION_PATTERN = re.compile(r"^12\.1\.1\+codex\.\d{14}$")
 EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
@@ -37,89 +37,59 @@ EXPECTED_SKILLS = (
 EXPECTED_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
 EXPECTED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 BASE_V12_TOOLS = (
-    "create_task",
-    "inspect_task",
-    "create_delegation",
-    "read_delegation",
-    "submit_report",
-    "read_reports",
-    "set_governance_mode",
-    "record_initiative",
-    "inspect_governance",
-    "submit_governance_closure",
-    "record_user_decision",
+    "open_task",
+    "read_task",
+    "open_decision",
+    "open_assignment",
+    "consume_assignment_evidence",
+    "publish_plan",
+    "publish_result",
+    "publish_documentation",
+    "record_decision",
+    "assess_governance",
+    "close_task",
 )
 SUPPORTED_V12_CATALOGUES = (BASE_V12_TOOLS,)
 TASK_ANCHORED_TOOLS = {
-    "inspect_task", "create_delegation", "set_governance_mode", "record_initiative",
-    "inspect_governance", "submit_governance_closure", "record_user_decision",
+    "read_task", "open_decision", "open_assignment", "record_decision", "assess_governance", "close_task",
 }
 EXPECTED_TOOL_FIELDS = {
-    "create_task": {
+    "open_task": {
         "project_root", "objective", "user_request_original", "user_language",
-        "requirements", "constraints", "acceptance_criteria", "verification_plan", "context",
-        "idempotency_key",
+        "requirements", "constraints", "acceptance_criteria", "context",
     },
-    "inspect_task": {"task_ref", "after_sequence", "limit"},
-    "create_delegation": {
-        "task_ref", "objective", "role", "profile_name", "scope", "instructions",
-        "parent_delegation_ref", "input_report_refs", "input_decision_refs", "outcome_assignments",
-        "model", "reasoning_effort",
-        "idempotency_key",
-    },
-    "read_delegation": {"delegation_ref", "after_sequence", "limit"},
-    "submit_report": {
-        "delegation_ref", "mode", "report_type", "status", "content", "report_ref",
-        "chunk_index", "section", "expected_chunk_count", "expected_content_digest", "abort_reason_en",
-        "supersedes_report_ref", "review_policy", "idempotency_key",
-    },
-    "read_reports": {
-        "report_refs", "sections", "cursor", "max_bytes",
-        "consumer_delegation_ref",
-    },
-    "set_governance_mode": {
-        "task_ref", "mode", "rationale", "risk_factors", "source", "initiative_ref", "idempotency_key",
-    },
-    "record_initiative": {
-        "task_ref", "goal", "initiative_ref", "parent_initiative_ref", "risk", "status", "dependency_refs",
-        "linked_task_refs", "linked_delegation_refs", "linked_report_refs", "linked_decision_refs", "notes", "idempotency_key",
-    },
-    "inspect_governance": {"task_ref", "initiative_ref", "after_sequence", "limit"},
-    "submit_governance_closure": {
-        "task_ref", "subject_type", "subject_ref", "verdict", "evidence", "unresolved_risks", "follow_ups",
-        "initiative_status", "completion_notes", "idempotency_key",
-    },
+    "read_task": {"task_ref", "after_sequence"},
+    "open_decision": {"task_ref", "prompt", "prompt_language", "subject_type", "subject_ref", "assignment_ref"},
+    "open_assignment": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "parent_assignment_ref", "input_report_refs", "input_decision_refs", "model", "reasoning_effort"},
+    "consume_assignment_evidence": {"assignment_ref", "cursor"},
+    "publish_plan": {"assignment_ref", "evidence", "status"},
+    "publish_result": {"assignment_ref", "evidence", "status"},
+    "publish_documentation": {"assignment_ref", "evidence", "status"},
+    "record_decision": {"task_ref", "binding_ref", "response_original", "user_language"},
+    "assess_governance": {"task_ref", "mode", "rationale", "risk_factors"},
+    "close_task": {"task_ref", "verdict", "evidence", "unresolved_risks", "follow_ups", "completion_notes"},
 }
 EXPECTED_TOOL_REQUIRED = {
-    "create_task": {
+    "open_task": {
         "project_root", "objective", "user_request_original", "user_language",
-        "requirements", "constraints",
-        "acceptance_criteria", "verification_plan",
+        "requirements", "constraints", "acceptance_criteria",
     },
-    "inspect_task": {"task_ref"},
-    "create_delegation": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"},
-    "read_delegation": {"delegation_ref"},
-    "submit_report": {"delegation_ref", "mode"},
-    "read_reports": {"report_refs"},
-    "set_governance_mode": {"task_ref", "mode"},
-    "record_initiative": {"task_ref"},
-    "inspect_governance": {"task_ref"},
-    "submit_governance_closure": {"task_ref", "subject_type", "subject_ref", "verdict", "evidence"},
-    "record_user_decision": {
-        "task_ref", "subject_type", "subject_ref", "decision_type",
-        "prompt", "response_original", "user_language",
-    },
-}
-EXPECTED_DECISION_FIELDS = {
-    "task_ref", "subject_type", "subject_ref", "subject_digest", "decision_type", "prompt",
-    "response_original", "user_language", "approval_handle",
-    "approval_view_content_digest", "approval_view_source_sequence", "supersedes_decision_ref",
-    "idempotency_key", "steering_delta",
+    "read_task": {"task_ref"},
+    "open_decision": {"task_ref", "prompt", "prompt_language"},
+    "open_assignment": {"task_ref", "objective", "role", "profile_name", "scope", "instructions", "model", "reasoning_effort"},
+    "consume_assignment_evidence": {"assignment_ref"},
+    "publish_plan": {"assignment_ref", "evidence"},
+    "publish_result": {"assignment_ref", "evidence"},
+    "publish_documentation": {"assignment_ref", "evidence"},
+    "record_decision": {"task_ref", "binding_ref", "response_original", "user_language"},
+    "assess_governance": {"task_ref", "mode"},
+    "close_task": {"task_ref", "verdict", "evidence"},
 }
 ACTIVE_RUNTIME_FILES = {
     "__init__.py",
     "canonical_json.py",
     "delegation.py",
+    "domain_api.py",
     "markdown_document.py",
     "mcp_api.py",
     "model_routing.py",
@@ -240,9 +210,9 @@ def validate_manifest(plugin: Path) -> None:
     manifest = load_json(plugin / ".codex-plugin/plugin.json", "plugin manifest")
     version = manifest.get("version")
     if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
-        fail("plugin manifest must use Cortex 12.1.0 with a codex timestamp cachebuster")
+        fail("plugin manifest must use Cortex 12.1.1 with a codex timestamp cachebuster")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
-        fail("plugin manifest semantic version must be 12.1.0")
+        fail("plugin manifest semantic version must be 12.1.1")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare the bundled skills and MCP companion")
     interface = manifest.get("interface")
@@ -337,7 +307,7 @@ def validate_profiles(plugin: Path) -> None:
 def validate_skills(plugin: Path) -> None:
     folders = {path.name for path in (plugin / "skills").iterdir() if path.is_dir() and not path.is_symlink()}
     if folders != set(EXPECTED_SKILLS):
-        fail("bundled skills must be exactly the eleven V12 skills")
+        fail("bundled skills must be exactly the eleven supported V12 skills")
     resources = {
         path.relative_to(plugin / "skills")
         for path in (plugin / "skills").rglob("*")
@@ -357,17 +327,17 @@ def validate_skills(plugin: Path) -> None:
         if f"\nname: {name}\n" not in content:
             fail(f"skill frontmatter must identify {name}")
     orchestrator = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
-    # Native argument names and lifecycle fields belong to the active host
-    # schema, not to the packaged prose.  Keep the semantic boundary in the
-    # release gate while allowing the host to evolve its concrete fields.
+    # Concrete host arguments and lifecycle fields belong to the active Codex
+    # schema. The package retains a semantic brief only.
     orchestrator_semantics = " ".join(orchestrator.split()).lower()
     lifecycle_markers = (
-        "active host schema is authoritative for the actual spawn projection",
-        "do not copy an assumed native operation name, argument shape, lifecycle state",
+        "host-neutral dispatch brief",
+        "active host schema is authoritative for mapping that brief",
+        "do not copy an assumed operation name, argument shape, lifecycle",
         "a host result that is absent or ambiguous is an external limitation",
-        "do not infer lifecycle from a stable name",
+        "never create an ad-hoc spawn",
     )
-    if "gpt-5.6-luna" not in orchestrator_semantics or any(marker not in orchestrator_semantics for marker in lifecycle_markers):
+    if any(marker not in orchestrator_semantics for marker in lifecycle_markers):
         fail("orchestrator guidance must describe host-schema-owned native lifecycle semantics")
     required_safety_markers = (
         "deterministically matches the actual user message",
@@ -430,7 +400,7 @@ def validate_runtime(plugin: Path) -> None:
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         fail(f"V12 runtime cannot be imported: {exc}")
     if getattr(cortex, "SERVER_VERSION", None) != EXPECTED_BASE_VERSION:
-        fail("Cortex server must publish the 12.1.0 semantic version")
+        fail("Cortex server must publish the 12.1.1 semantic version")
     compact_probe = "task-" + ("a" * 64) + "-" + ("b" * 32)
     compact_ref = task_ref(compact_probe)
     if (
@@ -467,15 +437,22 @@ def validate_runtime(plugin: Path) -> None:
             fail(f"V12 public contract fields drifted: {name}")
         if expected_required is not None and required != expected_required:
             fail(f"V12 public contract required fields drifted: {name}")
-        if name == "create_task":
+        if name == "open_task":
+            required_contract_dimensions = ("requirements", "constraints", "acceptance_criteria")
+            if not set(required_contract_dimensions).issubset(set(contract.get("inputSchema", {}).get("required") or ())):
+                fail("create_task must require its three explicit contract dimensions")
+            if "verification_plan" in properties:
+                fail("create_task must derive verification entries without a public duplicate input")
+            if tuple(properties)[-1:] != ("context",):
+                fail("create_task optional context must remain the final advertised property")
+            if not str(contract.get("description", "")).strip():
+                fail("open_task description must lead with the complete required task contract")
             project_root = properties.get("project_root")
             if not isinstance(project_root, dict) or project_root.get("type") != "string":
                 fail("create_task.project_root must remain the explicit V12 shard anchor")
-        elif name in {"read_delegation", "submit_report", "read_reports"}:
+        elif name == "consume_assignment_evidence":
             derived_required = {
-                "read_delegation": {"delegation_ref"},
-                "submit_report": {"delegation_ref"},
-                "read_reports": {"report_refs"},
+                "consume_assignment_evidence": {"assignment_ref"},
             }[name]
             if (
                 "project_root" in properties
@@ -495,26 +472,7 @@ def validate_runtime(plugin: Path) -> None:
                 or task_ref.get("maxLength") != 14
             ):
                 fail(f"{name} must resolve through required compact task_ref without a public task_id alternative")
-        if name == "read_reports":
-            max_bytes = properties.get("max_bytes")
-            if (
-                not isinstance(max_bytes, dict)
-                or max_bytes.get("type") != "integer"
-                or max_bytes.get("minimum") != 0
-                or not isinstance(max_bytes.get("maximum"), int)
-                or "byte_budget" in properties
-            ):
-                fail("read_reports must expose only the canonical integer max_bytes field")
-            submit_section = contracts["submit_report"]["inputSchema"]["properties"].get("section")
-            read_sections = properties.get("sections")
-            read_section = read_sections.get("items") if isinstance(read_sections, dict) else None
-            if not (
-                isinstance(submit_section, dict)
-                and isinstance(read_section, dict)
-                and all(submit_section.get(item) == read_section.get(item) for item in ("type", "maxLength", "pattern"))
-            ):
-                fail("submit_report.section and read_reports.sections items must share the canonical bounded section schema")
-        if name == "create_delegation":
+        if name == "open_assignment":
             scope = properties.get("scope")
             if (
                 not isinstance(scope, dict)
@@ -523,91 +481,25 @@ def validate_runtime(plugin: Path) -> None:
                 or not isinstance(scope.get("maxLength"), int)
                 or scope["maxLength"] < 1
             ):
-                fail("create_delegation.scope must be a bounded non-empty string")
-        if name == "submit_governance_closure":
-            subject_id = properties.get("subject_ref")
-            if (
-                not isinstance(subject_id, dict)
-                or subject_id.get("type") != "string"
-                or subject_id.get("minLength") != 1
-                or subject_id.get("maxLength") != 14
-            ):
-                fail("submit_governance_closure.subject_ref must be a bounded compact reference")
-        if name == "record_user_decision":
-            if set(properties) != EXPECTED_DECISION_FIELDS:
-                fail("record_user_decision fields drifted from the canonical V12 user-decision contract")
-            decision_shapes = schema.get("oneOf")
-            approval_required = {"approval_handle", "approval_view_content_digest", "approval_view_source_sequence"}
-            if (
-                not isinstance(decision_shapes, list)
-                or not any(
-                    isinstance(shape, dict)
-                    and isinstance(shape.get("properties"), dict)
-                    and isinstance(shape["properties"].get("subject_type"), dict)
-                    and shape["properties"]["subject_type"].get("const") == "plan"
-                    and isinstance(shape["properties"].get("decision_type"), dict)
-                    and shape["properties"]["decision_type"].get("const") == "approve"
-                    and approval_required.issubset(set(shape.get("required") or ()))
-                    for shape in decision_shapes
-                )
-            ):
-                fail("record_user_decision must require the complete approval relation for approve")
-            subject_type = properties.get("subject_type")
-            decision_type = properties.get("decision_type")
-            approval_handle = properties.get("approval_handle")
-            approval_view_digest = properties.get("approval_view_content_digest")
-            approval_view_sequence = properties.get("approval_view_source_sequence")
-            if (
-                not isinstance(subject_type, dict)
-                or subject_type.get("type") != "string"
-                or subject_type.get("enum") != ["task", "plan", "initiative", "delegation", "report"]
-                or not isinstance(decision_type, dict)
-                or decision_type.get("type") != "string"
-                or decision_type.get("enum") != [
-                    "approve", "reject", "request_revision", "clarification", "cancel", "accept_risk", "override", "steer",
-                ]
-            ):
-                fail("record_user_decision must preserve the canonical V12 subject and decision enums")
-            if (
-                approval_required & required
-                or not isinstance(approval_handle, dict)
-                or approval_handle.get("type") != "string"
-                or approval_handle.get("minLength") != 1
-                or approval_handle.get("maxLength") != 160
-                or not isinstance(approval_view_digest, dict)
-                or approval_view_digest.get("type") != "string"
-                or approval_view_digest.get("minLength") != 0
-                or approval_view_digest.get("maxLength") != 71
-                or not isinstance(approval_view_digest.get("pattern"), str)
-                or not isinstance(approval_view_sequence, dict)
-                or approval_view_sequence.get("type") != "integer"
-                or approval_view_sequence.get("minimum") != 0
-            ):
-                fail("record_user_decision must preserve the canonical approval relation fields")
+                fail("open_assignment.scope must be a bounded non-empty string")
     if hasattr(__import__("cortex_runtime.mcp_api", fromlist=["public_tools_for_audience"]), "public_tools_for_audience"):
         fail("V12 MCP transport must not project tools by audience")
 
     registry = model_routing.model_effort_registry()
     if tuple(registry) != EXPECTED_MODELS or registry != {model: EXPECTED_EFFORTS for model in EXPECTED_MODELS}:
-        fail("native model/effort registry must preserve all exact supported selections")
+        fail("packaged model/effort recommendations must remain internally consistent")
     for model in EXPECTED_MODELS:
         for effort in EXPECTED_EFFORTS:
             try:
-                native = model_routing.native_spawn_arguments(
-                    model=model,
-                    reasoning_effort=effort,
-                    task_name="cortex-v12-validator",
-                    message="Preserve the selected native model and effort exactly.",
-                )
+                recommendation = model_routing.validate_model_selection(model, effort)
             except ValueError as exc:
-                fail(f"native model/effort transport rejected {model}/{effort}: {exc}")
-            if native.get("reasoning_effort") != effort or native.get("fork_turns") != "none":
-                fail(f"native model/effort transport rewrote {model}/{effort}")
-            if model == "gpt-5.6-luna":
-                if "model" in native:
-                    fail("native Luna transport must omit the model override")
-            elif native.get("model") != model:
-                fail(f"native {model} transport must retain the explicit model override")
+                fail(f"model/effort recommendation rejected {model}/{effort}: {exc}")
+            if recommendation.model != model or recommendation.reasoning_effort != effort:
+                fail(f"model/effort recommendation rewrote {model}/{effort}")
+    try:
+        model_routing.validate_model_selection("host-selected-model", "host-selected-effort")
+    except ValueError as exc:
+        fail(f"host-neutral recommendation validation rejected non-empty host values: {exc}")
 
 
 def main() -> int:

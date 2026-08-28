@@ -27,14 +27,14 @@ completed reports.
 ## Key files
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) builds and serves the V12 facade.
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact eleven-tool catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact eleven-tool semantic catalog.
 - [mcp_api.py](../../../plugins/cortex/scripts/cortex_runtime/mcp_api.py) validates requests and serves MCP over stdio.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) maps public calls to the store.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) owns bounded V12 task/report constants and canonical report digests.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 persistence.
 - [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) materializes derived host-private plan/report Markdown views.
-- [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the direct native worker message from bundled policy and coordinator-authored delegation data.
-- [delegation.py](../../../plugins/cortex/scripts/cortex_runtime/delegation.py) projects coordinator-owned model metadata to native spawn arguments.
+- [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the direct worker message from bundled policy and coordinator-authored delegation data.
+- [delegation.py](../../../plugins/cortex/scripts/cortex_runtime/delegation.py) projects coordinator-owned model metadata into the host-neutral `dispatch_brief`.
 - [model_routing.py](../../../plugins/cortex/scripts/cortex_runtime/model_routing.py) validates exact native model/effort support.
 
 ## Data flow
@@ -49,7 +49,7 @@ create_task
     │       ├── discovery / implementation / review / verification / security
     │       └── evidence may add/remove/reorder/retry/rework later nodes
     │
-    ├── create_delegation ──► native_dispatch + renderer proof ──► native worker
+    ├── create_delegation ──► dispatch_brief + renderer proof ──► native worker
     │                                                │
     │                                                ▼
     │                                          submit_report
@@ -90,9 +90,9 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | --- | --- |
 | `create_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful `cortex/task-contract/v1` result fields; return preferred `task_ref` and canonical `task_id`. |
 | `inspect_task` | Use `task_ref` to return compact task history after `after_sequence`, bounded by `limit`, plus exact persisted continuation dispatches for host reconciliation. The result includes independent `execution_outcome` and task-relevant `advisory_closure` projections. Continuations are lifecycle-unknown and require a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
-| `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return a semantic delegation receipt consisting of root-level `native_dispatch` and `renderer` proof. The complete message occurs once at `native_dispatch.native_arguments.message`; normal spawn uses that receipt directly, while `read_delegation` is recovery-only. The active host schema defines native lifecycle arguments; the receipt is not host authority. |
+| `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return a host-neutral `dispatch_brief` and renderer/profile proof. Codex maps the brief to its active spawn operation; `read_delegation` is recovery-only, and the receipt is not host authority. |
 | `read_delegation` | Use the exact emitted `delegation_ref` plus `after_sequence` to resolve its owner task and return compact local history without a receipt. Do not supply `task_ref` or `task_id`; no legacy or direct-ID public shape is accepted. |
-| `submit_report` | Use the exact emitted `delegation_ref` for one bounded `single` report or an assembled `begin`/sequential `append`/`finalize`/`abort` progress, result, synthesis, or plan report. It resolves the owner task; do not supply `task_ref` or `task_id`. |
+| `submit_report` | Use the exact emitted `delegation_ref` for an assembled `begin`/sequential `append`/`finalize`/`abort` progress, result, synthesis, or plan report. It resolves the owner task; do not supply `task_ref` or `task_id`. |
 | `read_reports` | Use exact `report_refs` to resolve their owner task and read metadata for coordinators or whole JSON chunks for a consuming worker (with its exact `consumer_delegation_ref` and declared inputs), for 1–20 known reports in requested order, with section/cursor/integer-byte bounds. Do not supply `task_ref` or `task_id`. |
 | `set_governance_mode` | Use `task_ref` to append a model or user-override assessment. |
 | `record_initiative` | Use `task_ref` only as the project anchor to create or revise an initiative and its links. |
@@ -110,8 +110,8 @@ Returned task IDs use `task-<64-lowercase-hex-project-shard>-<32-lowercase-hex-r
 so the runtime can resolve a ledger without scanning project directories. Callers
 must still treat the ID as opaque and preserve it exactly.
 
-For public continuation calls, `handles.after_sequence`,
-`handles.chunk_index`, and `handles.idempotency_key` are copied unchanged to
+For public continuation calls, `handles.after_sequence` and
+`handles.idempotency_key` are copied unchanged to
 their identically named literal inputs. `handles.cursor` is the separate opaque
 `read_reports` continuation value. Root-level `next_sequence` and
 `next_chunk_index` describe the returned receipt; they are informational, not
@@ -201,6 +201,20 @@ unchanged; it has no language tag or translated/original duplicate. Only a
 finalized, completed, semantic-valid canonical plan may produce a ready
 approval relation. This classification is evidence, not a scheduler or
 lifecycle gate.
+
+New specialist plan and result reports use the current `v3` evidence envelope.
+Before finalization it requires exact coverage, observable executed or
+explicitly-not-run checks, residual risks/deviations/unresolved items, and a
+documentation-impact decision. A planner maps the complete current effective
+contract—requirements, constraints, acceptance criteria, and derived
+verification items—using the stable item references returned in its semantic
+brief, independent of delivery assignments. It maps every current item exactly
+once and provides ordered stages with an owner, earlier dependencies, work, and
+verification. An incomplete or predictably semantic-invalid V3 report remains
+assembling for corrective append; a corrective coverage mapping is the final
+canonical view while prior immutable chunks remain history. Finalization does
+not consume a normal result slot. V1/V2 history remains readable without reset
+or migration.
 Planner-authored implementation microtasks, when present in plan evidence,
 are likewise evidence for the model-owned orchestration DAG: they carry
 ownership, dependencies, acceptance, and verification context but are not
@@ -232,8 +246,7 @@ manifests, completed coordinator-read digests, and aggregate coverage. It
 guides model-owned rework, verification, and closure review; it cannot alter
 report/delegation lifecycle or block safe coordination.
 
-One bounded report can be submitted atomically with `single`. Larger reports
-use one stable ID across `begin`, sequential labeled `append` chunks up to
+Every new report uses one stable ID across `begin`, sequential labeled `append` chunks up to
 32 KiB, exact-manifest `finalize`, or `abort`. The limits
 are 256 chunks and 8 MiB per report, eight assembling reports and 16 MiB of
 assembling content per task, and 128 MiB retained report content per task.
@@ -242,7 +255,7 @@ final submission, or abort. A duplicate identical chunk is safe; a conflicting
 or out-of-order chunk is rejected.
 
 `read_reports` supports up to 32 section labels, an opaque scoped cursor, and a
-65,536-byte maximum/default `max_bytes` budget (`0` means metadata only).
+fixed 65,536-byte server page; metadata-only reads omit a consuming delegation.
 It returns only
 whole JSON chunks under a 224 KiB response ceiling. A small finalized one-chunk
 report may additionally expose compatibility `content`; incomplete/aborted
@@ -287,7 +300,7 @@ The coordinator may define outcome/acceptance, select or revise governance,
 create and inspect tasks/delegations, choose exact worker model/effort,
 coordinate native workers, read reports, decide rework/replacement, record
 advisory closure, and synthesize the final answer. Before project delegation,
-it must read applicable `AGENTS.md`, the project and feature indexes, and
+the host-injected `AGENTS.md` context governs the task; it then reads the project and feature indexes, and
 task-relevant pages
 selected from those indexes. It may not inspect or search source/code/config,
 scan unrelated documentation, create or edit target-project files, perform
@@ -361,9 +374,8 @@ first normal path-bearing task creation automatically upgrades the one exact
 released pre-human-view V12 layout transactionally; unknown or future layouts
 remain fail-closed, and V11 is never a migration input.
 
-Mutations run transactionally. A first mutation may omit an idempotency key;
-the receipt returns a server-issued `handles.idempotency_key` that callers copy
-unchanged for an exact retry. The same normalized payload returns the original
+Mutations run transactionally and require caller-generated idempotency keys.
+The same normalized payload/key returns the original
 result; conflicting payload returns `idempotency_conflict` without mutation. Concurrent reports,
 assessments, and initiative revisions receive unique ordered sequences.
 

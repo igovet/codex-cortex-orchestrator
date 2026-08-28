@@ -32,8 +32,9 @@ tree. Each delegation uses a required concise textual ownership `scope`; its
 detailed procedure belongs in `instructions`.
 
 The root coordinator has one bounded project-read exception for knowledge
-routing. It reads every applicable `AGENTS.md` for the known task scope, then
-`docs/project/index.md` and `docs/features/index.md`, then only the
+routing. The host-injected `AGENTS.md` context already governs the current
+task; the coordinator does not reread a global or project-root `AGENTS.md`.
+It then reads `docs/project/index.md` and `docs/features/index.md`, then only the
 task-relevant pages those indexes select. It does not scan arbitrary
 documentation, follow unrelated links, inspect source/code/configuration,
 perform the underlying domain analysis, edit documents, or run link, command,

@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Classic interactive tmux driver for repository Cortex live-dev checks."""
+from __future__ import annotations
+
+import argparse
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SESSION = "cortex-v12-smoke"
+TARGET = f"={SESSION}:0.0"
+SUBMIT_DRAIN_SECONDS = 5.0
+
+
+def tmux(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["tmux", "-f", "/dev/null", *args], text=True,
+                          capture_output=True, check=False)
+
+
+def exists() -> bool:
+    return tmux("has-session", "-t", f"={SESSION}").returncode == 0
+
+
+def fail(message: str) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return 2
+
+
+def start(project_root: Path, workdir: Path | None = None) -> int:
+    launcher_root = project_root.resolve()
+    selected_workdir = (workdir or project_root).resolve()
+    if not selected_workdir.is_dir():
+        return fail("--workdir must name an existing directory")
+    launcher = launcher_root / "scripts" / "cortex-dev"
+    if exists():
+        tmux("kill-session", "-t", f"={SESSION}")
+    result = tmux(
+        "new-session", "-d", "-s", SESSION, "-c", str(selected_workdir),
+        "bash", "-c",
+        f"cd {shlex.quote(str(selected_workdir))} && {shlex.quote(str(launcher))}; status=$?; printf 'Cortex live-dev exit=%s\\n' \"$status\"; exit \"$status\"",
+    )
+    if result.returncode != 0 or not exists():
+        return fail("could not create the default-server live-dev session")
+    print(f"Cortex live-dev session={SESSION}")
+    print("Cortex live-dev server=default")
+    print("Cortex live-dev target=HOME/.cortex-dev/.codex")
+    print(f"Attach with: tmux -f /dev/null attach -t {SESSION}")
+    print(f"Send a task prompt with: {Path(__file__).name} send --prompt-file FILE")
+    return 0
+
+
+def send_prompt(prompt_file: Path) -> int:
+    if not exists():
+        return fail(f"session {SESSION!r} does not exist; run start first")
+    try:
+        prompt = prompt_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return fail("cannot read prompt file as UTF-8")
+    if "\x00" in prompt:
+        return fail("prompt file contains NUL")
+    # Codex's composer is line-oriented.  A task prompt is still authored per
+    # task, but the controller submits one literal line so tmux cannot treat a
+    # newline as an unsubmitted editor action.
+    prompt = " ".join(prompt.split())
+    if not prompt:
+        return fail("prompt file must contain a non-empty task-specific prompt")
+    # Keep insertion and Enter as separate tmux calls, and let the interactive
+    # editor drain the literal paste before receiving Enter. Without this tiny
+    # gap a long prompt can appear in the composer while Enter is lost.
+    inserted = tmux("send-keys", "-l", "-t", TARGET, "--", prompt)
+    if inserted.returncode != 0:
+        return fail("could not insert prompt into the live session")
+    # Keep transport deliberately dumb: the coordinator observes the attached
+    # or captured TUI and decides when the composer is ready. This sequence is
+    # the empirically working one for the Codex composer: an initial carriage
+    # return, fixed drain, then one standalone carriage return.
+    primed = tmux("send-keys", "-t", TARGET, "C-m")
+    if primed.returncode != 0:
+        return fail("prompt inserted but initial submit keystroke failed")
+    time.sleep(SUBMIT_DRAIN_SECONDS)
+    submitted = tmux("send-keys", "-t", TARGET, "C-m")
+    if submitted.returncode != 0:
+        return fail("prompt inserted but Enter could not be submitted")
+    print(f"Cortex live-dev prompt-inserted={prompt_file}")
+    print("Cortex live-dev prompt-submitted=C-m")
+    print("Cortex live-dev transport-only=yes")
+    return 0
+
+
+def capture(lines: int) -> int:
+    if not exists():
+        return fail(f"session {SESSION!r} does not exist")
+    result = tmux("capture-pane", "-p", "-t", TARGET, "-S", f"-{lines}", "-E", "-1")
+    if result.returncode:
+        return fail("could not capture the live session")
+    print(result.stdout, end="")
+    return 0
+
+
+def status() -> int:
+    if not exists():
+        print(f"Cortex live-dev session={SESSION} has-session=no")
+        return 1
+    pane = tmux("display-message", "-p", "-t", TARGET, "#{pane_current_command}")
+    dead = tmux("display-message", "-p", "-t", TARGET, "#{pane_dead}")
+    print(f"Cortex live-dev session={SESSION} has-session=yes")
+    print(f"Cortex live-dev pane_current_command={pane.stdout.strip() or 'unknown'}")
+    print(f"Cortex live-dev pane_dead={dead.stdout.strip() or 'unknown'}")
+    return 0
+
+
+def stop(interrupt: bool) -> int:
+    if not exists():
+        print(f"Cortex live-dev session={SESSION} has-session=no")
+        return 0
+    tmux("send-keys", "-t", TARGET, "C-c" if interrupt else "C-d")
+    result = tmux("kill-session", "-t", f"={SESSION}")
+    if result.returncode != 0 or exists():
+        return fail("could not remove the owned live-dev session")
+    print(f"Cortex live-dev session={SESSION} stopped")
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+    start_cmd = sub.add_parser("start", help="create session and launch isolated cortex-dev")
+    start_cmd.add_argument("--workdir", type=Path, help="canonical Codex working directory")
+    send = sub.add_parser("send", help="send one task-specific prompt and then Enter")
+    send.add_argument("--prompt-file", type=Path, required=True)
+    cap = sub.add_parser("capture", help="capture bounded visible pane output")
+    cap.add_argument("--lines", type=int, default=200)
+    sub.add_parser("status", help="show exact-session and pane state")
+    stop_cmd = sub.add_parser("stop", help="send EOF and remove exact session")
+    stop_cmd.add_argument("--interrupt", action="store_true", help="send C-c before cleanup")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    root = Path(__file__).resolve().parent.parent
+    if args.command == "start":
+        return start(root, args.workdir)
+    if args.command == "send":
+        return send_prompt(args.prompt_file)
+    if args.command == "capture":
+        if args.lines < 1 or args.lines > 1000:
+            return fail("--lines must be between 1 and 1000")
+        return capture(args.lines)
+    if args.command == "status":
+        return status()
+    return stop(args.interrupt)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

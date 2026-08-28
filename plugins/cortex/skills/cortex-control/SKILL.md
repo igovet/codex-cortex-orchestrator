@@ -1,9 +1,9 @@
 ---
 name: cortex-control
-description: Internal Cortex v12.1.0 semantic companion supplied by the host after explicit cortex:orchestrator activation. Never select it for ordinary work or fetch its skill URI through MCP resources/read.
+description: Internal Cortex v12.1.1 semantic companion supplied by the host after explicit cortex:orchestrator activation. Never select it for ordinary work or fetch its skill URI through MCP resources/read.
 ---
 
-# Cortex Control v12.1.0
+# Cortex Control v12.1.1
 
 Cortex is a durable coordination ledger, not a workflow engine. The active MCP
 registry is the sole authority for argument and response shapes. Use returned
@@ -51,12 +51,12 @@ or ordinary safety and approval requirements.
 
 ## Public semantic catalog
 
-The same eleven tools are available to coordinators and workers. There is no
+The same ten semantic tools are available to coordinators and workers. There is no
 audience filtering, capability matrix, lifecycle authority, or profile-based
 capability admission; exact packaged `profile_name` validation is only a prompt
 integrity boundary.
 
-Use `set_governance_mode` to retain an advisory assessment when useful.
+Use `assess_governance` to retain an advisory assessment when useful.
 Light/full assessments, plans, user decisions, documentation evidence, and
 closures inform model judgment but never admit, reject, order, or close
 ordinary safe ledger work. Exact report/decision links remain available as
@@ -64,17 +64,17 @@ immutable evidence and retain their normal project/reference validation.
 
 | Tool | Semantic purpose |
 | --- | --- |
-| `create_task` | Create one exact task/result contract from its explicit root and return preferred `task_ref` plus canonical durable task ID. |
-| `inspect_task` | Read the task header, bounded chronology, and exact persisted continuation dispatches. A continuation is `ledger_unknown` for host lifecycle and must end in a finalized report, explicit blocked/partial handoff, or parent-linked replacement; native commentary alone is not a predecessor. |
-| `create_delegation` | Record bounded work, separate human role, exact packaged profile, model/effort, and relevant report/decision inputs; return root-level `native_dispatch` plus `renderer` proof. The complete message occurs once in `native_dispatch.native_arguments.message`; use it directly for normal spawning. |
-| `read_delegation` | Read one complete delegation contract and bounded compact chronology. |
-| `submit_report` | Create, chunk, finalize, or abort an immutable progress, result, synthesis, or plan report. |
-| `read_reports` | Read selected report manifests, sections, and chunks in requested report order with bounded resume. |
-| `set_governance_mode` | Append a model assessment or asserted direct-user override. |
-| `record_initiative` | Create or revise advisory same-project initiative context and evidence lineage. |
-| `inspect_governance` | Read scoped governance history and its current advisory projection. |
-| `submit_governance_closure` | Record a model-authored task or initiative closure recommendation. |
-| `record_user_decision` | Append an exact ordinary-chat user decision bound to an existing subject; plan/report subjects additionally bind an immutable digest. |
+| `open_task` | Open one durable task contract. |
+| `read_task` | Read bounded task state and immutable aggregate evidence. |
+| `open_decision` | Open one server-owned pending user-decision binding. |
+| `open_assignment` | Bind one worker assignment to effective contract and typed predecessor evidence. |
+| `consume_assignment_evidence` | Consume only declared report evidence for an assignment. |
+| `publish_plan` | Atomically publish a complete planning outcome. |
+| `publish_result` | Atomically publish a complete implementation or verification outcome. |
+| `publish_documentation` | Atomically publish a complete documentation-impact outcome. |
+| `record_decision` | Record an explicit user response only against server-issued decision evidence. |
+| `assess_governance` | Record a material advisory governance assessment. |
+| `close_task` | Record final task closure from immutable published evidence. |
 
 ## Root, task, and exact contract identity
 
@@ -152,9 +152,10 @@ bounded human-readable `role`; a free-form role never masquerades as profile
 selection. An unavailable-profile fallback on the degraded non-durable path
 needs a complete explicit role contract plus an unavailable-profile limitation
 in the handoff and final disclosure. Do not build a second prompt contract in a
-profile, skill, or spawn helper. Model and effort stay coordinator-selected; the
-backend never chooses, promotes, or substitutes either. The active host schema,
-not bundled prose, determines the host task name and spawn arguments.
+profile, skill, or spawn helper. Model and effort remain coordinator
+recommendations; the backend never chooses, promotes, substitutes, or validates
+host availability. The active host schema, not bundled prose, determines the
+spawn operation and arguments.
 
 For every Cortex next call, use only the exact callable handles returned by the
 last successful result. Copy each value byte-for-byte; never use a UI ellipsis,
@@ -163,15 +164,14 @@ error means do not retry the shortened display—reuse the exact handle. Keep
 timeline continuation and report pagination handles distinct as directed by
 the active registry.
 
-Each successful `create_delegation` returns renderer proof and a semantic
-delegation receipt. The coordinator verifies the rendered message,
-task/delegation anchors, input evidence, profile proof, and selected
-model/effort, then makes one corresponding host spawn using the active host
-schema. It never writes an ad-hoc prompt, edits or reassembles the payload,
-uses one worker for multiple delegations, leaves a delegation unspawned, or
-claims a spawn against a different delegation. The receipt does not assert that
-the host started, waited for, continued, steered, or observed a worker. Treat
-an ambiguous host result as an external limitation and reconcile it without
+Each successful `create_delegation` returns renderer proof and a host-neutral
+dispatch brief. The coordinator verifies its rendered message, task/delegation
+anchors, input evidence, profile proof, semantic objective, and model/effort
+recommendations, then maps it once to the active host schema. It never writes
+an ad-hoc prompt, edits the rendered message, uses one worker for multiple
+delegations, leaves a delegation unspawned, or claims a spawn against a
+different delegation. The brief makes no host lifecycle assertion. Treat an
+ambiguous host result as an external limitation and reconcile it without
 duplicating work.
 
 Delegation creation is distinct from delegation recovery. For an exact
@@ -253,7 +253,7 @@ Only coordinator policy may assert that ordinary-chat text is a direct user
 decision. The decision tool stores the neutral `prompt`, exact arbitrary-Unicode
 `response_original`, and `user_language`, together with subject binding,
 immutable digest when applicable, supersession, attribution, and chronology.
-It does not generate or accept `prompt_en` or `response_en`. The backend
+It does not generate or accept translated or duplicate language-specific fields. The backend
 verifies binding and project/task scope but does not authenticate the user or
 interpret the row as authorization. Consult the active registry for the
 current decision shape and supported decision types.
@@ -292,31 +292,23 @@ coordinator policy, not a backend approval gate.
 
 For a worker question or a blocked/partial report, preserve this durable order:
 worker report/question reference → localized coordinator question →
-`record_user_decision` with its exact subject and, for plan/report subjects, exact
-digest → `followup_task` to the
-same persisted `native_task_name` with exact decision and report references →
-finalized or superseding worker report → downstream delegation/read receipt.
-The stored native name is a server-derived identity for a live host call, not a
-host lifecycle receipt. `followup_task` is safe only when the host still knows
-the same non-root worker; after chat/task resume that must be proved live. If it
-is unavailable or ambiguous, reconcile first, then use an explicit
-parent-linked replacement rather than claiming same-worker continuation.
+`record_user_decision` with its exact subject and, for plan/report subjects,
+exact digest → finalized or superseding worker report → downstream
+delegation/read receipt. The stored task name is context for host reconciliation,
+not a lifecycle receipt. If host continuation is unavailable or ambiguous, use
+an explicit parent-linked replacement rather than claiming same-worker
+continuation.
 
 ## Bounded same-worker liveness
 
 Workers emit concise English checkpoints (at most five bullets/150 words) and a
-final response of at most 300 words, then submit their own durable report. The
-coordinator waits at most 60 seconds per call. After the first quiet interval it
-uses `send_message` with the exact `native_task_name` to request a checkpoint,
-then inspects/lists status after later intervals. A worker that remains running
-continues bounded waits and receives a concise user update; elapsed time never
-proves it is stuck. `interrupt_agent` and same-handle `followup_task` require
-explicit failed/unavailable/idle-without-work evidence, host-confirmed
-no-progress, or user cancellation. Only failed/ambiguous authorized recovery
-permits reportless/blocked evidence and a parent-linked replacement with exact
-input report/decision refs. Never skip a planner dependency or silently start
-downstream work. C-level/timebox affects cadence only, never routing, IDs, or
-ownership.
+final response of at most 300 words, then submit their own durable report. Use
+the current host status and waiting operations from the runtime rather than
+fixed policy names or assumed lifecycle shapes. Silence never proves a worker
+is stuck. Only failed or ambiguous host recovery permits reportless/blocked
+evidence and a parent-linked replacement with exact input report/decision refs.
+Never skip a planner dependency or silently start downstream work. C-level or
+timebox affects cadence only, never routing, IDs, or ownership.
 
 ## Dynamic pipeline ownership
 

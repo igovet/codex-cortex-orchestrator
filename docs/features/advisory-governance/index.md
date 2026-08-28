@@ -15,7 +15,7 @@ orchestrator-owned knowledge route used to compile delegation requirements.
 
 ## Key files
 
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the four governance tools, `record_user_decision`, and the uniform eleven-tool catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the governance and decision tools, including `open_decision` and `record_decision`, in the uniform eleven-tool semantic catalog.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) exposes action-specific governance operations.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns append-only assessments, initiative revisions/links, warnings, and closures.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines outcome-first model behavior.
@@ -118,7 +118,7 @@ is evidence only and does not authorize or gate the initiative.
 
 A plan is a finalized `report_type=plan` report. Its review policy is
 `informational` or `required`; an updated plan names a finalized predecessor
-through `supersedes_report_ref` and receives a new immutable report ref and
+through the plan-revision relation and receives a new immutable report ref and
 content-manifest digest. Informational plans do not pause work. Required review
 creates a coordinator-owned pause only for plan-dependent work when explicit
 review or a real product, scope, destructive, external, security, privacy, or
@@ -204,12 +204,12 @@ product or plan-review decision.
 The public result keeps execution and bookkeeping separate. `inspect_task`
 returns:
 
-- `execution_outcome`, with exact fields `evidence_status`,
-  `finalized_report_count`, `completed_report_count`, and `outcome`. The
-  finalized count covers every finalized report. The completed count and
-  nullable `completed`/`incomplete` outcome derive only from semantically valid
-  canonical finalized results and make no native-lifecycle claim. The projection
-  remains independent of the closure record;
+- `execution_outcome`, with fields `evidence_status`,
+  `finalized_report_count`, `completed_report_count`, `effective_revision`,
+  `coverage_status`, and `outcome`. Its outcome derives deterministically from
+  current effective-contract coverage, independent of report arrival order and
+  historical/superseded claims, and makes no native-lifecycle claim. The
+  projection remains independent of the closure record;
 - `advisory_closure`, with `record_status` (`recorded` or `not_recorded`) and
   `latest_record` (the latest advisory closure object or `null`).
 

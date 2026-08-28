@@ -1,5 +1,27 @@
 # Changelog
 
+## [12.1.1] - 2026-08-28
+
+### Fixed
+
+- Removed active single-call report writes: all new reports use the assembled
+  `begin` → `append` → `finalize` or `abort` protocol, while historical
+  finalized one-chunk evidence remains readable.
+- Required caller-generated idempotency keys for every mutation, including
+  exact replay/conflict behavior after a post-commit response loss.
+- Made current effective-contract coverage deterministic across steering,
+  ownership transfer, supersession, report arrival order, and closure review.
+- Replaced static native-host argument projection with a host-neutral dispatch
+  brief, and restricted report bodies to declared consuming delegations.
+- Aligned UTF-8 operation budgets, maintenance/index recovery, prompt-only
+  decisions, advisory closure evidence, source packaging, and documentation
+  with the V12 stabilization contract.
+
+### Verification
+
+- Added the deterministic source-mode all-eleven first-valid-call regression
+  and the owned-PTY `scripts/cortex-live-smoke` verifier.
+
 ## [12.1.0] - 2026-08-28
 
 - Added fixed canonical semantic report schemas with a single unchanged

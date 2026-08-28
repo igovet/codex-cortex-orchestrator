@@ -22,6 +22,16 @@ runtime guarantees from those bundled sources without depending on this file.
   are development support only. When runtime behavior changes, update the
   bundled contract and add a parity or behavior test before trimming any local
   development note.
+- MCP argument contracts belong exclusively to each tool's advertised input
+  schema and tool/property descriptions. Never put MCP parameter names,
+  request shapes, required/optional field lists, enums, validation limits, or
+  sample tool payloads in skills, agent prompts, live-dev workload prompts, or
+  other model instructions. Those instructions may state the task-specific
+  behavior and semantic outcome to exercise, but the model must derive every
+  call argument from the live advertised tool contract. A tool call that needs
+  parameter hints outside that contract is a schema/description defect; fix
+  the tool contract and add a first-call regression test instead of teaching
+  the call shape in a skill or prompt.
 - For source-only package checks, use `./scripts/sync-cortex.sh --check` or
   `./scripts/sync-cortex.sh --dry-run`; these are read-only validation only.
   Do not invoke cachebuster helpers manually, run `codex plugin add`, or edit
@@ -52,98 +62,18 @@ runtime guarantees from those bundled sources without depending on this file.
   `HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.cortex-dev/.codex` runtime
   and must retain the same ordinary interactive Codex and no-`codex exec`
   constraints.
-- Live testing is allowed only through an interactive `tmux` session running
-  ordinary Codex. Create a fresh named session in the background, and deliver
-  every workload command directly with `tmux send-keys`; do not open or drive a
-  foreground console, use `codex exec`, an exec-mode wrapper, or a
-  detached/non-interactive Codex substitute. Use the current user's default
-  tmux server so the named smoke session is visible to `tmux ls`; `tmux` uses
-  `$TMUX` to locate that server when commands are issued from an existing tmux
-  pane. If the default server or nested-server path is denied with
-  `Operation not permitted`, classify the smoke as failed or unverified and
-  report that terminal limitation; do not silently switch to an independent
-  socket. Use this session sequence,
-  replacing `<repository-root>` with the exact checkout:
-
-  ```bash
-  session_name=cortex-v12-smoke
-  tmux_cmd=(tmux -f /dev/null)
-  "${tmux_cmd[@]}" has-session -t "=$session_name" 2>/dev/null && \
-    "${tmux_cmd[@]}" kill-session -t "=$session_name" || true
-  "${tmux_cmd[@]}" new-session -d -s "$session_name" -c "<repository-root>" bash
-  "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" 'cd <repository-root> && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
-  # Phase 1 ends here: return control to the coordinator while Codex starts.
-  # In phase 2, after a coordinator poll confirms the prompt is usable, inject
-  # only the narrow smoke input into the already-open session as a separate
-  # later action (do not execute this line in the phase-1 launcher batch):
-  "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" '<targeted test input>' C-m
-  # Phase 3: give each fresh bounded snapshot back to the coordinator/LLM for
-  # interpretation and a decision to poll again, continue, or clean up.
-  "${tmux_cmd[@]}" capture-pane -p -t "=$session_name:0.0" -S -200 -E -1
-  "${tmux_cmd[@]}" kill-session -t "=$session_name" 2>/dev/null || true
-  ```
-
-  If the bounded `capture-pane` result does not contain the launcher's target
-  and an interactive Codex prompt, or the Codex TUI redraws it away before the
-  result can be captured, use this output-only capture fallback. Start it
-  before sending the launcher; it records the PTY stream while Codex remains an
-  ordinary interactive process. This is not a shell pipe into Codex and must
-  not be used to feed input, replace `send-keys`, or run an exec-mode command.
-  The coordinator owns the three phases: launch and return; later send the
-  user message after a poll confirms a usable prompt; then repeatedly read a
-  bounded snapshot and give it to the coordinator/LLM for interpretation.
-
-  ```bash
-  capture_dir="$(mktemp -d "${TMPDIR:-/tmp}/cortex-v12-smoke.XXXXXX")"
-  capture_path="${capture_dir}/pane.raw"
-  (umask 077; : >"${capture_path}")
-  "${tmux_cmd[@]}" pipe-pane -t "=$session_name:0.0" "cat > '${capture_path}'"
-  # Phase 1: launch ordinary interactive Codex and return immediately.
-  "${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" 'cd <repository-root> && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
-  # Do not put a readiness/result wait loop here. The coordinator performs
-  # separate bounded reads and sends the phase-2 input only after interpreting
-  # a usable prompt. Phase 3 repeats bounded reads while the session is alive;
-  # each snapshot is fed back to the coordinator/LLM, which decides whether to
-  # poll again, continue, or clean up. Unchanged output is not completion.
-  tail -c 20000 "${capture_path}"
-  "${tmux_cmd[@]}" pipe-pane -t "=$session_name:0.0"
-  "${tmux_cmd[@]}" kill-session -t "=$session_name" 2>/dev/null || true
-  rm -f -- "${capture_path}"
-  rmdir -- "${capture_dir}"
-  ```
-
-  The `pipe-pane` command is a fallback for TUI capture loss, not a readiness
-  signal by itself. A coordinator poll interprets the configured-MCP line and
-  the `configured Cortex MCP default_tools_approval_mode=approve` line plus
-  the interactive prompt before sending input; there is no launcher-side
-  readiness wait. The
-  20,000-byte tail is the only retained evidence. Keep the temporary directory
-  owner-only, remove it after inspection, and never paste raw output that
-  contains user prompts, tokens, or personal data.
-
-  The first tmux management commands run from the controlling shell; the
-  launcher and smoke commands themselves must be injected into the named pane.
-  `-f /dev/null` prevents an unrelated tmux configuration from changing the
-  smoke while retaining the user's default tmux server. Use bounded
-  `capture-pane` output as
-  the result record. If the default socket is denied, do not fall back to a
-  foreground console, independent socket, `codex exec`, or a shell pipe:
-  classify the smoke as failed or unverified and report the host's
-  terminal/permission limitation; do not fall back to an independent socket.
-  If the session exits early, the launcher
-  prints an error, the exit marker is non-zero, or the bounded capture has no
-  usable result, report the live-dev test as failed or unverified from the
-  capture; never infer success. Before the scoped smoke, record the candidate
-  target printed by the launcher as `$HOME/.cortex-dev/.codex` and the
-  refreshed cache version shown by the launcher/synchronization output. Keep
-  each test narrowly targeted to the modified tool, function, or contract; do
-  not turn a focused smoke into a broad repository or release run. Record the
-  exact session and socket commands, isolated target, scope, outcome, cleanup,
-  and any unrun checks. A successful smoke must end with the exact named
-  session gone. Do not kill the user's default tmux server during cleanup.
+- Live-dev verification is an operator-controlled ordinary Codex session. `./scripts/cortex-dev` refreshes only the isolated `HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.cortex-dev/.codex` candidate; it does not create tmux. Use `./scripts/cortex-live-smoke start` to create the exact `cortex-v12-smoke` session on the current user's default tmux server and run the fixed `bash -c` launcher as the pane's initial process; it runs `./scripts/cortex-dev`, prints `Cortex live-dev exit=<status>`, and exits with that same status. Never use `codex exec`, nested tmux, an alternate socket, or the stable plugin environment.
+- Observe the real session with `tmux ls`, `./scripts/cortex-live-smoke status`, `capture`, or `TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke`; after `start`, visibly confirm that the interactive composer is rendered before sending a prompt. `pane_current_command=codex` alone is insufficient: an early send during TUI initialization can lose both text submission and Enter. Every task authors its own task-specific prompt based on its changed behavior; the stabilization fixture is only an example. The prompt must say the session is already live-dev and prohibit nested tmux, cortex-dev, shell validation, and repository inspection.
+- Submit with `./scripts/cortex-live-smoke send --prompt-file FILE`. After the operator has visibly confirmed the composer, the transport normalizes the UTF-8 prompt to one line, inserts it literally, sends an initial `C-m`, waits five seconds, and sends one standalone `C-m`. It does not poll readiness or decide acceptance. Observe actual task-relevant Cortex MCP calls and results. Any `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, missing success marker, or repeated successful mutation without an explicitly ambiguous prior transport result is a failed live check; backend idempotency does not excuse an unexplained replay. For the stabilization fixture, accept its sentinel only after exactly one task-creation request has produced a non-replayed success. Cleanup never changes that outcome.
+- For every native worker spawned by live orchestration, the LLM verifier must inspect a bounded sanitized structured event stream as well as the coordinator pane because worker MCP calls/errors may be hidden. The helper may expose events but must not decide pass/fail. Acceptance requires a clean first worker-owned report-submission success, zero prior hidden validation/tool errors or mutation replays; a final report reference alone is insufficient.
+- Before cleanup, capture the explicit `Cortex live-dev exit=0` marker when applicable. Then run `./scripts/cortex-live-smoke stop` (or `--interrupt` after failure), which targets and removes only the exact named session; never kill the tmux server. Record the session, isolated target, observed tool result/error, scope, outcome, and unrun checks.
+- The focused E2E acceptance scenario is multi-turn and LLM-driven: in a separate test project, observe the live pane, answer exactly one product clarification with the predefined safe answer, later approve the visibly rendered plan, and continue planner → implementation → independent verification → documentation-impact assessment → closure. Inspect every native worker's bounded structured event stream, including the first report-submission event; any hidden tool error or unexplained replay fails the scenario. The transport only delivers text/keys and exposes observations; it never answers clarification, approves a plan, or decides acceptance autonomously.
+- `cortex-live-smoke` is transport-only: it never parses readiness, rollout, sentinels, acceptance, approvals, MCP errors, or retry conditions. The coordinator/LLM reads the real attached or captured terminal and owns every decision. Prompt delivery is one literal normalized insertion followed by one standalone `Enter` key.
 - Before finishing a change, run the smallest non-destructive check set that
   proves the affected behavior, then broaden validation in proportion to risk.
   State every unrun release gate or environmental limitation plainly.
+- `./scripts/cortex-live-smoke start --workdir PATH` may select a separate existing canonical test-project directory for Codex's cwd; the fixed launcher and candidate refresh always use this checkout's absolute `scripts/cortex-dev`.
+- `scripts/cortex-dev` records its caller cwd, temporarily enters this checkout only for candidate refresh/sync, then restores the caller cwd before `exec codex`; therefore `--workdir PATH` is also the task project root seen by ordinary Codex.
 - After editing behavior, interfaces, commands, diagrams, or release metadata,
   re-read `README.md`, `SECURITY.md`, and every affected Markdown file. Check
   links, Mermaid diagrams, version strings, examples, and documented commands

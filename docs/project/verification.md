@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 12.1.0 source, package, installed-host, and
+This page describes Cortex 12.1.1 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -60,10 +60,9 @@ The V12 protocol evidence must prove:
   `instructions`;
 - `create_delegation` requires a human-readable `role`, exact packaged
   `profile_name`, and exact model/effort together; its successful response is
-  dispatch-first with root-level `native_dispatch` and `renderer` proof, and
-  the complete rendered message occurs once at
-  `native_dispatch.native_arguments.message`; the host copies that payload
-  byte-for-byte into one spawn without a healthy-path `read_delegation` call;
+  host-neutral with a `dispatch_brief` and renderer/profile proof; Codex maps
+  that semantic brief to one active host spawn without a healthy-path
+  `read_delegation` call or static host-argument/lifecycle claim;
   `read_delegation` retains the verbose brief and bounded chronology for
   recovery after host reconciliation;
 - `submit_governance_closure` requires `subject_type` plus the existing compact
@@ -73,11 +72,10 @@ The V12 protocol evidence must prove:
   advisory write, and performs bounded inspection of the intended record;
   `ready_with_risks` does not request user confirmation;
 - `inspect_task` exposes independent `execution_outcome` and
-  `advisory_closure` projections. `execution_outcome` contains exactly
-  `evidence_status`, `finalized_report_count`, `completed_report_count`, and
-  `outcome`; the finalized count covers every finalized report, while only
-  semantically valid canonical finalized results contribute to the completed
-  count and determine the nullable `completed`/`incomplete` outcome. It makes no
+  `advisory_closure` projections. `execution_outcome` contains
+  `evidence_status`, `finalized_report_count`, `completed_report_count`,
+  `effective_revision`, `coverage_status`, and `outcome`; its result derives
+  deterministically from current effective-contract coverage and makes no
   native-lifecycle claim;
   `advisory_closure` contains `record_status` and `latest_record` (or `null`);
   a closure record cannot turn report evidence into a completion claim;
@@ -88,7 +86,7 @@ The V12 protocol evidence must prove:
   independent `execution_outcome` evidence;
 - `submit_report` accepts the immutable types `progress`, `result`, `synthesis`,
   and `plan`, with `informational`/`required` review policy for plans; it
-  supports bounded one-chunk `single` reports and assembled `begin`, sequential
+  supports assembled `begin`, sequential
   `append`, `finalize`, and `abort`, and
   enforces 32,768-byte chunks, 256 chunks, and 8 MiB
   per report;
@@ -100,6 +98,12 @@ The V12 protocol evidence must prove:
   translated/original duplicate; storage-valid legacy and semantic-invalid
   bodies remain evidence, while only completed semantic-valid canonical plans
   receive ready approval relations;
+- the current V3 specialist planner envelope is admitted before terminal
+  finalization: its stable planner brief tokens cover the full effective
+  contract exactly once, stages have explicit ordered ownership/dependencies/
+  work/verification, and an incomplete mapping stays assembling for a
+  corrective immutable append rather than producing a terminal semantic-invalid
+  plan or requiring a second planner delegation;
 - `inspect_task` exposes the revisioned effective contract and aggregate
   coverage. Verify stable active item references, one current owner per item,
   allowed contributing/evidence-producing roles, completed/partial/unverified/
@@ -109,18 +113,18 @@ The V12 protocol evidence must prove:
   finalized report manifest digests, completed coordinator-report consumption,
   and aggregate coverage without becoming a dispatch, reporting, or closure
   admission gate;
-- interrupted report assembly resumes from manifest and `next_chunk_index`,
-  rejects gaps, post-finalize/abort appends, and overwrites, and uses explicit
+- interrupted report assembly retries the same append payload and idempotency key; it
+  rejects post-finalize/abort appends and overwrites, and uses explicit
   supersession for a replacement;
 - `read_reports` accepts 1–20 known compact `report_refs`, preserves requested
-  order, supports named sections, obeys the 65,536-byte content budget, returns a scope-bound
-  cursor for exact resumption, and supports `max_bytes=0` metadata-only reads;
+  order, supports named sections, uses fixed 65,536-byte server pages, returns a scope-bound
+  cursor for exact resumption, and uses metadata-only reads when no consuming delegation is supplied;
 - report-read request/response aggregation is preflighted before body
   materialization (including report/chunk counts and the 224 KiB response cap),
   and projection rendering preflights its aggregate 512-file/32 MiB output
   budget plus the 10 MiB per-file cap without partial writes;
 - `inspect_task`, `read_delegation`, and `inspect_governance` bound incremental
-  reads with `after_sequence` default 0 plus `limit` default 50/range 1–200,
+  reads with `after_sequence` default 0 and a fixed 50-event server page,
   return `timeline`, `next_sequence`, and `has_more`, and expose only compact
   report references; `read_reports` is
   the only bounded report body/chunk reader;
@@ -272,13 +276,11 @@ For every supported model, verify `low`, `medium`, `high`, `xhigh`, and `max`.
 Native projection must retain `fork_turns="none"` and the exact effort.
 
 For each durable delegation, verify the successful `create_delegation` response
-has root-level `native_dispatch` and `renderer` proof, with the exact rendered
-worker message only once at `native_dispatch.native_arguments.message`, and
-logical model/effort. The host call must copy its native arguments byte-for-byte
-exactly once without a healthy-path `read_delegation` call. A
-missing/duplicate spawn, ad-hoc message, shared worker across delegations,
-`fork_turns="all"`, omitted effort, explicit Luna model, or omitted Terra/Sol
-model is a failure.
+has a host-neutral `dispatch_brief` and renderer/profile proof, with logical
+model/effort recommendations. The active host maps the brief exactly once to
+its spawn operation without a healthy-path `read_delegation` call. A
+missing/duplicate spawn, ad-hoc message, shared worker across delegations, or
+claim that Cortex fixes host argument names or model availability is a failure.
 
 - logical `gpt-5.6-luna` omits the native `model` argument;
 - `gpt-5.6-terra` passes its exact model override;
@@ -370,28 +372,25 @@ eleven-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, and absence of lifecycle hooks. Start a new task
 after any install or update.
 
-## Interactive tmux smoke
+## Interactive tmux live-dev workflow
 
-Use an ordinary interactive Codex CLI inside a background tmux session. Create
-the named session, send commands directly, capture a bounded pane, and clean
-up the session; do not use `codex exec`. If the host denies a nested tmux
-server with `Operation not permitted`, use the independent socket form below;
-`env -u TMUX` applies only to tmux management commands and keeps Codex
-interactive:
+Use the real operator-controlled ordinary Codex session. `./scripts/cortex-dev` refreshes the isolated candidate but does not create tmux; `./scripts/cortex-live-smoke start` creates the exact session on the default server and runs the fixed `bash -c` launcher as the pane's initial process. The launcher prints `Cortex live-dev exit=<status>` and exits with that same status.
 
 ```bash
-session_name=cortex-v12-smoke
-socket_name=cortex-v12-smoke
-tmux_cmd=(env -u TMUX tmux -L "$socket_name" -f /dev/null)
-"${tmux_cmd[@]}" has-session -t "=$session_name" 2>/dev/null && \
-  "${tmux_cmd[@]}" kill-session -t "=$session_name" || true
-"${tmux_cmd[@]}" new-session -d -s "$session_name" -c "/path/to/codex-orchestration" bash
-"${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" 'cd /path/to/codex-orchestration && ./scripts/cortex-dev; status=$?; printf "Cortex live-dev exit=%s\\n" "$status"' C-m
-# After the launcher is ready, inject only the narrow smoke input:
-"${tmux_cmd[@]}" send-keys -t "=$session_name:0.0" '<targeted test input>' C-m
-"${tmux_cmd[@]}" capture-pane -p -t "=$session_name:0.0" -S -200 -E -1
-"${tmux_cmd[@]}" kill-session -t "=$session_name" 2>/dev/null || true
+./scripts/cortex-live-smoke start
+./scripts/cortex-live-smoke status
+./scripts/cortex-live-smoke capture
+TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
+./scripts/cortex-live-smoke send --prompt-file TASK_PROMPT.txt
+./scripts/cortex-live-smoke capture
+./scripts/cortex-live-smoke stop
 ```
+
+After `start`, visibly confirm the interactive composer in `attach` or `capture` before `send`; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. Every task authors its own prompt for its changed behavior. It must say the session is already live-dev and prohibit nested tmux, cortex-dev, shell validation, and repository inspection. The controller normalizes the prompt to one line, uses literal `send-keys -l`, then issues one separate `send-keys ... Enter` call; it does not poll readiness or decide acceptance. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or a missing success marker is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure; backend idempotency does not excuse an unexplained replay. For the stabilization example, require exactly one task-creation request and a non-replayed success before its sentinel. Capture the exit marker before stopping; cleanup removes only `cortex-v12-smoke`. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
+
+For every native worker spawned by live orchestration, the LLM verifier must inspect a bounded sanitized structured event stream as well as the coordinator pane because worker MCP calls/errors may be hidden. The helper may expose events but must not decide pass/fail. Acceptance requires a clean first worker-owned report-submission success, zero prior hidden validation/tool errors or mutation replays; a final report reference alone is insufficient.
+
+The E2E acceptance case is multi-turn and runs in a separate test project. The LLM observes the pane, answers exactly one product clarification with the predefined safe answer, later approves the visibly rendered plan, and follows planner → implementation → independent verification → documentation-impact assessment → closure. It inspects every native worker event stream and fails on any hidden tool error or unexplained replay. The tmux transport never answers or approves autonomously.
 
 After installation or source synchronization, run exactly one fresh interactive
 Cortex task first. It must reach worker-verified acceptance and an advisory
@@ -429,7 +428,7 @@ Exercise several explicit `$cortex:orchestrator` tasks:
    cites it (with any durable report ID retained as non-callable evidence);
    the coordinator creates no documentation edit, never calls `submit_report`,
    and never self-asserts `documentation_not_required`.
-9. A task whose coordinator reads only applicable `AGENTS.md`, both knowledge
+9. A task whose coordinator uses only the host-injected `AGENTS.md` context, both knowledge
    indexes, and one task-relevant linked page, compiles all six contract parts,
    and supplies them to a worker that does not independently redo routing.
 10. A deliberately missing or stale index handled by a bounded discovery
@@ -503,7 +502,7 @@ exact spawned worker before consuming that worker's finalized report.
 
 Inspect the coordinator chronology. Its only non-user actions may be Cortex
 ledger calls, native worker coordination, and the bounded orchestrator-owned
-knowledge route. It must read applicable `AGENTS.md`, the two knowledge indexes,
+knowledge route. The host-injected `AGENTS.md` context governs the task; it then reads the two knowledge indexes,
 and only task-relevant pages selected from them through non-shell direct reads
 of already-known exact paths. It must not use shell, `rg`, `find`, globs,
 graph/source/repository search, directory listing, or candidate probes for that
@@ -523,7 +522,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/12.1.0/schema-v1 identifiers;
+- V12/12.1.1/schema-v1 identifiers;
 - exact eleven-tool names;
 - explicit `project_root` only on `create_task`, compact `task_ref` on the seven
   task-anchored tools, compact `delegation_ref`/`report_ref`/`report_refs` on
@@ -565,5 +564,14 @@ configuration. Check:
 
 Record every exact command, outcome, environment, skipped scenario, and material
 limitation. Never claim an unavailable host or live-model check passed.
+The live-smoke script is transport-only and performs no readiness, rollout,
+sentinel, acceptance, approval, error, or retry parsing; the coordinator/LLM
+decides from attached or captured output. Its prompt transport is one literal
+normalized insertion followed by one separate explicit `Enter` key call.
+Use `./scripts/cortex-live-smoke start --workdir PATH` for a separate canonical
+test-project cwd; candidate refresh still uses this repository's absolute
+`scripts/cortex-dev`.
+The launcher restores the selected workdir before starting ordinary Codex, so
+the task project root follows `--workdir` while refresh remains repository-rooted.
 
 <!-- GENERATED:END -->

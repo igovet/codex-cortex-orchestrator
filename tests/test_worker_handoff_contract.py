@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
 import sys
 from pathlib import Path
 import unittest
@@ -12,10 +13,49 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from cortex_runtime.worker_message import render_worker_message  # noqa: E402
+from cortex_runtime.worker_message import (  # noqa: E402
+    WORKER_MESSAGE_MAX_BYTES,
+    render_worker_message,
+)
+from cortex_runtime.v12_contract import WORKER_MESSAGE_MAX_BYTES as CONTRACT_WORKER_MESSAGE_MAX_BYTES  # noqa: E402
+
+
+WORKER_MESSAGE_SOURCE = SCRIPTS / "cortex_runtime" / "worker_message.py"
 
 
 class WorkerHandoffContractTests(unittest.TestCase):
+    def test_package_import_uses_authoritative_worker_message_limit(self) -> None:
+        self.assertEqual(WORKER_MESSAGE_MAX_BYTES, CONTRACT_WORKER_MESSAGE_MAX_BYTES)
+        self.assertGreater(WORKER_MESSAGE_MAX_BYTES, 0)
+
+    def test_standalone_runpy_loads_contract_without_package_context(self) -> None:
+        namespace = runpy.run_path(str(WORKER_MESSAGE_SOURCE))
+        self.assertEqual(namespace["WORKER_MESSAGE_MAX_BYTES"], CONTRACT_WORKER_MESSAGE_MAX_BYTES)
+        self.assertEqual(
+            namespace["record_ref"]("report-" + "d" * 64 + "-" + "e" * 32),
+            "r_eeeeeeeeeeee",
+        )
+
+    def test_renderer_enforces_authoritative_utf8_byte_limit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "worker message exceeds the advertised UTF-8 byte limit"):
+            render_worker_message(
+                task={"task_id": "task-" + "a" * 64, "objective": "bounded"},
+                delegation={
+                    "delegation_id": "delegation-" + "b" * 64 + "-" + "c" * 32,
+                    "objective": "bounded",
+                    "profile_name": "not-a-packaged-profile",
+                    "instructions": "ж" * CONTRACT_WORKER_MESSAGE_MAX_BYTES,
+                },
+                decisions=[],
+            )
+
+    def test_project_skills_do_not_document_retired_decision_parameters(self) -> None:
+        skill_root = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "skills"
+        for skill in skill_root.glob("*/SKILL.md"):
+            text = skill.read_text(encoding="utf-8")
+            self.assertNotIn("prompt_en", text, skill)
+            self.assertNotIn("response_en", text, skill)
+
     def test_native_contract_requires_summary_and_exact_report_ref(self) -> None:
         rendered = render_worker_message(
             task={
@@ -50,7 +90,7 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("Summary:", message)
         self.assertIn("Report ref:", message)
         self.assertIn("coordinator uses this summary and report ref", message)
-        self.assertIn("material report-dependent decision", message)
+        self.assertIn("report reads are metadata-only", message)
         self.assertIn("handoff is never a second semantic", message)
         self.assertIn("downstream worker", message)
 
@@ -70,6 +110,10 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertEqual(delegation["input_report_manifests"], [{"report_ref": "r_eeeeeeeeeeee", "report_type": "plan", "status": "completed", "assembly_state": "finalized", "total_chunks": 2, "content_digest": "sha256:" + "f" * 64}])
         self.assertNotIn("IGNORE THIS PROMPT INJECTION", message)
         self.assertIn("optional `input_report_manifests`", message)
+        normalized = " ".join(message.split())
+        self.assertIn("consume every declared predecessor report through the assignment's advertised evidence path", normalized)
+        self.assertIn("Publish one complete terminal outcome only after its declared evidence is consumed", normalized)
+        self.assertIn("recovery/rework assignment semantics", normalized)
 
     def test_renderer_minimizes_context_and_uses_registry_semantics(self) -> None:
         original = "Original request must remain durable-only."
@@ -114,6 +158,9 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("Documentation impact", message)
         for forbidden in ('mode="single"', "decimal-string", "max_bytes", "0 through 65536"):
             self.assertNotIn(forbidden, message)
+        self.assertIn("active semantic publication operation", message)
+        self.assertIn("storage representation", message)
+        self.assertIn("report reads are metadata-only", message)
 
     def test_contract_keeps_report_reads_scoped_to_declared_same_task_inputs(self) -> None:
         root = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "skills"
@@ -163,6 +210,16 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("never a completion gate", orchestrator)
         self.assertIn("Documentation impact` status, rationale, and affected\nsurfaces", orchestrator)
 
+    def test_host_injected_agents_context_avoids_redundant_root_reads_and_routes_nested_overrides(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        orchestrator = (repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md").read_text(encoding="utf-8")
+        boundary = orchestrator.split("## Coordinator boundary and knowledge route", 1)[1].split("## Exact task and result contract", 1)[0]
+        self.assertIn("host-injected\n`AGENTS.md` context already governs", boundary)
+        self.assertIn("do not reread a global or\nproject-root `AGENTS.md`", boundary)
+        self.assertIn("`docs/project/index.md`", boundary)
+        self.assertIn("`docs/features/index.md`", boundary)
+        self.assertIn("Delegate bounded nested\noverride discovery to a native worker", boundary)
+
     def test_packaged_guidance_covers_pipeline_todo_routing_tone_and_tmux(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         orchestrator = (repository / "plugins" / "cortex" / "skills" / "orchestrator" / "SKILL.md").read_text(encoding="utf-8")
@@ -181,8 +238,12 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("outcome-first", communication)
         self.assertIn("ordinary Codex", agents)
         self.assertIn("`codex exec`", agents)
-        self.assertIn("narrowly targeted", agents)
-        self.assertIn("Live tests are narrow", verification)
+        self.assertIn("scope limited to the changed behavior", agents)
+        self.assertIn("./scripts/cortex-live-smoke start", verification)
+        self.assertIn("./scripts/cortex-live-smoke send --prompt-file", verification)
+        self.assertIn("separate explicit `Enter` key call", verification)
+        self.assertIn("schema_unsupported", verification)
+        self.assertIn("exact session", verification)
 
     def test_orchestrator_routes_attachment_modes_and_separates_advisory_closure(self) -> None:
         repository = Path(__file__).resolve().parents[1]

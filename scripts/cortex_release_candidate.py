@@ -43,6 +43,7 @@ PUBLIC_RELEASE_FILES = (
 )
 SUPPORT_SCRIPTS = (
     "scripts/cortex-host-preflight.py",
+    "scripts/cortex-live-smoke",
     "scripts/cortex-prompt-lint.py",
     "scripts/cortex_release_candidate.py",
     "scripts/cortex-dev",

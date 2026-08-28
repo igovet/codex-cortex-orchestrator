@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v12.1.0 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator; use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
+description: Explicit opt-in Cortex v12.1.1 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator; use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
 ---
 
-# Cortex Orchestrator v12.1.0
+# Cortex Orchestrator v12.1.1
 
 ## Invocation and language
 
@@ -16,7 +16,7 @@ state.
 The host supplies the activated orchestrator and companion control instructions
 as skill context. Treat those bundled skill bodies as already loaded; never call
 `read_mcp_resource`, MCP `resources/read`, or a Cortex tool to fetch a
-`skill://` URI. The Cortex registry contains exactly eleven ledger tools and no
+`skill://` URI. The Cortex registry contains exactly ten semantic tools and no
 skill-resource reader. If companion skill context is unavailable, use the
 active public MCP registry as the sole authority for tool shapes and continue
 without inventing a resource-read route.
@@ -71,13 +71,14 @@ or remained unchanged; enumerating a project-local `.codex` directory; and
 examining a manifest, cache, worktree, or other artifact. A direct user request
 to check project state changes the worker's objective, not this boundary.
 
-Knowledge routing is the only bounded project-file exception. From the
-explicit absolute project root, the coordinator must read:
+Knowledge routing is the only bounded project-file exception. The host-injected
+`AGENTS.md` context already governs the current task; do not reread a global or
+project-root `AGENTS.md`. From the explicit absolute project root, the
+coordinator must read:
 
-1. every applicable `AGENTS.md` for the known task scope;
-2. `docs/project/index.md`;
-3. `docs/features/index.md`; and
-4. only the task-relevant knowledge pages linked from those two indexes.
+1. `docs/project/index.md`;
+2. `docs/features/index.md`; and
+3. only the task-relevant knowledge pages linked from those two indexes.
 
 This is a closed direct-read allowlist, not search authority. Each read must use
 a non-shell direct file-read operation naming one exact path already known from
@@ -85,10 +86,13 @@ the explicit root, the user or host, a worker report, or a link in an already
 read allowed index. Never invoke a shell or command, `rg`, `find`, a glob,
 Codebase Memory or another graph, source search, browser, or repository search
 to find or read routing documents. Do not list a directory, probe candidate
-paths, or infer nested `AGENTS.md` applicability. If the exact root or an
-applicable path is not already known, or no non-shell direct reader is
-available, delegate its discovery or retrieval to a native worker and compile
-the knowledge contract from the worker's reported evidence.
+paths, or infer nested `AGENTS.md` applicability. Delegate bounded nested
+override discovery to a native worker when the known task scope may enter a
+child path, then compile only the worker-reported applicable override into the
+next knowledge contract. If the exact root or an applicable path is not already
+known, or no non-shell direct reader is available, delegate its discovery or
+retrieval to a native worker and compile the knowledge contract from the
+worker's reported evidence.
 
 Do not scan arbitrary documentation or follow unrelated links. Allowed reads
 support routing only, never project discovery, plan grounding, artifact or
@@ -123,7 +127,7 @@ architecture, file changes, or a work breakdown. When planning is useful, a
 when evidence changes, but do not overwrite the original request or an earlier
 immutable plan/report/decision. If a later user message changes the result contract,
 record the exact decision with neutral `prompt`, exact `response_original`, and
-`user_language`; reject `prompt_en` and `response_en` fields, and carry its
+`user_language`; reject translated or duplicate language-specific fields, and carry its
 compact `decision_ref` in the affected delegations' `input_decision_refs` array.
 
 Before `create_task`, verify that `requirements`, `constraints`,
@@ -223,14 +227,14 @@ declared work uses them. The original request, silence, implicit instruction,
 or inferred consent is never approval, and ordinary live approvals still govern
 destructive, external, privileged, or scope-expanding actions.
 
-Use the delegation receipt and renderer proof returned by `create_delegation`
-for normal spawning. The active host schema is authoritative for the actual
-spawn projection and any later host capability; do not copy an assumed native
-operation name, argument shape, lifecycle state, or byte-level dispatch claim
-into policy. On resume, reconcile the host only when necessary and treat native
-child prose as neither durable evidence nor lifecycle proof. A host result that
-is absent or ambiguous is an external limitation, not authority to invent a
-replacement lifecycle.
+Use the host-neutral dispatch brief and renderer proof returned by
+`create_delegation` for normal spawning. The active host schema is authoritative
+for mapping that brief to its actual spawn projection and any later host
+capability; do not copy an assumed operation name, argument shape, lifecycle
+state, or byte-level dispatch claim into policy. Treat native child prose as
+neither durable evidence nor lifecycle proof. A host result that is absent or
+ambiguous is an external limitation, not authority to invent a replacement
+lifecycle.
 
 Use structured report content for findings: stable finding key, severity,
 affected surface, evidence, impact, recommendation, disposition, and any exact
@@ -323,19 +327,18 @@ selected `harvest` or `harvest-refresh` route.
 Resolve one canonical absolute project root before project work. On the
 healthy path, create the task contract, record useful governance context,
 compile bounded routing, create one matching delegation, verify the returned
-renderer and dispatch proof, and make exactly one native spawn from that
-server-returned dispatch. Use the active MCP registry for the current
-request/response shapes and copy callable values byte-for-byte. Then wait for
-that same worker's own finalized report.
+renderer and host-neutral dispatch brief, and map that brief once through the
+current host spawn schema. Use the active MCP registry for ledger
+request/response shapes and copy callable values byte-for-byte. Then use the
+current host operations to observe the worker's own finalized report.
 
-Never create an ad-hoc spawn or rebuild, summarize, amend, or partially copy a
-returned native-dispatch payload. The one-to-one mapping is strict: do not use
-one native worker for multiple durable delegations, dispatch a delegation more
-than once, create a delegation without its matching spawn, or spawn first and
-write durable metadata afterward. A spawn call with an ambiguous outcome must
-be reconciled through its exact native handle before any replacement; never
-blindly duplicate it. When replacement is useful, create a new parent-linked
-delegation and use that replacement's own returned dispatch exactly once.
+Never create an ad-hoc spawn or alter the returned rendered message. The
+one-to-one mapping is strict: do not use one native worker for multiple durable
+delegations, dispatch a delegation more than once, create a delegation without
+its matching spawn, or spawn first and write durable metadata afterward. A
+spawn call with an ambiguous outcome must be reconciled through the active host
+before any replacement; never blindly duplicate it. When replacement is useful,
+create a new parent-linked delegation and map that replacement's own brief once.
 
 Delegation creation is distinct from recovery. For an exact idempotent retry,
 reuse the original arguments and returned retry handle. Otherwise use the
@@ -456,7 +459,7 @@ byte-for-byte, present it with a localized summary and explicit
 approve/revise/cancel choices (or reject), then end the turn. Silence,
 unrelated text, or a ledger row is not approval. Record the exact user decision
 through the active decision tool with neutral `prompt`, exact
-`response_original`, and `user_language`; reject `prompt_en` and `response_en`
+`response_original`, and `user_language`; reject translated or duplicate language-specific fields
 fields. The ready relation proves only that the view existed before the
 decision write; MCP has no host-authenticated user-turn receipt, so the
 new-user-response requirement remains coordinator policy. When work is
@@ -471,7 +474,7 @@ state/artifact check to improve, confirm, or preview the plan.
 
 Record the next unambiguous response with the active decision tool against the
 exact immutable plan evidence, using neutral `prompt`, exact
-`response_original`, and `user_language`; reject `prompt_en` and `response_en`
+`response_original`, and `user_language`; reject translated or duplicate language-specific fields
 fields. Approval additionally uses the current ready
 approval relation; revision and cancellation preserve the finalized plan
 evidence without volatile view binding, so intervening non-plan timeline events
@@ -547,7 +550,7 @@ For a worker question or a blocked/partial report, use this exact sequence:
 2. Ask the user in the task's current user language, then record the neutral
    `prompt`, exact `response_original`, and `user_language` with
    `record_user_decision` bound to the exact subject; do not generate or accept
-   `prompt_en` or `response_en`. Include the immutable digest when the subject
+   translated or duplicate language-specific fields. Include the immutable digest when the subject
    is a plan or report.
 3. If the active host supports it, steer the same existing live task with the
    decision and relevant evidence. Do not create a synthetic lifecycle or
@@ -576,14 +579,14 @@ durable report. The coordinator waits at most 60 seconds per wait call. A quiet
 interval is evidence to request a checkpoint and inspect status, never proof
 that a long-running worker is stuck or permission to start downstream work.
 
-For a quiet durable delegation, send an English `send_message` after the first
-quiet interval and inspect/list host status after later quiet intervals. If the
-worker remains running, keep bounded waiting without an unchanged user-facing
-update. Publish progress only for a requested checkpoint, meaningful change,
-result, blocker, or user decision. Host interruption or follow-up depends on
-the active host schema and confirmed host state; do not infer lifecycle from a
-stable name, synthesize a report, skip a planner predecessor, or silently
-dispatch downstream work.
+For a quiet durable delegation, use the current host status and waiting
+operations rather than fixed policy operation names. If the worker remains
+running, keep bounded waiting without an unchanged user-facing update. Publish
+progress only for a requested checkpoint, meaningful change, result, blocker,
+or user decision. Host interruption or continuation depends on the active host
+schema and confirmed host state; do not infer lifecycle from a stable name,
+synthesize a report, skip a planner predecessor, or silently dispatch downstream
+work.
 
 Only if an authorized same-worker recovery fails, is unavailable/ambiguous, or
 does not return a report/handoff may the coordinator record reportless/blocked

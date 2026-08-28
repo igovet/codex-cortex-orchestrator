@@ -74,7 +74,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             objective=objective,
             user_request_original=objective,
             user_language="en",
-            task_contract_version="cortex/task-contract/v1",
+            task_contract_version="cortex/task-contract/v2-criteria-derived",
             requirements=["Preserve the canonical timeline."],
             constraints=["No additional constraints."],
             acceptance_criteria=["The task timeline is ordered and complete."],
@@ -110,8 +110,8 @@ class V12TimelineRepairTests(unittest.TestCase):
     def _report(store: V12Store, task_id: str, delegation_id: str, report_type: str, content: object) -> dict[str, object]:
         started = store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="begin", report_type=report_type, idempotency_key=f"timeline-report-begin-{delegation_id}-{report_type}")[0]
         report_id = started["report"]["report_id"]
-        appended = store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="append", report_id=report_id, chunk_index=0, section="body", content=content, idempotency_key=f"timeline-report-append-{report_id}")[0]
-        return store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="finalize", report_id=report_id, status="completed", expected_chunk_count=appended["expected_chunk_count"], expected_content_digest=appended["expected_content_digest"], idempotency_key=f"timeline-report-finalize-{report_id}")[0]["report"]
+        store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="append", report_id=report_id, section="body", content=content, idempotency_key=f"timeline-report-append-{report_id}")
+        return store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="finalize", report_id=report_id, status="completed", idempotency_key=f"timeline-report-finalize-{report_id}")[0]["report"]
 
     def test_profile_names_are_used_for_native_workers_and_numbered_for_siblings(self) -> None:
         store = self._store()
@@ -219,12 +219,11 @@ class V12TimelineRepairTests(unittest.TestCase):
             mode="begin",
             idempotency_key="repair-fourth-report-begin",
         )[0]["report"]["report_id"]
-        appended = store.submit_report(
+        store.submit_report(
             task_id=task_id,
             delegation_id=delegations[3],
             report_id=begun,
             mode="append",
-            chunk_index=0,
             section="body",
             content={"report": 4},
             idempotency_key="repair-fourth-report-append",
@@ -235,8 +234,6 @@ class V12TimelineRepairTests(unittest.TestCase):
             report_id=begun,
             mode="finalize",
             status="completed",
-            expected_chunk_count=1,
-            expected_content_digest=appended["expected_content_digest"],
             idempotency_key="repair-fourth-report-finalize",
         )
         reports.append(begun)
@@ -452,12 +449,11 @@ class V12TimelineRepairTests(unittest.TestCase):
             task_id=task_id, delegation_id=delegation_id, report_type="result", mode="begin",
             idempotency_key="current-report-begin",
         )[0]["report"]["report_id"]
-        appended = store.submit_report(
+        store.submit_report(
             task_id=task_id,
             delegation_id=delegation_id,
             report_id=report_id,
             mode="append",
-            chunk_index=0,
             section="body",
             content={"state": "final"},
             idempotency_key="current-report-append",
@@ -468,8 +464,6 @@ class V12TimelineRepairTests(unittest.TestCase):
             report_id=report_id,
             mode="finalize",
             status="completed",
-            expected_chunk_count=1,
-            expected_content_digest=appended["expected_content_digest"],
             idempotency_key="current-report-finalize",
         )
         store.set_governance_mode(

@@ -225,9 +225,9 @@ from pathlib import Path
 path = Path(sys.argv[1])
 payload = json.loads(path.read_text(encoding="utf-8"))
 version = payload.get("version")
-match = re.fullmatch(r"(12\.1\.0\+codex\.)(\d{14})", version if isinstance(version, str) else "")
+match = re.fullmatch(r"(12\.1\.1\+codex\.)(\d{14})", version if isinstance(version, str) else "")
 if match is None:
-    raise SystemExit("error: plugin manifest version must be 12.1.0+codex.YYYYMMDDHHMMSS")
+    raise SystemExit("error: plugin manifest version must be 12.1.1+codex.YYYYMMDDHHMMSS")
 previous = datetime.strptime(match.group(2), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
 now = datetime.now(timezone.utc).replace(microsecond=0)
 next_value = max(now, previous + timedelta(seconds=1))
@@ -275,8 +275,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != base_version or base_version != "12.1.0":
-    raise SystemExit("plugin/server semantic version must match the 12.1.0 release manifest")
+if module.SERVER_VERSION != base_version or base_version != "12.1.1":
+    raise SystemExit("plugin/server semantic version must match the 12.1.1 release manifest")
 PY
 }
 

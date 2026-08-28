@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 12.1.0 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 12.1.1 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -64,9 +64,9 @@ coordinator model ── classify/revise C1 | C2 | C3 and minimal | light | full
 
 Workers own all project discovery, source/code/configuration access, domain
 analysis, implementation, documentation edits, commands, builds, tests,
-reviews, and verification. Before delegating project work, the coordinator must
-read every applicable
-`AGENTS.md`, `docs/project/index.md`, `docs/features/index.md`, and only the
+reviews, and verification. Before delegating project work, the host-injected
+`AGENTS.md` context already governs the task. The coordinator reads
+`docs/project/index.md`, `docs/features/index.md`, and only the
 task-relevant pages linked from those indexes for routing. The bundled
 orchestrator alone defines that route and compiles the six-part per-delegation
 knowledge contract: documents to consume first, applicable requirements,
@@ -146,17 +146,16 @@ The native worker brief carries the saved root only for project working context.
 The four task/result arrays are non-empty meaningful English contracts before
 task creation; optional context cannot replace one. Every delegation carries
 the exact six-part knowledge block once, in order, with non-empty values before
-native spawn. A successful `create_delegation` returns root-level
-`native_dispatch` and `renderer` proof; the complete rendered worker message
-occurs only once at `native_dispatch.native_arguments.message` and is copied
-byte-for-byte into exactly one matching host spawn. `read_delegation` is the
-verbose recovery surface and is not required on the healthy path. Luna omits
-only the model override, all efforts are explicit, and one worker is never
-reused across durable delegations.
+native spawn. A successful `create_delegation` returns a host-neutral
+`dispatch_brief` and renderer/profile proof. Codex maps the brief to the active
+host spawn operation; Cortex does not prescribe native argument names, model
+availability, or lifecycle. `read_delegation` is the verbose recovery surface
+and is not required on the healthy path.
 
 `submit_report` records immutable `progress`, `result`, `synthesis`, or `plan`
-evidence. A bounded one-chunk report uses `single`; larger reports use `begin`,
-sequential `append`, then `finalize`, or `begin` followed by `abort`. Plans
+evidence through one semantic publication operation. The server owns storage,
+completion, and replay identity; each delegation/report-kind slot has one
+terminal outcome, and changed payloads require recovery/rework. Plans
 declare `informational` or `required` review policy.
 Only the native worker that owns the delegation calls `submit_report`; its
 completion handoff returns a concise `Summary` and exact `Report ref`. The
@@ -186,12 +185,12 @@ tag or a translated/original duplicate. Only a finalized completed
 semantic-valid canonical plan receives a ready approval relation. Planner-authored
 implementation microtasks are evidence for the model-owned DAG only, never
 backend jobs, scheduling gates, or worker-subtask To-Do entries.
-Inspection reads use `after_sequence` plus `limit`, expose compact references,
+Inspection reads use `after_sequence` with fixed 50-event server pages, expose compact references,
 and return `next_sequence` with `has_more`; these inspections create no
 receipts. A worker handoff `read_reports` read may create an immutable page
 receipt for the exact consuming delegation.
 
-For continuation calls, `handles.after_sequence`, `handles.chunk_index`, and
+For continuation calls, `handles.after_sequence` and
 `handles.idempotency_key` are copied byte-for-byte only to their literal named
 inputs. `handles.cursor` is the separate opaque `read_reports` continuation
 value. Root receipt fields `next_sequence` and `next_chunk_index` are
@@ -242,13 +241,12 @@ concise worker-ownership boundary, while execution detail belongs in
 plus the existing compact `subject_ref`; durable `subject_id` is evidence only.
 
 The task-facing result separates neutral finalized-report evidence from advisory
-bookkeeping. `inspect_task` returns `execution_outcome` with exactly
-`evidence_status`, `finalized_report_count`, `completed_report_count`, and
-`outcome`. The finalized count includes every finalized report; the completed
-count includes semantically valid canonical finalized results with status
-`completed`. `outcome` is `null` before the first semantically valid canonical
-finalized result and then reflects the latest such result as `completed` or
-`incomplete`, without claiming native lifecycle. It returns
+bookkeeping. `inspect_task` returns `execution_outcome` with
+`evidence_status`, `finalized_report_count`, `completed_report_count`,
+`effective_revision`, `coverage_status`, and `outcome`. The finalized count
+includes every finalized report, while the outcome is derived deterministically
+from current effective-contract coverage, excluding historical/superseded claims
+and report arrival order, without claiming native lifecycle. It returns
 `advisory_closure`
 (`record_status` and `latest_record`, or `null`). After
 sufficient finalized evidence, the coordinator selects `ready`,
@@ -277,8 +275,7 @@ self-asserted `documentation_not_required` value is invalid. This stage
 precedes closure; missing documentation evidence may
 cause model-owned rework, replacement, or disclosed risk, never a backend gate.
 
-The first ledger mutation may omit `idempotency_key`; its receipt returns a
-server-issued `handles.idempotency_key` for an exact retry. Retrying the same
+Every mutation requires a caller-generated `idempotency_key`. Retrying the same
 operation with the same normalized payload replays the original result;
 reusing a key with a different payload is a non-mutating conflict. This is
 caller retry safety, not authentication or permission.

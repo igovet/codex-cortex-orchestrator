@@ -23,11 +23,12 @@ from typing import Any, TypeVar
 
 from cortex_runtime.model_routing import validate_model_selection
 from cortex_runtime.v12_contract import (
-    CLOSURE_SUBJECTS, CLOSURE_VERDICTS, DECISION_ATTRIBUTION, DECISION_SUBJECTS,
+    CANONICAL_REPORT_EVIDENCE_SCHEMAS, CANONICAL_REPORT_V2_SCHEMAS, CLOSURE_SUBJECTS, CLOSURE_VERDICTS, DECISION_ATTRIBUTION, DECISION_SUBJECTS,
     canonical_report_semantic_status,
     DECISION_TYPES, DEFAULT_PAGE_LIMIT, DIGEST_RE, GOVERNANCE_MODES,
     GOVERNANCE_SOURCES, IDEMPOTENCY_KEY_MAX_LENGTH, IDENTIFIER_RE,
     INITIATIVE_STATUSES, JSON_MAX_BYTES, JSON_MAX_DEPTH, LANGUAGE_TAG_MAX_LENGTH,
+    MUTATION_RESULT_MAX_BYTES,
     LANGUAGE_TAG_RE,
     MAX_DECISION_IDS, MAX_LINKS,
     MAX_PAGE_LIMIT, MAX_REPORT_IDS, PROJECT_ROOT_MAX_LENGTH, REPORT_STATUSES,
@@ -35,13 +36,18 @@ from cortex_runtime.v12_contract import (
     REPORT_ASSEMBLING_MAX_PER_TASK, REPORT_ASSEMBLY_STATES, REPORT_CHUNK_MAX_BYTES,
     REPORT_MAX_BYTES, REPORT_MAX_CHUNKS, REPORT_MODES, REPORT_READ_MAX_BYTES,
     REPORT_RESPONSE_MAX_BYTES, REPORT_RETAINED_MAX_BYTES_PER_TASK,
-    REPORT_SECTION_MAX_LENGTH, REPORT_SECTION_RE, REPORT_SINGLE_MAX_BYTES, REPORT_TYPES, ROLE_MAX_LENGTH, TASK_CONTRACT_ITEM_MAX_LENGTH,
+    REPORT_SECTION_MAX_LENGTH, REPORT_SECTION_RE, REPORT_TYPES, ROLE_MAX_LENGTH, TASK_CONTRACT_ITEM_MAX_LENGTH,
     TASK_CONTRACT_MAX_ITEMS, TASK_CONTRACT_VERSION, TEXT_MAX_LENGTH, new_sharded_id,
     new_task_id, record_ref, record_ref_parts, record_shard_hash, task_ref, task_ref_parts, task_shard_hash,
 )
 
 SCHEMA_VERSION = 1
 DATABASE_NAME = "cortex.db"
+# Cross-shard compact record references are resolved through this private,
+# host-local index.  The ledger rows remain authoritative: the index only
+# maps a typed suffix to the shard that must be verified before use.
+_RECORD_LOCATOR_DATABASE_NAME = "record-locators.db"
+_RECORD_LOCATOR_SCHEMA_VERSION = 1
 MIGRATION_NAME = "v12-initial"
 _EXPANSION_MIGRATION_VERSION = 2
 _EXPANSION_MIGRATION_NAME = "v12-schema-v1-human-views"
@@ -61,6 +67,16 @@ _REPORT_SEMANTICS_MIGRATION_VERSION = 9
 _REPORT_SEMANTICS_MIGRATION_NAME = "v12-canonical-report-semantics"
 _OUTCOME_COVERAGE_MIGRATION_VERSION = 10
 _OUTCOME_COVERAGE_MIGRATION_NAME = "v12-effective-outcome-coverage"
+_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION = 11
+_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME = "v12-report-coverage-diagnostics"
+_REVISIONED_ASSIGNMENTS_MIGRATION_VERSION = 12
+_REVISIONED_ASSIGNMENTS_MIGRATION_NAME = "v12-revisioned-outcome-assignments"
+_STEERING_DELTA_MIGRATION_VERSION = 13
+_STEERING_DELTA_MIGRATION_NAME = "v12-persisted-steering-delta"
+_REPORT_OPERATIONS_MIGRATION_VERSION = 14
+_REPORT_OPERATIONS_MIGRATION_NAME = "v14-atomic-report-operations"
+_CLARIFICATION_BINDING_MIGRATION_VERSION = 15
+_CLARIFICATION_BINDING_MIGRATION_NAME = "v15-durable-clarification-bindings"
 _APPLICATION_ID = 0x43563132
 _TIMELINE_BACKFILL_METADATA_KEY = "timeline_backfill_v1"
 _TIMELINE_BACKFILL_VERSION = "cortex/v12-timeline-backfill/v1"
@@ -166,18 +182,24 @@ def _depth(value: Any) -> int:
     return 0
 
 
-def _strict_json(value: Any, *, label: str) -> Any:
+def _strict_json(value: Any, *, label: str, maximum_bytes: int = JSON_MAX_BYTES) -> Any:
     try:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        if len(encoded.encode("utf-8")) > JSON_MAX_BYTES or _depth(value) > JSON_MAX_DEPTH:
+        if len(encoded.encode("utf-8")) > maximum_bytes or _depth(value) > JSON_MAX_DEPTH:
             raise ValueError("bounded JSON violation")
         return json.loads(encoded)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise V12StoreError(f"{label} is invalid", code="content_invalid", details={"field": label}) from exc
 
 
-def _canonical_json(value: Any, *, label: str) -> str:
-    return json.dumps(_strict_json(value, label=label), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+def _canonical_json(value: Any, *, label: str, maximum_bytes: int = JSON_MAX_BYTES) -> str:
+    return json.dumps(
+        _strict_json(value, label=label, maximum_bytes=maximum_bytes),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _load_json(value: str, *, label: str) -> Any:
@@ -329,6 +351,14 @@ def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return None if row is None else {str(key): row[key] for key in row.keys()}
 
 
+def _codex_home() -> Path:
+    """Return the one state root used by storage and compact-ref resolution."""
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(os.environ.get("HOME") or str(Path.home())).expanduser() / ".codex"
+
+
 class V12Store:
     """One private V12 SQLite shard; all methods preserve schema version 1."""
 
@@ -374,8 +404,7 @@ class V12Store:
         task_suffix = task_ref_parts(value)
         if task_suffix is None:
             raise V12StoreError("task_ref is invalid", code="invalid_identifier", details={"field": "task_ref"})
-        home = Path(os.environ.get("HOME") or str(Path.home())).expanduser()
-        projects = home / ".codex" / "cortex" / "v12" / "projects"
+        projects = _codex_home() / "cortex" / "v12" / "projects"
         try:
             shards = [
                 entry.name[2:]
@@ -429,12 +458,54 @@ class V12Store:
 
     @classmethod
     def for_record_ref(cls, value: object, *, label: str) -> tuple["V12Store", str]:
-        """Resolve one typed public record ref across private V12 shards only."""
+        """Resolve a compact record reference through the private locator index.
+
+        New writes populate the indexed resolver.  A missing index entry is
+        treated as an explicitly legacy recovery path: it performs the former
+        exact, fail-closed shard scan once and repairs the derived index.  A
+        collision remains ambiguous; recovery never guesses a target.
+        """
         suffix = record_ref_parts(value, label=label)
         if suffix is None:
             raise V12StoreError(f"{label} is invalid", code="invalid_identifier", details={"field": label})
-        home = Path(os.environ.get("HOME") or str(Path.home())).expanduser()
-        projects = home / ".codex" / "cortex" / "v12" / "projects"
+        indexed = cls._record_locator_matches(suffix, label=label)
+        if indexed is not None:
+            if len(indexed) != 1:
+                raise V12StoreError(f"{label} is ambiguous", code="record_ref_ambiguous", details={"field": label})
+            shard, identifier = indexed[0]
+            store = cls._store_for_shard(shard)
+            try:
+                store._verify_known_record(identifier, label=label)
+            except V12StoreError as exc:
+                if exc.code not in {f"{label.removesuffix('_id')}_not_found", "cross_project_reference"}:
+                    raise
+            else:
+                return store, identifier
+            # A stale derived entry is not an authority.  Fall through to the
+            # one legacy recovery scan, which verifies the canonical shards.
+        matches = cls._legacy_record_ref_matches(suffix, label=label)
+        if len(matches) == 1:
+            store, identifier = matches[0]
+            store._sync_record_locators()
+            return store, identifier
+        if len(matches) == 0:
+            raise V12StoreError(f"{label} was not found", code=f"{label.removesuffix('_id')}_not_found")
+        raise V12StoreError(f"{label} is ambiguous", code="record_ref_ambiguous", details={"field": label})
+
+    @classmethod
+    def _store_for_shard(cls, shard: str) -> "V12Store":
+        store = cls.__new__(cls)
+        store.project_root = None
+        store.project_hash = shard
+        store._guard = threading.RLock()
+        store._timeline_backfilled_tasks = set()
+        store._set_paths()
+        return store
+
+    @classmethod
+    def _legacy_record_ref_matches(cls, suffix: str, *, label: str) -> list[tuple["V12Store", str]]:
+        """One bounded compatibility scan for pre-index record locators."""
+        projects = _codex_home() / "cortex" / "v12" / "projects"
         try:
             shards = [entry.name[2:] for entry in os.scandir(projects) if entry.name.startswith("p-") and re.fullmatch(r"p-[0-9a-f]{64}", entry.name) and entry.is_dir(follow_symlinks=False)]
         except FileNotFoundError:
@@ -443,12 +514,7 @@ class V12Store:
             raise V12StoreError("V12 storage is unavailable", code="storage_unavailable") from exc
         matches: list[tuple[V12Store, str]] = []
         for shard in shards:
-            store = cls.__new__(cls)
-            store.project_root = None
-            store.project_hash = shard
-            store._guard = threading.RLock()
-            store._timeline_backfilled_tasks = set()
-            store._set_paths()
+            store = cls._store_for_shard(shard)
             try:
                 identifier = store._record_id_for_ref_suffix(suffix, label=label)
             except V12StoreError as exc:
@@ -456,17 +522,13 @@ class V12Store:
                     continue
                 raise
             matches.append((store, identifier))
-        if len(matches) == 0:
-            raise V12StoreError(f"{label} was not found", code=f"{label.removesuffix('_id')}_not_found")
-        if len(matches) != 1:
-            raise V12StoreError(f"{label} is ambiguous", code="record_ref_ambiguous", details={"field": label})
-        store, identifier = matches[0]
-        store._verify_known_record(identifier, label=label)
-        return store, identifier
+        return matches
 
     def _set_paths(self) -> None:
-        self._home = Path(os.environ.get("HOME") or str(Path.home())).expanduser()
-        self.root = self._home / ".codex" / "cortex" / "v12" / "projects" / f"p-{self.project_hash}"
+        self._codex_home = _codex_home()
+        self._v12_root = self._codex_home / "cortex" / "v12"
+        self._record_locator_path = self._v12_root / _RECORD_LOCATOR_DATABASE_NAME
+        self.root = self._codex_home / "cortex" / "v12" / "projects" / f"p-{self.project_hash}"
         self.database_path = self.root / DATABASE_NAME
         # Human-readable views live beside the canonical database but never in
         # project_root.  Task IDs are generated/validated identifiers, so this
@@ -570,9 +632,9 @@ class V12Store:
         # The general .codex directory is user-owned; only V12 directories are
         # permission-normalized.  All components are lstat-checked.
         components = [
-            (self._home / ".codex", False), (self._home / ".codex" / "cortex", False),
-            (self._home / ".codex" / "cortex" / "v12", True),
-            (self._home / ".codex" / "cortex" / "v12" / "projects", True), (self.root, True),
+            (self._codex_home, False), (self._codex_home / "cortex", False),
+            (self._codex_home / "cortex" / "v12", True),
+            (self._codex_home / "cortex" / "v12" / "projects", True), (self.root, True),
         ]
         for directory, normalize in components:
             try:
@@ -580,6 +642,76 @@ class V12Store:
             except OSError as exc:
                 raise V12StoreError("V12 storage is unavailable", code="storage_unavailable") from exc
             self._directory(directory, normalize=normalize)
+
+    @classmethod
+    def _record_locator_matches(cls, suffix: str, *, label: str) -> list[tuple[str, str]] | None:
+        """Read at most two verified candidates without enumerating shards.
+
+        ``None`` means no locator database exists yet, so only the explicit
+        legacy recovery path may scan project shards.  An empty list is a
+        valid indexed miss and follows the same one-time recovery path.
+        """
+        root = _codex_home() / "cortex" / "v12"
+        path = root / _RECORD_LOCATOR_DATABASE_NAME
+        try:
+            if not root.exists():
+                return None
+            cls._directory(root, normalize=True)
+            cls._regular(path, required=False)
+            if not path.exists():
+                return None
+            with sqlite3.connect(path, timeout=15, isolation_level=None) as connection:
+                connection.execute("PRAGMA busy_timeout = 15000")
+                version = connection.execute("PRAGMA user_version").fetchone()
+                if version is None or int(version[0]) != _RECORD_LOCATOR_SCHEMA_VERSION:
+                    raise V12StoreError("V12 storage is unavailable", code="storage_unavailable")
+                rows = connection.execute(
+                    "SELECT project_hash,record_id FROM record_locators WHERE label=? AND suffix=? ORDER BY record_id LIMIT 2",
+                    (label, suffix),
+                ).fetchall()
+        except V12StoreError:
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise _storage_error(exc) from exc
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    def _sync_record_locators(self) -> None:
+        """Rebuild this shard's derived locator rows without cross-shard reads."""
+        sources = {
+            "delegation_id": ("delegations", "delegation_id"),
+            "report_id": ("reports", "report_id"),
+            "initiative_id": ("initiatives", "initiative_id"),
+            "decision_id": ("user_decisions", "decision_id"),
+        }
+        try:
+            self._directory(self._v12_root, normalize=True)
+            self._regular(self._record_locator_path, required=False)
+            with self._connection() as ledger:
+                records = [
+                    (label, str(row[0]))
+                    for label, (table, column) in sources.items()
+                    for row in ledger.execute(f"SELECT {column} FROM {table} WHERE project_hash=?", (self.project_hash,)).fetchall()
+                ]
+            with sqlite3.connect(self._record_locator_path, timeout=15, isolation_level=None) as locator:
+                locator.execute("PRAGMA busy_timeout = 15000")
+                locator.execute("BEGIN IMMEDIATE")
+                locator.execute("CREATE TABLE IF NOT EXISTS record_locators(label TEXT NOT NULL,suffix TEXT NOT NULL,project_hash TEXT NOT NULL,record_id TEXT NOT NULL,PRIMARY KEY(label,record_id))")
+                locator.execute("CREATE INDEX IF NOT EXISTS record_locators_lookup ON record_locators(label,suffix,record_id)")
+                locator.execute(f"PRAGMA user_version = {_RECORD_LOCATOR_SCHEMA_VERSION}")
+                locator.execute("DELETE FROM record_locators WHERE project_hash=?", (self.project_hash,))
+                locator.executemany(
+                    "INSERT INTO record_locators(label,suffix,project_hash,record_id) VALUES (?, ?, ?, ?)",
+                    [
+                        (label, identifier.rsplit("-", 1)[-1][-12:], self.project_hash, identifier)
+                        for label, identifier in records
+                    ],
+                )
+                locator.execute("COMMIT")
+            os.chmod(self._record_locator_path, 0o600)
+        except V12StoreError:
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise _storage_error(exc) from exc
 
     def _check_open_paths(self, *, database_required: bool) -> None:
         self._directory(self.root, normalize=True)
@@ -664,6 +796,11 @@ class V12Store:
                         self._migrate_advisory_governance(connection)
                         self._migrate_canonical_report_semantics(connection)
                         self._migrate_effective_outcome_coverage(connection)
+                        self._migrate_report_coverage_diagnostics(connection)
+                        self._migrate_revisioned_outcome_assignments(connection)
+                        self._migrate_persisted_steering_delta(connection)
+                        self._migrate_report_operations(connection)
+                        self._migrate_clarification_bindings(connection)
                         self._validate_existing(connection)
                         self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                     except BaseException:
@@ -685,6 +822,11 @@ class V12Store:
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION, _REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REVISIONED_ASSIGNMENTS_MIGRATION_VERSION, _REVISIONED_ASSIGNMENTS_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_STEERING_DELTA_MIGRATION_VERSION, _STEERING_DELTA_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_OPERATIONS_MIGRATION_VERSION, _REPORT_OPERATIONS_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_CLARIFICATION_BINDING_MIGRATION_VERSION, _CLARIFICATION_BINDING_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_hash', ?)", (self.project_hash,))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_root_digest', ?)", (hashlib.sha256(str(self.project_root).encode("utf-8")).hexdigest(),))
                     except BaseException:
@@ -693,6 +835,10 @@ class V12Store:
                     connection.execute("COMMIT")
             self._protect_files()
             self._materialize_timeline_backfills()
+            # Build or refresh only this shard's locator rows.  Older shards
+            # become indexed on their next normal open; until then the narrow
+            # recovery path above remains available and fails closed.
+            self._sync_record_locators()
         except V12StoreError:
             raise
         except (OSError, sqlite3.DatabaseError) as exc:
@@ -812,7 +958,7 @@ class V12Store:
                 connection.execute(statement)
             connection.execute("UPDATE tasks SET project_root=? WHERE project_hash=?", (str(self.project_root), self.project_hash))
             connection.execute("UPDATE tasks SET user_request_original=objective WHERE user_request_original=''" )
-            connection.execute("CREATE TABLE user_decisions(decision_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),subject_type TEXT NOT NULL,subject_id TEXT NOT NULL,subject_digest TEXT,decision_type TEXT NOT NULL,prompt_en TEXT NOT NULL,response_original TEXT NOT NULL,response_en TEXT NOT NULL,user_language TEXT NOT NULL,attribution TEXT NOT NULL,supersedes_decision_id TEXT REFERENCES user_decisions(decision_id),created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL)")
+            connection.execute("CREATE TABLE user_decisions(decision_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),subject_type TEXT NOT NULL,subject_id TEXT NOT NULL,subject_digest TEXT,decision_type TEXT NOT NULL,prompt_en TEXT NOT NULL,response_original TEXT NOT NULL,response_en TEXT NOT NULL,user_language TEXT NOT NULL,attribution TEXT NOT NULL,supersedes_decision_id TEXT REFERENCES user_decisions(decision_id),created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,steering_delta_json TEXT)")
             connection.execute("CREATE TABLE report_chunks(report_id TEXT NOT NULL REFERENCES reports(report_id),chunk_index INTEGER NOT NULL,section TEXT NOT NULL,content_json TEXT NOT NULL,content_digest TEXT NOT NULL,content_bytes INTEGER NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(report_id,chunk_index))")
             connection.execute("CREATE TABLE report_usage(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),total_retained_bytes INTEGER NOT NULL,assembling_bytes INTEGER NOT NULL,assembling_reports INTEGER NOT NULL,updated_at TEXT NOT NULL)")
             connection.execute("CREATE TABLE projection_jobs(job_id INTEGER PRIMARY KEY AUTOINCREMENT,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),source_sequence INTEGER NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,lease_token TEXT,lease_expires_at TEXT,last_error_code TEXT,attempt_count INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(task_id,source_sequence,reason))")
@@ -1111,6 +1257,154 @@ class V12Store:
         except sqlite3.DatabaseError as exc:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
 
+    def _migrate_report_coverage_diagnostics(self, connection: sqlite3.Connection) -> None:
+        """Persist coverage diagnostics without rejecting immutable report transport."""
+        migration = connection.execute("SELECT name FROM schema_migrations WHERE version=?", (_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION,)).fetchone()
+        if migration is not None:
+            if str(migration[0]) != _REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        expected = [
+            (SCHEMA_VERSION, MIGRATION_NAME), (_EXPANSION_MIGRATION_VERSION, _EXPANSION_MIGRATION_NAME),
+            (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
+            (_NATIVE_TASK_NAME_MIGRATION_VERSION, _NATIVE_TASK_NAME_MIGRATION_NAME),
+            (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
+            (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
+            (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
+            (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
+            (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME),
+        ]
+        if [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()] != expected or "coverage_diagnostics_json" in self._column_names(connection, "reports"):
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            connection.execute("DROP TRIGGER reports_terminal_no_update")
+            connection.execute("ALTER TABLE reports ADD COLUMN coverage_diagnostics_json TEXT NOT NULL DEFAULT '[]'")
+            connection.execute("CREATE TRIGGER reports_terminal_no_update BEFORE UPDATE ON reports WHEN OLD.assembly_state IN ('finalized','aborted') BEGIN SELECT RAISE(ABORT,'terminal reports are immutable'); END")
+            connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION, _REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME, _now()))
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
+    def _migrate_revisioned_outcome_assignments(self, connection: sqlite3.Connection) -> None:
+        """Keep ownership history while making only one assignment current.
+
+        The v10 assignment table deliberately retained every row, but its
+        partial unique index treated a replaced parent owner as permanently
+        current.  This additive migration records explicit supersession and
+        makes the active owner relation queryable without rewriting reports.
+        """
+        migration = connection.execute("SELECT name FROM schema_migrations WHERE version=?", (_REVISIONED_ASSIGNMENTS_MIGRATION_VERSION,)).fetchone()
+        if migration is not None:
+            if str(migration[0]) != _REVISIONED_ASSIGNMENTS_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        expected = [
+            (SCHEMA_VERSION, MIGRATION_NAME), (_EXPANSION_MIGRATION_VERSION, _EXPANSION_MIGRATION_NAME),
+            (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
+            (_NATIVE_TASK_NAME_MIGRATION_VERSION, _NATIVE_TASK_NAME_MIGRATION_NAME),
+            (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
+            (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
+            (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
+            (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
+            (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME),
+            (_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION, _REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME),
+        ]
+        if [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()] != expected:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            connection.execute("DROP INDEX outcome_owned_current")
+            connection.execute("ALTER TABLE delegation_outcome_assignments ADD COLUMN superseded_by_delegation_id TEXT REFERENCES delegations(delegation_id)")
+            connection.execute("ALTER TABLE delegation_outcome_assignments ADD COLUMN superseded_sequence INTEGER")
+            connection.execute("CREATE UNIQUE INDEX outcome_owned_current ON delegation_outcome_assignments(item_id) WHERE assignment_role='owned' AND superseded_by_delegation_id IS NULL")
+            connection.execute("CREATE INDEX outcome_assignment_current ON delegation_outcome_assignments(item_id,assignment_role,superseded_by_delegation_id)")
+            connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REVISIONED_ASSIGNMENTS_MIGRATION_VERSION, _REVISIONED_ASSIGNMENTS_MIGRATION_NAME, _now()))
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
+    def _migrate_persisted_steering_delta(self, connection: sqlite3.Connection) -> None:
+        """Retain the narrow steering effect needed by later worker briefs."""
+        migration = connection.execute("SELECT name FROM schema_migrations WHERE version=?", (_STEERING_DELTA_MIGRATION_VERSION,)).fetchone()
+        if migration is not None:
+            if str(migration[0]) != _STEERING_DELTA_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        expected = [
+            (SCHEMA_VERSION, MIGRATION_NAME), (_EXPANSION_MIGRATION_VERSION, _EXPANSION_MIGRATION_NAME),
+            (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
+            (_NATIVE_TASK_NAME_MIGRATION_VERSION, _NATIVE_TASK_NAME_MIGRATION_NAME),
+            (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
+            (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
+            (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
+            (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
+            (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME),
+            (_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION, _REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME),
+            (_REVISIONED_ASSIGNMENTS_MIGRATION_VERSION, _REVISIONED_ASSIGNMENTS_MIGRATION_NAME),
+        ]
+        if [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()] != expected:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            if "steering_delta_json" not in self._column_names(connection, "user_decisions"):
+                connection.execute("ALTER TABLE user_decisions ADD COLUMN steering_delta_json TEXT")
+            connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_STEERING_DELTA_MIGRATION_VERSION, _STEERING_DELTA_MIGRATION_NAME, _now()))
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
+    def _migrate_report_operations(self, connection: sqlite3.Connection) -> None:
+        """Add the durable ledger for atomic semantic report publication.
+
+        No historical rows are inferred: this table records only operations
+        written by the new domain publication path.
+        """
+        migration = connection.execute("SELECT name FROM schema_migrations WHERE version=?", (_REPORT_OPERATIONS_MIGRATION_VERSION,)).fetchone()
+        if migration is not None:
+            if str(migration[0]) != _REPORT_OPERATIONS_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        expected = [
+            (SCHEMA_VERSION, MIGRATION_NAME), (_EXPANSION_MIGRATION_VERSION, _EXPANSION_MIGRATION_NAME),
+            (_PROFILE_BINDING_MIGRATION_VERSION, _PROFILE_BINDING_MIGRATION_NAME),
+            (_NATIVE_TASK_NAME_MIGRATION_VERSION, _NATIVE_TASK_NAME_MIGRATION_NAME),
+            (_REPORT_CONSUMPTION_MIGRATION_VERSION, _REPORT_CONSUMPTION_MIGRATION_NAME),
+            (_GOVERNANCE_GATE_MIGRATION_VERSION, _GOVERNANCE_GATE_MIGRATION_NAME),
+            (_APPROVAL_HANDLE_MIGRATION_VERSION, _APPROVAL_HANDLE_MIGRATION_NAME),
+            (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
+            (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
+            (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME),
+            (_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION, _REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME),
+            (_REVISIONED_ASSIGNMENTS_MIGRATION_VERSION, _REVISIONED_ASSIGNMENTS_MIGRATION_NAME),
+            (_STEERING_DELTA_MIGRATION_VERSION, _STEERING_DELTA_MIGRATION_NAME),
+        ]
+        if [tuple(row) for row in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()] != expected:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            tables = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "report_operations" in tables:
+                expected_columns = {"operation_id", "task_id", "delegation_id", "kind", "payload_digest", "report_id", "created_at"}
+                if self._column_names(connection, "report_operations") != expected_columns:
+                    raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            else:
+                connection.execute("CREATE TABLE report_operations(operation_id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(task_id),delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),kind TEXT NOT NULL,payload_digest TEXT NOT NULL,report_id TEXT NOT NULL REFERENCES reports(report_id),created_at TEXT NOT NULL,UNIQUE(delegation_id,kind))")
+                connection.execute("CREATE INDEX report_operations_task ON report_operations(task_id,created_at)")
+            connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_REPORT_OPERATIONS_MIGRATION_VERSION, _REPORT_OPERATIONS_MIGRATION_NAME, _now()))
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
+    def _migrate_clarification_bindings(self, connection: sqlite3.Connection) -> None:
+        """Add the durable server-issued one-shot clarification relation."""
+        row = connection.execute("SELECT name FROM schema_migrations WHERE version=?", (_CLARIFICATION_BINDING_MIGRATION_VERSION,)).fetchone()
+        if row is not None:
+            if str(row[0]) != _CLARIFICATION_BINDING_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        previous = connection.execute("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone()
+        if previous is None or int(previous[0]) != _REPORT_OPERATIONS_MIGRATION_VERSION:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        connection.execute("CREATE TABLE clarification_bindings(clarification_binding TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),subject_type TEXT NOT NULL,subject_id TEXT NOT NULL,assignment_id TEXT,decision_type TEXT NOT NULL,prompt_digest TEXT NOT NULL,prompt TEXT NOT NULL,prompt_language TEXT NOT NULL,effective_contract_revision INTEGER NOT NULL,issue_sequence INTEGER NOT NULL,request_digest TEXT NOT NULL,response_digest TEXT,consumed_decision_id TEXT REFERENCES user_decisions(decision_id),created_at TEXT NOT NULL,UNIQUE(task_id,subject_type,subject_id,decision_type,prompt_digest,effective_contract_revision))")
+        connection.execute("CREATE INDEX clarification_bindings_task_pending ON clarification_bindings(task_id,consumed_decision_id,issue_sequence)")
+        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_CLARIFICATION_BINDING_MIGRATION_VERSION, _CLARIFICATION_BINDING_MIGRATION_NAME, _now()))
+
     def _validate_existing(self, connection: sqlite3.Connection) -> None:
         if int(connection.execute("PRAGMA application_id").fetchone()[0]) != _APPLICATION_ID or int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
@@ -1127,12 +1421,18 @@ class V12Store:
             (_ADVISORY_GOVERNANCE_MIGRATION_VERSION, _ADVISORY_GOVERNANCE_MIGRATION_NAME),
             (_REPORT_SEMANTICS_MIGRATION_VERSION, _REPORT_SEMANTICS_MIGRATION_NAME),
             (_OUTCOME_COVERAGE_MIGRATION_VERSION, _OUTCOME_COVERAGE_MIGRATION_NAME),
+            (_REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_VERSION, _REPORT_COVERAGE_DIAGNOSTICS_MIGRATION_NAME),
+            (_REVISIONED_ASSIGNMENTS_MIGRATION_VERSION, _REVISIONED_ASSIGNMENTS_MIGRATION_NAME),
+            (_STEERING_DELTA_MIGRATION_VERSION, _STEERING_DELTA_MIGRATION_NAME),
+            (_REPORT_OPERATIONS_MIGRATION_VERSION, _REPORT_OPERATIONS_MIGRATION_NAME),
+            (_CLARIFICATION_BINDING_MIGRATION_VERSION, _CLARIFICATION_BINDING_MIGRATION_NAME),
         ] or metadata is None or str(metadata[0]) != self.project_hash:
             raise V12StoreError("reference belongs to another project", code="cross_project_reference")
         required_columns = {
             "tasks": {"task_id", "project_hash", "project_root", "objective", "user_request_original", "user_language", "task_contract_version", "requirements_json", "constraints_json", "acceptance_criteria_json", "verification_plan_json", "context_json"},
             "delegations": {"delegation_id", "task_id", "profile_name", "native_task_name", "input_report_ids_json", "input_decision_ids_json"},
-            "reports": {"report_id", "task_id", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy", "semantic_status"},
+            "reports": {"report_id", "task_id", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy", "semantic_status", "coverage_diagnostics_json"},
+            "report_operations": {"operation_id", "task_id", "delegation_id", "kind", "payload_digest", "report_id"},
             "report_chunks": {"report_id", "chunk_index", "section", "content_json", "content_digest", "content_bytes"},
             "report_usage": {"task_id", "total_retained_bytes", "assembling_bytes", "assembling_reports"},
             "timeline": {"sequence", "task_id", "decision_id", "payload_json"},
@@ -1141,9 +1441,11 @@ class V12Store:
             "projection_files": {"task_id", "relative_path", "content_digest", "status"},
             "report_consumption_receipts": {"task_id", "consumer_delegation_id", "reader_kind", "report_id", "observed_content_digest", "sections_json", "input_cursor", "output_cursor", "chunk_indexes_json", "returned_content_bytes", "has_more", "created_sequence"},
             "approval_handles": {"approval_handle", "task_id", "report_id", "report_content_digest", "view_relative_path", "view_content_digest", "view_source_sequence", "request_digest", "created_sequence", "consumed_decision_id"},
+            "clarification_bindings": {"clarification_binding", "project_hash", "task_id", "subject_type", "subject_id", "decision_type", "prompt_digest", "prompt", "prompt_language", "effective_contract_revision", "issue_sequence", "request_digest", "response_digest", "consumed_decision_id"},
             "effective_contract_revisions": {"task_id", "revision", "created_sequence"},
             "effective_contract_items": {"item_id", "task_id", "category", "ordinal", "text", "created_revision", "retired_revision"},
-            "delegation_outcome_assignments": {"delegation_id", "item_id", "assignment_role", "revision"},
+            "delegation_outcome_assignments": {"delegation_id", "item_id", "assignment_role", "revision", "superseded_by_delegation_id", "superseded_sequence"},
+            "user_decisions": {"steering_delta_json"},
             "report_contract_coverage": {"report_id", "item_id", "status", "verification_json"},
         }
         for table, columns in required_columns.items():
@@ -1164,7 +1466,7 @@ class V12Store:
                 raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
             seen_native_names.add(native_key)
         objects = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('index','trigger')")}
-        if not {"reports_terminal_no_update", "reports_no_delete", "report_chunks_no_update", "report_chunks_no_delete", "decisions_no_update", "decisions_no_delete", "decisions_task_created", "report_chunks_report_order", "timeline_decision_sequence", "projection_jobs_pending", "consumption_task_sequence", "consumption_delegation_report", "approval_handles_task_report"}.issubset(objects):
+        if not {"reports_terminal_no_update", "reports_no_delete", "report_chunks_no_update", "report_chunks_no_delete", "decisions_no_update", "decisions_no_delete", "decisions_task_created", "report_chunks_report_order", "timeline_decision_sequence", "projection_jobs_pending", "consumption_task_sequence", "consumption_delegation_report", "approval_handles_task_report", "clarification_bindings_task_pending"}.issubset(objects):
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
         if self.project_root is not None:
             canonical = str(self.project_root)
@@ -1638,6 +1940,11 @@ class V12Store:
                     self._migrate_advisory_governance(connection)
                     self._migrate_canonical_report_semantics(connection)
                     self._migrate_effective_outcome_coverage(connection)
+                    self._migrate_report_coverage_diagnostics(connection)
+                    self._migrate_revisioned_outcome_assignments(connection)
+                    self._migrate_persisted_steering_delta(connection)
+                    self._migrate_report_operations(connection)
+                    self._migrate_clarification_bindings(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1685,6 +1992,11 @@ class V12Store:
                     self._migrate_advisory_governance(connection)
                     self._migrate_canonical_report_semantics(connection)
                     self._migrate_effective_outcome_coverage(connection)
+                    self._migrate_report_coverage_diagnostics(connection)
+                    self._migrate_revisioned_outcome_assignments(connection)
+                    self._migrate_persisted_steering_delta(connection)
+                    self._migrate_report_operations(connection)
+                    self._migrate_clarification_bindings(connection)
                     self._validate_existing(connection)
                     self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                 except BaseException:
@@ -1719,7 +2031,7 @@ class V12Store:
         CREATE TABLE timeline(sequence INTEGER PRIMARY KEY AUTOINCREMENT,occurred_at TEXT NOT NULL,event_type TEXT NOT NULL,entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,task_id TEXT,delegation_id TEXT,report_id TEXT,initiative_id TEXT,assessment_id TEXT,closure_id TEXT,decision_id TEXT,payload_json TEXT NOT NULL);
         CREATE TABLE tasks(task_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,project_root TEXT NOT NULL,objective TEXT NOT NULL,user_request_original TEXT NOT NULL,user_language TEXT NOT NULL,task_contract_version TEXT NOT NULL,requirements_json TEXT NOT NULL,constraints_json TEXT NOT NULL,acceptance_criteria_json TEXT NOT NULL,verification_plan_json TEXT NOT NULL,context_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,updated_sequence INTEGER NOT NULL);
         CREATE TABLE delegations(delegation_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),parent_delegation_id TEXT REFERENCES delegations(delegation_id),native_task_name TEXT NOT NULL,objective TEXT NOT NULL,role TEXT NOT NULL,profile_name TEXT NOT NULL,scope TEXT NOT NULL,instructions TEXT NOT NULL,input_report_ids_json TEXT NOT NULL,input_decision_ids_json TEXT NOT NULL,model TEXT NOT NULL,reasoning_effort TEXT NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
-        CREATE TABLE reports(report_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),report_type TEXT NOT NULL,status TEXT,semantic_status TEXT,assembly_state TEXT NOT NULL,next_chunk_index INTEGER NOT NULL,total_chunks INTEGER NOT NULL,total_bytes INTEGER NOT NULL,content_digest TEXT NOT NULL,supersedes_report_id TEXT REFERENCES reports(report_id),review_policy TEXT,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,finalized_at TEXT,finalized_sequence INTEGER,aborted_at TEXT,aborted_sequence INTEGER,abort_reason_en TEXT);
+        CREATE TABLE reports(report_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),report_type TEXT NOT NULL,status TEXT,semantic_status TEXT,coverage_diagnostics_json TEXT NOT NULL DEFAULT '[]',assembly_state TEXT NOT NULL,next_chunk_index INTEGER NOT NULL,total_chunks INTEGER NOT NULL,total_bytes INTEGER NOT NULL,content_digest TEXT NOT NULL,supersedes_report_id TEXT REFERENCES reports(report_id),review_policy TEXT,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,finalized_at TEXT,finalized_sequence INTEGER,aborted_at TEXT,aborted_sequence INTEGER,abort_reason_en TEXT);
         CREATE TABLE report_chunks(report_id TEXT NOT NULL REFERENCES reports(report_id),chunk_index INTEGER NOT NULL,section TEXT NOT NULL,content_json TEXT NOT NULL,content_digest TEXT NOT NULL,content_bytes INTEGER NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(report_id,chunk_index));
         CREATE TABLE report_consumption_receipts(receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),consumer_delegation_id TEXT REFERENCES delegations(delegation_id),reader_kind TEXT NOT NULL,report_id TEXT NOT NULL REFERENCES reports(report_id),observed_content_digest TEXT NOT NULL,sections_json TEXT NOT NULL,input_cursor TEXT,output_cursor TEXT,chunk_indexes_json TEXT NOT NULL,returned_content_bytes INTEGER NOT NULL,has_more INTEGER NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
         CREATE TABLE report_usage(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),total_retained_bytes INTEGER NOT NULL,assembling_bytes INTEGER NOT NULL,assembling_reports INTEGER NOT NULL,updated_at TEXT NOT NULL);
@@ -1728,14 +2040,16 @@ class V12Store:
         CREATE TABLE initiative_revisions(revision_id INTEGER PRIMARY KEY AUTOINCREMENT,initiative_id TEXT NOT NULL REFERENCES initiatives(initiative_id),revision_number INTEGER NOT NULL,project_hash TEXT NOT NULL,occurred_at TEXT NOT NULL,sequence INTEGER NOT NULL,payload_json TEXT NOT NULL,UNIQUE(initiative_id,revision_number));
         CREATE TABLE initiative_links(link_id INTEGER PRIMARY KEY AUTOINCREMENT,initiative_id TEXT NOT NULL REFERENCES initiatives(initiative_id),project_hash TEXT NOT NULL,relationship TEXT NOT NULL,target_id TEXT NOT NULL,is_resolved INTEGER NOT NULL,warnings_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(initiative_id,relationship,target_id));
         CREATE TABLE governance_closures(closure_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,subject_type TEXT NOT NULL,subject_id TEXT NOT NULL,verdict TEXT NOT NULL,evidence_json TEXT NOT NULL,unresolved_risks_json TEXT NOT NULL,follow_ups_json TEXT NOT NULL,initiative_status TEXT,completion_notes_json TEXT,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
-        CREATE TABLE user_decisions(decision_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),subject_type TEXT NOT NULL,subject_id TEXT NOT NULL,subject_digest TEXT,decision_type TEXT NOT NULL,prompt_en TEXT NOT NULL,response_original TEXT NOT NULL,response_en TEXT NOT NULL,user_language TEXT NOT NULL,attribution TEXT NOT NULL,supersedes_decision_id TEXT REFERENCES user_decisions(decision_id),created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL);
+        CREATE TABLE user_decisions(decision_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),subject_type TEXT NOT NULL,subject_id TEXT NOT NULL,subject_digest TEXT,decision_type TEXT NOT NULL,prompt_en TEXT NOT NULL,response_original TEXT NOT NULL,response_en TEXT NOT NULL,user_language TEXT NOT NULL,attribution TEXT NOT NULL,supersedes_decision_id TEXT REFERENCES user_decisions(decision_id),created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,steering_delta_json TEXT);
         CREATE TABLE approval_handles(approval_handle TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),report_id TEXT NOT NULL REFERENCES reports(report_id),report_content_digest TEXT NOT NULL,view_relative_path TEXT NOT NULL,view_content_digest TEXT NOT NULL,view_source_sequence INTEGER NOT NULL,request_digest TEXT NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,consumed_decision_id TEXT REFERENCES user_decisions(decision_id),UNIQUE(task_id,report_id,report_content_digest,view_content_digest,view_source_sequence));
+        CREATE TABLE clarification_bindings(clarification_binding TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),subject_type TEXT NOT NULL,subject_id TEXT NOT NULL,assignment_id TEXT,decision_type TEXT NOT NULL,prompt_digest TEXT NOT NULL,prompt TEXT NOT NULL,prompt_language TEXT NOT NULL,effective_contract_revision INTEGER NOT NULL,issue_sequence INTEGER NOT NULL,request_digest TEXT NOT NULL,response_digest TEXT,consumed_decision_id TEXT REFERENCES user_decisions(decision_id),created_at TEXT NOT NULL,UNIQUE(task_id,subject_type,subject_id,decision_type,prompt_digest,effective_contract_revision));
         CREATE TABLE projection_jobs(job_id INTEGER PRIMARY KEY AUTOINCREMENT,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),source_sequence INTEGER NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,lease_token TEXT,lease_expires_at TEXT,last_error_code TEXT,attempt_count INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(task_id,source_sequence,reason));
         CREATE TABLE projection_files(task_id TEXT NOT NULL REFERENCES tasks(task_id),relative_path TEXT NOT NULL,source_sequence INTEGER NOT NULL,renderer_version TEXT NOT NULL,content_digest TEXT NOT NULL,status TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(task_id,relative_path));
         CREATE TABLE effective_contract_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id),revision INTEGER NOT NULL,decision_id TEXT REFERENCES user_decisions(decision_id),created_sequence INTEGER NOT NULL,PRIMARY KEY(task_id,revision));
         CREATE TABLE effective_contract_items(item_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),category TEXT NOT NULL,ordinal INTEGER NOT NULL,text TEXT NOT NULL,created_revision INTEGER NOT NULL,retired_revision INTEGER,UNIQUE(task_id,category,ordinal,created_revision));
-        CREATE TABLE delegation_outcome_assignments(delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),assignment_role TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(delegation_id,item_id,assignment_role));
+        CREATE TABLE delegation_outcome_assignments(delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),assignment_role TEXT NOT NULL,revision INTEGER NOT NULL,superseded_by_delegation_id TEXT REFERENCES delegations(delegation_id),superseded_sequence INTEGER,PRIMARY KEY(delegation_id,item_id,assignment_role));
         CREATE TABLE report_contract_coverage(report_id TEXT NOT NULL REFERENCES reports(report_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),status TEXT NOT NULL,verification_json TEXT NOT NULL,PRIMARY KEY(report_id,item_id));
+        CREATE TABLE report_operations(operation_id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(task_id),delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),kind TEXT NOT NULL,payload_digest TEXT NOT NULL,report_id TEXT NOT NULL REFERENCES reports(report_id),created_at TEXT NOT NULL,UNIQUE(delegation_id,kind));
         CREATE TABLE idempotency(operation TEXT NOT NULL,idempotency_key TEXT NOT NULL,payload_digest TEXT NOT NULL,result_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(operation,idempotency_key));
         CREATE INDEX timeline_task_sequence ON timeline(task_id,sequence);
         CREATE INDEX timeline_delegation_sequence ON timeline(delegation_id,sequence);
@@ -1743,15 +2057,18 @@ class V12Store:
         CREATE INDEX reports_task_created ON reports(task_id,created_sequence);
         CREATE INDEX reports_delegation_created ON reports(delegation_id,created_sequence);
         CREATE INDEX report_chunks_report_order ON report_chunks(report_id,chunk_index);
+        CREATE INDEX report_operations_task ON report_operations(task_id,created_at);
         CREATE INDEX consumption_task_sequence ON report_consumption_receipts(task_id,created_sequence);
         CREATE INDEX consumption_delegation_report ON report_consumption_receipts(consumer_delegation_id,report_id,created_sequence);
         CREATE INDEX assessments_task_created ON governance_assessments(task_id,created_sequence);
         CREATE INDEX initiative_links_source ON initiative_links(initiative_id,relationship);
         CREATE INDEX decisions_task_created ON user_decisions(task_id,created_sequence);
         CREATE INDEX approval_handles_task_report ON approval_handles(task_id,report_id,created_sequence);
+        CREATE INDEX clarification_bindings_task_pending ON clarification_bindings(task_id,consumed_decision_id,issue_sequence);
         CREATE INDEX timeline_decision_sequence ON timeline(decision_id,sequence);
         CREATE INDEX projection_jobs_pending ON projection_jobs(status,lease_expires_at,job_id);
-        CREATE UNIQUE INDEX outcome_owned_current ON delegation_outcome_assignments(item_id) WHERE assignment_role='owned';
+        CREATE UNIQUE INDEX outcome_owned_current ON delegation_outcome_assignments(item_id) WHERE assignment_role='owned' AND superseded_by_delegation_id IS NULL;
+        CREATE INDEX outcome_assignment_current ON delegation_outcome_assignments(item_id,assignment_role,superseded_by_delegation_id);
         CREATE INDEX outcome_items_task_current ON effective_contract_items(task_id,retired_revision,category,ordinal);
         """
         for statement in statements.split(";"):
@@ -1838,13 +2155,16 @@ class V12Store:
 
     def _mutation(self, operation: str, payload: Mapping[str, Any], key: Any, call: Callable[[sqlite3.Connection], dict[str, Any]]) -> tuple[dict[str, Any], bool]:
         normalized = _strict_json(dict(payload), label="mutation payload")
-        digest = hashlib.sha256(_canonical_json(normalized, label="mutation payload").encode("utf-8")).hexdigest()
-        # A first mutation may omit retry material. Mint an opaque server key
-        # before the write and return it verbatim, so a caller can make an
-        # exact retry without turning its own content into authority.
-        client_key = uuid.uuid4().hex if key is None else _required_text(
-            key, label="idempotency_key", maximum=IDEMPOTENCY_KEY_MAX_LENGTH
-        )
+        # Operation identity is server-owned.  Public semantic callers do not
+        # manufacture retry keys; identity is computed after normalizing the
+        # fields whose order/presence has no domain meaning.  This makes
+        # equivalent retries (None vs [], reordered refs) the same mutation
+        # while preserving a digest conflict for genuinely different data.
+        identity_payload = self._canonical_operation_payload(operation, normalized)
+        digest = hashlib.sha256(_canonical_json(identity_payload, label="mutation payload").encode("utf-8")).hexdigest()
+        caller_supplied_key = key is not None
+        client_key = (_required_text(key, label="idempotency_key", maximum=IDEMPOTENCY_KEY_MAX_LENGTH)
+                      if caller_supplied_key else "server-" + digest)
         retry_handle = client_key
         idempotency = hashlib.sha256(_canonical_json({"operation": operation, "retry_handle": retry_handle}, label="idempotency operation key").encode("utf-8")).hexdigest()
         def transact(connection: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
@@ -1855,8 +2175,18 @@ class V12Store:
                 value = _load_json(str(previous["result_json"]), label="idempotency result")
                 if not isinstance(value, dict):
                     raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
+                if not caller_supplied_key:
+                    value.pop("idempotency_key", None)
                 return value, True
-            value = _strict_json(call(connection), label="mutation result")
+            # The public operation envelope has already been admitted at the
+            # MCP boundary.  Persisting its response additionally records
+            # server-minted IDs, timestamps, and retry metadata, so validate
+            # that result against the dedicated bounded result envelope.
+            value = _strict_json(
+                call(connection),
+                label="mutation result",
+                maximum_bytes=MUTATION_RESULT_MAX_BYTES,
+            )
             if not isinstance(value, dict):
                 raise V12StoreError("V12 storage is unavailable", code="storage_unavailable")
             projection_task = payload.get("task_id")
@@ -1866,10 +2196,32 @@ class V12Store:
             if isinstance(projection_task, str):
                 sequence = connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM timeline WHERE task_id=?", (projection_task,)).fetchone()[0]
                 connection.execute("INSERT INTO projection_jobs(project_hash,task_id,source_sequence,reason,status,created_at,updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(task_id,source_sequence,reason) DO UPDATE SET status='pending',last_error_code=NULL,updated_at=excluded.updated_at", (self.project_hash, projection_task, int(sequence), operation, _now(), _now()))
-            value = dict(value) | {"retry_handle": retry_handle, "idempotency_key": client_key}
-            connection.execute("INSERT INTO idempotency(operation,idempotency_key,payload_digest,result_json,created_at) VALUES (?, ?, ?, ?, ?)", (operation, idempotency, digest, _canonical_json(value, label="mutation result"), _now()))
-            return value, False
+            binding_replayed = bool(value.get("replayed"))
+            value = dict(value) | {"retry_handle": retry_handle}
+            if caller_supplied_key:
+                value["idempotency_key"] = client_key
+            connection.execute(
+                "INSERT INTO idempotency(operation,idempotency_key,payload_digest,result_json,created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    operation,
+                    idempotency,
+                    digest,
+                    _canonical_json(
+                        value,
+                        label="mutation result",
+                        maximum_bytes=MUTATION_RESULT_MAX_BYTES,
+                    ),
+                    _now(),
+                ),
+            )
+            return value, binding_replayed
         result, replayed = self._write(transact)
+        # Record writes are committed before this derived cross-shard index is
+        # refreshed.  Should the index be unavailable after a committed write,
+        # later resolution uses its explicit legacy-recovery scan rather than
+        # treating the cache as durable record authority.
+        if not replayed:
+            self._sync_record_locators()
         # Derived Markdown is never part of the transaction's success.  A
         # bounded best-effort pass happens only after canonical commit; later
         # reads retry it opportunistically.
@@ -1879,6 +2231,37 @@ class V12Store:
         if isinstance(task_value, str):
             self.materialize_human_views(task_value)
         return result, replayed
+
+    @staticmethod
+    def _canonical_operation_payload(operation: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Canonical identity payload for all durable mutations.
+
+        The ledger stores the caller's validated representation, but mutation
+        identity must be based on domain semantics: optional collection
+        fields treat ``null`` and an empty collection alike, and relation
+        collections are sets.  This is intentionally limited to identity;
+        it never changes the durable evidence or public response.
+        """
+        value = dict(payload)
+        collection_fields = {
+            "input_report_ids", "input_decision_ids", "requirements",
+            "constraints", "acceptance_criteria", "verification_plan",
+            "risk_factors", "unresolved_risks", "follow_ups",
+            "dependencies", "linked_task_ids", "linked_delegation_ids",
+            "linked_report_ids", "linked_decision_ids",
+        }
+        for field in collection_fields:
+            if field in value and (value[field] is None or value[field] == []):
+                value[field] = []
+            elif field in value and isinstance(value[field], list):
+                # These are references or contract facts whose order is not a
+                # relation.  Preserve duplicate rejection in input validation,
+                # then sort only for the identity digest.
+                value[field] = sorted(value[field], key=lambda item: _canonical_json(item, label=field))
+        for field in ("context", "evidence", "completion_notes", "notes"):
+            if field in value and value[field] is None:
+                value[field] = {}
+        return {"operation": operation, "payload": value}
 
     def materialize_human_views(self, task_id: str) -> None:
         """Best-effort post-commit materialization; intentionally non-failing."""
@@ -2005,7 +2388,13 @@ class V12Store:
         return found
 
     def _execution_evidence(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
-        """Derive neutral execution evidence from canonical finalized reports."""
+        """Project outcome from current required coverage, never report order.
+
+        Finalized report counts remain neutral diagnostics.  The outcome itself
+        is intentionally derived only from the active effective contract and
+        its current-owner claims, so historical replacement attempts and
+        optional reports cannot turn a completed contract back into failure.
+        """
         finalized = int(connection.execute(
             "SELECT COUNT(*) FROM reports WHERE project_hash=? AND task_id=? AND assembly_state='finalized'",
             (self.project_hash, task_id),
@@ -2014,15 +2403,15 @@ class V12Store:
             "SELECT COUNT(*) FROM reports WHERE project_hash=? AND task_id=? AND assembly_state='finalized' AND report_type='result' AND semantic_status='semantic_valid' AND status='completed'",
             (self.project_hash, task_id),
         ).fetchone()[0])
-        latest_result = connection.execute(
-            "SELECT status FROM reports WHERE project_hash=? AND task_id=? AND assembly_state='finalized' AND report_type='result' AND semantic_status='semantic_valid' ORDER BY finalized_sequence DESC, report_id DESC LIMIT 1",
-            (self.project_hash, task_id),
-        ).fetchone()
+        coverage = self._aggregate_coverage(connection, task_id)
+        contract = self._effective_contract(connection, task_id)
         return {
             "evidence_status": "finalized_reports_present" if finalized else "no_finalized_reports",
             "finalized_report_count": finalized,
             "completed_report_count": completed,
-            "outcome": None if latest_result is None else ("completed" if str(latest_result[0]) == "completed" else "incomplete"),
+            "effective_revision": contract["revision"],
+            "coverage_status": coverage["status"],
+            "outcome": "completed" if coverage["status"] == "ready" else "incomplete",
         }
 
     def _advisory_closure(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
@@ -2074,6 +2463,10 @@ class V12Store:
         # storage-only placeholder change the public assembling-report state.
         if found.get("content_json") == "null" and found.get("assembly_state") == "assembling" and found.get("status") == "partial":
             found["status"] = None
+        found["coverage_diagnostics"] = _load_json(
+            str(found.pop("coverage_diagnostics_json", "[]")),
+            label="report coverage diagnostics",
+        )
         return found
 
     def _report_chunks(self, connection: sqlite3.Connection, report_id: str) -> list[dict[str, Any]]:
@@ -2132,7 +2525,7 @@ class V12Store:
 
     @staticmethod
     def _compact_report(report: Mapping[str, Any]) -> dict[str, Any]:
-        keys = ("report_id", "project_hash", "task_id", "delegation_id", "report_type", "status", "semantic_status", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy", "created_at", "created_sequence", "finalized_at", "finalized_sequence", "aborted_at", "aborted_sequence")
+        keys = ("report_id", "project_hash", "task_id", "delegation_id", "report_type", "status", "semantic_status", "coverage_diagnostics", "assembly_state", "next_chunk_index", "total_chunks", "total_bytes", "content_digest", "supersedes_report_id", "review_policy", "created_at", "created_sequence", "finalized_at", "finalized_sequence", "aborted_at", "aborted_sequence")
         compact = {key: report.get(key) for key in keys}
         compact["storage_status"] = "storage_valid"
         return compact
@@ -2160,14 +2553,19 @@ class V12Store:
         for item in contract["items"]:
             suffix = str(item["item_ref"])[2:]
             item_id = str(connection.execute("SELECT item_id FROM effective_contract_items WHERE task_id=? AND item_id LIKE ?", (task_id, "%" + suffix)).fetchone()[0])
-            owner = connection.execute("SELECT delegation_id FROM delegation_outcome_assignments WHERE item_id=? AND assignment_role='owned'", (item_id,)).fetchone()
-            claims = connection.execute(
-                "SELECT c.status AS claim_status,c.verification_json,r.report_id,r.status AS report_status "
+            owner = connection.execute(
+                "SELECT delegation_id FROM delegation_outcome_assignments "
+                "WHERE item_id=? AND assignment_role='owned' AND superseded_by_delegation_id IS NULL",
+                (item_id,),
+            ).fetchone()
+            all_claims = connection.execute(
+                "SELECT c.status AS claim_status,c.verification_json,r.report_id,r.status AS report_status,r.delegation_id "
                 "FROM report_contract_coverage c JOIN reports r ON r.report_id=c.report_id "
                 "WHERE c.item_id=? AND r.assembly_state='finalized' "
                 "ORDER BY r.finalized_sequence,r.report_id",
                 (item_id,),
             ).fetchall()
+            claims = [] if owner is None else [row for row in all_claims if str(row["delegation_id"]) == str(owner["delegation_id"])]
             statuses = {str(row["claim_status"]) for row in claims}
             if owner is None:
                 status, reason = "missing", "no_owned_delegation"
@@ -2185,7 +2583,12 @@ class V12Store:
                 status, reason = "unverified", "unverified_claim"
             else:
                 status, reason = "complete", "current_verified_claim"
-            rows.append({"item_ref": item["item_ref"], "status": status, "reason": reason, "report_refs": [record_ref(str(row["report_id"])) for row in claims]})
+            current_ids = {str(row["report_id"]) for row in claims}
+            rows.append({
+                "item_ref": item["item_ref"], "status": status, "reason": reason,
+                "report_refs": [record_ref(str(row["report_id"])) for row in claims],
+                "superseded_report_refs": [record_ref(str(row["report_id"])) for row in all_claims if str(row["report_id"]) not in current_ids],
+            })
         statuses = {str(row["status"]) for row in rows}
         if rows and statuses == {"complete"}:
             overall = "ready"
@@ -2332,6 +2735,23 @@ class V12Store:
             for decision_id in payload["input_decision_ids"]:
                 self._decision(connection, decision_id, task_id=task["task_id"])
             assignment_ids = {kind: [self._outcome_item_id(connection, str(task["task_id"]), item) for item in values] for kind, values in payload["outcome_assignments"].items()}
+            parent_owned = set()
+            if payload["parent_delegation_id"] is not None:
+                parent_owned = {
+                    str(row[0]) for row in connection.execute(
+                        "SELECT item_id FROM delegation_outcome_assignments WHERE delegation_id=? AND assignment_role='owned' AND superseded_by_delegation_id IS NULL",
+                        (payload["parent_delegation_id"],),
+                    ).fetchall()
+                }
+            for item_id in assignment_ids["owned"]:
+                current_owner = connection.execute(
+                    "SELECT delegation_id FROM delegation_outcome_assignments WHERE item_id=? AND assignment_role='owned' AND superseded_by_delegation_id IS NULL",
+                    (item_id,),
+                ).fetchone()
+                if current_owner is not None and (
+                    payload["parent_delegation_id"] is None or str(current_owner["delegation_id"]) != str(payload["parent_delegation_id"])
+                ):
+                    raise V12StoreError("outcome item already has an active owner", code="outcome_assignment_conflict")
             identifier = str(payload["delegation_id"] or new_sharded_id("delegation", self.project_hash))
             if connection.execute("SELECT 1 FROM delegations WHERE delegation_id=?", (identifier,)).fetchone() is not None:
                 raise V12StoreError("delegation_id already exists", code="delegation_exists")
@@ -2342,6 +2762,19 @@ class V12Store:
             )
             sequence = self._timeline(connection, event_type="delegation_created", entity_type="delegation", entity_id=identifier, payload={"delegation_id": identifier, "task_id": task["task_id"], "native_task_name": native_name}, task_id=task["task_id"], delegation_id=identifier)
             connection.execute("INSERT INTO delegations(delegation_id,project_hash,task_id,parent_delegation_id,native_task_name,objective,role,profile_name,scope,instructions,input_report_ids_json,input_decision_ids_json,model,reasoning_effort,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, task["task_id"], payload["parent_delegation_id"], native_name, payload["objective"], payload["role"], payload["profile_name"], payload["scope"], payload["instructions"], _canonical_json(payload["input_report_ids"], label="input_report_ids"), _canonical_json(payload["input_decision_ids"], label="input_decision_ids"), payload["model"], payload["reasoning_effort"], _now(), sequence))
+            transferred = [item_id for item_id in assignment_ids["owned"] if item_id in parent_owned]
+            if transferred:
+                transfer_sequence = self._timeline(
+                    connection, event_type="outcome_ownership_transferred", entity_type="delegation", entity_id=identifier,
+                    payload={"delegation_id": identifier, "parent_delegation_id": payload["parent_delegation_id"], "item_count": len(transferred)},
+                    task_id=task["task_id"], delegation_id=identifier,
+                )
+                placeholders = ",".join("?" for _ in transferred)
+                connection.execute(
+                    "UPDATE delegation_outcome_assignments SET superseded_by_delegation_id=?, superseded_sequence=? "
+                    f"WHERE delegation_id=? AND assignment_role='owned' AND superseded_by_delegation_id IS NULL AND item_id IN ({placeholders})",
+                    (identifier, transfer_sequence, payload["parent_delegation_id"], *transferred),
+                )
             revision = self._effective_contract(connection, str(task["task_id"]))["revision"]
             for kind, items in assignment_ids.items():
                 role_name = "evidence" if kind == "evidence_producing" else kind
@@ -2351,15 +2784,13 @@ class V12Store:
                     except sqlite3.IntegrityError as exc:
                         raise V12StoreError("outcome item already has an owner", code="outcome_assignment_conflict") from exc
             delegation = self._delegation(connection, identifier, task_id=task["task_id"])
-            # Creation must be immediately dispatchable, but must not echo the
-            # full recovery brief as well as its native message.  Retain that
-            # detailed durable brief for ``read_delegation``; the creation
-            # receipt carries only the exact projection a host needs to spawn
-            # this delegation and the proof that its selected profile loaded.
+            # Creation returns the semantic brief required by a coordinator.
+            # The active host maps that brief to its own agent API; the ledger
+            # never serializes or authorizes a host-native spawn request.
             worker_brief = self._worker_brief(connection, task, delegation)
             return {
                 "delegation": delegation,
-                "native_dispatch": worker_brief["native_dispatch"],
+                "dispatch_brief": worker_brief["dispatch_brief"],
                 "renderer": worker_brief["renderer"],
             }
         return self._mutation("create_delegation", payload, idempotency_key, write)
@@ -2372,13 +2803,48 @@ class V12Store:
         acceptance criteria compiled by the coordinator. The ledger preserves
         that text exactly and does not synthesize broad directory instructions.
         """
-        from cortex_runtime.delegation import native_delegation_projection
+        from cortex_runtime.delegation import dispatch_brief_projection
         from cortex_runtime.worker_message import render_worker_message
 
         decisions = [self._decision(connection, item, task_id=str(task["task_id"])) for item in delegation["input_decision_ids"]]
         input_reports = [self._report(connection, item, task_id=str(task["task_id"])) for item in delegation["input_report_ids"]]
         if any(item["assembly_state"] != "finalized" for item in input_reports):
             raise V12StoreError("input handoff report is not finalized", code="report_state_conflict")
+        revision = self._effective_contract(connection, str(task["task_id"]))["revision"]
+        assignment_rows = connection.execute(
+            "SELECT a.assignment_role,i.item_id,i.category,i.text FROM delegation_outcome_assignments a "
+            "JOIN effective_contract_items i ON i.item_id=a.item_id "
+            "WHERE a.delegation_id=? AND a.superseded_by_delegation_id IS NULL "
+            "AND (i.retired_revision IS NULL OR i.retired_revision>?) ORDER BY i.category,i.ordinal,i.item_id,a.assignment_role",
+            (delegation["delegation_id"], revision),
+        ).fetchall()
+        relevant_decisions = []
+        for item in decisions:
+            if item["decision_type"] != "steer":
+                continue
+            changed = connection.execute(
+                "SELECT 1 FROM effective_contract_revisions WHERE task_id=? AND decision_id=?",
+                (task["task_id"], item["decision_id"]),
+            ).fetchone() is not None
+            relevant_decisions.append({
+                "decision_ref": record_ref(str(item["decision_id"])), "type": "steer",
+                "effect_summary": "effective_contract_updated" if changed else "no_effective_contract_change",
+                "steering_delta": _load_json(str(item["steering_delta_json"]), label="steering_delta") if item.get("steering_delta_json") else None,
+            })
+        full_contract = self._effective_contract(connection, str(task["task_id"]))
+        effective_brief = {
+            "revision": revision,
+            "assigned_items": [
+                {"item_ref": self._outcome_ref(str(row["item_id"])), "category": str(row["category"]), "text": str(row["text"]), "assignment_role": str(row["assignment_role"])}
+                for row in assignment_rows
+            ],
+            "decisions": relevant_decisions,
+        }
+        if delegation["profile_name"] == "planner":
+            # A planner maps the whole current contract before any delivery
+            # ownership exists.  Its stable tokens are not outcome assignments
+            # and must therefore be available independently of that empty set.
+            effective_brief["planning_items"] = full_contract["items"]
         report_refs = [
             {key: item[key] for key in ("report_id", "delegation_id", "report_type", "status", "assembly_state", "total_chunks", "content_digest")}
             for item in input_reports
@@ -2396,11 +2862,16 @@ class V12Store:
                 code="profile_unavailable",
                 details={"field": "profile_name", "expected": "loaded_packaged_profile"},
             )
-        native_dispatch = native_delegation_projection(
+        dispatch_brief = dispatch_brief_projection(
             task_name=delegation["native_task_name"],
             message=rendered["message"],
             model=delegation["model"],
             reasoning_effort=delegation["reasoning_effort"],
+            delegation_ref=record_ref(str(delegation["delegation_id"])),
+            project_root=str(self.project_root),
+            semantic_objective=delegation["objective"],
+            profile_proof=renderer,
+            effective_contract=effective_brief,
         )
         return {
             "delegation_id": delegation["delegation_id"], "task_id": delegation["task_id"],
@@ -2409,14 +2880,23 @@ class V12Store:
             "native_task_name": delegation["native_task_name"],
             "instructions": delegation["instructions"], "input_report_ids": list(delegation["input_report_ids"]),
             "input_report_refs": report_refs,
+            "report_inputs": {"state": "none" if not report_refs else "declared", "reports": report_refs},
             "input_decision_ids": list(delegation["input_decision_ids"]),
             "input_decisions": [
-                {key: item[key] for key in ("decision_id", "subject_type", "subject_id", "subject_digest", "decision_type", "user_language")}
+                {key: item[key] for key in ("decision_id", "subject_type", "subject_id", "subject_digest", "decision_type", "prompt_en", "response_original", "user_language")}
                 for item in decisions
             ],
+            "decision_inputs": {
+                "state": "none" if not decisions else "declared",
+                "decisions": [
+                    {key: item[key] for key in ("decision_id", "subject_type", "subject_id", "subject_digest", "decision_type", "prompt_en", "response_original", "user_language")}
+                    for item in decisions
+                ],
+            },
             "model": delegation["model"], "reasoning_effort": delegation["reasoning_effort"],
+            "effective_contract": effective_brief,
             "worker_message": rendered["message"], "renderer": rendered["renderer"],
-            "native_dispatch": native_dispatch,
+            "dispatch_brief": dispatch_brief,
         }
 
     def _task_for_delegation(self, delegation_id: Any, task_id: Any = None) -> tuple[str, str]:
@@ -2453,7 +2933,7 @@ class V12Store:
 
         return self._read(read)
 
-    def submit_report(self, *, task_id: Any = None, delegation_id: Any = None, report_type: Any = None, status: Any = None, content: Any = None, report_id: Any = None, mode: Any = None, chunk_index: Any = None, section: Any = None, expected_chunk_count: Any = None, expected_content_digest: Any = None, abort_reason_en: Any = None, supersedes_report_id: Any = None, review_policy: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
+    def submit_report(self, *, task_id: Any = None, delegation_id: Any = None, report_type: Any = None, status: Any = None, content: Any = None, report_id: Any = None, mode: Any = None, section: Any = None, abort_reason_en: Any = None, supersedes_report_id: Any = None, review_policy: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
         """Run the bounded immutable report upload state machine.
 
         This is intentionally data-only: an assembling/aborted/failed report
@@ -2487,30 +2967,23 @@ class V12Store:
             raise V12StoreError("review_policy is invalid", code="invalid_report")
         supersedes = None if supersedes_report_id is None else self._record_identifier(supersedes_report_id, label="supersedes_report_id")
         chunk = None
-        if mode_value in {"single", "append"}:
+        if mode_value == "append":
             if content is None:
                 raise V12StoreError("content is required", code="invalid_report_operation")
             chunk = _canonical_json_bytes(content, label="content")
-            if chunk[2] > (REPORT_SINGLE_MAX_BYTES if mode_value == "single" else REPORT_CHUNK_MAX_BYTES):
+            if chunk[2] > REPORT_CHUNK_MAX_BYTES:
                 raise V12StoreError("report chunk is too large", code="report_chunk_too_large")
         if mode_value == "append":
-            if not isinstance(chunk_index, int) or isinstance(chunk_index, bool) or chunk_index < 0:
-                raise V12StoreError("chunk_index is invalid", code="invalid_report_operation")
             if not isinstance(section, str) or REPORT_SECTION_RE.fullmatch(section) is None:
                 raise V12StoreError("section is invalid", code="invalid_report_operation", details={"field": "section"})
         if mode_value == "finalize":
-            if not isinstance(expected_chunk_count, int) or isinstance(expected_chunk_count, bool) or not 1 <= expected_chunk_count <= REPORT_MAX_CHUNKS:
-                raise V12StoreError("expected_chunk_count is invalid", code="invalid_report_operation")
-            _digest(expected_content_digest, required=True)
             if status_value is None:
                 raise V12StoreError("status is required", code="invalid_report_operation")
         if mode_value == "abort" and _optional_text(abort_reason_en, label="abort_reason_en", maximum=4_096) is None:
             raise V12StoreError("abort_reason_en is required", code="invalid_report_operation")
-        if mode_value in {"single", "begin"}:
+        if mode_value == "begin":
             if type_value is None:
                 raise V12StoreError("report_type is required", code="invalid_report_operation")
-            if mode_value == "single" and status_value is None:
-                raise V12StoreError("status is required", code="invalid_report_operation")
             if type_value != "plan" and (policy is not None or supersedes is not None):
                 raise V12StoreError("plan metadata requires a plan report", code="invalid_report")
             if type_value == "plan" and policy is None:
@@ -2521,8 +2994,7 @@ class V12Store:
         payload = {
             "task_id": anchor, "delegation_id": delegation, "mode": mode_value,
             "report_type": type_value, "status": status_value, "content": None if chunk is None else chunk[0],
-            "report_id": identifier, "chunk_index": chunk_index, "section": section,
-            "expected_chunk_count": expected_chunk_count, "expected_content_digest": expected_content_digest,
+            "report_id": identifier, "section": section,
             "abort_reason_en": abort_reason_en, "supersedes_report_id": supersedes, "review_policy": policy,
         }
 
@@ -2565,30 +3037,142 @@ class V12Store:
                 arguments = (*arguments[:5], None, semantic_status, *arguments[6:])
                 connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", arguments)
 
-        def record_coverage(connection: sqlite3.Connection, task: Mapping[str, Any], owner: Mapping[str, Any], report_value: str, semantic: str, canonical_content: object) -> None:
+        def record_coverage(connection: sqlite3.Connection, task: Mapping[str, Any], owner: Mapping[str, Any], report_value: str, semantic: str, canonical_content: object) -> list[dict[str, str]]:
             if semantic != "semantic_valid" or not isinstance(canonical_content, Mapping):
-                return
+                return []
+            if owner.get("profile_name") == "planner" and canonical_content.get("schema") == CANONICAL_REPORT_EVIDENCE_SCHEMAS.get("plan"):
+                # Planner mappings prove planned contract treatment; they are
+                # not execution claims and must not change outcome coverage.
+                return []
             claims = canonical_content.get("contract_coverage")
             if not isinstance(claims, list):
-                return
-            revision = self._effective_contract(connection, str(task["task_id"]))["revision"]
+                return [{"code": "coverage_missing", "message": "canonical coverage is absent"}]
+            validated: list[tuple[str, str, object]] = []
             for claim in claims:
-                assert isinstance(claim, Mapping)
-                item_id = self._outcome_item_id(connection, str(task["task_id"]), claim.get("item_ref"))
-                allowed = connection.execute("SELECT 1 FROM delegation_outcome_assignments WHERE delegation_id=? AND item_id=? AND revision=?", (owner["delegation_id"], item_id, revision)).fetchone()
+                if not isinstance(claim, Mapping):
+                    return [{"code": "coverage_invalid", "message": "coverage claim is invalid"}]
+                try:
+                    item_id = self._outcome_item_id(connection, str(task["task_id"]), claim.get("item_ref"))
+                except V12StoreError:
+                    return [{"code": "coverage_unassigned", "message": "coverage item is unavailable"}]
+                allowed = connection.execute(
+                    "SELECT 1 FROM delegation_outcome_assignments "
+                    "WHERE delegation_id=? AND item_id=? AND superseded_by_delegation_id IS NULL",
+                    (owner["delegation_id"], item_id),
+                ).fetchone()
                 if allowed is None:
-                    raise V12StoreError("report coverage item is not assigned to this delegation", code="outcome_coverage_unassigned")
+                    return [{"code": "coverage_unassigned", "message": "coverage item is not assigned to this delegation"}]
                 status = claim.get("status")
                 if status not in {"complete", "partial", "unverified", "not_applicable"}:
-                    raise V12StoreError("report coverage status is invalid", code="invalid_report")
+                    return [{"code": "coverage_invalid", "message": "coverage status is invalid"}]
                 verification = claim.get("verification", [])
+                validated.append((item_id, status, verification))
+            for item_id, status, verification in validated:
                 connection.execute("INSERT INTO report_contract_coverage(report_id,item_id,status,verification_json) VALUES (?, ?, ?, ?)", (report_value, item_id, status, _canonical_json(verification, label="coverage verification")))
+            return []
+
+        def completeness_diagnostics(connection: sqlite3.Connection, task: Mapping[str, Any], owner: Mapping[str, Any], report_type: str, canonical_content: object) -> list[dict[str, str]]:
+            """Admission-check new specialist evidence before terminal finalization.
+
+            Historical and ordinary general-purpose rows remain readable.  New
+            specialist v2 plan/result evidence must be complete while its
+            assembly is still amendable; this is deliberately separate from
+            the non-gating semantic classifier used for immutable history.
+            """
+            enforced_profiles = {
+                "planner", "backend_dev", "frontend_dev", "fullstack_dev", "mobile_dev",
+                "accessibility_fixer", "qa_engineer", "build_verification", "technical_writer",
+                "code_reviewer", "security_auditor", "accessibility_auditor", "database_architect",
+                "data_engineer", "devops_engineer", "debugger",
+            }
+            if owner.get("profile_name") not in enforced_profiles or report_type not in {"plan", "result"}:
+                return []
+            # Existing v1/v2 rows are immutable evidence and intentionally
+            # retain their historical finalization semantics.  The current v3
+            # envelope is the only shape admitted through this new gate.
+            if not isinstance(canonical_content, Mapping) or canonical_content.get("schema") != CANONICAL_REPORT_EVIDENCE_SCHEMAS.get(report_type):
+                return []
+            diagnostics: list[dict[str, str]] = []
+            if canonical_report_semantic_status(report_type, canonical_content) != "semantic_valid":
+                diagnostics.append({"code": "canonical_semantic_invalid", "message": "the v3 canonical evidence envelope is structurally incomplete"})
+            evidence = canonical_content.get("evidence")
+            if not isinstance(evidence, list) or not evidence:
+                diagnostics.append({"code": "evidence_missing", "message": "at least one observable evidence fact is required"})
+            else:
+                valid_facts = 0
+                for fact in evidence:
+                    if not isinstance(fact, Mapping):
+                        diagnostics.append({"code": "evidence_invalid", "message": "each evidence entry must be an object"})
+                        continue
+                    state = fact.get("state")
+                    if state == "executed":
+                        if not all(isinstance(fact.get(field), str) and fact[field].strip() for field in ("command", "cwd", "result")) or not isinstance(fact.get("exit_code"), int) or isinstance(fact.get("exit_code"), bool):
+                            diagnostics.append({"code": "command_evidence_incomplete", "message": "executed evidence requires command, cwd, integer exit_code, and result"})
+                            continue
+                    elif state == "not_run":
+                        if not isinstance(fact.get("reason"), str) or not fact["reason"].strip():
+                            diagnostics.append({"code": "not_run_reason_missing", "message": "not_run evidence requires a non-empty reason"})
+                            continue
+                    else:
+                        diagnostics.append({"code": "evidence_state_invalid", "message": "evidence state must be executed or not_run"})
+                        continue
+                    valid_facts += 1
+                if not valid_facts:
+                    diagnostics.append({"code": "evidence_missing", "message": "no complete observable evidence fact was supplied"})
+            impact = canonical_content.get("documentation_impact")
+            if not isinstance(impact, Mapping) or impact.get("status") not in {"impact", "no_impact", "unavailable"} or not isinstance(impact.get("rationale"), str) or not impact["rationale"].strip() or not isinstance(impact.get("affected_surfaces"), list) or not impact["affected_surfaces"] or not all(isinstance(item, str) and item.strip() for item in impact["affected_surfaces"]):
+                diagnostics.append({"code": "documentation_impact_incomplete", "message": "documentation impact requires status, rationale, and non-empty affected surfaces"})
+            elif impact.get("status") == "impact" and (not isinstance(impact.get("paths"), list) or not impact["paths"] or not all(isinstance(item, str) and item.strip() for item in impact["paths"])):
+                diagnostics.append({"code": "documentation_paths_missing", "message": "documentation impact requires affected paths"})
+            if owner.get("profile_name") == "planner" and report_type == "plan":
+                # Planning is a task-level contract mapping, not an outcome
+                # assignment.  Require every current requirement, constraint,
+                # acceptance criterion, and derived verification item exactly
+                # once even when the planner owns no delivery item.
+                assigned = [
+                    self._outcome_item_id(connection, str(task["task_id"]), item["item_ref"])
+                    for item in self._effective_contract(connection, str(task["task_id"]))["items"]
+                ]
+            else:
+                assigned = [str(row[0]) for row in connection.execute("SELECT item_id FROM delegation_outcome_assignments WHERE delegation_id=? AND superseded_by_delegation_id IS NULL ORDER BY item_id", (owner["delegation_id"],)).fetchall()]
+            claims = canonical_content.get("contract_coverage")
+            if not isinstance(claims, list):
+                diagnostics.append({"code": "contract_coverage_missing", "message": "complete assigned contract coverage is required"})
+            else:
+                seen: set[str] = set()
+                by_ref: dict[str, Mapping[str, Any]] = {}
+                for claim in claims:
+                    if not isinstance(claim, Mapping) or not isinstance(claim.get("item_ref"), str):
+                        diagnostics.append({"code": "contract_coverage_invalid", "message": "each coverage claim requires an exact item reference"})
+                        continue
+                    try:
+                        item_id = self._outcome_item_id(connection, str(task["task_id"]), claim["item_ref"])
+                    except V12StoreError:
+                        diagnostics.append({"code": "contract_coverage_extra", "message": "coverage includes an unavailable item"})
+                        continue
+                    if item_id in seen:
+                        diagnostics.append({"code": "contract_coverage_duplicate", "message": "each assigned item must have exactly one coverage claim"})
+                    seen.add(item_id); by_ref[item_id] = claim
+                if set(assigned) != seen:
+                    diagnostics.append({"code": "contract_coverage_incomplete", "message": "coverage must contain exactly every current assigned item"})
+                for item_id, claim in by_ref.items():
+                    verification = claim.get("verification")
+                    if claim.get("status") in {"complete", "partial"} and (not isinstance(verification, list) or not verification):
+                        diagnostics.append({"code": "coverage_evidence_missing", "message": "complete or partial coverage requires non-empty verification evidence"})
+            input_row = connection.execute("SELECT input_report_ids_json FROM delegations WHERE delegation_id=?", (owner["delegation_id"],)).fetchone()
+            inputs = [] if input_row is None else _load_json(str(input_row[0]), label="delegation inputs")
+            if inputs:
+                placeholders = ",".join("?" for _ in inputs)
+                observed = {str(row[0]) for row in connection.execute("SELECT DISTINCT report_id FROM report_consumption_receipts WHERE consumer_delegation_id=? AND has_more=0 AND report_id IN (" + placeholders + ")", [owner["delegation_id"], *inputs]).fetchall()}
+                if any(item not in observed for item in inputs):
+                    diagnostics.append({"code": "predecessor_unread", "message": "every declared predecessor report must have a completed worker read receipt"})
+            return diagnostics
 
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
             owner = self._delegation(connection, delegation, task_id=task["task_id"])
             state = usage(connection, str(task["task_id"]))
-            if mode_value in {"single", "begin"}:
+            if mode_value == "begin":
                 value = str(identifier or new_sharded_id("report", self.project_hash))
                 if connection.execute("SELECT 1 FROM reports WHERE report_id=?", (value,)).fetchone() is not None:
                     raise V12StoreError("report_id already exists", code="report_exists")
@@ -2600,19 +3184,6 @@ class V12Store:
                     state["assembling_reports"] += 1
                     update_usage(connection, str(task["task_id"]), state)
                     return {"report": self._compact_report(self._report(connection, value, task_id=task["task_id"])), "assembly_state": "assembling", "next_chunk_index": 0}
-                assert chunk is not None
-                if chunk[2] > REPORT_MAX_BYTES or state["total_retained_bytes"] + chunk[2] > REPORT_RETAINED_MAX_BYTES_PER_TASK:
-                    raise V12StoreError("report quota is exceeded", code="report_quota_exceeded")
-                sequence = self._timeline(connection, event_type="report_submitted", entity_type="report", entity_id=value, payload={"report_id": value, "delegation_id": owner["delegation_id"], "report_type": type_value, "status": status_value, "total_chunks": 1, "total_bytes": chunk[2]}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=value)
-                insert_header(connection, task, owner, value, assembly_state="assembling", semantic_status="pending", sequence=sequence)
-                connection.execute("INSERT INTO report_chunks(report_id,chunk_index,section,content_json,content_digest,content_bytes,created_at) VALUES (?, 0, 'body', ?, ?, ?, ?)", (value, chunk[1], chunk[3], chunk[2], _now()))
-                digest = self._report_digest(connection, value)
-                semantic = canonical_report_semantic_status(str(type_value), chunk[0])
-                connection.execute("UPDATE reports SET next_chunk_index=1,total_chunks=1,total_bytes=?,content_digest=?,assembly_state='finalized',status=?,semantic_status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (chunk[2], digest, status_value, semantic, _now(), sequence, value))
-                record_coverage(connection, task, owner, value, semantic, chunk[0])
-                state["total_retained_bytes"] += chunk[2]
-                update_usage(connection, str(task["task_id"]), state)
-                return {"report": self._compact_report(self._report(connection, value, task_id=task["task_id"]))}
 
             if identifier is None:
                 raise V12StoreError("report_id is required", code="invalid_report_operation")
@@ -2622,14 +3193,8 @@ class V12Store:
             if mode_value == "append":
                 if report["assembly_state"] != "assembling":
                     raise V12StoreError("report state conflicts with operation", code="report_state_conflict")
-                assert chunk is not None and isinstance(chunk_index, int) and isinstance(section, str)
-                if chunk_index < int(report["next_chunk_index"]):
-                    existing = _row(connection.execute("SELECT section,content_digest,content_bytes FROM report_chunks WHERE report_id=? AND chunk_index=?", (identifier, chunk_index)).fetchone())
-                    if existing is not None and existing["section"] == section and existing["content_digest"] == chunk[3] and int(existing["content_bytes"]) == chunk[2]:
-                        return {"report": self._compact_report(report), "accepted_chunk_index": chunk_index, "next_chunk_index": report["next_chunk_index"], "chunk_digest": chunk[3], "chunk_bytes": chunk[2], "expected_chunk_count": report["total_chunks"], "expected_content_digest": report["content_digest"]}
-                    raise V12StoreError("report chunk conflicts with existing chunk", code="report_chunk_conflict")
-                if chunk_index != int(report["next_chunk_index"]):
-                    raise V12StoreError("report chunk is out of order", code="report_chunk_out_of_order")
+                assert chunk is not None and isinstance(section, str)
+                chunk_index = int(report["next_chunk_index"])
                 if int(report["total_chunks"]) >= REPORT_MAX_CHUNKS or int(report["total_bytes"]) + chunk[2] > REPORT_MAX_BYTES or state["total_retained_bytes"] + chunk[2] > REPORT_RETAINED_MAX_BYTES_PER_TASK or state["assembling_bytes"] + chunk[2] > REPORT_ASSEMBLING_MAX_BYTES_PER_TASK:
                     raise V12StoreError("report quota is exceeded", code="report_quota_exceeded")
                 connection.execute("INSERT INTO report_chunks(report_id,chunk_index,section,content_json,content_digest,content_bytes,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (identifier, chunk_index, section, chunk[1], chunk[3], chunk[2], _now()))
@@ -2647,23 +3212,31 @@ class V12Store:
                 state["assembling_bytes"] += chunk[2]
                 update_usage(connection, str(task["task_id"]), state)
                 current = self._report(connection, identifier, task_id=task["task_id"])
+                # These are immutable receipt evidence only.  They are not
+                # advertised handles or legal finalize inputs: the server
+                # computes the final manifest transactionally.
                 return {"report": self._compact_report(current), "accepted_chunk_index": chunk_index, "next_chunk_index": current["next_chunk_index"], "chunk_digest": chunk[3], "chunk_bytes": chunk[2], "expected_chunk_count": current["total_chunks"], "expected_content_digest": current["content_digest"]}
             if mode_value == "finalize":
-                if report["assembly_state"] == "finalized" and int(report["total_chunks"]) == expected_chunk_count and report["content_digest"] == expected_content_digest and report["status"] == status_value:
+                if report["assembly_state"] == "finalized" and report["status"] == status_value:
                     return {"report": self._compact_report(report)}
                 if report["assembly_state"] != "assembling":
                     raise V12StoreError("report state conflicts with operation", code="report_state_conflict")
                 actual = self._report_digest(connection, identifier)
-                if int(report["total_chunks"]) != expected_chunk_count or actual != expected_content_digest or report["content_digest"] != actual:
+                if int(report["total_chunks"]) < 1 or report["content_digest"] != actual:
                     raise V12StoreError("report manifest does not match", code="report_manifest_mismatch")
                 sequence = self._timeline(connection, event_type="report_submitted", entity_type="report", entity_id=identifier, payload={"report_id": identifier, "delegation_id": owner["delegation_id"], "report_type": report["report_type"], "status": status_value, "total_chunks": report["total_chunks"], "total_bytes": report["total_bytes"], "content_digest": actual}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=identifier)
                 chunks = self._report_chunks(connection, identifier)
                 canonical_content: object = chunks[0]["content"] if len(chunks) == 1 else None
                 if len(chunks) > 1 and all(isinstance(item["content"], Mapping) for item in chunks):
                     merged: dict[str, Any] = {}
+                    first_content = chunks[0]["content"]
+                    allow_coverage_amendment = (
+                        isinstance(first_content, Mapping)
+                        and first_content.get("schema") == CANONICAL_REPORT_EVIDENCE_SCHEMAS.get(str(report["report_type"]))
+                    )
                     for item in chunks:
                         for key, item_value in item["content"].items():
-                            if key in merged:
+                            if key in merged and not (key == "contract_coverage" and allow_coverage_amendment):
                                 merged = {}
                                 break
                             merged[key] = item_value
@@ -2671,8 +3244,11 @@ class V12Store:
                             break
                     canonical_content = merged or None
                 semantic = canonical_report_semantic_status(str(report["report_type"]), canonical_content)
-                connection.execute("UPDATE reports SET assembly_state='finalized',status=?,semantic_status=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (status_value, semantic, _now(), sequence, identifier))
-                record_coverage(connection, task, owner, identifier, semantic, canonical_content)
+                diagnostics = completeness_diagnostics(connection, task, owner, str(report["report_type"]), canonical_content)
+                if diagnostics:
+                    raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"field": "content", "expected": "complete_evidence_envelope", "reason": diagnostics[0]["code"]})
+                diagnostics = record_coverage(connection, task, owner, identifier, semantic, canonical_content)
+                connection.execute("UPDATE reports SET assembly_state='finalized',status=?,semantic_status=?,coverage_diagnostics_json=?,finalized_at=?,finalized_sequence=? WHERE report_id=?", (status_value, semantic, _canonical_json(diagnostics, label="coverage diagnostics"), _now(), sequence, identifier))
                 state["assembling_bytes"] -= int(report["total_bytes"])
                 state["assembling_reports"] -= 1
                 update_usage(connection, str(task["task_id"]), state)
@@ -2690,7 +3266,159 @@ class V12Store:
             return {"report": self._compact_report(self._report(connection, identifier, task_id=task["task_id"]))}
         return self._mutation("submit_report", payload, idempotency_key, write)
 
-    def record_user_decision(self, *, task_id: Any, subject_type: Any, subject_id: Any, subject_digest: Any = None, decision_type: Any = None, prompt: Any = None, response_original: Any = None, user_language: Any = None, approval_handle: Any = None, approval_view_content_digest: Any = None, approval_view_source_sequence: Any = None, supersedes_decision_id: Any = None, steering_delta: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
+    def publish_domain_report(self, *, delegation_id: Any, publication_kind: Any, content: Any, status: Any) -> dict[str, Any]:
+        """Atomically publish one terminal semantic report for an assignment.
+
+        ``report_operations`` is deliberately separate from caller-facing
+        idempotency.  The assignment/kind unique slot makes ambiguous retries
+        safe: an equal canonical payload replays the existing report, while a
+        different payload is an explicit conflict requiring a new assignment.
+        """
+        anchor, delegation = self._task_for_delegation(delegation_id, None)
+        report_kind = _required_text(publication_kind, label="publication_kind", maximum=16).lower()
+        if report_kind not in REPORT_TYPES:
+            raise V12StoreError("report type is invalid", code="invalid_report")
+        report_status = _required_text(status, label="status", maximum=16).lower()
+        if report_status not in REPORT_STATUSES:
+            raise V12StoreError("report status is invalid", code="invalid_report")
+        canonical = _canonical_json_bytes(content, label="content")
+        if canonical[2] > REPORT_MAX_BYTES:
+            raise V12StoreError("report is too large", code="report_too_large")
+        operation_payload = {"task_id": anchor, "delegation_id": delegation, "kind": report_kind, "status": report_status, "content": canonical[0]}
+        payload_digest = hashlib.sha256(_canonical_json(operation_payload, label="report operation").encode("utf-8")).hexdigest()
+
+        def write(connection: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
+            task = self._task(connection, anchor)
+            owner = self._delegation(connection, delegation, task_id=task["task_id"])
+            existing = connection.execute("SELECT payload_digest,report_id FROM report_operations WHERE delegation_id=? AND kind=?", (owner["delegation_id"], report_kind)).fetchone()
+            if existing is not None:
+                if str(existing["payload_digest"]) != payload_digest:
+                    raise V12StoreError("assignment already has a different terminal report", code="report_operation_conflict")
+                report = self._report(connection, str(existing["report_id"]), task_id=task["task_id"])
+                return {"report": self._compact_report(report), "operation_id": str(existing["report_id"]), "replayed": True}
+            # Assignment evidence is an admission precondition, never a
+            # post-terminal review.  A no-input assignment needs no receipt;
+            # every declared predecessor needs one complete body-read receipt.
+            inputs = owner["input_report_ids"]
+            if inputs:
+                placeholders = ",".join("?" for _ in inputs)
+                observed = {
+                    str(row[0]) for row in connection.execute(
+                        "SELECT DISTINCT report_id FROM report_consumption_receipts "
+                        f"WHERE consumer_delegation_id=? AND has_more=0 AND report_id IN ({placeholders})",
+                        [owner["delegation_id"], *inputs],
+                    ).fetchall()
+                }
+                if any(item not in observed for item in inputs):
+                    raise V12StoreError("declared input evidence must be consumed before publication", code="input_evidence_unread")
+            # The domain API is deliberately stricter than the historical
+            # assembled-report transport: only the exact current envelope for
+            # this publication kind may consume a terminal logical slot.
+            expected_schema = CANONICAL_REPORT_EVIDENCE_SCHEMAS.get(report_kind)
+            if expected_schema is None:
+                expected_schema = CANONICAL_REPORT_V2_SCHEMAS.get(report_kind)
+            if not isinstance(content, Mapping) or content.get("schema") != expected_schema:
+                raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "canonical_semantic_invalid"})
+            if canonical_report_semantic_status(report_kind, content) != "semantic_valid":
+                    raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "canonical_semantic_invalid"})
+            if report_kind in CANONICAL_REPORT_EVIDENCE_SCHEMAS:
+                diagnostics: list[str] = []
+                evidence = content.get("evidence")
+                if not isinstance(evidence, list) or not evidence:
+                    diagnostics.append("evidence_missing")
+                else:
+                    for fact in evidence:
+                        if not isinstance(fact, Mapping):
+                            diagnostics.append("evidence_invalid")
+                            break
+                        if fact.get("state") == "executed":
+                            if not all(isinstance(fact.get(field), str) and fact[field].strip() for field in ("command", "cwd", "result")) or not isinstance(fact.get("exit_code"), int) or isinstance(fact.get("exit_code"), bool):
+                                diagnostics.append("command_evidence_incomplete")
+                                break
+                        elif fact.get("state") == "not_run":
+                            if not isinstance(fact.get("reason"), str) or not fact["reason"].strip():
+                                diagnostics.append("not_run_reason_missing")
+                                break
+                        else:
+                            diagnostics.append("evidence_state_invalid")
+                            break
+                impact = content.get("documentation_impact")
+                if not isinstance(impact, Mapping) or impact.get("status") not in {"impact", "no_impact", "unavailable"} or not isinstance(impact.get("rationale"), str) or not impact["rationale"].strip() or not isinstance(impact.get("affected_surfaces"), list) or not impact["affected_surfaces"]:
+                    diagnostics.append("documentation_impact_incomplete")
+                elif impact.get("status") == "impact" and (not isinstance(impact.get("paths"), list) or not impact["paths"]):
+                    diagnostics.append("documentation_paths_missing")
+                if report_kind == "plan" and owner.get("profile_name") == "planner":
+                    # The effective contract is the public semantic view and
+                    # exposes compact ``item_ref`` handles.  Resolve those
+                    # handles through the canonical outcome-item lookup; do
+                    # not assume storage-only ``item_id`` is present in the
+                    # returned contract objects.
+                    required_items = {
+                        self._outcome_item_id(connection, str(task["task_id"]), item["item_ref"])
+                        for item in self._effective_contract(connection, str(task["task_id"]))["items"]
+                    }
+                else:
+                    required_items = {str(row[0]) for row in connection.execute("SELECT item_id FROM delegation_outcome_assignments WHERE delegation_id=? AND superseded_by_delegation_id IS NULL", (owner["delegation_id"],)).fetchall()}
+                claimed: set[str] = set()
+                claims = content.get("contract_coverage")
+                if not isinstance(claims, list):
+                    diagnostics.append("contract_coverage_missing")
+                else:
+                    for claim in claims:
+                        if not isinstance(claim, Mapping) or not isinstance(claim.get("item_ref"), str):
+                            diagnostics.append("contract_coverage_invalid")
+                            break
+                        try:
+                            item_id = self._outcome_item_id(connection, str(task["task_id"]), claim["item_ref"])
+                        except V12StoreError:
+                            diagnostics.append("contract_coverage_extra")
+                            break
+                        if item_id in claimed:
+                            diagnostics.append("contract_coverage_duplicate")
+                            break
+                        claimed.add(item_id)
+                    if not diagnostics and claimed != required_items:
+                        diagnostics.append("contract_coverage_incomplete")
+                if diagnostics:
+                    raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": diagnostics[0]})
+            report_id = new_sharded_id("report", self.project_hash)
+            manifest = _sha256_prefixed(_report_manifest([{"chunk_index": 0, "section": "body", "content_digest": canonical[3], "content_bytes": canonical[2]}]), label="report manifest")
+            sequence = self._timeline(connection, event_type="report_submitted", entity_type="report", entity_id=report_id, payload={"report_id": report_id, "delegation_id": owner["delegation_id"], "report_type": report_kind, "status": report_status, "total_chunks": 1, "total_bytes": canonical[2], "content_digest": manifest}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=report_id)
+            timestamp = _now()
+            arguments = (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", manifest, timestamp, sequence)
+            if "content_json" in self._column_names(connection, "reports"):
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,content_json,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", "null", canonical[2], manifest, timestamp, sequence, timestamp, sequence))
+            else:
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", canonical[2], manifest, timestamp, sequence, timestamp, sequence))
+            connection.execute("INSERT INTO report_chunks(report_id,chunk_index,section,content_json,content_digest,content_bytes,created_at) VALUES (?, 0, 'body', ?, ?, ?, ?)", (report_id, canonical[1], canonical[3], canonical[2], timestamp))
+            connection.execute("INSERT INTO report_operations(operation_id,task_id,delegation_id,kind,payload_digest,report_id,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (uuid.uuid4().hex, task["task_id"], owner["delegation_id"], report_kind, payload_digest, report_id, timestamp))
+            return {"report": self._compact_report(self._report(connection, report_id, task_id=task["task_id"])), "operation_id": report_id, "replayed": False}
+        return self._write(write)
+
+    def issue_clarification_binding(self, *, task_id: Any, prompt: Any, prompt_language: Any, subject_type: Any = "task", subject_id: Any = None, assignment_id: Any = None, decision_type: Any = "clarification", idempotency_key: Any = None) -> dict[str, Any]:
+        """Issue or replay one exact, durable binding for a pending clarification."""
+        anchor = self._task_identifier(task_id)
+        text = _opaque_text(prompt, label="prompt")
+        language = _language(prompt_language)
+        kind = _required_text(subject_type, label="subject_type", maximum=16).lower()
+        dtype = _required_text(decision_type, label="decision_type", maximum=32).lower()
+        subject = anchor if subject_id is None and kind == "task" else self._record_identifier(subject_id, label="subject_id")
+        assignment = None if assignment_id is None else self._record_identifier(assignment_id, label="assignment_id")
+        request_digest = _sha256_prefixed({"task_id": anchor, "subject_type": kind, "subject_id": subject, "decision_type": dtype, "prompt": text, "prompt_language": language}, label="clarification request")
+        prompt_digest = _sha256_prefixed(text, label="clarification prompt")
+        def write(connection: sqlite3.Connection) -> dict[str, Any]:
+            task = self._task(connection, anchor)
+            revision = int(self._effective_contract(connection, anchor)["revision"])
+            existing = connection.execute("SELECT * FROM clarification_bindings WHERE task_id=? AND subject_type=? AND subject_id=? AND decision_type=? AND prompt_digest=? AND effective_contract_revision=?", (anchor, kind, subject, dtype, prompt_digest, revision)).fetchone()
+            if existing is not None:
+                return {"binding": {"clarification_binding": str(existing["clarification_binding"]), "task_ref": task_ref(str(anchor)), "subject_type": str(existing["subject_type"]), "subject_ref": record_ref(str(existing["subject_id"])) if str(existing["subject_type"]) != "task" else task_ref(str(existing["subject_id"])), "decision_type": str(existing["decision_type"]), "prompt": str(existing["prompt"]), "prompt_language": str(existing["prompt_language"]), "effective_contract_revision": int(existing["effective_contract_revision"]), "consumed": existing["consumed_decision_id"] is not None}, "replayed": True}
+            sequence = self._timeline(connection, event_type="clarification_binding_issued", entity_type="clarification_binding", entity_id="cb_" + uuid.uuid4().hex, payload={"task_id": anchor, "decision_type": dtype, "prompt_digest": prompt_digest}, task_id=anchor)
+            token = "cb_" + uuid.uuid4().hex
+            connection.execute("INSERT INTO clarification_bindings(clarification_binding,project_hash,task_id,subject_type,subject_id,assignment_id,decision_type,prompt_digest,prompt,prompt_language,effective_contract_revision,issue_sequence,request_digest,response_digest,consumed_decision_id,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)", (token, self.project_hash, anchor, kind, subject, assignment, dtype, prompt_digest, text, language, revision, sequence, request_digest, _now()))
+            return {"binding": {"clarification_binding": token, "task_ref": task_ref(anchor), "subject_type": kind, "subject_ref": task_ref(subject) if kind == "task" else record_ref(subject), "decision_type": dtype, "prompt": text, "prompt_language": language, "effective_contract_revision": revision, "consumed": False}, "replayed": False}
+        return self._write(write)
+
+    def record_user_decision(self, *, task_id: Any, subject_type: Any, subject_id: Any, subject_digest: Any = None, decision_type: Any = None, prompt: Any = None, response_original: Any = None, user_language: Any = None, approval_handle: Any = None, approval_view_content_digest: Any = None, approval_view_source_sequence: Any = None, supersedes_decision_id: Any = None, steering_delta: Any = None, clarification_binding: Any = None, idempotency_key: Any = None) -> tuple[dict[str, Any], bool]:
         """Append a user-origin decision with exact immutable subject binding.
 
         Attribution is intentionally an honest coordinator assertion, never an
@@ -2716,7 +3444,28 @@ class V12Store:
             "approval_view_source_sequence": approval_view_source_sequence,
             "supersedes_decision_id": None if supersedes_decision_id is None else self._record_identifier(supersedes_decision_id, label="supersedes_decision_id"),
             "steering_delta": steering_delta,
+            "clarification_binding": None if clarification_binding is None else _required_text(clarification_binding, label="clarification_binding", maximum=160),
         }
+        # Steering is a task-only contract mutation.  Validate its shape
+        # before opening the write callback so malformed requests cannot leave
+        # a user_decisions row or timeline event behind.
+        if decision == "steer":
+            if kind != "task" or subject != anchor:
+                raise V12StoreError("steer decisions must target the anchored task", code="invalid_decision_subject", details={"field": "subject_ref", "expected": "task_ref"})
+            delta = payload["steering_delta"]
+            if not isinstance(delta, Mapping) or set(delta) - {"retire_item_refs", "add"}:
+                raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+            retired = delta.get("retire_item_refs", [])
+            additions = delta.get("add", [])
+            if not isinstance(retired, list) or not isinstance(additions, list) or not retired and not additions:
+                raise V12StoreError("steering_delta must contain at least one operation", code="invalid_argument", details={"field": "steering_delta"})
+            if any(not isinstance(value, str) for value in retired) or len({value for value in retired if isinstance(value, str)}) != len(retired):
+                raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+            for addition in additions:
+                if not isinstance(addition, Mapping) or set(addition) != {"category", "text"} or addition.get("category") not in {"requirement", "constraint", "acceptance", "verification"} or not isinstance(addition.get("text"), str) or not addition["text"].strip():
+                    raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+        elif steering_delta is not None:
+            raise V12StoreError("steering_delta is only permitted for steer decisions", code="invalid_argument", details={"field": "steering_delta"})
         requires_plan_approval_view = kind == "plan" and decision == "approve"
         if requires_plan_approval_view and payload["approval_handle"] is not None and IDENTIFIER_RE.fullmatch(payload["approval_handle"]) is None:
             raise V12StoreError("approval_handle is invalid", code="invalid_argument", details={"field": "approval_handle"})
@@ -2732,6 +3481,21 @@ class V12Store:
                 raise V12StoreError("approval view is no longer ready", code="approval_view_not_ready")
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
+            clarification_row = None
+            if payload["clarification_binding"] is not None:
+                clarification_row = connection.execute("SELECT * FROM clarification_bindings WHERE clarification_binding=? AND project_hash=?", (payload["clarification_binding"], self.project_hash)).fetchone()
+                if clarification_row is None:
+                    raise V12StoreError("clarification binding was not found", code="clarification_binding_not_found")
+                expected_prompt_digest = _sha256_prefixed(payload["prompt"], label="clarification prompt")
+                if (str(clarification_row["task_id"]) != anchor or str(clarification_row["subject_type"]) != kind or str(clarification_row["subject_id"]) != subject or str(clarification_row["decision_type"]) != decision or str(clarification_row["prompt_digest"]) != expected_prompt_digest or str(clarification_row["prompt"]) != payload["prompt"] or str(clarification_row["prompt_language"]) != payload["user_language"]):
+                    raise V12StoreError("clarification binding does not match the decision", code="clarification_binding_mismatch")
+                if int(clarification_row["effective_contract_revision"]) != int(self._effective_contract(connection, anchor)["revision"]):
+                    raise V12StoreError("clarification binding is stale", code="clarification_binding_stale")
+                if clarification_row["consumed_decision_id"] is not None:
+                    expected = _sha256_prefixed(payload["response_original"], label="clarification response")
+                    if clarification_row["response_digest"] != expected:
+                        raise V12StoreError("clarification binding was already consumed with a different response", code="clarification_binding_conflict")
+                    return {"decision": self._compact_decision(self._decision(connection, str(clarification_row["consumed_decision_id"]), task_id=anchor)), "replayed": True}
             bound_digest: str | None
             if kind == "task":
                 if subject != task["task_id"]:
@@ -2791,34 +3555,45 @@ class V12Store:
                 prior = self._decision(connection, payload["supersedes_decision_id"], task_id=anchor)
                 if prior["subject_type"] != kind or prior["subject_id"] != subject:
                     raise V12StoreError("superseded decision has a different subject", code="cross_project_reference")
+            retired_item_ids: list[str] = []
+            effective_additions: list[Mapping[str, Any]] = []
+            if decision == "steer":
+                delta = payload["steering_delta"]
+                retired_item_ids = [self._outcome_item_id(connection, anchor, value) for value in delta.get("retire_item_refs", [])]
+                current_revision = self._effective_contract(connection, anchor)["revision"]
+                active_rows = connection.execute("SELECT item_id,category,text FROM effective_contract_items WHERE task_id=? AND (retired_revision IS NULL OR retired_revision>?)", (anchor, current_revision)).fetchall()
+                retired_set = set(retired_item_ids)
+                active_pairs = {(str(row["category"]), str(row["text"])) for row in active_rows if str(row["item_id"]) not in retired_set}
+                seen_pairs: set[tuple[str, str]] = set()
+                for addition in delta.get("add", []):
+                    pair = (str(addition["category"]), str(addition["text"]))
+                    if pair not in active_pairs and pair not in seen_pairs:
+                        effective_additions.append(addition)
+                        seen_pairs.add(pair)
             identifier = new_sharded_id("decision", self.project_hash)
             sequence = self._timeline(connection, event_type="user_decision_recorded", entity_type="user_decision", entity_id=identifier, payload={"decision_id": identifier, "subject_type": kind, "subject_id": subject, "subject_digest": bound_digest, "decision_type": decision}, task_id=anchor, decision_id=identifier)
             # Retain the historical columns for opening immutable pre-rework
             # rows. New writes map the neutral prompt into the old storage
             # slot and leave the retired English normalization empty; neither
             # field is part of the public contract or compact projections.
-            connection.execute("INSERT INTO user_decisions(decision_id,project_hash,task_id,subject_type,subject_id,subject_digest,decision_type,prompt_en,response_original,response_en,user_language,attribution,supersedes_decision_id,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, anchor, kind, subject, bound_digest, decision, payload["prompt"], payload["response_original"], "", payload["user_language"], DECISION_ATTRIBUTION, payload["supersedes_decision_id"], _now(), sequence))
+            connection.execute("INSERT INTO user_decisions(decision_id,project_hash,task_id,subject_type,subject_id,subject_digest,decision_type,prompt_en,response_original,response_en,user_language,attribution,supersedes_decision_id,created_at,created_sequence,steering_delta_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, anchor, kind, subject, bound_digest, decision, payload["prompt"], payload["response_original"], "", payload["user_language"], DECISION_ATTRIBUTION, payload["supersedes_decision_id"], _now(), sequence, None if decision != "steer" else _canonical_json(payload["steering_delta"], label="steering_delta")))
             if decision == "steer":
-                delta = {} if payload["steering_delta"] is None else payload["steering_delta"]
-                if not isinstance(delta, Mapping) or not set(delta).issubset({"retire_item_refs", "add"}):
-                    raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
-                retired = delta.get("retire_item_refs", [])
-                additions = delta.get("add", [])
-                if not isinstance(retired, list) or not isinstance(additions, list) or any(not isinstance(value, str) for value in retired):
-                    raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
-                revision = self._effective_contract(connection, anchor)["revision"] + 1
-                item_ids = [self._outcome_item_id(connection, anchor, value) for value in retired]
-                for item_id in item_ids:
-                    connection.execute("UPDATE effective_contract_items SET retired_revision=? WHERE item_id=? AND retired_revision IS NULL", (revision, item_id))
-                for ordinal, addition in enumerate(additions):
-                    if not isinstance(addition, Mapping) or addition.get("category") not in {"requirement", "constraint", "acceptance", "verification"} or not isinstance(addition.get("text"), str) or not addition["text"].strip():
-                        raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
-                    connection.execute("INSERT INTO effective_contract_items(item_id,project_hash,task_id,category,ordinal,text,created_revision,retired_revision) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)", ("outcome-" + uuid.uuid4().hex, self.project_hash, anchor, addition["category"], ordinal, addition["text"], revision))
-                connection.execute("INSERT INTO effective_contract_revisions(task_id,revision,decision_id,created_sequence) VALUES (?, ?, ?, ?)", (anchor, revision, identifier, sequence))
+                if retired_item_ids or effective_additions:
+                    revision = self._effective_contract(connection, anchor)["revision"] + 1
+                    for item_id in retired_item_ids:
+                        connection.execute("UPDATE effective_contract_items SET retired_revision=? WHERE item_id=? AND retired_revision IS NULL", (revision, item_id))
+                    for ordinal, addition in enumerate(effective_additions):
+                        connection.execute("INSERT INTO effective_contract_items(item_id,project_hash,task_id,category,ordinal,text,created_revision,retired_revision) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)", ("outcome-" + uuid.uuid4().hex, self.project_hash, anchor, addition["category"], ordinal, addition["text"], revision))
+                    connection.execute("INSERT INTO effective_contract_revisions(task_id,revision,decision_id,created_sequence) VALUES (?, ?, ?, ?)", (anchor, revision, identifier, sequence))
             if approval_handle is not None:
                 cursor = connection.execute("UPDATE approval_handles SET consumed_decision_id=? WHERE approval_handle=? AND consumed_decision_id IS NULL", (identifier, payload["approval_handle"]))
                 if cursor.rowcount != 1:
                     raise V12StoreError("approval handle has already been used", code="approval_handle_consumed")
+            if clarification_row is not None:
+                response_digest = _sha256_prefixed(payload["response_original"], label="clarification response")
+                cursor = connection.execute("UPDATE clarification_bindings SET response_digest=?,consumed_decision_id=? WHERE clarification_binding=? AND consumed_decision_id IS NULL", (response_digest, identifier, payload["clarification_binding"]))
+                if cursor.rowcount != 1:
+                    raise V12StoreError("clarification binding has already been used", code="clarification_binding_consumed")
             return {"decision": self._compact_decision(self._decision(connection, identifier, task_id=anchor))}
         return self._mutation("record_user_decision", payload, idempotency_key, write)
 
@@ -2862,6 +3637,26 @@ class V12Store:
             risk_value = (existing["risk"] if existing is not None else None) if not payload["risk_present"] else payload["risk"]
             notes_value = (existing["notes"] if existing is not None else []) if not payload["notes_present"] else payload["notes"]
             goal_value = (existing["goal"] if existing is not None else None) if not payload["goal_present"] else payload["goal"]
+            if existing is not None:
+                # Initiatives describe cross-task or long-lived governance
+                # topology.  Ordinary worker-stage, report-link, decision-link
+                # and notes churn is already durable in the task timeline and
+                # must not manufacture a fresh initiative revision.
+                current_parent = by_kind["parent"][0] if by_kind["parent"] else None
+                material = (
+                    goal_value != existing["goal"]
+                    or risk_value != existing["risk"]
+                    or state_value != existing["status"]
+                    or parent != current_parent
+                    or dependency_values != by_kind["dependency"]
+                    or task_values != by_kind["task"]
+                )
+                if not material:
+                    raise V12StoreError(
+                        "initiative revision has no material governance change",
+                        code="initiative_revision_not_material",
+                        details={"field": "initiative_ref", "expected": "goal_dependency_graph_risk_status_or_cross_task_change"},
+                    )
             for candidate, label in [(parent, "parent_initiative_id"), *[(item, "dependencies") for item in dependency_values]]:
                 if candidate is not None:
                     self._record_identifier(candidate, label=label)
@@ -2938,89 +3733,6 @@ class V12Store:
                 resolved = target in existing
                 warnings = [f"unresolved_{relationship}"] if not resolved else ([f"cyclic_{relationship}"] if path(target, source) else [])
                 connection.execute("UPDATE initiative_links SET is_resolved=?,warnings_json=? WHERE link_id=?", (int(resolved), _canonical_json(warnings, label="link warnings"), int(row["link_id"])))
-
-    def _require_documentation_impact_report(self, connection: sqlite3.Connection, task_id: str) -> None:
-        """Require consumed worker-owned documentation evidence for governed closure.
-
-        The relation check intentionally never reads a report body or closure
-        evidence.  A light/full task needs a post-approval ``technical_writer``
-        result that names the approved plan/decision and every earlier finalized
-        result report.  The worker handoff and its durable report are sufficient;
-        the coordinator must not reread opaque report prose merely to close the
-        task.
-        """
-        gate = self._governance_gate(connection, task_id)
-        if gate is None or gate["mode"] not in {"light", "full"}:
-            return
-        plan_id, approval_id = gate.get("plan_report_id"), gate.get("approval_decision_id")
-        if not isinstance(plan_id, str) or not isinstance(approval_id, str):
-            raise V12StoreError(
-                "documentation impact assessment is required before closure",
-                code="documentation_impact_required",
-            )
-        approval = self._decision(connection, approval_id, task_id=task_id)
-        candidates = connection.execute(
-            "SELECT delegation_id FROM delegations WHERE task_id=? AND project_hash=? "
-            "AND profile_name='technical_writer' AND created_sequence>? ORDER BY created_sequence",
-            (task_id, self.project_hash, int(approval["created_sequence"])),
-        ).fetchall()
-        if not candidates:
-            raise V12StoreError(
-                "documentation impact assessment is required before closure",
-                code="documentation_impact_required",
-            )
-        for row in candidates:
-            delegation = self._delegation(connection, str(row["delegation_id"]), task_id=task_id)
-            inputs = set(delegation["input_report_ids"])
-            decisions = set(delegation["input_decision_ids"])
-            prior_results = {
-                str(item["report_id"])
-                for item in connection.execute(
-                    "SELECT report_id FROM reports WHERE task_id=? AND project_hash=? "
-                    "AND report_type='result' AND status='completed' AND assembly_state='finalized' "
-                    "AND created_sequence<?",
-                    (task_id, self.project_hash, int(delegation["created_sequence"])),
-                ).fetchall()
-            }
-            if plan_id not in inputs or approval_id not in decisions or not prior_results.issubset(inputs):
-                continue
-            reports = connection.execute(
-                "SELECT report_id,created_sequence FROM reports WHERE delegation_id=? AND task_id=? "
-                "AND report_type='result' AND status='completed' AND assembly_state='finalized' "
-                "ORDER BY created_sequence",
-                (delegation["delegation_id"], task_id),
-            ).fetchall()
-            # The finalized worker-owned report is the durable handoff.  Its
-            # body remains available to downstream workers through read_reports,
-            # but coordinator consumption is deliberately not a closure
-            # prerequisite.  Requiring a receipt here recreated the protocol
-            # contradiction where the coordinator had to reread the report it
-            # had already received as a Summary + exact Report ref.
-            if reports:
-                return
-        raise V12StoreError(
-            "documentation impact evidence is incomplete before closure",
-            code="documentation_impact_evidence_missing",
-        )
-
-    def _require_initiative_closures(self, connection: sqlite3.Connection, task_id: str) -> None:
-        """Keep initiative and task closure handoff explicit and ordered."""
-        initiatives = self._task_initiative_ids(connection, task_id)
-        if not initiatives:
-            return
-        closed = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT subject_id FROM governance_closures WHERE project_hash=? AND subject_type='initiative' "
-                "AND subject_id IN (%s)" % ",".join("?" for _ in initiatives),
-                [self.project_hash, *initiatives],
-            ).fetchall()
-        }
-        if set(initiatives) - closed:
-            raise V12StoreError(
-                "every initiative related to this task requires its own closure before task closure",
-                code="initiative_closure_required",
-            )
 
     def submit_governance_closure(self, *, task_id: Any, subject_type: Any, subject_id: Any, verdict: Any, evidence: Any, unresolved_risks: Any, follow_ups: Any, initiative_status: Any, completion_notes: Any, idempotency_key: Any) -> tuple[dict[str, Any], bool]:
         anchor = self._task_identifier(task_id)
@@ -3229,13 +3941,54 @@ class V12Store:
             return {"delegation": delegation, "worker_brief": self._worker_brief(connection, self._task(connection, anchor), delegation), "reports": reports, "consumption_receipts": receipts, "timeline": timeline, "next_sequence": next_sequence, "has_more": has_more}
         return self._read(read)
 
-    def read_reports(self, *, report_ids: Any, sections: Any = None, cursor: Any = None, max_bytes: Any = REPORT_READ_MAX_BYTES, consumer_delegation_id: Any = None, reader_kind: Any = None, task_id: Any = None) -> dict[str, Any]:
+    def admit_result_report(self, *, delegation_id: Any, idempotency_key: Any) -> None:
+        """Fail closed before a result assembly when required input evidence is unread."""
+        anchor, identifier = self._task_for_delegation(delegation_id)
+        client_key = _required_text(idempotency_key, label="idempotency_key", maximum=IDEMPOTENCY_KEY_MAX_LENGTH)
+        idempotency = hashlib.sha256(
+            _canonical_json(
+                {"operation": "submit_report", "retry_handle": client_key},
+                label="idempotency operation key",
+            ).encode("utf-8")
+        ).hexdigest()
+
+        def read(connection: sqlite3.Connection) -> None:
+            replay = connection.execute(
+                "SELECT 1 FROM idempotency WHERE operation='submit_report' AND idempotency_key=? LIMIT 1",
+                (idempotency,),
+            ).fetchone()
+            if replay is not None:
+                return
+            delegation = self._delegation(connection, identifier, task_id=anchor)
+            inputs = delegation["input_report_ids"]
+            if inputs:
+                placeholders = ",".join("?" for _ in inputs)
+                observed = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT DISTINCT report_id FROM report_consumption_receipts "
+                        f"WHERE consumer_delegation_id=? AND has_more=0 AND report_id IN ({placeholders})",
+                        [identifier, *inputs],
+                    ).fetchall()
+                }
+                if any(item not in observed for item in inputs):
+                    raise V12StoreError("declared input evidence must be read before a result report", code="input_evidence_unread")
+            existing = connection.execute(
+                "SELECT 1 FROM reports WHERE delegation_id=? AND report_type='result' AND assembly_state='finalized' LIMIT 1",
+                (identifier,),
+            ).fetchone()
+            if existing is not None:
+                raise V12StoreError("delegation already has a finalized result report", code="result_report_exists")
+
+        self._read(read)
+
+    def read_reports(self, *, report_ids: Any, sections: Any = None, cursor: Any = None, max_bytes: Any = REPORT_READ_MAX_BYTES, consumer_delegation_id: Any = None, task_id: Any = None) -> dict[str, Any]:
         """Return bounded chunks and append structural evidence of that read.
 
-        A worker handoff read names the exact consuming delegation.  A
-        coordinator read is explicitly classified and cannot masquerade as
-        downstream worker consumption.  Receipts contain only immutable IDs,
-        digests, cursors, chunk indexes, and byte counts—never report bodies.
+        Report bodies require the exact consuming delegation.  Calls without a
+        consumer return metadata only and cannot create receipts. Receipts
+        contain only immutable IDs, digests, cursors, chunk indexes, and byte
+        counts—never report bodies.
         """
         import base64
 
@@ -3250,12 +4003,10 @@ class V12Store:
             selected_sections = list(sections)
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 0 <= max_bytes <= REPORT_READ_MAX_BYTES:
             raise V12StoreError("max_bytes is invalid", code="invalid_argument", details={"field": "max_bytes"})
-        kind = "coordinator" if reader_kind is None else _required_text(reader_kind, label="reader_kind", maximum=16).lower()
-        if kind not in {"coordinator", "worker"}:
-            raise V12StoreError("reader_kind is invalid", code="invalid_argument", details={"field": "reader_kind"})
         consumer = None if consumer_delegation_id is None else self._record_identifier(consumer_delegation_id, label="consumer_delegation_id")
-        if (kind == "worker") != (consumer is not None):
-            raise V12StoreError("worker report reads require consumer_delegation_id", code="invalid_argument", details={"field": "consumer_delegation_id"})
+        if consumer is None and max_bytes != 0:
+            raise V12StoreError("report bodies require consumer_delegation_id", code="invalid_argument", details={"field": "consumer_delegation_id"})
+        kind = "worker" if consumer is not None else "coordinator"
         anchor = self._task_for_reports(requested, task_id, consumer)
         scope = _sha256_prefixed({"task_id": anchor, "report_ids": requested, "sections": selected_sections}, label="report read scope")
 
@@ -3332,36 +4083,6 @@ class V12Store:
                     chunks = compact["chunks"]
                     indexes = [int(chunk["chunk_index"]) for chunk in chunks]
                     bytes_value = sum(int(chunk["content_bytes"]) for chunk in chunks)
-                    # Immutable evidence can be reused safely only after a
-                    # complete read of the same manifest and section set.
-                    # Incomplete/cursor reads deliberately never match this
-                    # lookup, so a caller must finish them before relying on
-                    # the receipt for a material decision.
-                    if kind == "coordinator" and not more and cursor is None:
-                        prior = connection.execute(
-                            "SELECT receipt_id,chunk_indexes_json,returned_content_bytes,created_sequence "
-                            "FROM report_consumption_receipts WHERE project_hash=? AND task_id=? "
-                            "AND consumer_delegation_id IS NULL AND reader_kind='coordinator' "
-                            "AND report_id=? AND observed_content_digest=? AND sections_json=? "
-                            "AND input_cursor IS NULL AND output_cursor IS NULL AND has_more=0 "
-                            "ORDER BY created_sequence DESC,receipt_id DESC LIMIT 1",
-                            (
-                                self.project_hash, anchor, report["report_id"], report["content_digest"],
-                                _canonical_json(selected_sections, label="report read sections"),
-                            ),
-                        ).fetchone()
-                        if prior is not None:
-                            receipts.append({
-                                "receipt_id": int(prior["receipt_id"]), "report_id": report["report_id"],
-                                "consumer_delegation_id": None, "reader_kind": "coordinator",
-                                "observed_content_digest": report["content_digest"],
-                                "chunk_indexes": _load_json(str(prior["chunk_indexes_json"]), label="report receipt chunks"),
-                                "input_cursor": None, "output_cursor": None,
-                                "returned_content_bytes": int(prior["returned_content_bytes"]),
-                                "has_more": False, "created_sequence": int(prior["created_sequence"]),
-                                "reused": True,
-                            })
-                            continue
                     sequence = self._timeline(
                         connection,
                         event_type="report_read",

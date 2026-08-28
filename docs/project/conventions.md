@@ -38,7 +38,7 @@
   delegate and coordinate native workers, read reports, decide rework, record
   advisory closure, and synthesize the final answer.
 - Preserve the coordinator's sole project-read exception: bounded knowledge
-  routing through every applicable `AGENTS.md`, `docs/project/index.md`,
+  routing through the host-injected `AGENTS.md` context, `docs/project/index.md`,
   `docs/features/index.md`, and only task-relevant pages selected from those
   indexes. The bundled orchestrator skill alone owns the exact route and
   six-part per-delegation template: documents to consume first, applicable
@@ -82,7 +82,7 @@
   original request. Treat optional `create_task.context` as arbitrary task JSON,
   never as a root binding.
 - Before `create_task`, require non-empty meaningful `requirements`,
-  `constraints`, `acceptance_criteria`, and `verification_plan` arrays. Optional
+  `constraints`, and `acceptance_criteria` arrays; the persisted verification plan is derived deterministically. Optional
   context cannot replace them; record a bounded assumption and verification
   item instead of an unknown/placeholder array.
 - Keep delegation `scope` a required non-empty text boundary of worker ownership;
@@ -119,8 +119,8 @@
   append a suffix to any ref or ID.
 - Treat the `task_ref` on initiative operations only as the locator for the
   saved project ledger, never as governance permission or a lifecycle gate.
-- The first ledger mutation may omit an operation-scoped idempotency key. Copy
-  the returned server-issued `handles.idempotency_key` unchanged only for an
+- Every mutation requires a caller-generated operation-scoped idempotency key.
+  Reuse that exact key unchanged only for an
   exact normalized-payload retry; the same payload replays the original result
   and conflicting content returns a non-mutating `idempotency_conflict`.
 - Treat reports as immutable evidence. Pass only finalized relevant report refs
@@ -139,21 +139,20 @@
   coordinator-owned ordinary-chat hold, never a backend gate. A required review
   needs an explicit unambiguous response to that exact finalized plan digest;
   silence and unrelated text are not approval.
-- Use bounded `single` for one report, or `begin`, sequential `append`,
-  `finalize`, and `abort` for an assembled report. Each
-  appended chunk is at most 32,768 bytes; a report has at most 256 chunks and
-  8 MiB total. Resume an
-  interrupted assembly from its manifest and `next_chunk_index`; never restart,
-  skip, overwrite, or append after finalization/abort. Use an explicit
+- Use the semantic publication operation for one complete terminal report outcome.
+  The server owns storage and derives replay identity from the delegation,
+  phase, assembly state, and canonical payload. Exact ambiguous retries replay;
+  changed payloads conflict and require an explicit recovery/rework delegation.
+  Never restart, overwrite, or publish after terminal completion. Use an explicit
   superseding report for replacement.
 - Preserve `read_reports` request order and its 20-report maximum; select only
-  needed sections, use compact `report_refs`, respect its maximum 65,536-byte content budget, and continue
-  with the returned cursor until complete. `max_bytes=0` is metadata-only
+  needed sections, use compact `report_refs`, and continue through its fixed 65,536-byte server pages
+  with the returned cursor until complete. Omitting a consuming delegation is metadata-only
   recovery. A worker must name its
   own delegation and may read only declared
   finalized inputs; retain the exact receipt digest, chunk indexes, and cursor
-  transitions. Bound task/delegation/governance inspection with `after_sequence`
-  plus `limit` and preserve `next_sequence`/`has_more`.
+  transitions. Continue task/delegation/governance inspection with `after_sequence`
+  and preserve `next_sequence`/`has_more`; pages are fixed at 50 events.
 - Use `record_user_decision` only when coordinator policy has identified an
   ordinary-chat response as a direct user decision. Use neutral `prompt`, append
   the exact original-language response in `response_original`, and retain no
@@ -199,11 +198,12 @@
   default; pass exact Terra or Sol overrides.
 - Map each successful durable delegation to exactly one native host spawn. The
   first worker with a profile uses its exact profile name; same-profile
-  siblings use the server-issued `_2`, `_3`, and later numeric suffixes. Copy
-  the returned native arguments byte-for-byte, including the exact rendered
-  message and explicit effort; never assemble an ad-hoc prompt, omit a spawn,
-  dispatch twice, or reuse one worker for multiple delegations. Reconcile an
-  ambiguous host result by exact native handle before replacement.
+  siblings use the server-issued `_2`, `_3`, and later numeric suffixes. Map
+  the returned host-neutral `dispatch_brief` to the active host operation,
+  preserving its exact rendered message and effort semantics; never assemble an
+  ad-hoc prompt, omit a spawn, dispatch twice, or reuse one worker for multiple
+  delegations. Reconcile an ambiguous host result by exact native handle before
+  replacement.
 - Keep the standard Codex To-Do projection limited to current pipeline stages
   and review state. Refresh it whenever either changes; never use it for worker
   subtasks, implementation checklists, or report-body copies. Concise handoff
