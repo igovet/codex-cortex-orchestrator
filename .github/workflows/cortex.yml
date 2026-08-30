@@ -35,7 +35,9 @@ jobs:
         run: |
           python -B scripts/cortex-prompt-lint.py
           python -B scripts/render_cortex_tool_catalog.py --check
+          bash -n scripts/sync-cortex.sh
           python -B scripts/validate-cortex-marketplace.py
           python -B scripts/verify-cortex-release.py --mode source
           python -B -m pytest -q tests/test_marketplace_release_gate.py
+          python -B -m pytest -q tests/test_sync_release_workflow.py
           git diff --check

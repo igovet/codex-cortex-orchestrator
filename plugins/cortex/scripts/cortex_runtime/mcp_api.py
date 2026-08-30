@@ -67,6 +67,7 @@ def catalogue_identity(public_tools: Mapping[str, Mapping[str, Any]]) -> dict[st
         {
             "name": name, "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
+            "outputSchema": dict(contract["outputSchema"]),
         }
         for name, contract in public_tools.items()
     )
@@ -886,6 +887,7 @@ def serve_stdio(
         if (
             not isinstance(contract.get("inputSchema"), Mapping)
             or not isinstance(contract.get("outputSchema"), Mapping)
+            or not isinstance(contract.get("runtimeOutputSchema"), Mapping)
             or not callable(contract.get("handler"))
         ):
             raise RuntimeError("Cortex v12 public tool binding is invalid")
@@ -895,6 +897,7 @@ def serve_stdio(
             "name": name,
             "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
+            "outputSchema": dict(contract["outputSchema"]),
         }
         for name, contract in public_tools.items()
     )
@@ -1332,9 +1335,13 @@ def serve_stdio(
                     continue
                 discovered_task_ref = _handles(result).get("task_ref")
                 result = _project_public_views(result)
-                output_schema = contract["outputSchema"]
-                if isinstance(output_schema, Mapping):
-                    result["handles"] = _handles_for_output_schema(result, output_schema)
+                # Validate against the complete closed private schema.  The
+                # compact outputSchema is discovery-only and intentionally
+                # permits additional observational receipt fields.
+                public_output_schema = contract["outputSchema"]
+                output_schema = contract["runtimeOutputSchema"]
+                if isinstance(public_output_schema, Mapping):
+                    result["handles"] = _handles_for_output_schema(result, public_output_schema)
                 try:
                     if isinstance(output_schema, Mapping):
                         _validate_schema(output_schema, result)

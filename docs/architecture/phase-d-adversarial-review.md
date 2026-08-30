@@ -32,6 +32,19 @@ negative claims and for the MCP result projection. This review did not run
 live-dev, refresh a cache, modify the installed profile, or change production
 or test code.
 
+## Current result-schema contract
+
+The reviewed runtime now separates discovery from validation. Every semantic
+tool advertises a compact public `outputSchema` containing only the essential
+handles, lifecycle states, replay/continuation information, and next-action
+data needed to navigate results. The complete closed result schema is retained
+as a private runtime contract and remains authoritative for successful-result
+validation. This keeps the complete fifteen-tool catalogue within the bounded
+discovery response without weakening validation. A deferred mutation lookup is
+safe only when it retrieves the specific intact live declaration it needs; a
+missing or truncated declaration must fail closed rather than guessing a
+mutation contract.
+
 ## Findings
 
 Severity uses `P0` for a blocker that makes the public path unusable or loses a
@@ -49,7 +62,7 @@ be fixed before candidate qualification.
 | D-ADV-007 | P1 | The steering nested input schema is open-ended, contradicting the closed-schema architecture. | `public_contracts.record_steering` declares `steering_delta` as `{"type": "object", "additionalProperties": True}` while the architecture requires concrete closed schemas and the store accepts only `retire_item_refs` and `add` with closed addition objects. The advertised contract invites calls that can only fail after dispatch. | Generate the steering delta schema from the same registry contract as the handler, set `additionalProperties: false` at every object level, and keep backend validation as the final invariant check. |
 | D-ADV-008 | P1 | Runtime instructions and guard messages still claim an eleven-tool catalogue. | `plugins/cortex/scripts/cortex.py::SERVER_INSTRUCTIONS` says participants receive “the same eleven semantic tools”; `build_v12_public_tools` raises an error mentioning the “canonical eleven-tool catalogue”; `public_contracts.build_public_contracts` has the same stale eleven-tool message. The registry currently contains 15 operations. | Derive the count and wording from `OPERATION_NAMES` or use count-neutral instructions. Add a first-call test that compares initialize instructions, tools/list, registry order, and handler order. |
 | D-ADV-009 | P1 | Legacy callable aliases remain exported from the semantic adapter. | `domain_api.__all__` still exports `issue_clarification`, `open_decision`, and `record_decision`; those functions retain overloaded or historical argument shapes. The MCP composition map no longer exposes them, but direct imports and stale qualification paths keep the second protocol alive. | Remove legacy names from the semantic public export and test surface. Keep only non-callable historical read/migration logic internally. Any migration adapter must not accept the old MCP request shape. |
-| D-ADV-010 | P1 | Family output schemas are not actually advertised on the MCP wire. | `mcp_api.serve_stdio` constructs every `tools/list` entry with `_WIRE_OUTPUT_SCHEMA`, ignoring each contract's family-specific `outputSchema`. The result is validated against the internal family schema only after projection, while clients see one generic envelope. This hides the family result type and allowed handle relation from model/tool discovery. | Advertise the complete bounded family output schema, or deliberately define one registry-generated wire result schema that is semantically equivalent for each operation and prove it. Do not silently substitute a generic schema while architecture documents promise typed results. |
+| D-ADV-010 | P1 | Family output schemas were not actually advertised on the MCP wire. | Historical finding: the prior implementation substituted a generic wire schema and kept family validation internal. | Resolved by advertising a compact registry-generated public projection for each operation while retaining the complete closed family schema privately for runtime validation; the bounded catalogue and strict separation are covered by `tests/test_public_schema_separation.py`. |
 
 ## Invariant coverage matrix
 
@@ -120,7 +133,7 @@ coordinator before candidate qualification can begin.
 | D-ADV-007 — open-ended steering delta | **Resolved in source/schema** | The nested steering delta and addition objects are closed and require at least one operation; public first-call checks inspect closed input roots. |
 | D-ADV-008 — stale eleven-tool language | **Resolved in source** | Initialize instructions and composition guard derive the operation count from `OPERATION_NAMES`; no stale eleven-tool executable text remains in the reviewed composition/contracts. |
 | D-ADV-009 — public legacy aliases | **Resolved in source** | `domain_api.__all__` exports only semantic family operations; historical helpers are underscore-prefixed and are not in the MCP handler map or registry. |
-| D-ADV-010 — generic output schema on wire | **Resolved in source/test surface** | `serve_stdio` now copies each contract's `outputSchema` into `tools/list`; public conformance compares advertised and internal schemas. Candidate execution remains unverified. |
+| D-ADV-010 — generic output schema on wire | **Resolved in source/test surface** | `serve_stdio` now copies each contract's compact public `outputSchema` into `tools/list`, while dispatch validates successful results against `runtimeOutputSchema`; `tests/test_public_schema_separation.py` proves the separation and strict rejection. Candidate execution remains unverified. |
 
 ### New findings from the re-review
 
@@ -178,9 +191,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q \
 
 ### D-ADV-001 through D-ADV-010 regression check
 
-No new P0/P1 regression was found in this pass. The six-operation registry,
-handler map, family output projection, compact-reference resolution, closed
-schemas, wire `outputSchema`, and legacy-name exclusions remain aligned. The
+No new P0/P1 regression was found in this pass. The current fifteen-operation
+registry, handler map, compact public result projection, private closed runtime
+schemas, compact-reference resolution, wire `outputSchema`, and legacy-name exclusions remain aligned. The
 focused source suites provide positive evidence for family handles,
 schema/wire contract, command naming, and plan relation. Candidate and live
 evidence remain separate required gates.

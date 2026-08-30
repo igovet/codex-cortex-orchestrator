@@ -144,6 +144,28 @@ def test_stale_cortex_source_is_replaced_without_touching_unrelated_marketplaces
     assert after["installed_version"].startswith("1.12.1+codex.sha256.")
 
 
+def test_install_rebuilds_when_checkout_manifest_suffix_is_stale(tmp_path: Path) -> None:
+    """Install mode must reconcile a generated suffix before marketplace validation."""
+    manifest = ROOT / "plugins/cortex/.codex-plugin/plugin.json"
+    original = manifest.read_text(encoding="utf-8")
+    payload = json.loads(original)
+    payload["version"] = "1.12.1+codex.sha256.0000000000000000"
+    manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        completed, state = _run_sync(
+            tmp_path,
+            {"marketplaces": [], "installed_version": ""},
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert "staged Cortex candidate:" in completed.stdout
+        staged = list((tmp_path / "owner/.cortex-dev/.codex/.cortex-candidates").glob("1.12.1+codex.sha256.*"))
+        assert len(staged) == 1
+        assert not staged[0].name.endswith("0000000000000000")
+        assert state["installed_version"] == staged[0].name
+    finally:
+        manifest.write_text(original, encoding="utf-8")
+
+
 def test_same_isolated_source_is_reused_and_missing_source_is_registered(tmp_path: Path) -> None:
     state = {"marketplaces": [{"name": "unrelated", "root": str(tmp_path / "other")}], "installed_version": ""}
     first, after_first = _run_sync(tmp_path, state)

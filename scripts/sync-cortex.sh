@@ -395,6 +395,7 @@ PY
   marketplace_root="${candidate_root}"
   marketplace_manifest="${marketplace_root}/.agents/plugins/marketplace.json"
   echo "staged Cortex candidate: ${candidate_version}"
+  echo "marketplace validation passed: stamped candidate"
 }
 
 prepare_backup_directory() {
@@ -412,7 +413,15 @@ validate_sources() {
   [[ -f "${plugin_source}/.codex-plugin/plugin.json" ]] || { echo "error: plugin manifest is missing" >&2; return 1; }
   [[ -f "${plugin_source}/.mcp.json" ]] || { echo "error: MCP manifest is missing" >&2; return 1; }
   [[ -f "${marketplace_manifest}" && ! -L "${marketplace_manifest}" ]] || { echo "error: root marketplace manifest is missing or symlinked" >&2; return 1; }
-  "${cortex_python}" -B "${script_dir}/validate-cortex-marketplace.py"
+  # The checkout manifest is the source template, so its generated
+  # content-address suffix may legitimately be stale after a working-tree
+  # edit.  Install mode rebuilds and validates an immutable stamped candidate
+  # in prepare_candidate; validating the unstamped checkout here would reject
+  # the very refresh that is meant to reconcile it.  Read-only modes retain
+  # the strict marketplace check and therefore continue to report drift.
+  if [[ "${mode}" != "install" ]]; then
+    "${cortex_python}" -B "${script_dir}/validate-cortex-marketplace.py"
+  fi
   "${cortex_python}" -B "${script_dir}/verify-cortex-release.py" --mode source
   "${cortex_python}" -B - "${plugin_source}/.codex-plugin/plugin.json" "${plugin_source}/scripts/cortex.py" <<'PY'
 import importlib.util, json, sys

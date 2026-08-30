@@ -281,14 +281,21 @@ def consume_assignment_evidence(*, assignment_ref: str, cursor: str | None = Non
             "predecessor_evidence": predecessor_evidence if isinstance(predecessor_evidence, list) else [],
             "decision_evidence": decision_evidence if isinstance(decision_evidence, list) else [],
         }
+        # The task anchor is server-derived from the assignment and is the
+        # callable context for the next worker operation on this connection.
+        # Returning it lets the MCP transport bind the connection without
+        # requiring the host to reconstruct or forward a task reference.
+        bound_task_ref = compact_task_ref(task_id)
+        if bound_task_ref is None:
+            raise V12ServiceError("worker task context is invalid", code="ledger_error")
         report_ids = worker.get("input_report_ids") if isinstance(worker, Mapping) else None
         if not isinstance(report_ids, list) or not report_ids:
-            return {"assignment_ref": assignment_ref, "continuation_ref": continuation_ref, **authority, "evidence": {"state": "none", "reports": []}, "next_cursor": None, "has_more": False}
+            return {"assignment_ref": assignment_ref, "continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "none", "reports": []}, "next_cursor": None, "has_more": False}
         result = store.read_reports(
             report_ids=report_ids, cursor=cursor, max_bytes=65_536,
             consumer_delegation_id=delegation_id,
         )
-        return {"assignment_ref": assignment_ref, "continuation_ref": continuation_ref, **authority, "evidence": {"state": "consumed", **result}}
+        return {"assignment_ref": assignment_ref, "continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "consumed", **result}}
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 

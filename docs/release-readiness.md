@@ -46,8 +46,10 @@ record may prohibit the model from taking the next safe meaningful step.
 
 The catalog is identical for every participant. There is no audience filter,
 capability matrix, host-bound authority, tool-name alias, or action selector. Each input
-schema is closed and is also the runtime validator's source; every tool also
-keeps its successful-result schema internal, which runtime validates before a
+schema is closed and is also the runtime validator's source. Every tool advertises a
+compact public result projection containing only essential handles, lifecycle states,
+replay/continuation information, and next-action data; its complete successful-result
+schema remains private and is the runtime validator's authoritative contract before a
 success is transported as JSON text plus `structuredContent` with
 `isError=false`. Caller-correctable errors are bounded sanitized text-only
 `isError=true` results with no `structuredContent`; server-state failures are
@@ -56,7 +58,10 @@ sanitized JSON-RPC internal errors.
 The complete catalogue must fit in one `tools/list` JSON-RPC response below
 65,536 bytes. This bounded discovery contract is substantially below the 256
 KiB physical JSONL frame bound and does not use continuation pages, so every
-participant receives all fifteen operation definitions together.
+participant receives all fifteen operation definitions together. When a host
+defers discovery for a mutation, it must retrieve the exact intact declaration
+needed for that operation. Missing or truncated declarations fail closed; no
+mutation contract may be guessed from names, descriptions, or partial output.
 
 Only `create_task` accepts the exact resolved `project_root` and stores the
 canonical project association; it is the sole public project-root boundary. It

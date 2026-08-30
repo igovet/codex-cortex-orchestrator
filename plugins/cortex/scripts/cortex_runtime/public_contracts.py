@@ -279,6 +279,11 @@ def _describe_contract_schemas(contracts: Mapping[str, Mapping[str, Any]]) -> No
             schema = contract.get(key)
             if not isinstance(schema, dict):
                 continue
+            if key == "outputSchema":
+                # Public output projections are intentionally terse.  Their
+                # machine-readable handle patterns are sufficient; adding
+                # per-field prose here would consume the catalogue budget.
+                continue
             schema.setdefault("$schema", _JSON_SCHEMA_DRAFT_2020_12)
             schema["description"] = f"{name} {kind}. {tool_description}{contract_guidance if key == 'inputSchema' else ''}"
             _describe_schema_properties(schema)
@@ -616,6 +621,47 @@ def _tool_output_schema(
         },
         "required": [*required_success_fields, "handles"],
     }
+
+
+def _compact_public_output_schema(full_schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a closed runtime receipt into the small MCP discovery view.
+
+    The complete schema remains private and is used after every successful
+    handler call.  Discovery only needs the typed next-call handles and a few
+    lifecycle indicators; advertising nested ledger records makes the fixed
+    catalogue needlessly large and invites callers to treat evidence as input.
+    """
+    properties = full_schema.get("properties", {})
+    handles = properties.get("handles") if isinstance(properties, Mapping) else None
+
+    def compact(node: Mapping[str, Any]) -> dict[str, Any]:
+        """Retain validation shape while dropping prose from nested receipts."""
+        # Bounds and prose are runtime concerns; type/pattern/enum are the
+        # only discovery facts needed to copy a typed handle safely.
+        keep = {"type", "enum", "pattern", "const"}
+        result = {key: node[key] for key in keep if key in node}
+        nested = node.get("properties")
+        if isinstance(nested, Mapping):
+            result["properties"] = {str(key): compact(value) for key, value in nested.items() if isinstance(value, Mapping)}
+        items = node.get("items")
+        if isinstance(items, Mapping):
+            result["items"] = compact(items)
+        return result
+
+    handles = compact(handles) if isinstance(handles, Mapping) else _closed({}, ())
+    public: dict[str, Any] = {
+        "type": "object",
+        "description": "Compact successful Cortex receipt; copy only handles.",
+        "properties": {"handles": handles},
+        "required": ["handles"],
+        "additionalProperties": True,
+    }
+    # Keep only small, stable state fields in the advertised projection.
+    for name in ("replayed", "status", "state", "assembly_state", "next_action", "has_more", "next_cursor", "next_sequence"):
+        value = properties.get(name) if isinstance(properties, Mapping) else None
+        if isinstance(value, Mapping):
+            public["properties"][name] = compact(value)
+    return public
 
 
 def _forbid_properties(*names: str) -> list[dict[str, Any]]:
@@ -1258,6 +1304,15 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         _assert_no_callable_durable_properties(contract["inputSchema"], path=f"{name}.inputSchema")
     _assert_no_callable_durable_properties(_HANDLES_SCHEMA, path="handles")
     _assert_no_callable_durable_properties(_APPROVAL_VIEW_SCHEMA, path="approval_view")
+    # Keep the strict closed receipt schema available to the runtime while
+    # exposing only a compact projection to MCP discovery.  Do this after all
+    # operation-specific schemas have been assembled and validated.
+    for name, contract in contracts.items():
+        full_output = contract.get("outputSchema")
+        if not isinstance(full_output, Mapping):
+            raise RuntimeError(f"{name} is missing its closed runtime output schema")
+        contract["runtimeOutputSchema"] = full_output
+        contract["outputSchema"] = _compact_public_output_schema(full_output)
     _describe_contract_schemas(contracts)
     return contracts
 

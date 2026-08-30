@@ -35,10 +35,12 @@ and release-facing documentation must describe the same V12 contract.
 ## Current package contract
 
 The package exposes exactly fifteen semantic tools with identical coordinator and worker
-schemas. `tools/list` advertises the canonical registry's closed input schemas
-in one response below 65,536 bytes. Optional MCP `outputSchema` metadata is not
-advertised; the family-specific schemas remain internal contracts used to
-validate every successful result. Success returns canonical JSON as text plus
+schemas. `tools/list` advertises the canonical registry's closed input schemas and
+compact public result projections in one response below 65,536 bytes. The compact
+projections contain only the essential result-navigation handles, lifecycle states,
+replay/continuation information, and next-action data needed for discovery. The
+complete family result schemas remain private runtime contracts and are used to
+validate every successful result before transport. Success returns canonical JSON as text plus
 `structuredContent` with `isError=false`.
 Caller-correctable errors are bounded sanitized text-only `isError=true` results
 with no `structuredContent`; server-state faults use sanitized JSON-RPC internal
@@ -48,7 +50,10 @@ control-plane route.
 The standard MCP `tools/list` response returns the complete unchanged
 fifteen-tool catalogue in one page. A release fails validation if the final
 JSON-RPC envelope exceeds 65,536 bytes, well below the 256 KiB physical JSONL
-frame bound, so bounded or deferred host discovery cannot omit a later tool.
+frame bound. If a host uses deferred discovery for a mutation, it must obtain
+the specific intact live declaration required for that operation; an unavailable
+or truncated declaration is a fail-closed condition, and the host must not infer
+or guess a mutation contract.
 
 Only `create_task` accepts explicit `project_root`; it stores the canonical
 project association and returns a compact `task_ref` for later task-anchored
@@ -186,8 +191,8 @@ The release candidate must prove:
 - content-addressed manifest/Marketplace parity with semantic base version
   1.12.1 and a suffix matching the complete normalized plugin payload;
 - exact fifteen-tool registry/runtime parity;
-- uniform participant catalog, closed advertised input schemas, internal
-  successful-result schema validation, a complete catalogue below 65,536
+- uniform participant catalog, closed advertised input schemas, compact public
+  result projections, private successful-result schema validation, a complete catalogue below 65,536
   bytes, and the distinct success/correctable-error/server
   fault transport shapes;
 - explicit root only on `create_task`, `task_ref` on the seven task-anchored

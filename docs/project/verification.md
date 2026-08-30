@@ -38,8 +38,10 @@ The V12 protocol evidence must prove:
 - coordinator and worker catalogs are identical, with no audience filtering,
   capabilities, tool-name aliases, or selector branches;
 - runtime validation uses the same closed input schemas advertised by the
-  registry and validates successful results against each advertised
-  `outputSchema`; successful calls carry matching JSON text content plus
+  registry and validates successful results against each complete private
+  runtime result schema; the advertised `outputSchema` is a compact public
+  projection limited to essential handles, lifecycle states, replay/continuation,
+  and next-action data. Successful calls carry matching JSON text content plus
   `structuredContent` with `isError=false`, while caller-correctable errors use
   `isError=true` bounded sanitized text only (no `structuredContent`);
 - only `create_task` accepts explicit `project_root`; the seven task-anchored
@@ -342,6 +344,10 @@ GitHub Marketplace installation flow and not proof of an installed cache.
 Normal `sync-cortex.sh` mode removes only disposable bytecode under the packaged
 plugin before validation and regenerates the marked orchestrator model-routing
 table from `profiles.json`; `--dry-run` and `--check` remain read-only.
+During install, the checkout's generated content-address suffix is a source
+template and may be stale after a working-tree edit; the workflow rebuilds and
+validates the immutable stamped candidate before marketplace registration.
+Read-only `--check` continues to reject a stale checkout suffix.
 
 Before publication, verify the committed candidate:
 

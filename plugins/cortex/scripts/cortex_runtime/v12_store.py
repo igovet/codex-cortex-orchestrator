@@ -4114,6 +4114,11 @@ class V12Store:
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
             self._require_no_pending_user_decision(connection, task_id=str(task["task_id"]))
+            self._enforce_planning_admission(
+                connection, task_id=str(task["task_id"]),
+                profile_name=str(payload["profile_name"]),
+                input_report_ids=list(payload["input_report_ids"]),
+            )
             input_reports: list[dict[str, Any]] = []
             for report_id in payload["input_report_ids"]:
                 report = self._report(connection, report_id, task_id=task["task_id"])
@@ -4329,6 +4334,48 @@ class V12Store:
             }
             return result
         return self._mutation("create_delegation", payload, idempotency_key, write)
+
+    def _enforce_planning_admission(self, connection: sqlite3.Connection, *, task_id: str, profile_name: str, input_report_ids: list[str]) -> None:
+        """Require approved planner evidence before light/full owner work.
+
+        Governance assessments are advisory history, but selecting light or
+        full makes the planner predecessor an admission invariant for owner
+        assignments. Planner/review/documentation assignments remain available
+        to build the evidence needed by that invariant.
+        """
+        from cortex_runtime.worker_message import packaged_profile_assignment_policy
+        if profile_name == "planner" or packaged_profile_assignment_policy(profile_name) != "owner":
+            return
+        assessment = connection.execute(
+            "SELECT mode FROM governance_assessments WHERE task_id=? "
+            "ORDER BY created_sequence DESC LIMIT 1", (task_id,),
+        ).fetchone()
+        mode = str(assessment["mode"]) if assessment is not None else "minimal"
+        if mode not in {"light", "full"}:
+            return
+        if not input_report_ids:
+            raise V12StoreError(
+                "light/full owner assignment requires an approved planner predecessor",
+                code="planning_predecessor_required",
+                details={"field": "input_report_refs", "mode": mode},
+            )
+        placeholders = ",".join("?" for _ in input_report_ids)
+        approved = connection.execute(
+            "SELECT 1 FROM reports r JOIN user_decisions u "
+            "ON u.task_id=r.task_id AND u.subject_type='plan' "
+            "AND u.subject_id=r.report_id AND u.decision_type='approve' "
+            "WHERE r.task_id=? AND r.report_type='plan' "
+            "AND r.assembly_state='finalized' AND r.status='completed' "
+            "AND r.semantic_status='semantic_valid' AND r.report_id IN (" + placeholders + ") "
+            "ORDER BY u.created_sequence DESC LIMIT 1",
+            (task_id, *input_report_ids),
+        ).fetchone()
+        if approved is None:
+            raise V12StoreError(
+                "light/full owner assignment requires an approved planner predecessor",
+                code="planning_predecessor_required",
+                details={"field": "input_report_refs", "mode": mode},
+            )
 
     @staticmethod
     def _worker_capability_ref(value: Any, *, label: str) -> str:

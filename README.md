@@ -449,8 +449,11 @@ schemas, and tests remain authoritative when prose drifts.
 > Cortex workers can use it for architecture discovery, impact analysis, and
 > end-to-end tracing, especially in large monorepos.
 >
-> Codebase Memory is not a hard runtime dependency. If it is unavailable, a
-> worker should make one bounded attempt and use ordinary repository tools.
+> Codebase Memory is not a hard runtime dependency, but it is the mandatory
+> first route for project-code discovery. If it is unavailable, excludes the
+> requested surface, or returns insufficient evidence, a worker may make
+> exactly one bounded ordinary-repository fallback and must record that
+> evidence-based rationale. There is no silent or chained fallback.
 
 Quick install on macOS/Linux:
 
