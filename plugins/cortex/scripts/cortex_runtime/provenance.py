@@ -72,7 +72,13 @@ def package_digest(package_root: Path) -> str:
 
 
 def verify_runtime(package_root: Path, server_version: str, environment: Mapping[str, str] | None = None, *, allow_source_mode: bool = False) -> dict[str, str]:
-    """Verify the running package and return provenance derived from its files."""
+    """Verify a release, source, or content-addressed candidate package.
+
+    Marketplace releases and isolated development candidates carry the same
+    content digest suffix and must prove it against their installed bytes.
+    Plain semantic versions are reserved for an explicitly enabled source
+    checkout and never form an installable production package.
+    """
     root = package_root.absolute()
     manifest_path = root / ".codex-plugin" / "plugin.json"
     try:
@@ -83,7 +89,7 @@ def verify_runtime(package_root: Path, server_version: str, environment: Mapping
         raise RuntimeError("candidate plugin manifest is invalid")
     version = manifest["version"]
     match = re.fullmatch(r"(1\.12\.1)\+codex\.sha256\.([0-9a-f]{16})", version)
-    source_mode = version == "1.12.1" and allow_source_mode
+    source_mode = allow_source_mode and (version == "1.12.1" or match is not None)
     if (match is None and not source_mode) or server_version != "1.12.1":
         raise RuntimeError("candidate product version or build suffix is invalid")
     digest = package_digest(root)
@@ -93,7 +99,8 @@ def verify_runtime(package_root: Path, server_version: str, environment: Mapping
         "build_id": f"sha256:{digest}",
         "source_digest": digest,
         "candidate_path": str(root),
-        "parity_verified": "false" if source_mode else "true",
+        "parity_verified": "true" if match is not None and not source_mode else "false",
+        "runtime_mode": "source" if source_mode else "content_addressed",
     }
     supplied = environment if environment is not None else os.environ
     expected_build = supplied.get("CORTEX_BUILD_ID")

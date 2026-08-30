@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -154,6 +155,8 @@ def validate_hooks(plugin: Path) -> None:
                     fail(f"plugin hook {event_name} must use the trusted in-plugin command")
                 if not isinstance(handler.get("timeout"), int) or handler["timeout"] < 1:
                     fail(f"plugin hook {event_name} must declare a positive timeout")
+                if event_name == "SessionEnd" and handler["timeout"] > 3:
+                    fail("plugin SessionEnd hook timeout exceeds the Codex 3-second limit")
     regular_file(plugin / "hooks/cortex_activation.py", "activation hook script")
     regular_file(plugin / "hooks/cortex_lifecycle_observer.py", "lifecycle observer hook script")
     source = (plugin / "hooks/cortex_activation.py").read_text(encoding="utf-8")
@@ -224,10 +227,19 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
     manifest = load_json(plugin / ".codex-plugin/plugin.json", "plugin manifest")
     version = manifest.get("version")
     valid_version = VERSION_PATTERN.fullmatch(version) if isinstance(version, str) else None
-    if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or (candidate and not valid_version) or (not candidate and version != EXPECTED_BASE_VERSION):
-        fail("plugin manifest must use base 1.12.1 in source mode or a content-addressed candidate version")
+    if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not valid_version:
+        fail("installable plugin manifest must use a content-addressed 1.12.1 version")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
         fail("plugin manifest semantic version must be 1.12.1")
+    provenance_path = plugin / "scripts/cortex_runtime/provenance.py"
+    spec = importlib.util.spec_from_file_location("cortex_marketplace_provenance", provenance_path)
+    if spec is None or spec.loader is None:
+        fail("canonical package provenance module cannot be loaded")
+    provenance = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(provenance)
+    digest = provenance.package_digest(plugin)
+    if not digest.startswith(version.rsplit(".", 1)[-1]):
+        fail("plugin manifest content-addressed suffix does not match package content")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare the bundled skills and MCP companion")
     interface = manifest.get("interface")
@@ -236,6 +248,8 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
         for field in ("displayName", "shortDescription", "longDescription", "logo", "defaultPrompt")
     ):
         fail("plugin interface metadata is incomplete")
+    if len(interface["defaultPrompt"].encode("utf-8")) > 128:
+        fail("plugin interface defaultPrompt exceeds the Codex 128-byte limit")
     regular_file(plugin / str(interface["logo"]).removeprefix("./"), "plugin logo")
 
     mcp = load_json(plugin / ".mcp.json", "MCP companion")

@@ -112,6 +112,28 @@ class V21WorkerCapabilityStoreTests(unittest.TestCase):
         self.assertIn("dispatch_digest", columns)
         self.assertIn("lease_expires_at", columns)
 
+    def test_v21_store_automatically_migrates_through_v23_with_data_preserved(self) -> None:
+        """The v22 migration must admit v21 before inserting its own record."""
+        capability = self.store.mint_worker_bootstrap(**self.args)
+        with self.store._connection() as connection:
+            connection.execute("DROP TRIGGER assignment_scope_no_update")
+            connection.execute("DROP TRIGGER assignment_scope_no_delete")
+            connection.execute("DROP INDEX assignment_scope_task_revision")
+            connection.execute("DROP TABLE assignment_scope_snapshots")
+            connection.execute("DELETE FROM schema_migrations WHERE version IN (22,23)")
+            connection.execute("ALTER TABLE worker_capabilities DROP COLUMN lease_expires_at")
+
+        upgraded = V12Store(self.project)
+        with upgraded._connection() as connection:
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 23)
+            row = connection.execute(
+                "SELECT state,lease_expires_at FROM worker_capabilities WHERE capability_ref=?",
+                (capability["capability"],),
+            ).fetchone()
+            self.assertEqual(row["state"], "minted")
+            self.assertTrue(row["lease_expires_at"])
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM tasks WHERE task_id=?", (self.task_id,)).fetchone()[0], 1)
+
     def test_active_dispatch_lease_rejects_parent_replacement_before_worker_consumes(self) -> None:
         capability = self.store.mint_worker_bootstrap(**self.args)
         self.assertEqual(capability["state"], "minted")

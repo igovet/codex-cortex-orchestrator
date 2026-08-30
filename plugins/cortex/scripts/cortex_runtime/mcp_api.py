@@ -1187,6 +1187,7 @@ def serve_stdio(
                     "sourceDigest": provenance["source_digest"],
                     "candidatePath": provenance["candidate_path"],
                     "parityVerified": provenance["parity_verified"] == "true",
+                    "runtimeMode": provenance["runtime_mode"],
                 })
                 initialize_wire_success = reply(request_id, {
                     "protocolVersion": negotiated_protocol_version,

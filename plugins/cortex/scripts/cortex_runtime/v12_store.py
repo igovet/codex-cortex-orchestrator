@@ -2261,7 +2261,6 @@ class V12Store:
             (_TASK_LOCATOR_MIGRATION_VERSION, _TASK_LOCATOR_MIGRATION_NAME),
             (_DISPATCH_CORRELATION_MIGRATION_VERSION, _DISPATCH_CORRELATION_MIGRATION_NAME),
             (_WORKER_CAPABILITY_MIGRATION_VERSION, _WORKER_CAPABILITY_MIGRATION_NAME),
-            (_DISPATCH_LEASE_MIGRATION_VERSION, _DISPATCH_LEASE_MIGRATION_NAME),
         ]
         if [tuple(item) for item in connection.execute("SELECT version,name FROM schema_migrations ORDER BY version").fetchall()] != expected:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")

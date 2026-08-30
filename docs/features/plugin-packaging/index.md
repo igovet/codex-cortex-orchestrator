@@ -151,6 +151,15 @@ End users add
 `https://github.com/igovet/codex-cortex-orchestrator` at Git ref `main` as a
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
+The source published to that Marketplace already has a content-addressed
+manifest version, `1.12.1+codex.sha256.<digest-prefix>`. The isolated development
+builder uses the identical version rule. At MCP startup the packaged runtime
+recomputes the normalized plugin-tree digest before `initialize`; therefore the
+production and development paths differ only in installation environment, not
+in provenance strength. A plain `1.12.1` manifest is source-mode only and the
+Marketplace validator rejects it. The same gate enforces the host's 128-byte
+`defaultPrompt` and three-second `SessionEnd` timeout limits.
+
 `./scripts/cortex-dev` is the repository's interactive local source-development
 entry point. It creates/reuses the exact persistent `$HOME/.cortex-dev`
 candidate, isolates both `HOME` and `CODEX_HOME` (including plugin cache,
@@ -173,7 +182,8 @@ continue to report any residue or catalog drift.
 
 The release candidate must prove:
 
-- manifest and Marketplace version 1.12.1 parity;
+- content-addressed manifest/Marketplace parity with semantic base version
+  1.12.1 and a suffix matching the complete normalized plugin payload;
 - exact fifteen-tool registry/runtime parity;
 - uniform participant catalog, closed input schemas, advertised successful
   `outputSchema` validation, and the distinct success/correctable-error/server

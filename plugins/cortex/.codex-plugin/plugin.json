@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.12.1",
+  "version": "1.12.1+codex.sha256.102b84087a10e527",
   "description": "Durable local coordination ledger for model-owned multi-agent governance.",
   "author": {
     "name": "igovet"
@@ -23,6 +23,6 @@
       "Advisory agent profiles"
     ],
     "logo": "./assets/logo.png",
-    "defaultPrompt": "Coordinate this task with Cortex 1.12.1. Choose proportional governance, delegate useful independent work, preserve worker evidence, and keep governance advisory."
+    "defaultPrompt": "Coordinate this task with Cortex 1.12.1 using durable worker evidence, proportional governance, and verified closure."
   }
 }

@@ -333,7 +333,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
-closure, hook absence, and release metadata.
+closure, bundled hook contracts, and release metadata. The installable manifest
+must be `1.12.1+codex.sha256.<digest-prefix>` and its suffix must match the
+normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
+UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
 GitHub Marketplace installation flow and not proof of an installed cache.
 Normal `sync-cortex.sh` mode removes only disposable bytecode under the packaged
@@ -369,7 +372,10 @@ plugin for repository live development.
 
 Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fifteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
-human-view behavior, and absence of lifecycle hooks. Start a new task
+human-view behavior, content-addressed runtime identity, and bounded lifecycle
+hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
+successful `initialize`, report semantic version `1.12.1` with
+`runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
 ## Interactive tmux live-dev workflow

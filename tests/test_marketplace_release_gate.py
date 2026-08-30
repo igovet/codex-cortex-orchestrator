@@ -108,6 +108,15 @@ class MarketplaceReleaseGate(unittest.TestCase):
         manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
         self.assertEqual(manifest["name"], "cortex")
         self.assertTrue(str(manifest["version"]).startswith("1.12.1"))
+        self.assertLessEqual(len(manifest["interface"]["defaultPrompt"].encode("utf-8")), 128)
+        hooks = json.loads((ROOT / "plugins/cortex/hooks/hooks.json").read_text())
+        session_end = hooks["hooks"]["SessionEnd"]
+        self.assertTrue(session_end)
+        self.assertTrue(all(
+            handler["timeout"] <= 3
+            for group in session_end
+            for handler in group["hooks"]
+        ))
         mcp = json.loads((ROOT / "plugins/cortex/.mcp.json").read_text())
         server = mcp["mcpServers"]["cortex"]
         self.assertEqual(server["env_vars"], ["CODEX_HOME", "CORTEX_SESSION_NONCE", "CORTEX_RAW_DIAGNOSTIC"])

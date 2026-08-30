@@ -522,6 +522,15 @@ non-regular entries. Direct `./scripts/sync-cortex.sh` use remains an explicitly
 authorized local-source operation; source-mode checks do not prove an installed
 cache or interactive host behavior.
 
+Production and isolated development installations share one fail-closed package
+identity rule. Their plugin manifest carries
+`1.12.1+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.12.1` is
+accepted only when source mode is explicitly enabled and is never a publishable
+Marketplace artifact. Release validation also enforces Desktop metadata limits,
+including a 128-byte `defaultPrompt` and a maximum three-second `SessionEnd` hook
+timeout, so host clamping or ignored metadata cannot conceal package drift.
+
 V12 state uses a new namespace. V11 databases are not opened, migrated,
 deleted, or modified. V11 public tools and unfinished V11 tasks are incompatible
 with V12. Historical V11 state is never an authorization source, fallback

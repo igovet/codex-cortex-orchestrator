@@ -113,8 +113,8 @@ exit 0
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
         after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
-        assert after_version == "1.12.1"
-        assert before_version == "1.12.1"
+        assert re.fullmatch(r"1\.12\.1\+codex\.sha256\.[0-9a-f]{16}", after_version)
+        assert before_version == after_version
         staged_versions = list((codex_home / ".cortex-candidates").glob("1.12.1+codex.sha256.*"))
         assert len(staged_versions) == 1
         assert (codex_home / "plugins/cache/cortex/cortex" / staged_versions[0].name).is_dir()
@@ -178,7 +178,7 @@ def test_sync_shell_path_rejects_symlinked_installed_version_parent(tmp_path: Pa
         """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1 $2 $3" == "plugin list --json" ]]; then
-  printf '%s\\n' '{"installed":[{"pluginId":"cortex@cortex","version":"1.12.1"}]}'
+  printf '{"installed":[{"pluginId":"cortex@cortex","version":"%s"}]}\\n' "$SYNC_EXPECTED_VERSION"
   exit 0
 fi
 exit 0
@@ -192,6 +192,9 @@ exit 0
         "CODEX_HOME": str(codex_home),
         "PATH": f"{tmp_path}:{environment['PATH']}",
         "CORTEX_PYTHON": sys.executable,
+        "SYNC_EXPECTED_VERSION": json.loads(
+            (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+        )["version"],
     })
     completed = subprocess.run(
         ["bash", "scripts/sync-cortex.sh", "--check"],

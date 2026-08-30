@@ -1552,7 +1552,10 @@ The complete commands, safety boundaries, and verification contract are in
 ### Versioning
 
 The current Cortex public contract release is **1.12.1**. Version and build identity are
-defined by `plugins/cortex/.codex-plugin/plugin.json`.
+defined by `plugins/cortex/.codex-plugin/plugin.json`. The installable manifest always
+uses `1.12.1+codex.sha256.<digest-prefix>` in both the GitHub Marketplace package and
+the isolated development candidate; the MCP server continues to advertise semantic
+version `1.12.1`.
 
 When changing the plugin, update the version according to SemVer:
 
@@ -1562,8 +1565,12 @@ When changing the plugin, update the version according to SemVer:
 
 Build metadata after `+` is content-addressed as
 `codex.sha256.<digest-prefix>`; it identifies the exact isolated candidate and
-cannot be reused for different bytes. The product/server compatibility boundary
-remains `1.12.1`. V11 tools and unfinished V11 tasks are not compatible with Cortex 1.12.1.
+the exact production package and cannot be reused for different bytes. Runtime
+startup recomputes the packaged digest before MCP initialization and rejects a
+missing, stale, or invented suffix. Plain `1.12.1` is reserved for explicitly
+enabled source-mode execution and is not an installable release. The
+product/server compatibility boundary remains `1.12.1`. V11 tools and unfinished
+V11 tasks are not compatible with Cortex 1.12.1.
 
 ### Development agreements
 

@@ -1,10 +1,12 @@
 # Release readiness
 
-Status: source-mode release contract for Cortex 1.12.1.
+Status: content-addressed production and development release contract for Cortex 1.12.1.
 
 ## Current release identity
 
-- release label: 1.12.1
+- semantic release label: 1.12.1
+- installable identity: `1.12.1+codex.sha256.<digest-prefix>` with runtime
+  verification against the complete normalized plugin payload
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
 - public facade: exactly fifteen action-specific MCP tools
@@ -14,7 +16,7 @@ Status: source-mode release contract for Cortex 1.12.1.
 - governance: model-owned and advisory
 - coordinator: orchestration/delegation plus the bounded orchestrator-owned
   knowledge route; no source/project action or substantive task work
-- lifecycle hooks: absent
+- lifecycle hooks: bundled and bounded; `SessionEnd` is limited to three seconds
 - operator maintenance: task-anchored host-private CLI outside MCP; restore is
   offline only
 

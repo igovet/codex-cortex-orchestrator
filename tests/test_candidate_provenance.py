@@ -55,6 +55,18 @@ def _installed_isolated_candidate(tmp_path: Path) -> tuple[Path, Path, Path, Pat
     return owner, home, codex_home, installed, version
 
 
+def _installed_release(tmp_path: Path) -> tuple[Path, Path]:
+    """Install the Marketplace payload under a fresh production profile."""
+    version = json.loads(
+        (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    codex_home = tmp_path / "release-home" / ".codex"
+    installed = codex_home / "plugins/cache/cortex/cortex" / version
+    installed.parent.mkdir(parents=True)
+    shutil.copytree(ROOT / "plugins/cortex", installed)
+    return codex_home, installed
+
+
 def test_isolated_candidate_receipt_is_stamped_deterministic_and_owner_only(tmp_path: Path) -> None:
     owner, home, codex_home, installed, version = _installed_isolated_candidate(tmp_path)
     first = write_receipt(
@@ -467,6 +479,47 @@ def test_exact_candidate_stdio_reports_identity_and_catalog(tmp_path: Path) -> N
     assert ready[0]["catalogue_count"] == len(OPERATION_NAMES)
     assert len(ready[0]["catalogue_digest"]) == 64
     assert all(name not in journal_path.read_text(encoding="ascii") for name in OPERATION_NAMES)
+
+
+def test_content_addressed_installed_release_stdio_initializes_without_source_mode(tmp_path: Path) -> None:
+    """The public content-addressed package must start without a dev override."""
+    codex_home, installed = _installed_release(tmp_path)
+    home = codex_home.parent
+    os.chmod(home, 0o700)
+    os.chmod(codex_home, 0o700)
+    request = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "release-black-box", "version": "1"},
+        },
+    }
+    listing = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    environment = {
+        **os.environ, "HOME": str(home), "CODEX_HOME": str(codex_home),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    environment.pop("PYTHONPATH", None)
+    environment.pop("CORTEX_SOURCE_MODE", None)
+    process = subprocess.Popen(
+        [sys.executable, "-B", str(installed / "scripts/cortex.py")],
+        cwd=tmp_path, env=environment, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    process.stdin.write(json.dumps(request) + "\n")
+    process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}) + "\n")
+    process.stdin.write(json.dumps(listing) + "\n")
+    process.stdin.close()
+    lines = [json.loads(line) for line in process.stdout if line.strip()]
+    assert process.wait(timeout=10) == 0, process.stderr.read() if process.stderr else ""
+    info = next(item for item in lines if item.get("id") == 1)["result"]["serverInfo"]
+    assert info["version"] == "1.12.1"
+    assert info["runtimeMode"] == "content_addressed"
+    assert info["parityVerified"] is True
+    assert info["buildId"] == "sha256:" + info["sourceDigest"]
+    tools = next(item for item in lines if item.get("id") == 2)["result"]["tools"]
+    assert len(tools) == len(OPERATION_NAMES)
 
 
 def test_runtime_rejects_spoofed_expectation_and_manifest_suffix(tmp_path: Path) -> None:
