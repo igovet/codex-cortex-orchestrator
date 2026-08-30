@@ -321,7 +321,6 @@ def test_stdio_emits_one_safe_server_ready_after_physical_initialize_reply(tmp_p
         tuple({
             "name": name, "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
-            "outputSchema": dict(contract["outputSchema"]),
         } for name, contract in PUBLIC_TOOLS.items()),
         sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
     ).encode("ascii")).hexdigest()

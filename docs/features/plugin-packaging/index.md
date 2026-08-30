@@ -35,19 +35,20 @@ and release-facing documentation must describe the same V12 contract.
 ## Current package contract
 
 The package exposes exactly fifteen semantic tools with identical coordinator and worker
-schemas. Runtime validation uses the canonical registry's closed input schemas
-and validates successful results against each advertised `outputSchema`. Success
-returns canonical JSON as text plus `structuredContent` with `isError=false`.
+schemas. `tools/list` advertises the canonical registry's closed input schemas
+in one response below 65,536 bytes. Optional MCP `outputSchema` metadata is not
+advertised; the family-specific schemas remain internal contracts used to
+validate every successful result. Success returns canonical JSON as text plus
+`structuredContent` with `isError=false`.
 Caller-correctable errors are bounded sanitized text-only `isError=true` results
 with no `structuredContent`; server-state faults use sanitized JSON-RPC internal
 errors. The server is a storage/integrity sidecar and contains no V11
 control-plane route.
 
-The standard MCP `tools/list` response uses opaque `nextCursor` pagination when
-the complete catalog would exceed the 256 KiB physical JSONL frame bound. Each
-page contains complete tool definitions and is measured as its final JSON-RPC
-envelope; clients must follow `nextCursor` to receive the unchanged fifteen-tool
-catalogue.
+The standard MCP `tools/list` response returns the complete unchanged
+fifteen-tool catalogue in one page. A release fails validation if the final
+JSON-RPC envelope exceeds 65,536 bytes, well below the 256 KiB physical JSONL
+frame bound, so bounded or deferred host discovery cannot omit a later tool.
 
 Only `create_task` accepts explicit `project_root`; it stores the canonical
 project association and returns a compact `task_ref` for later task-anchored
@@ -185,8 +186,9 @@ The release candidate must prove:
 - content-addressed manifest/Marketplace parity with semantic base version
   1.12.1 and a suffix matching the complete normalized plugin payload;
 - exact fifteen-tool registry/runtime parity;
-- uniform participant catalog, closed input schemas, advertised successful
-  `outputSchema` validation, and the distinct success/correctable-error/server
+- uniform participant catalog, closed advertised input schemas, internal
+  successful-result schema validation, a complete catalogue below 65,536
+  bytes, and the distinct success/correctable-error/server
   fault transport shapes;
 - explicit root only on `create_task`, `task_ref` on the seven task-anchored
   tools, `delegation_ref`/`report_ref`/`report_refs` on entity-derived tools,

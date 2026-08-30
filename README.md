@@ -1136,17 +1136,20 @@ risk.
 
 ### Cortex 1.12.1 closed public response boundary
 
-Every tool has a closed input schema and an advertised `outputSchema` in the
-active MCP registry. Runtime validation consumes the same input schema and
-validates each successful service result against that tool's `outputSchema`
-before transport. A successful MCP tool result carries canonical data in
+Every tool has a closed input schema in the active MCP registry. The complete
+fifteen-tool `tools/list` response is kept below 65,536 bytes so bounded or
+deferred host discovery cannot truncate later operations. Family-specific
+successful-result schemas remain internal runtime contracts rather than being
+repeated as optional MCP `outputSchema` metadata; the runtime validates every
+successful service result against the corresponding internal schema before
+transport. A successful MCP tool result carries that canonical data in
 `structuredContent`; its text content is a compact, actionable summary and
 handles rather than a duplicated large payload, with `isError=false`.
 
 Caller-correctable failures instead return `isError=true` and one bounded,
 sanitized text-content explanation with a stable Cortex code and next action;
-they intentionally omit `structuredContent` so clients never validate an error
-against a successful `outputSchema`. Server-state faults use a sanitized JSON-RPC
+they intentionally omit `structuredContent` so error data cannot be confused
+with a successful structured result. Server-state faults use a sanitized JSON-RPC
 internal error rather than a second incompatible tool-error shape. No error may
 include task/report content, credentials, raw diagnostics, filesystem state, or
 private ledger records.

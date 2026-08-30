@@ -183,9 +183,11 @@ value, and either validation failure leaves the ledger unchanged.
 The stdio transport bounds one JSON frame at 256 KiB. An oversized frame is
 fully drained and returns a sanitized parse error so the next valid
 `ping`/`tools/list` request can succeed; it must not desynchronize the server.
-When the full tool catalog cannot fit that physical bound, `tools/list` returns
-only complete definitions and an opaque `nextCursor`; clients continue until no
-cursor remains. Cortex never splits or truncates a definition to fit a frame.
+The complete fifteen-tool catalogue is additionally constrained to 65,536
+bytes. It advertises the authoritative closed input contracts while keeping
+optional successful-result schemas inside the runtime validation boundary, so
+bounded host discovery receives every complete operation without pagination or
+truncation. Cortex never splits or truncates a definition to fit a frame.
 
 ## Data handling
 

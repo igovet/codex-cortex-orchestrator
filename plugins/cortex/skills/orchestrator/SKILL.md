@@ -53,8 +53,11 @@ explicit user request can change the coordinator-facing language.
 
 Once this route is explicitly selected for project-facing work, the first
 project execution action is the catalogued `open_task` operation. Compose the
-complete outcome contract before that boundary, but do not substitute a prose
-activation acknowledgement for it. Shell or repository inspection, project
+complete outcome contract before that boundary without rendering coordinator
+commentary, a loading notice, an activation acknowledgement, a plan preview,
+or any other user-facing progress text. The first coordinator-to-user surface
+after activation may follow only a successful `open_task`; do not substitute
+prose for the anchor. Shell or repository inspection, project
 state checks, and native worker dispatch before `open_task` are route
 violations. If the task-opening boundary fails or produces no task anchor,
 stop the route and explain the limitation; do not begin degraded project work.

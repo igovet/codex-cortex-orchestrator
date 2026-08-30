@@ -418,10 +418,11 @@ outside the ledger.
 
 ## MCP result transport
 
-Every one of the eleven registry entries advertises both its closed input schema
-and successful `outputSchema`; the runtime uses those same definitions to
-validate inputs and successful results. A successful call returns canonical JSON
-as text content and `structuredContent`, with `isError=false`. A
+Every one of the fifteen registry entries advertises its closed input schema.
+The runtime separately retains the family-specific successful-result schema
+and uses those definitions to validate inputs and successful results. A
+successful call returns canonical JSON as text content and `structuredContent`,
+with `isError=false`. A
 caller-correctable error returns `isError=true` with one bounded sanitized text
 message, stable code, and recovery action, but no `structuredContent`—an error
 is not a successful-output-schema variant. Sanitized JSON-RPC internal errors

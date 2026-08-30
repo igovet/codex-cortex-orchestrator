@@ -352,8 +352,7 @@ def test_candidate_catalog_provenance_and_first_calls(candidate) -> None:
         assert ready[0]["catalogue_count"] == len(EXPECTED_TOOLS)
         expected_digest = hashlib.sha256(json.dumps(
             tuple({"name": item["name"], "description": str(item["description"]),
-                  "inputSchema": dict(item["inputSchema"]),
-                  "outputSchema": dict(item["outputSchema"])} for item in tools),
+                  "inputSchema": dict(item["inputSchema"])} for item in tools),
             sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False,
         ).encode("ascii")).hexdigest()
         assert ready[0]["catalogue_digest"] == expected_digest
@@ -361,7 +360,7 @@ def test_candidate_catalog_provenance_and_first_calls(candidate) -> None:
     for tool in tools:
         assert tool["inputSchema"]["type"] == "object"
         assert tool["inputSchema"]["additionalProperties"] is False
-        assert isinstance(tool.get("outputSchema"), dict)
+        assert "outputSchema" not in tool
 
     task_ref = _task(client, project)
     opened = _success(client, "open_clarification", {"task_ref": task_ref, "prompt": "First candidate call?", "prompt_language": "en"})

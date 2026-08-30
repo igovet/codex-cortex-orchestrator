@@ -47,17 +47,16 @@ record may prohibit the model from taking the next safe meaningful step.
 The catalog is identical for every participant. There is no audience filter,
 capability matrix, host-bound authority, tool-name alias, or action selector. Each input
 schema is closed and is also the runtime validator's source; every tool also
-advertises its successful `outputSchema`, which runtime validates before a
+keeps its successful-result schema internal, which runtime validates before a
 success is transported as JSON text plus `structuredContent` with
 `isError=false`. Caller-correctable errors are bounded sanitized text-only
 `isError=true` results with no `structuredContent`; server-state failures are
 sanitized JSON-RPC internal errors.
 
-When the complete catalog would exceed the 256 KiB physical JSONL frame bound,
-the standard `tools/list` response returns complete definitions on opaque
-`nextCursor` continuation pages. Clients follow the cursor until absent to
-recover the unchanged ordered fifteen-tool semantic catalog; a definition is never split
-or truncated to make a frame fit.
+The complete catalogue must fit in one `tools/list` JSON-RPC response below
+65,536 bytes. This bounded discovery contract is substantially below the 256
+KiB physical JSONL frame bound and does not use continuation pages, so every
+participant receives all fifteen operation definitions together.
 
 Only `create_task` accepts the exact resolved `project_root` and stores the
 canonical project association; it is the sole public project-root boundary. It

@@ -67,7 +67,6 @@ def catalogue_identity(public_tools: Mapping[str, Mapping[str, Any]]) -> dict[st
         {
             "name": name, "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
-            "outputSchema": dict(contract["outputSchema"]),
         }
         for name, contract in public_tools.items()
     )
@@ -896,13 +895,15 @@ def serve_stdio(
             "name": name,
             "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
-            # The wire contract is the same family-specific schema used for
-            # result validation below.  Discovery must not collapse typed
-            # decision handles into a generic envelope.
-            "outputSchema": dict(contract["outputSchema"]),
         }
         for name, contract in public_tools.items()
     )
+    # MCP outputSchema is optional.  Keep the family-specific result schemas
+    # private to the runtime validation boundary below instead of repeating
+    # them in every deferred host-tool declaration.  The successful result's
+    # structuredContent remains unchanged and self-describing, while one
+    # complete tools/list response stays small enough for bounded host tool
+    # discovery without truncating later operations from the model's view.
     # This is a digest of the complete advertised catalogue, not a second
     # wire catalogue.  It gives the passive observer compact registration
     # parity without retaining tool names or schemas in the event stream.

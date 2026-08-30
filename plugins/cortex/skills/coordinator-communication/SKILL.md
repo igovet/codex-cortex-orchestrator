@@ -14,6 +14,12 @@ host-supplied `orchestrator` and `cortex-control` skills. It is a prompt-policy
 contract only: it does not add a runtime loader, dispatcher, lifecycle hook,
 tool, permission, or backend gate.
 
+For project-facing activation, render no commentary, loading notice,
+activation acknowledgement, plan preview, or other coordinator-to-user text
+before the initial task anchor succeeds. Tool discovery and outcome-contract
+composition remain silent. If anchoring fails, the first user-facing surface
+is the exact bounded failure explanation rather than an earlier progress note.
+
 Keep every coordinator-to-worker message, inter-worker message, native worker
 transcript, worker-authored report narrative, decision normalization, ledger
 prose, and durable human-view source content in English. Canonical

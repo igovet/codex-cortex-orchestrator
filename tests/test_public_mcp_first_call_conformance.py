@@ -17,7 +17,6 @@ sys.path.insert(0, str(SCRIPTS))
 
 from cortex import PUBLIC_TOOLS, SERVER_INSTRUCTIONS, SERVER_VERSION  # noqa: E402
 from cortex_runtime.mcp_api import (  # noqa: E402
-    MAX_PHYSICAL_JSONL_FRAME_BYTES,
     MCP_SUPPORTED_PROTOCOL_VERSIONS,
     _success_tool_result,
     _validation_failure,
@@ -59,7 +58,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertNotIn("nextCursor", result)
         self.assertEqual(tuple(tool["name"] for tool in result["tools"]), EXPECTED_TOOLS)
         response_line = next(line for line in output.getvalue().splitlines() if json.loads(line).get("id") == 2)
-        self.assertLessEqual(len(response_line.encode()), MAX_PHYSICAL_JSONL_FRAME_BYTES)
+        self.assertLessEqual(len(response_line.encode()), 65536)
         advertised = {tool["name"]: tool for tool in result["tools"]}
         for name in EXPECTED_TOOLS:
             tool = PUBLIC_TOOLS[name]
@@ -69,7 +68,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             self.assertNotIn("allOf", schema)
             self.assertIn("outputSchema", tool)
             self.assertEqual(tool["outputSchema"]["type"], "object")
-            self.assertEqual(advertised[name]["outputSchema"], tool["outputSchema"])
+            self.assertNotIn("outputSchema", advertised[name])
             self.assertNotIn("max_bytes", schema["properties"])
             self.assertNotIn("maxBytes", schema["properties"])
             self.assertNotIn("budget", schema["properties"])
@@ -463,8 +462,8 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             self.assertNotIn("subject_ref", listed_clarification["inputSchema"]["properties"])
             self.assertIn("server derives the task subject", listed_clarification["description"])
             listed_record_decision = next(tool for tool in listed if tool["name"] == "record_clarification")
-            self.assertIn("outputSchema", listed_record_decision)
-            self.assertIn("outputSchema", listed_clarification)
+            self.assertNotIn("outputSchema", listed_record_decision)
+            self.assertNotIn("outputSchema", listed_clarification)
             self.assertNotIn("steering_delta", json.dumps(listed_record_decision["inputSchema"]))
             for narrow_name, forbidden in {
                 "record_clarification": {"outcome", "add", "retire_item_refs"},

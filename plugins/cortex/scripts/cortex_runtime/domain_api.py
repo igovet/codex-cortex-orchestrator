@@ -36,8 +36,6 @@ def _worker_capability_provenance() -> dict[str, str]:
             "name": name,
             "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
-            **({"outputSchema": dict(contract["outputSchema"])}
-               if isinstance(contract.get("outputSchema"), dict) else {}),
         }
         for name, contract in build_public_contracts().items()
     )

@@ -39,6 +39,7 @@ def test_activation_kernels_are_flattened_and_ordered() -> None:
     # the companion states the same boundary in its pre-anchor protocol.  Do
     # not depend on the retired reference-loader wording or line counts.
     assert "first project execution action is the catalogued `open_task` operation" in orchestrator_flat
+    assert "the first coordinator-to-user surface after activation may follow only a successful `open_task`" in orchestrator_flat
     assert "first project execution action is exactly one" in control_flat
     assert "before the anchor" in control
 
@@ -53,6 +54,8 @@ def test_preload_metadata_blocks_unanchored_user_questions() -> None:
     assert "first project operation is open_task" in orchestrator_description
     assert "no user question may be rendered until the matching durable clarification hold succeeds" in orchestrator_description
     assert "never preview a pending question in commentary" in communication_description
+    assert "render no commentary" in communication
+    assert "before the initial task anchor succeeds" in communication
 
 
 def test_flattened_orchestrator_preserves_capability_inventory() -> None:
