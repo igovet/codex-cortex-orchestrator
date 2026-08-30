@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import sys
 
+sys.dont_write_bytecode = True
+
+import sys
+
 # The ordinary MCP command intentionally remains ``python3 ./scripts/cortex.py``.
 # Disable bytecode before importing any bundled runtime module so an installed
 # cache never receives generated ``__pycache__`` artifacts merely by launching
@@ -19,7 +23,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from cortex_runtime.mcp_api import serve_stdio
-from cortex_runtime.public_contracts import V12_TOOL_NAMES, build_public_contracts
+from cortex_runtime.public_contracts import build_public_contracts
+from cortex_runtime.semantic_registry import OPERATION_NAMES, bind_handlers
 from cortex_runtime.domain_api import (
     assess_governance,
     close_task,
@@ -30,15 +35,17 @@ from cortex_runtime.domain_api import (
     publish_plan,
     publish_result,
     read_task,
-    open_decision,
-    record_decision,
+    open_clarification,
+    open_plan_review,
+    open_steering,
+    record_clarification, record_plan_review, record_steering,
 )
 
 
-SERVER_VERSION = "12.1.1"
+SERVER_VERSION = "1.12.1"
 SERVER_INSTRUCTIONS = (
     "Cortex v12 is a durable coordination ledger. All participants receive the "
-    "same eleven semantic tools for task, assignment, evidence, publication, decision, "
+    f"same {len(OPERATION_NAMES)} semantic tools for task, assignment, evidence, publication, decision, "
     "governance, and closure. The model owns delegation, model/effort selection, governance, "
     "rework, verification depth, and final-answer decisions. Governance records are "
     "advisory and never block safe coordination or a user-facing answer."
@@ -48,26 +55,28 @@ SERVER_INSTRUCTIONS = (
 _HANDLERS: Mapping[str, Callable[..., Mapping[str, Any]]] = {
     "open_task": open_task,
     "read_task": read_task,
-    "open_decision": open_decision,
+    "open_clarification": open_clarification,
+    "open_plan_review": open_plan_review,
+    "open_steering": open_steering,
+    "record_clarification": record_clarification,
+    "record_plan_review": record_plan_review,
+    "record_steering": record_steering,
     "open_assignment": open_assignment,
     "consume_assignment_evidence": consume_assignment_evidence,
     "publish_plan": publish_plan,
     "publish_result": publish_result,
     "publish_documentation": publish_documentation,
-    "record_decision": record_decision,
     "assess_governance": assess_governance,
     "close_task": close_task,
 }
+_HANDLERS = {name: _HANDLERS[name] for name in OPERATION_NAMES}
 
 def build_v12_public_tools() -> dict[str, dict[str, Any]]:
     """Bind the uniform v12 contracts directly to their durable handlers."""
     contracts = build_public_contracts()
-    if tuple(contracts) != V12_TOOL_NAMES or tuple(_HANDLERS) != V12_TOOL_NAMES:
-        raise RuntimeError("Cortex v12 must expose exactly the canonical eleven-tool catalogue")
-    return {
-        name: {**dict(contracts[name]), "handler": _HANDLERS[name]}
-        for name in V12_TOOL_NAMES
-    }
+    if tuple(contracts) != OPERATION_NAMES or tuple(_HANDLERS) != OPERATION_NAMES:
+        raise RuntimeError(f"Cortex v12 must expose exactly the canonical {len(OPERATION_NAMES)}-tool catalogue")
+    return bind_handlers(_HANDLERS)
 
 
 PUBLIC_TOOLS = build_v12_public_tools()

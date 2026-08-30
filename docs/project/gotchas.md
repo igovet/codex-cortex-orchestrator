@@ -155,7 +155,7 @@
 - Do not mix subject fields: task closures omit initiative status/completion
   fields, while initiative closures use the exact returned compact
   `initiative_ref`. The closure call has no subject digest argument.
-- `record_user_decision` is coordinator-asserted evidence. Use neutral `prompt`
+- The three narrow decision record operations are coordinator-asserted evidence. Use the matching advertised operation and preserve the exact user response.
   and preserve the exact ordinary-chat response in `response_original`; do not
   send retired `prompt_en`/`response_en` duplicate fields. Bind plan/report decisions to the exact
   immutable digest. Only plan `approve` also requires a current ready approval

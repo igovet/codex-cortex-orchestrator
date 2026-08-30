@@ -2,8 +2,9 @@
   "mcpServers": {
     "cortex": {
       "command": "python3",
-      "args": ["./scripts/cortex.py"],
-      "cwd": "."
+      "args": ["-B", "./scripts/cortex.py"],
+      "cwd": ".",
+      "env_vars": ["CODEX_HOME", "CORTEX_SESSION_NONCE", "CORTEX_RAW_DIAGNOSTIC"]
     }
   }
 }

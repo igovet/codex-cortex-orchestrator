@@ -85,6 +85,7 @@ CANONICAL_REPORT_V2_SCHEMAS = {
 # admission while its assembly can still be corrected.
 CANONICAL_REPORT_EVIDENCE_SCHEMAS = {
     "result": "cortex/report/result/v3",
+    "synthesis": "cortex/report/synthesis/v3",
     "plan": "cortex/report/plan/v3",
 }
 REPORT_SEMANTIC_STATUSES = ("pending", "semantic_valid", "semantic_invalid", "legacy")
@@ -162,11 +163,36 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
             "synthesis": ("summary", "findings", "recommendations"),
             "plan": ("summary", "scope", "stages", "verification"),
         }[report_type]
-        required = {*base, "contract_coverage", "deviations", "unresolved", "risks", "verification"}
-        evidence_required = schema == CANONICAL_REPORT_EVIDENCE_SCHEMAS.get(report_type)
+        required = {*base, "deviations", "unresolved", "risks", "verification"}
+        current_v3 = schema == CANONICAL_REPORT_EVIDENCE_SCHEMAS.get(report_type)
+        # A planner can prove the proposed work breakdown and its observable
+        # planning checks, but cannot truthfully issue the post-implementation
+        # documentation-impact verdict.  That assessment belongs to result
+        # and synthesis publication after implementation/verification.
+        evidence_required = current_v3 and report_type in {"plan", "result", "synthesis"}
         if evidence_required:
-            required |= {"evidence", "documentation_impact"}
-        if any(not isinstance(key, str) or key not in {"schema", "source_text", *required} for key in content):
+            if report_type in {"plan", "result"}:
+                required.add("verification_facts")
+            if report_type in {"result", "synthesis"}:
+                required.add("documentation_impact")
+        elif not current_v3:
+            # Historical v2 evidence already stored caller-authored coverage.
+            # Keep those immutable rows readable, but do not admit the field in
+            # the current v3 public contract or use it as current authority.
+            required.add("contract_coverage")
+        # Current v3 publication scope is owned by the immutable assignment
+        # capability.  Accepting caller-authored coverage here would make the
+        # model reconstruct server-owned item identities and would duplicate
+        # an authority relation the store already has.  Historical v2 remains
+        # readable through the branch above, but v3 deliberately has no
+        # coverage input field.
+        allowed_keys = {"schema", "source_text", *required}
+        # A planner may optionally carry an early impact hypothesis, but it
+        # cannot be required to know the post-implementation verdict. The
+        # explicit authoritative assessment belongs to the later synthesis.
+        if report_type == "plan":
+            allowed_keys.add("documentation_impact")
+        if any(not isinstance(key, str) or key not in allowed_keys for key in content):
             return "semantic_invalid"
         if not isinstance(content.get("summary"), str) or not content["summary"].strip():
             return "semantic_invalid"
@@ -183,9 +209,14 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
             scalar_fields.add("scope")
         if any(not isinstance(content.get(key), list) for key in required - scalar_fields - {"documentation_impact"}):
             return "semantic_invalid"
-        if evidence_required and not isinstance(content.get("documentation_impact"), Mapping):
+        if report_type in {"result", "synthesis"} and evidence_required and (not isinstance(content.get("documentation_impact"), str) or not content["documentation_impact"].strip()):
             return "semantic_invalid"
-        if any(not isinstance(item, Mapping) or not isinstance(item.get("item_ref"), str) or not isinstance(item.get("status"), str) for item in content["contract_coverage"]):
+        if not current_v3 and any(
+            not isinstance(item, Mapping)
+            or not isinstance(item.get("item_ref"), str)
+            or not isinstance(item.get("status"), str)
+            for item in content["contract_coverage"]
+        ):
             return "semantic_invalid"
         if report_type == "plan" and evidence_required:
             stages = content["stages"]

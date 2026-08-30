@@ -1,6 +1,6 @@
 # Changelog
 
-## [12.1.1] - 2026-08-28
+## [1.12.1] - 2026-08-28
 
 ### Fixed
 
@@ -19,10 +19,10 @@
 
 ### Verification
 
-- Added the deterministic source-mode all-eleven first-valid-call regression
+- Added the deterministic source-mode all-15-operation first-valid-call regression
   and the owned-PTY `scripts/cortex-live-smoke` verifier.
 
-## [12.1.0] - 2026-08-28
+## Historical/internal milestone — 2026-08-28 (pre-1.12.1 development)
 
 - Added fixed canonical semantic report schemas with a single unchanged
   `source_text` value and non-gating semantic classification.

@@ -190,7 +190,11 @@ def _ready_approval_view(store: V12Store, report: Mapping[str, Any]) -> dict[str
     relative = f"plans/revisions/{report_id}.md"
     view: dict[str, Any] = {"status": "unavailable", "path": None}
     for _attempt in range(2):
-        candidate = store.human_view(task_id, relative)
+        # An approval relation is anchored to this immutable report/view
+        # snapshot. Global task chronology is deliberately irrelevant: later
+        # governance or initiative events cannot make the already-issued
+        # relation stale.
+        candidate = store.human_view(task_id, relative, require_fresh=False)
         if candidate.get("status") == "ready":
             view = candidate
             break
@@ -354,6 +358,8 @@ def create_delegation(
     input_report_refs: list[str] | None = None,
     input_decision_refs: list[str] | None = None,
     outcome_assignments: dict[str, list[str]] | None = None,
+    bootstrap_provenance: dict[str, str] | None = None,
+    derive_assignment_scope: bool = False,
 ) -> dict[str, Any]:
     """Persist a coordinator-supplied delegation without selecting a route."""
     store, canonical = _task_store(task_ref)
@@ -375,6 +381,8 @@ def create_delegation(
         model=model,
         reasoning_effort=reasoning_effort,
         idempotency_key=idempotency_key,
+        bootstrap_provenance=bootstrap_provenance,
+        derive_assignment_scope=derive_assignment_scope,
     )
 
 

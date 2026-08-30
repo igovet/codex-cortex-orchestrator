@@ -10,7 +10,7 @@
   repository state.
 - Treat activated bundled skill text as host-supplied context. Never call
   `read_mcp_resource`, `resources/read`, or a Cortex tool to fetch a `skill://`
-  URI; the eleven-tool registry has no skill-resource reader.
+  URI; the fifteen-tool registry has no skill-resource reader.
 - Treat Cortex as a durable coordination ledger. The coordinator owns only a
   model-held dynamic orchestration DAG and governance; the backend owns storage
   integrity, immutable evidence, bounded reads, and derived host-private
@@ -65,7 +65,7 @@
 - Before `create_delegation` or native spawn, require those six labels exactly
   once, in order, with non-empty delegation-specific content. Empty, omitted,
   TODO/TBD/unknown, or generic placeholder sections are invalid.
-- Keep the public facade at exactly the eleven canonical action-specific tools in
+- Keep the public facade at exactly the fifteen canonical action-specific tools in
   `public_contracts.py`. Coordinator and worker catalogs are identical.
 - Let the active MCP schema own exact fields, types, sizes, enumerations, and
   response shapes. Documentation mirrors semantics and the exact tool names but
@@ -153,7 +153,7 @@
   finalized inputs; retain the exact receipt digest, chunk indexes, and cursor
   transitions. Continue task/delegation/governance inspection with `after_sequence`
   and preserve `next_sequence`/`has_more`; pages are fixed at 50 events.
-- Use `record_user_decision` only when coordinator policy has identified an
+- Use the matching narrow decision record operation only when coordinator policy has identified an
   ordinary-chat response as a direct user decision. Use neutral `prompt`, append
   the exact original-language response in `response_original`, and retain no
   `prompt_en`/`response_en` duplicate fields. Bind

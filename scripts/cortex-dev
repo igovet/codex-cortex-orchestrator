@@ -46,8 +46,110 @@ chmod 700 -- "${dev_home}" "${dev_home}/.codex"
 
 export HOME="${dev_home}"
 export CODEX_HOME="${HOME}/.codex"
+# Authorize the sync helper to reconcile only this exact isolated marketplace
+# registration.  The helper independently validates all three lexical paths
+# before it can remove or add a marketplace, so this marker cannot widen the
+# supported path to the stable profile.
+export CORTEX_ISOLATED_MARKETPLACE_RECONCILE=1
+export CORTEX_ISOLATED_DEV_OWNER_HOME="${original_home}"
+export CORTEX_ISOLATED_DEV_CODEX_HOME="${CODEX_HOME}"
 cd -- "${project_dir}"
 printf 'Cortex isolated candidate target: HOME=%s CODEX_HOME=%s\n' "${HOME}" "${CODEX_HOME}"
 ./scripts/sync-cortex.sh
+candidate_identity="$({
+  python3 -B "${script_dir}/cortex_candidate_receipt.py" verify \
+    --source-root "${project_dir}" \
+    --owner-home "${original_home}" \
+    --isolated-home "${HOME}" \
+    --isolated-codex-home "${CODEX_HOME}"
+})" || {
+  echo "error: isolated Cortex candidate provenance verification failed; Codex will not start" >&2
+  exit 1
+}
+candidate_version="$(python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read())["base_version"])' <<<"${candidate_identity}")"
+candidate_build_id="$(python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read())["build_id"])' <<<"${candidate_identity}")"
+candidate_source_digest="$(python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read())["source_digest"])' <<<"${candidate_identity}")"
+candidate_digest_value="$(python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read())["candidate_digest"])' <<<"${candidate_identity}")"
+candidate_path="$(python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read())["candidate_path"])' <<<"${candidate_identity}")"
+candidate_stamp="$(python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read())["candidate_version"])' <<<"${candidate_identity}")"
+candidate_receipt="${CODEX_HOME}/.cortex-candidate-receipt.json"
+live_state_file="$(python3 -B -c 'import os; print("/tmp/cortex-live-smoke-%s/session.json" % os.getuid())')"
+session_nonce=""
+live_binding_path=""
+live_smoke_launch="${CORTEX_LIVE_SMOKE_LAUNCH:-}"
+if [[ "${live_smoke_launch}" == "1" ]]; then
+  mapfile -t live_identity < <(python3 -B - "${live_state_file}" "${CODEX_HOME}" "${caller_workdir}" <<'PY'
+import hashlib, json, os, pathlib, stat, sys
+state_path, codex_home, caller_workdir = map(pathlib.Path, sys.argv[1:])
+try:
+    info = state_path.lstat()
+    if state_path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    resolved_home = codex_home.resolve(strict=True)
+    expected_fingerprint = hashlib.sha256(str(resolved_home).encode()).hexdigest()
+    expected_binding = resolved_home / ".cortex-live-binding.json"
+    nonce = state.get("session_nonce")
+    binding = pathlib.Path(str(state.get("binding_path", "")))
+    if (state.get("workdir") != str(caller_workdir.resolve(strict=True))
+            or state.get("isolated_codex_fingerprint") != expected_fingerprint
+            or binding != expected_binding
+            or not isinstance(nonce, str) or len(nonce) != 64
+            or any(character not in "0123456789abcdef" for character in nonce)):
+        raise ValueError
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    raise SystemExit("error: live-smoke state does not match this isolated launch")
+print(nonce)
+print(binding)
+PY
+  )
+  if [[ "${#live_identity[@]}" -ne 2 ]]; then
+    echo "error: live-smoke identity is unavailable; Codex will not start" >&2
+    exit 1
+  fi
+  session_nonce="${live_identity[0]}"
+  live_binding_path="${live_identity[1]}"
+  export CORTEX_SESSION_NONCE="${session_nonce}"
+  export CORTEX_LIVE_BINDING_PATH="${live_binding_path}"
+  python3 -B "${script_dir}/cortex_observation_generation.py" \
+    --receipt "${candidate_receipt}" --session-nonce "${session_nonce}" >/dev/null || {
+    echo "error: isolated Cortex observation generation request failed; Codex will not start" >&2
+    exit 1
+  }
+fi
+printf 'Cortex server version=%s\n' "${candidate_version}"
+printf 'Cortex candidate version=%s\n' "${candidate_stamp}"
+printf 'Cortex candidate build=%s\n' "${candidate_build_id}"
+printf 'Cortex source digest=%s\n' "${candidate_source_digest}"
+printf 'Cortex candidate digest=%s\n' "${candidate_digest_value}"
+printf 'Cortex source/candidate parity=verified\n'
+printf 'Cortex candidate path=%s\n' "${candidate_path}"
+printf 'Cortex candidate receipt=%s\n' "${candidate_receipt}"
+export CORTEX_BUILD_ID="${candidate_build_id}"
+export CORTEX_SOURCE_DIGEST="${candidate_source_digest}"
+export CORTEX_CANDIDATE_PATH="${candidate_path}"
+export CORTEX_CANDIDATE_RECEIPT="${candidate_receipt}"
+export CORTEX_CANDIDATE_DIGEST="${candidate_digest_value}"
+export CORTEX_HOOK_DIAGNOSTIC=1
+export CORTEX_RAW_DIAGNOSTIC=1
 cd -- "${caller_workdir}"
+# Bind the upcoming Codex exec to the live-dev launch receipt.  exec preserves
+# this PID, allowing the trusted SessionStart observer to correlate one root
+# session without global session-file or timestamp selection.
+if [[ "${live_smoke_launch}" == "1" ]]; then
+python3 -B - "${CODEX_HOME}/.cortex-live-launch.json" "${CORTEX_SESSION_NONCE}" "${caller_workdir}" "${CODEX_HOME}" "$$" <<'PY'
+import hashlib, json, os, pathlib, stat, sys
+path = pathlib.Path(sys.argv[1]); nonce, cwd, profile, pid = sys.argv[2:]
+try:
+    if not nonce or not path.exists() or path.is_symlink() or stat.S_IMODE(path.stat().st_mode) != 0o600:
+        raise SystemExit(1)
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if value.get('session_nonce') != nonce or value.get('cwd') != cwd:
+        raise SystemExit(1)
+    value.update({'pid': int(pid), 'pgid': os.getpgrp(), 'tty': os.ttyname(0) if os.isatty(0) else '', 'profile_fingerprint': hashlib.sha256(str(path.parent.resolve()).encode()).hexdigest(), 'active': True})
+    tmp = path.with_suffix('.tmp'); tmp.write_text(json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n'); os.chmod(tmp, 0o600); os.replace(tmp, path); os.chmod(path, 0o600)
+except Exception:
+    raise SystemExit(1)
+PY
+fi
 exec codex "$@"

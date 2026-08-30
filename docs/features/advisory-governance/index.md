@@ -15,7 +15,7 @@ orchestrator-owned knowledge route used to compile delegation requirements.
 
 ## Key files
 
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the governance and decision tools, including `open_decision` and `record_decision`, in the uniform eleven-tool semantic catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the governance and decision tools, including the three narrow decision operations, in the uniform fifteen-tool semantic catalog.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) exposes action-specific governance operations.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns append-only assessments, initiative revisions/links, warnings, and closures.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines outcome-first model behavior.
@@ -124,7 +124,7 @@ creates a coordinator-owned pause only for plan-dependent work when explicit
 review or a real product, scope, destructive, external, security, privacy, or
 risk decision is needed. It never changes public-tool availability.
 
-`record_user_decision` appends `user_via_coordinator` evidence for an exact
+The matching narrow decision record operation appends `user_via_coordinator` evidence for an exact
 task, plan, initiative, delegation, or report through one closed canonical
 request containing the task and subject refs, decision type, neutral `prompt`,
 exact arbitrary-Unicode `response_original`, and asserted user language; include

@@ -4,7 +4,7 @@
 
 ## Purpose and boundary
 
-Cortex 12.1.1 ships a packaged coordinator-to-user communication policy. It
+Cortex 1.12.1 ships a packaged coordinator-to-user communication policy. It
 keeps user-facing commentary, questions, plan summaries, progress, decision
 summaries, artifact summaries, and final answers clear without creating a
 runtime loader, dispatcher, lifecycle hook, tool, or backend gate.

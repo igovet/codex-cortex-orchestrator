@@ -39,6 +39,16 @@ def validate_model_selection(model: object, reasoning_effort: object) -> ModelSe
     return ModelSelection(model=exact_model, reasoning_effort=exact_effort)
 
 
+def profile_default_selection(profile_name: object) -> ModelSelection:
+    """Return the packaged server-owned default for one explicit profile.
+
+    Profile intent remains caller-selected; model and effort are routing-table
+    policy and are not a second caller-owned assignment contract.
+    """
+    _required_text(profile_name, "profile_name")
+    return ModelSelection(model="gpt-5.6-luna", reasoning_effort="high")
+
+
 def model_effort_registry(_model_routing: Mapping[str, Any] | None = None) -> dict[str, tuple[str, ...]]:
     """Return packaged recommendations for source tooling only."""
     return {model: NATIVE_REASONING_EFFORTS for model in NATIVE_MODELS}

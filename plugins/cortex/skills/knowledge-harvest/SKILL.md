@@ -59,9 +59,10 @@ that decision.
    normally 2–8 in parallel for a large repository. Each inventories routes,
    commands, jobs, screens, handlers, policies, state, persistence,
    integrations, configuration, deployment paths, failure paths, and
-   behavior-revealing tests. Give each the scope report_ref when relevant.
+   behavior-revealing tests. Give each the relevant finalized evidence reference
+   when applicable.
 3. **Architecture synthesis:** Create an `architect` delegation with the
-   relevant census report_refs. It deduplicates features, defines stable
+   relevant census evidence references. It deduplicates features, defines stable
    boundaries, maps cross-domain flows and shared infrastructure, identifies
    ADR-worthy decisions, and proposes the documentation taxonomy.
 4. **Planning:** When ownership, dependencies, acceptance, or verification
@@ -82,7 +83,8 @@ that decision.
    checks, and the final coverage statement.
 
 Independent delegations may run concurrently. A delegation that genuinely
-needs earlier evidence receives the relevant report_refs after those reports
+needs earlier evidence receives the relevant finalized evidence references after
+those publications
 exist. The model owns every adaptation and completion decision.
 
 ## Relationship to the final documentation stage
@@ -92,7 +94,8 @@ documentation delegations serve as the dedicated documentation-sync worker or
 workers for `docs/project/`, `docs/features/`, and any affected public
 documentation. After the final writing or corrective delegation, a separate
 worker verifies documentation through the completeness-review and verification
-evidence above. The coordinator decides readiness only from those report_refs;
+evidence above. The coordinator decides readiness only from those finalized
+evidence references;
 apart from its bounded index-driven routing reads, it never inspects or edits
 the documentation itself.
 

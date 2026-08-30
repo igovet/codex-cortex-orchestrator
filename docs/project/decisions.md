@@ -65,15 +65,15 @@ worktrees, existence/absence or unchanged-state, and `.codex`—are also
 worker-owned, regardless of read-only, plan, report-recovery, or direct user
 framing.
 
-## Uniform eleven-tool facade
+## Uniform fifteen-tool facade
 
-The facade exposes exactly eleven action-specific tools and one input schema for
+The facade exposes exactly fifteen action-specific tools and one input schema for
 every participant. There is no coordinator/worker projection or audience-based
 field filtering. `tools/list` is the authoritative registry, and runtime
 validation consumes the same schema objects.
 
 The catalog is intentionally small: six core coordination operations, four
-advisory-governance operations, and `record_user_decision` for ordinary-chat
+advisory-governance operations, and the three narrow decision record operations for ordinary-chat
 evidence. Native agent creation, waiting, filesystem changes, permissions, and
 external actions remain outside the ledger.
 
@@ -134,7 +134,7 @@ Task, delegation, and governance inspection use `after_sequence` with fixed 50-e
 return compact report references, and expose `timeline`, `next_sequence`, and
 `has_more` rather than opaque capability cursors.
 
-`record_user_decision` appends a coordinator-asserted ordinary-chat decision
+The matching narrow decision record operation appends a coordinator-asserted ordinary-chat decision
 against an existing task, delegation, plan, report, or same-project initiative.
 It retains neutral `prompt`, exact arbitrary-Unicode `response_original`, user
 language, subject identity, immutable plan/report digest where applicable, and

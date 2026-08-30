@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 12.1.1 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.12.1 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -125,11 +125,12 @@ V12 ships no lifecycle hooks and requires no hook-trust flow.
 
 ## Public contract
 
-The same eleven tools are visible to every participant: `create_task`,
-`inspect_task`, `create_delegation`, `read_delegation`, `submit_report`,
-`read_reports`, `set_governance_mode`, `record_initiative`,
-`inspect_governance`, `submit_governance_closure`, and
-`record_user_decision`.
+The same fifteen tools are visible to every participant: `open_task`,
+`read_task`, `open_clarification`, `record_clarification`,
+`open_plan_review`, `record_plan_review`, `open_steering`, `record_steering`,
+`open_assignment`, `consume_assignment_evidence`, `publish_plan`,
+`publish_result`, `publish_documentation`, `assess_governance`, and
+`close_task`.
 
 The active MCP registry owns exact shapes. `create_task` alone accepts the
 resolved `project_root` and returns preferred compact `task_ref`; its canonical
@@ -215,7 +216,7 @@ reasoning, never a backend lifecycle or permission gate.
 Canonical compact decision references match `u_[0-9a-f]{12}` and remain opaque
 evidence references, copied exactly from a successful receipt.
 
-`record_user_decision` appends coordinator-asserted ordinary-chat evidence, not
+The matching narrow decision record operation appends coordinator-asserted ordinary-chat evidence, not
 backend authority. Its one canonical request contains `task_ref`,
 `subject_type`, `subject_ref`, `decision_type`, neutral `prompt`, exact
 arbitrary-Unicode `response_original`, and `user_language`. The original

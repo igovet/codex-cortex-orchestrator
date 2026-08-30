@@ -50,6 +50,14 @@ _MIGRATIONS = (
     (13, "v12-persisted-steering-delta"),
     (14, "v14-atomic-report-operations"),
     (15, "v15-durable-clarification-bindings"),
+    (16, "v16-transactional-command-receipts"),
+    (17, "v17-plan-review-bound-relations"),
+    (18, "v18-clarification-holds"),
+    (19, "v19-derived-task-locators"),
+    (20, "v20-dispatch-correlation-marker"),
+    (21, "v21-worker-bootstrap-capabilities"),
+    (22, "v22-dispatch-lease-expiry"),
+    (23, "v23-immutable-assignment-scope"),
 )
 _BACKUP_FORMAT = "cortex/v12-maintenance-backup/v1"
 _BACKUP_ID_PREFIX = "backup-"
@@ -83,10 +91,15 @@ _REQUIRED_TABLES = frozenset(
         "idempotency",
         "approval_handles",
         "clarification_bindings",
+        "clarification_holds",
+        "task_locator_publications",
         "effective_contract_revisions",
         "effective_contract_items",
         "delegation_outcome_assignments",
+        "assignment_scope_snapshots",
         "report_contract_coverage",
+        "command_receipts",
+        "worker_capabilities",
     }
 )
 _REQUIRED_SCHEMA_OBJECTS = frozenset(
@@ -105,14 +118,20 @@ _REQUIRED_SCHEMA_OBJECTS = frozenset(
         "projection_jobs_pending",
         "approval_handles_task_report",
         "clarification_bindings_task_pending",
+        "clarification_holds_assignment_state",
+        "clarification_holds_task_state",
+        "task_locator_publications_suffix",
         "outcome_owned_current",
         "outcome_assignment_current",
         "outcome_items_task_current",
+        "assignment_scope_task_revision",
+        "assignment_scope_no_update",
+        "assignment_scope_no_delete",
     }
 )
 _REQUIRED_COLUMNS = {
     "tasks": frozenset({"task_id", "project_hash", "project_root", "objective", "context_json"}),
-    "delegations": frozenset({"delegation_id", "project_hash", "task_id", "native_task_name", "input_report_ids_json", "input_decision_ids_json"}),
+    "delegations": frozenset({"delegation_id", "project_hash", "task_id", "native_task_name", "dispatch_correlation_marker", "dispatch_correlation_digest", "input_report_ids_json", "input_decision_ids_json"}),
     "reports": frozenset({"report_id", "project_hash", "task_id", "delegation_id", "assembly_state", "content_digest", "semantic_status", "coverage_diagnostics_json"}),
     "report_chunks": frozenset({"report_id", "chunk_index", "content_json", "content_digest"}),
     "report_consumption_receipts": frozenset({"receipt_id", "project_hash", "task_id", "consumer_delegation_id", "reader_kind", "report_id", "observed_content_digest", "sections_json", "input_cursor", "output_cursor", "chunk_indexes_json", "returned_content_bytes", "has_more", "created_sequence"}),
@@ -122,10 +141,17 @@ _REQUIRED_COLUMNS = {
     "effective_contract_revisions": frozenset({"task_id", "revision", "decision_id", "created_sequence"}),
     "effective_contract_items": frozenset({"item_id", "project_hash", "task_id", "category", "ordinal", "text", "created_revision", "retired_revision"}),
     "delegation_outcome_assignments": frozenset({"delegation_id", "item_id", "assignment_role", "revision", "superseded_by_delegation_id", "superseded_sequence"}),
+    "assignment_scope_snapshots": frozenset({"assignment_id", "task_id", "item_id", "assignment_role", "contract_revision", "created_sequence"}),
     "report_contract_coverage": frozenset({"report_id", "item_id", "status", "verification_json"}),
-    "clarification_bindings": frozenset({"clarification_binding", "project_hash", "task_id", "subject_type", "subject_id", "decision_type", "prompt_digest", "prompt", "prompt_language", "effective_contract_revision", "issue_sequence", "request_digest", "response_digest", "consumed_decision_id"}),
+    # v17 makes these four fields the authoritative immutable plan-review
+    # relation.  Maintenance must reject a shard that claims v17 while any
+    # one is absent; it must never repair, infer, or downgrade that relation.
+    "clarification_bindings": frozenset({"clarification_binding", "project_hash", "task_id", "subject_type", "subject_id", "decision_type", "prompt_digest", "prompt", "prompt_language", "effective_contract_revision", "issue_sequence", "request_digest", "response_digest", "consumed_decision_id", "plan_content_digest", "plan_approval_handle", "plan_view_content_digest", "plan_view_source_sequence"}),
+    "clarification_holds": frozenset({"clarification_binding", "project_hash", "task_id", "assignment_id", "native_dispatch_digest", "continuation_capability", "state", "response_decision_id", "delivery_claim_digest", "opened_sequence", "answered_sequence", "delivery_sequence", "unavailable_reason", "created_at", "updated_at"}),
+    "task_locator_publications": frozenset({"task_id", "project_hash", "suffix", "fingerprint", "created_at"}),
     "projection_jobs": frozenset({"job_id", "task_id", "source_sequence", "status"}),
     "projection_files": frozenset({"task_id", "relative_path", "content_digest", "status"}),
+    "worker_capabilities": frozenset({"capability_ref", "project_hash", "task_id", "assignment_id", "contract_revision", "build_digest", "candidate_digest", "source_digest", "catalogue_digest", "dispatch_digest", "capability_digest", "continuation_ref", "state", "created_sequence", "consumed_sequence", "created_at", "updated_at", "lease_expires_at"}),
 }
 
 

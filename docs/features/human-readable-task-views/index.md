@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 12.1.1 projects selected host-private plan and finalized-report evidence
+Cortex 1.12.1 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read
@@ -136,7 +136,7 @@ exact absolute path it returned. The accompanying summary is localized to the
 user's language and explains what evidence the particular page contains.
 
 The published form is the server-provided `markdown_link` field copied
-byte-for-byte, such as `[Open plan](/absolute/path/to/t_ref/plans/current.md)`:
+byte-for-byte, including its readable label and absolute destination:
 its readable label and destination are already bound to the verified artifact.
 Cortex never uses a bare or backticked path, a code block, a constructed path,
 or a line break inside the destination.
@@ -194,7 +194,7 @@ reviewable plan; immutable historical revisions appear at
 content to the canonical report so review cannot silently drift to altered
 text.
 
-`record_user_decision` records `approve`, `reject`, `request_revision`,
+The matching narrow decision record operation records `approve`, `reject`, `request_revision`,
 `clarification`, `cancel`, `accept_risk`, `override`, or `steer` against an exact task,
 plan, initiative, delegation, or report. Its closed canonical request preserves
 the task/subject refs, decision type, neutral `prompt`, exact

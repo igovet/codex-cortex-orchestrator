@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 12.1.1 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.12.1 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -36,7 +36,7 @@ backend gates. Required plan review and a genuine user decision are owned by
 the coordinator in ordinary chat: a stored decision records the evidence but
 does not authenticate the user, grant authority, or authorize a later action.
 
-Coordinators and workers receive the same exact eleven-tool semantic catalog. There is no
+Coordinators and workers receive the same exact fifteen-tool semantic catalog. There is no
 audience filtering, opaque coordinator or worker capability, host epoch, native
 child binding or lifecycle attestation, profile capability matrix, or session
 or environment identity. The worker brief does carry renderer/profile proof and
@@ -90,17 +90,21 @@ The complete public catalog is defined in
 [`public_contracts.py`](plugins/cortex/scripts/cortex_runtime/public_contracts.py)
 and contains exactly:
 
-1. `create_task`
-2. `inspect_task`
-3. `create_delegation`
-4. `read_delegation`
-5. `submit_report`
-6. `read_reports`
-7. `set_governance_mode`
-8. `record_initiative`
-9. `inspect_governance`
-10. `submit_governance_closure`
-11. `record_user_decision`
+1. `open_task`
+2. `read_task`
+3. `open_clarification`
+4. `record_clarification`
+5. `open_plan_review`
+6. `record_plan_review`
+7. `open_steering`
+8. `record_steering`
+9. `open_assignment`
+10. `consume_assignment_evidence`
+11. `publish_plan`
+12. `publish_result`
+13. `publish_documentation`
+14. `assess_governance`
+15. `close_task`
 
 Every tool has a closed input object. Runtime validation consumes the same
 schema object advertised by `tools/list`. Unexpected properties, invalid
@@ -148,7 +152,9 @@ replacement. `submit_governance_closure` requires both `subject_type` and the
 matching compact task or initiative `subject_ref`; it records advisory evidence
 and does not gate safe work or a truthful user-facing answer.
 
-`record_user_decision` is the durable record of an ordinary-chat decision. It
+The narrow decision operations are the durable record of ordinary-chat
+decisions. `record_clarification`, `record_plan_review`, and
+`record_steering` each consume only the matching server-issued binding. They
 requires one canonical field set: `task_ref`, subject type/ref/digest, decision
 type, neutral `prompt`, exact arbitrary-Unicode `response_original`, and
 `user_language`. A plan decision binds only that completed, finalized plan
@@ -191,6 +197,25 @@ raw diagnostic logs, or unnecessarily sensitive operational details in:
 - worker reports or report handoffs;
 - governance rationales, risk factors, initiatives, closures, or follow-ups;
 - prompts, fixtures, tests, documentation, issues, commits, or generated views.
+
+The isolated live-dev MCP observation journal is an owner-only bounded
+diagnostic surface, not durable ledger evidence. It may retain only safe
+operation/outcome metadata, an optional registry-safe failure fault, build
+identity, and one-way anchor fingerprints. Its internal outcome vocabulary is
+not a public MCP error-code namespace.
+After a successful physical MCP initialization reply, one registration-only
+`server_ready` observation may additionally retain the verified build identity
+and a count plus one-way digest of the advertised catalogue. It must not retain
+tool names, definitions, request content, server paths, or host diagnostics.
+It must never retain raw references, request arguments, responses, prompts,
+reports, native task names, host messages, continuation capabilities, project
+paths, secrets, personal data, or raw exceptions. Symlinks, non-private modes,
+and oversized/corrupt journal state are observation failures. They must not
+change a successful canonical MCP mutation into a failure or trigger a retry;
+the live verifier records the resulting observation limitation. The runtime
+opens the isolated `CODEX_HOME` root and all journal descendants with a
+no-follow descriptor chain; it rejects a symlink, wrong owner, or wrong mode
+at any such ancestor and never creates a missing arbitrary `CODEX_HOME` root.
 
 Use English for every native worker commentary/update, inter-worker message,
 final response, tool-authored durable string, objective, requirement,
@@ -523,7 +548,7 @@ A useful report includes:
 
 ## Release safety checklist
 
-1. Verify the manifest is V12, the public registry has exactly eleven tools, and
+1. Verify the manifest is V12, the public registry has exactly fifteen tools, and
    coordinator and worker catalogs are identical.
 2. Verify the bundled skills make the root coordinator orchestration-only and
    delegate every source/code/config read, analysis, edit, command, test,
@@ -549,7 +574,7 @@ A useful report includes:
    host-private verified projection behavior, and V11 byte-for-byte
    preservation.
 6. Confirm lifecycle hook code and enabled hook declarations are absent.
-7. Verify the packaged maintenance CLI remains outside the eleven-tool semantic catalog,
+7. Verify the packaged maintenance CLI remains outside the fifteen-tool semantic catalog,
    uses task/shard-derived host-private targets and exact confirmations,
    validates backups before retention/restore, requires offline `MCP_STOPPED`
    restore acknowledgement, preserves canonical data during projection/backup

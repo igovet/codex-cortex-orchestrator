@@ -27,7 +27,7 @@ completed reports.
 ## Key files
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) builds and serves the V12 facade.
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact eleven-tool semantic catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact fifteen-tool semantic catalog.
 - [mcp_api.py](../../../plugins/cortex/scripts/cortex_runtime/mcp_api.py) validates requests and serves MCP over stdio.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) maps public calls to the store.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) owns bounded V12 task/report constants and canonical report digests.
@@ -56,7 +56,7 @@ create_task
     │                                                │
     ├────────────── inspect_task / bounded read_reports ◄────┘
     │
-    ├── plan report ──► verified review links ──► record_user_decision
+    ├── plan report ──► verified review links ──► open_plan_review → record_plan_review
     │
     ├── record_initiative / inspect_governance
     │
@@ -98,7 +98,9 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | `record_initiative` | Use `task_ref` only as the project anchor to create or revise an initiative and its links. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative assessments, revisions, links, warnings, and closures. |
 | `submit_governance_closure` | After sufficient finalized worker evidence, use `task_ref` to append an advisory verdict and evidence for required `subject_type` plus matching compact task/initiative `subject_ref`; the service automatically inspects the intended record and returns `closure_confirmation` separately from `execution_outcome`. |
-| `record_user_decision` | Use one canonical task-ref/subject-ref/decision/response field set (`prompt`, exact `response_original`, and `user_language`) to append coordinator-attributed evidence; include the subject digest for plan/report subjects only. For plan `approve`, include the complete exact ready approval-view relation: report ref/digest, handle, view digest, and source sequence. |
+| `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
+| `open_plan_review` → `record_plan_review` | Present and record one immutable plan review through a matching server-owned binding. |
+| `open_steering` → `record_steering` | Ask and record one steering change through a matching server-owned binding. |
 
 The catalog is identical for coordinators and workers. There is no audience
 filter, capability matrix, host-bound lifecycle authority, receipt-gated
@@ -145,7 +147,7 @@ sufficient completed evidence and then automatically attempts the advisory
 closure write followed by bounded inspection of the intended record. This
 policy does not make closure a scheduler, admission check, or user-confirmation
 step. `ready_with_risks` needs no user confirmation; any genuine user decision
-is handled through ordinary chat and `record_user_decision` only where the
+is handled through ordinary chat and the matching narrow decision record operation only where the
 coordinator's plan or product policy requires it.
 
 `inspect_task` also returns `advisory_closure`, whose `record_status` is
@@ -281,7 +283,7 @@ existing timeline row or guesses ambiguous report-only lineage.
 
 Plan reports add `review_policy=informational|required` and may name a
 finalized predecessor. A required review is a coordinator-owned pause for
-plan-dependent work, not a backend gate. `record_user_decision` preserves an
+plan-dependent work, not a backend gate. The matching narrow decision record operation preserves an
 exact original response and attribution `user_via_coordinator` through one
 closed canonical request containing task and subject refs, decision type,
 neutral `prompt`, exact `response_original`, and user language; retired English

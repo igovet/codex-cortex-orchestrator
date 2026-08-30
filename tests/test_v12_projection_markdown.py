@@ -149,7 +149,21 @@ class ProjectionMarkdownTests(unittest.TestCase):
 
         self.assertEqual(ready["markdown_link"], f"[Open plan revision]({canonical})")
         self.assertIn("report-full-canonical-id.md", ready["markdown_link"])
+        self.assertNotIn("path", ready)
+        self.assertEqual(_public_view(ready, approval=False), ready)
         self.assertNotIn("markdown_link", stale)
+        self.assertNotIn("path", stale)
+
+        approval = _public_view({
+            "status": "ready",
+            "path": canonical,
+            "markdown_link": link,
+            "report_ref": "r_0123456789ab",
+            "delegation_ref": "d_0123456789ab",
+            "approval_handle": "approval-ready",
+        }, approval=True)
+        self.assertNotIn("path", approval)
+        self.assertEqual(_public_view(approval, approval=True), approval)
 
     def test_typed_document_owns_hierarchy_and_spacing(self) -> None:
         rendered = render_markdown(Document(

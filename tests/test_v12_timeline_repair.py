@@ -131,9 +131,9 @@ class V12TimelineRepairTests(unittest.TestCase):
             )
             return str(result["delegation"]["native_task_name"])
 
-        self.assertEqual(create(1), "general")
-        self.assertEqual(create(2), "general_2")
-        self.assertEqual(create(3), "general_3")
+        names = [create(index) for index in range(1, 4)]
+        self.assertTrue(all(re.fullmatch(r"general_d_[0-9a-f]{12}", name) for name in names))
+        self.assertEqual(len(set(names)), 3)
 
     def test_plan_revision_feedback_survives_intervening_timeline_activity(self) -> None:
         store = self._store()

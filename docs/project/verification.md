@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 12.1.1 source, package, installed-host, and
+This page describes Cortex 1.12.1 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -34,7 +34,7 @@ The V12 protocol evidence must prove:
 - `tools/list` exposes exactly `create_task`, `inspect_task`,
   `create_delegation`, `read_delegation`, `submit_report`, `read_reports`,
   `set_governance_mode`, `record_initiative`, `inspect_governance`, and
-  `submit_governance_closure`, and `record_user_decision`;
+  `submit_governance_closure`, and the three narrow decision record operations;
 - coordinator and worker catalogs are identical, with no audience filtering,
   capabilities, tool-name aliases, or selector branches;
 - runtime validation uses the same closed input schemas advertised by the
@@ -131,7 +131,7 @@ The V12 protocol evidence must prove:
 - ordinary inspection reads create no receipt and no native lifecycle evidence;
   worker handoff `read_reports` reads create immutable delivery receipts, which
   are not native lifecycle evidence;
-- `record_user_decision` accepts only an existing in-scope task, delegation,
+- The narrow decision record operations accept only an existing in-scope task, delegation,
   plan, report, or same-project initiative subject; accepts the complete
   canonical field set (`task_ref`, subject type/ref, decision type,
   neutral `prompt`, exact `response_original`, and
@@ -237,7 +237,7 @@ Also prove all of the following:
 Verify `cortex_runtime.v12_maintenance` as a separately invoked local operator
 module, not an MCP tool:
 
-- `tools/list` remains the exact eleven-tool registry when the module is
+- `tools/list` remains the exact fifteen-tool registry when the module is
   packaged;
 - every command in this separately invoked non-MCP operator module requires a
   valid retained V12 durable `task_id`, derives the exact host-private shard,
@@ -368,25 +368,40 @@ Never install, reinstall, update, or synchronize the user's real installed
 plugin for repository live development.
 
 Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
-eleven-tool catalog, bundled skill/profile content, schema-v1 path, host-private
+fifteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, and absence of lifecycle hooks. Start a new task
 after any install or update.
 
 ## Interactive tmux live-dev workflow
 
-Use the real operator-controlled ordinary Codex session. `./scripts/cortex-dev` refreshes the isolated candidate but does not create tmux; `./scripts/cortex-live-smoke start` creates the exact session on the default server and runs the fixed `bash -c` launcher as the pane's initial process. The launcher prints `Cortex live-dev exit=<status>` and exits with that same status.
+visibly confirm that the interactive composer is rendered before sending.
+
+Before submitting a workload, the LLM/operator must observe the passive
+host-owned activation receipt for the exact isolated candidate. Candidate
+identity, registered Cortex server identity, and advertised catalogue identity
+must agree. This is observation-only: transport exposes it, while the
+coordinator/LLM verifies it; absence makes the environment unverified. Once
+`cortex:orchestrator` is selected, the first project execution action must be
+the catalogued `open_task` operation. Prose activation acknowledgement,
+shell/repository inspection, project-state checks, or worker dispatch before
+task opening is a route violation.
+
+Use the real operator-controlled ordinary Codex session. `./scripts/cortex-dev` refreshes the isolated candidate but does not create tmux; `./scripts/cortex-live-smoke start` creates the exact session on the default server with an ordinary `bash` pane, attaches an owner-only output-only `pipe-pane` stream to that exact pane, and only then inserts the fixed launcher command literally and submits it with one standalone Enter. The launcher prints `Cortex live-dev exit=<status>` and exits with that same status.
 
 ```bash
 ./scripts/cortex-live-smoke start
 ./scripts/cortex-live-smoke status
 ./scripts/cortex-live-smoke capture
+./scripts/cortex-live-smoke events
 TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
+# Only after visibly observing a fresh-project trust screen:
+./scripts/cortex-live-smoke enter
 ./scripts/cortex-live-smoke send --prompt-file TASK_PROMPT.txt
 ./scripts/cortex-live-smoke capture
 ./scripts/cortex-live-smoke stop
 ```
 
-After `start`, visibly confirm the interactive composer in `attach` or `capture` before `send`; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. Every task authors its own prompt for its changed behavior. It must say the session is already live-dev and prohibit nested tmux, cortex-dev, shell validation, and repository inspection. The controller normalizes the prompt to one line, uses literal `send-keys -l`, then issues one separate `send-keys ... Enter` call; it does not poll readiness or decide acceptance. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or a missing success marker is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure; backend idempotency does not excuse an unexplained replay. For the stabilization example, require exactly one task-creation request and a non-replayed success before its sentinel. Capture the exit marker before stopping; cleanup removes only `cortex-v12-smoke`. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
+After `start`, `capture` reads the bounded output-only PTY stream when detached `capture-pane` is stale. `events` reads the exact session's bounded owner-only sanitized MCP observation stream. It exposes safe metadata only and never parses readiness, errors, replay, or acceptance; the LLM verifier makes those decisions. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If the visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; it sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the composer before `send`. Every task authors its own prompt for its changed behavior. It must say the session is already live-dev and prohibit nested tmux, cortex-dev, shell validation, and repository inspection. The controller normalizes the prompt to one line, uses literal `send-keys -l`, then issues one separate `send-keys ... Enter` call; it does not poll readiness or decide acceptance. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or a missing success marker is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure; backend idempotency does not excuse an unexplained replay. For the stabilization example, require exactly one task-creation request and a non-replayed success before its sentinel. Capture the exit marker before stopping; cleanup stops the pipe and removes only `cortex-v12-smoke` plus its owner-only temporary capture. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
 
 For every native worker spawned by live orchestration, the LLM verifier must inspect a bounded sanitized structured event stream as well as the coordinator pane because worker MCP calls/errors may be hidden. The helper may expose events but must not decide pass/fail. Acceptance requires a clean first worker-owned report-submission success, zero prior hidden validation/tool errors or mutation replays; a final report reference alone is insufficient.
 
@@ -522,8 +537,8 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/12.1.1/schema-v1 identifiers;
-- exact eleven-tool names;
+- V12/1.12.1/schema-v1 identifiers;
+- exact fifteen-tool names;
 - explicit `project_root` only on `create_task`, compact `task_ref` on the seven
   task-anchored tools, compact `delegation_ref`/`report_ref`/`report_refs` on
   entity-derived tools, `subject_ref`/`initiative_ref` where applicable, exact
@@ -564,10 +579,12 @@ configuration. Check:
 
 Record every exact command, outcome, environment, skipped scenario, and material
 limitation. Never claim an unavailable host or live-model check passed.
-The live-smoke script is transport-only and performs no readiness, rollout,
-sentinel, acceptance, approval, error, or retry parsing; the coordinator/LLM
-decides from attached or captured output. Its prompt transport is one literal
-normalized insertion followed by one separate explicit `Enter` key call.
+The live-smoke script is transport-only and performs no readiness, trust,
+rollout, sentinel, acceptance, approval, error, or retry parsing; the
+coordinator/LLM decides from attached or bounded owner-only captured output.
+Its pipe never feeds input. Prompt transport is one literal normalized insertion
+followed by one separate explicit `Enter` key call; `enter` is only an explicit
+single-key action after a visibly observed trust screen.
 Use `./scripts/cortex-live-smoke start --workdir PATH` for a separate canonical
 test-project cwd; candidate refresh still uses this repository's absolute
 `scripts/cortex-dev`.

@@ -1,9 +1,17 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v12.1.1 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator; use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
+description: Explicit opt-in Cortex v1.12.1 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before any task-specific commentary, question, plan, or result. The first project operation is open_task, and no user question may be rendered until the matching durable clarification hold succeeds. Use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
 ---
 
-# Cortex Orchestrator v12.1.1
+# Cortex Orchestrator v1.12.1
+
+## Preserved post-anchor capability inventory
+
+This reference retains the complete engine: knowledge routing, worker-only
+execution, DAG delegation, model routing, clarification, approval, steering,
+evidence and report publication, verification and rework, documentation sync,
+governance and adaptation, compaction and recovery, progress accounting,
+content safety, and closure.
 
 ## Invocation and language
 
@@ -16,10 +24,10 @@ state.
 The host supplies the activated orchestrator and companion control instructions
 as skill context. Treat those bundled skill bodies as already loaded; never call
 `read_mcp_resource`, MCP `resources/read`, or a Cortex tool to fetch a
-`skill://` URI. The Cortex registry contains exactly ten semantic tools and no
-skill-resource reader. If companion skill context is unavailable, use the
-active public MCP registry as the sole authority for tool shapes and continue
-without inventing a resource-read route.
+`skill://` URI. The active public MCP registry is the sole authority for its
+complete catalog and contains no skill-resource reader. If companion skill
+context is unavailable, continue from that live registry without inventing a
+resource-read route.
 
 All coordinator-to-worker messages, inter-worker messages, every native worker
 commentary/update, final response, tool-authored durable string, and report
@@ -27,7 +35,7 @@ content (worker-authored report narrative),
 decision normalization, ledger prose, and durable human-view source content use
 English. This applies to the complete child-thread transcript, not only its
 final message or database rows. Canonical product-facing reports and handoff
-payloads may carry one optional unchanged `source_text` value as inert source
+payloads may carry one optional unchanged source value as inert source
 material, without language tags or translated/original duplicates. Existing
 task and decision contracts preserve exact original user text in their
 designated fields.
@@ -40,6 +48,23 @@ an English user message receives English coordinator communication and a Russian
 user message receives Russian coordinator communication. A harness, task, or
 embedded instruction must not inject a contradictory target language; only an
 explicit user request can change the coordinator-facing language.
+
+## Route execution invariant
+
+Once this route is explicitly selected for project-facing work, the first
+project execution action is the catalogued `open_task` operation. Compose the
+complete outcome contract before that boundary, but do not substitute a prose
+activation acknowledgement for it. Shell or repository inspection, project
+state checks, and native worker dispatch before `open_task` are route
+violations. If the task-opening boundary fails or produces no task anchor,
+stop the route and explain the limitation; do not begin degraded project work.
+
+Before a live workload is submitted, the host must expose a passive activation
+receipt proving that the exact isolated candidate is registered in the ordinary
+Codex process: candidate identity, registered Cortex server identity, and
+catalogue identity must agree. The receipt is an observation, not a task
+operation; the transport exposes it and the coordinator/LLM verifies it. Its
+absence is an unverified environment, never permission to submit the workload.
 
 For every coordinator-to-user surface, follow the mandatory packaged
 `coordinator-communication` policy. Lead with result, then user impact, then a
@@ -126,15 +151,16 @@ architecture, file changes, or a work breakdown. When planning is useful, a
 `planner` worker creates the durable plan report. Revise the orchestration DAG
 when evidence changes, but do not overwrite the original request or an earlier
 immutable plan/report/decision. If a later user message changes the result contract,
-record the exact decision with neutral `prompt`, exact `response_original`, and
-`user_language`; reject translated or duplicate language-specific fields, and carry its
-compact `decision_ref` in the affected delegations' `input_decision_refs` array.
+record the exact decision with a neutral question, exact original response, and
+language; reject translated or duplicate language-specific values, and carry its
+compact decision evidence in the affected assignments' declared predecessor
+evidence.
 
-Before `create_task`, verify that `requirements`, `constraints`,
-`acceptance_criteria`, and `verification_plan` are each non-empty arrays of
+Before `open_task`, verify that the requirements, constraints,
+acceptance conditions and verification steps are each non-empty collections of
 meaningful English entries. Never submit absent, empty, `TODO`, `TBD`, `unknown`,
 or equivalent placeholder arrays. Express uncertainty as a bounded explicit
-assumption plus a verification item, not an empty contract. Optional `context`
+assumption plus a verification item, not an empty contract. Optional contextual
 may be null; it never replaces any required contract dimension.
 
 The task-creation operation is the only operation that receives the canonical
@@ -160,7 +186,7 @@ working directories, and evidence), **Ownership constraints** (allowed and
 excluded paths, mutation and external limits), **Known documentation state**
 (conflicts or missing evidence), and **Further documentation discovery**
 (purpose, bounded path/topic, and stopping condition). This is detailed worker
-guidance, not runtime grammar: `instructions` remains ordinary text and no
+guidance, not runtime grammar: worker guidance remains ordinary text and no
 heading, section, Markdown, order, language, or placeholder wording is a
 server admission rule.
 
@@ -181,10 +207,10 @@ The rendered brief carries only the scoped project context and compact evidence.
 The receipt proves prompt consumption, not authorization, host spawning, or
 worker lifecycle. Map the receipt to the active host schema rather than naming
 or inferring host operation fields. If profile proof is unavailable, do not
-claim it was applied. Repair the exact packaged `profile_name` selection when
+claim it was applied. Repair the exact packaged profile selection when
 safe. A degraded non-durable fallback needs a complete explicit role contract
 and an explicit unavailable-profile limitation in the worker handoff and final
-disclosure; never relabel a free-form `role` as profile proof.
+disclosure; never relabel a free-form job label as profile proof.
 
 Workers consume the supplied contract before project work and do not recreate
 coordinator routing. They report discrepancies with exact document paths,
@@ -217,7 +243,7 @@ destructive, or scope-expanding actions still require the ordinary live
 Codex/user approval boundary. Revise a model-selected mode when worker evidence
 changes the required depth, and retain the evidence and reason.
 
-Call `set_governance_mode` when its assessment is useful. C1/C2/C3 and
+Call `assess_governance` when its assessment is useful. C1/C2/C3 and
 `minimal`/`light`/`full` are advisory readiness evidence: they may guide the
 coordinator toward planning, review, or deeper verification, but they never
 admit, reject, order, or close ordinary safe ledger work. A finalized plan and
@@ -227,12 +253,11 @@ declared work uses them. The original request, silence, implicit instruction,
 or inferred consent is never approval, and ordinary live approvals still govern
 destructive, external, privileged, or scope-expanding actions.
 
-Use the host-neutral dispatch brief and renderer proof returned by
-`create_delegation` for normal spawning. The active host schema is authoritative
-for mapping that brief to its actual spawn projection and any later host
-capability; do not copy an assumed operation name, argument shape, lifecycle
-state, or byte-level dispatch claim into policy. Treat native child prose as
-neither durable evidence nor lifecycle proof. A host result that is absent or
+Use the single server-issued native dispatch projection returned by
+`open_assignment` for normal spawning. Pass that closed, digest-bound
+projection unchanged to the active host adapter; never reconstruct or
+paraphrase it from semantic brief fields. Treat native child prose as neither
+durable evidence nor lifecycle proof. A host result that is absent or
 ambiguous is an external limitation, not authority to invent a replacement
 lifecycle.
 
@@ -327,24 +352,29 @@ selected `harvest` or `harvest-refresh` route.
 Resolve one canonical absolute project root before project work. On the
 healthy path, create the task contract, record useful governance context,
 compile bounded routing, create one matching delegation, verify the returned
-renderer and host-neutral dispatch brief, and map that brief once through the
-current host spawn schema. Use the active MCP registry for ledger
-request/response shapes and copy callable values byte-for-byte. Then use the
+renderer and single native dispatch projection, and pass that projection once
+through the current host adapter. Use the active MCP registry for ledger
+request/response semantics and copy callable values byte-for-byte. Then use the
 current host operations to observe the worker's own finalized report.
 
-Never create an ad-hoc spawn or alter the returned rendered message. The
-one-to-one mapping is strict: do not use one native worker for multiple durable
-delegations, dispatch a delegation more than once, create a delegation without
-its matching spawn, or spawn first and write durable metadata afterward. A
-spawn call with an ambiguous outcome must be reconciled through the active host
-before any replacement; never blindly duplicate it. When replacement is useful,
-create a new parent-linked delegation and map that replacement's own brief once.
+The host-neutral dispatch brief remains semantic evidence: verify its task and
+delegation anchors, input evidence, profile proof, and model/effort
+recommendations. The coordinator maps it once through the server-issued native
+projection. The active host schema is authoritative for mapping that brief; do
+not copy an assumed operation name, argument shape, lifecycle.
 
-Delegation creation is distinct from recovery. For an exact idempotent retry,
-reuse the original arguments and returned retry handle. Otherwise use the
-active recovery operation with its emitted delegation handle and continuation
-value only when host reconciliation shows that an ambiguous or interrupted
-spawn needs recovery. Healthy creation does not need a second read.
+Never create an ad-hoc spawn or alter the returned rendered message. The
+one-to-one mapping is strict: one durable delegation produces one native worker
+through its single returned host projection. If the host outcome is unclear,
+observe the existing worker before deciding whether the original projection is
+still pending, already running, or unavailable. A replacement is a distinct
+parent-linked delegation and uses only its own returned projection.
+
+Form every delegation request solely from that operation's live advertised
+input schema. On success, continue from the returned assignment and host
+projection. Consider the server-described recovery path only after observation
+establishes that the original host outcome is unavailable. A healthy creation
+is one complete call followed by one literal forwarding of its projection.
 
 Healthy writes are preferred durable evidence, not permission to start. Use
 task-scoped or entity-scoped calls only with the exact compact handle returned
@@ -359,7 +389,8 @@ use the complete ready relation returned by one successful operation; incomplete
 or cross-mixed view data is not approval.
 
 Treat every returned compact task, delegation, report, initiative, and decision
-reference, every digest, and every cursor as opaque immutable return data. Store and
+reference, every digest, and every continuation token as opaque immutable return
+data. Store and
 reuse the exact byte-for-byte value. Never parse, split, concatenate,
 reconstruct, normalize, reformat, suffix, or derive one from another, a path,
 or a remembered pattern. Before every call, copy each compact subject ref and
@@ -377,7 +408,8 @@ Keep timeline-continuation and report-pagination handles distinct as directed
 by the active registry. Never concatenate, transform, or substitute one for the
 other.
 
-Call ownership is strict. The coordinator never calls `submit_report`, whether
+Call ownership is strict. The coordinator never bootstraps a worker assignment and
+never publishes a worker outcome, whether
 the report is a plan, progress/result, verification, synthesis, documentation
 change, documentation verification, or `documentation not required` rationale.
 It creates the durable delegation, sends the exact rendered brief to the native
@@ -388,25 +420,26 @@ submission or submission on behalf of another worker.
 
 Accept the canonical root only when its exact absolute path is already supplied
 by trusted user or host context or worker evidence. Resolving or confirming a
-root through `pwd`, Git, filesystem traversal, a manifest, MCP metadata,
-project-local `.codex`, or any search is project work and must be delegated. A
+root through `pwd`, Git, filesystem traversal, a manifest, project-local
+`.codex`, or any search is project work and must be delegated. A
 pre-ledger native discovery worker may report the root through a self-contained
-brief when the root is needed before `create_task`; do not invent a root or
+brief when the root is needed before `open_task`; do not invent a root or
 cross the coordinator boundary to bootstrap the ledger.
 
 A ledger error is transient only when structured failure or verified
-environmental evidence says so. Retry that operation at most once with the same
-idempotency key. Do not retry schema, size, reference, safety, or idempotency
-conflicts unchanged. If the MCP server, an expected tool, or the active catalog
-is unavailable, or the retry fails, continue when safe using a self-contained
+environmental evidence says so. Repeat a request only when the active tool
+contract explicitly describes that recovery and the original semantic input
+can be preserved byte-for-byte. Do not repeat schema, size, reference, safety,
+or conflict failures unchanged. If the MCP server, an expected tool, or the
+active catalog is unavailable, or the recovery fails, continue when safe using a self-contained
 native worker message with the same task/result, knowledge, profile, language,
 safety, acceptance, and exact model/effort contracts. Preserve known compact
 refs and durable evidence IDs; never invent them or create a duplicate task to
 simulate recovery.
 
-`create_task` is the terminal task-anchoring boundary. If it returns a
+`open_task` is the terminal task-anchoring boundary. If it returns a
 server-state failure (`storage_unavailable`, `ledger_corrupt`,
-`schema_unsupported`, or `ledger_error`) or returns no `task_ref`, stop Cortex
+`schema_unsupported`, or `ledger_error`) or returns no task anchor, stop Cortex
 orchestration immediately. Do not start degraded project work, use a fallback,
 create a delegation, spawn a worker, or manually intervene in the database.
 Give only an honest coordinator-facing explanation in the actual user's
@@ -450,6 +483,13 @@ advisory profile never select, promote, or substitute the coordinator's choice.
 
 ## Plan and clarification holds
 
+Task-scoped semantic operations begin only after the task anchor. Therefore a
+clarification hold or question required before planning is opened and
+presented after anchoring and before planner dispatch. The clarification is a
+hold on the anchored task; it never precedes task opening. The same boundary
+also applies to plan or approval holds, steering, governance, knowledge
+routing, delegation, worker dispatch, and closure preparation.
+
 A requested or otherwise necessary main plan is an ordinary-chat hold owned by
 the coordinator, not a backend gate for plan selection. Have the planner worker
 submit the immutable plan report. Use the successful report operation's
@@ -458,9 +498,8 @@ inspect it. Copy the verified view link and complete approval relation
 byte-for-byte, present it with a localized summary and explicit
 approve/revise/cancel choices (or reject), then end the turn. Silence,
 unrelated text, or a ledger row is not approval. Record the exact user decision
-through the active decision tool with neutral `prompt`, exact
-`response_original`, and `user_language`; reject translated or duplicate language-specific fields
-fields. The ready relation proves only that the view existed before the
+through the active decision tool with a neutral question, exact original response,
+and language; reject translated or duplicate language-specific values. The ready relation proves only that the view existed before the
 decision write; MCP has no host-authenticated user-turn receipt, so the
 new-user-response requirement remains coordinator policy. When work is
 plan-dependent, carry the returned decision reference as an ordinary
@@ -473,9 +512,8 @@ above to compile a planner delegation; it must not run a project search or
 state/artifact check to improve, confirm, or preview the plan.
 
 Record the next unambiguous response with the active decision tool against the
-exact immutable plan evidence, using neutral `prompt`, exact
-`response_original`, and `user_language`; reject translated or duplicate language-specific fields
-fields. Approval additionally uses the current ready
+exact immutable plan evidence, using a neutral question, exact original response,
+and language; reject translated or duplicate language-specific values. Approval additionally uses the current ready
 approval relation; revision and cancellation preserve the finalized plan
 evidence without volatile view binding, so intervening non-plan timeline events
 cannot block saving feedback. Approval applies only to that exact revision.
@@ -492,17 +530,24 @@ or absent report as a C1/minimal path, and it must never treat native prose as a
 durable plan substitute.
 
 For any user-question hold or worker recovery, preserve the exact live handle
-when it is known and use `parent_delegation_ref` for a replacement when it is
+when it is known and use the server-returned parent-assignment relation for a
+replacement when it is
 not. Cortex does not guarantee same-child continuation; never claim that Cortex
 guarantees same-child continuation across a stopped or resumed chat.
 
 Ask a question only for a genuine product, requirement, scope, acceptance, or
 external/destructive authorization decision. Workers report unresolved ambiguity
-with evidence; the coordinator must not decide it as project/product work. Ask
-one complete localized question and record its exact answer via the active
-decision tool. When the host supports steering, deliver that decision through
-the existing live task without changing its identity; otherwise report the host
-limitation and use ordinary evidence-backed rework. Never turn ledger, retry,
+with evidence; the coordinator must not decide it as project/product work. Before
+showing a genuine question, open one durable clarification hold. Show only the
+question covered by that hold exactly once in the final answer; never also
+render or preview it in commentary. Then record the next exact user answer before
+continuing orchestration. When the host supports it, deliver the server-returned
+continuation evidence to the exact live worker; when it does not, use the
+existing parent-linked replacement/recovery route. Ask one complete question in
+the user's language. When the host supports steering, deliver
+that decision through the existing live task without changing its identity;
+otherwise report the host limitation and use ordinary evidence-backed rework.
+Never turn ledger, retry,
 worker, report, dependency, initiative, or closure state into a user question.
 
 ### Continuous orchestration and turn completion
@@ -512,7 +557,7 @@ remains and until the requested outcome is reached or a material limitation is
 honestly disclosed. After sufficient completed outcome evidence settles, the
 coordinator independently chooses exactly one advisory verdict: `ready`,
 `ready_with_risks`, or `not_ready`. It then automatically attempts the
-supported `submit_governance_closure` operation and its supported scoped
+supported `close_task` operation and its supported scoped
 inspection. This advisory sequence is never a user-facing blocker or question:
 in particular, `ready_with_risks` never asks the user to confirm, approve, or
 reclassify the result. A storage or inspection outage is nonblocking for a
@@ -534,7 +579,7 @@ completed worker, use its concise native summary and exact report reference for
 notification and routing. Before a material report-dependent decision—plan
 approval or revision, pipeline adaptation, rework, verification classification,
 documentation impact, closure, or final conformance—read the authoritative body
-through the existing report reader and complete its bounded cursor chain. A genuine user
+through the existing evidence reader and complete its bounded continuation chain. A genuine user
 question creates an intentional pause; otherwise, once safe work is complete
 or the remaining limitation is disclosed, the coordinator may answer even when
 an advisory closure write, inspection, or projection is unavailable.
@@ -548,9 +593,10 @@ For a worker question or a blocked/partial report, use this exact sequence:
    handoff is missing or the reference cannot be verified, reconcile the exact
    delegation and obtain a corrected handoff before proceeding.
 2. Ask the user in the task's current user language, then record the neutral
-   `prompt`, exact `response_original`, and `user_language` with
-   `record_user_decision` bound to the exact subject; do not generate or accept
-   translated or duplicate language-specific fields. Include the immutable digest when the subject
+   a neutral question, exact original response, and language with
+   the applicable family-specific decision-recording operation bound to the exact
+   subject; do not generate or accept
+   translated or duplicate language-specific values. Include the immutable digest when the subject
    is a plan or report.
 3. If the active host supports it, steer the same existing live task with the
    decision and relevant evidence. Do not create a synthetic lifecycle or
@@ -567,7 +613,7 @@ above and continue the task rather than silently ending it.
 
 If the exact host handle is absent, rejected, or ambiguous after reconciliation,
 do not use its stable name as proof of resumability. Create a replacement only
-with an explicit `parent_delegation_ref` delegation and durable predecessor report/decision
+with an explicit parent-linked assignment and durable predecessor evidence
 references. Never claim that Cortex guarantees same-child continuation across a
 stopped or resumed chat.
 
@@ -597,12 +643,13 @@ cadence only; it never changes server-owned model routing, IDs, or ownership.
 ## Reports, large results, and evidence routing
 
 Workers alone publish their own immutable English progress, result, synthesis,
-or plan reports with `submit_report`; the coordinator only creates
+or plan publications with the applicable worker-owned publication operation; the coordinator only creates
 delegations, coordinates native workers, and consumes the worker's concise
 native handoff. Every successful worker completion must return a bounded
 `Summary` and the exact server-returned `Report ref` (plus the manifest digest
 when supplied), without copying the report body. Durable report IDs are
-non-callable evidence, not completion receipts; use the compact `report_ref`
+non-callable evidence, not completion receipts; use the exact server-returned
+evidence reference
 for public report inputs. A normal bounded
 follow the active registry's report-assembly protocol for every new report.
 Stored historical evidence may retain immutable read/open compatibility. For a
@@ -612,12 +659,12 @@ The handoff summary must contain the operational variables needed for the next
 safe decision: current stage/state, outcome, next owner and action, pipeline or
 review delta, changed surfaces or verification scope, exact report reference and
 manifest digest when returned, and any residual risk or unrun check. Keep the
-summary concise and English. The coordinator consumes this summary and report
-reference for routine progression; it calls the existing `read_reports` path
-before a material report-dependent decision. A worker that genuinely needs evidence reads
+summary concise and English. The coordinator uses this summary and the task's
+server-rendered metadata for routine progression; it never invokes a worker's
+assignment bootstrap operation. A worker that genuinely needs evidence reads
 the declared finalized report itself with its consuming delegation reference.
 
-Use the active report assembly operations in their returned order. Keep chunks
+Use the active publication assembly operations in their returned order. Keep chunks
 non-overlapping and stable, finalize only after the complete content digest is
 available, and abort with an English reason when safe completion is impossible.
 Resume from returned continuation metadata rather than guessing a position.
@@ -631,18 +678,18 @@ Use the active report reader as the only full-body path for authoritative report
 content. The coordinator must call it before every material report-dependent
 decision; routine notification remains the minimal handoff summary. Select only
 relevant declared evidence and sections,
-respect the active byte budget and continuation cursor, and continue until the
+respect the active server bounds and continuation state, and continue until the
 selection is complete. Metadata-only reads may recover manifests without bodies.
 The ledger rejects reports outside a worker's declared inputs and records each
-returned page's digest, chunk indexes, and cursor transition. Coordinator reads
+returned page's digest, continuation transition, and completeness. Coordinator reads
 never prove worker consumption. Never paste a huge report into a delegation;
 pass its compact evidence reference and require the worker to read only needed
 sections. Preserve contradictions, partial results, exact commands, and
 limitations.
 
-The worker may read only the exact finalized `input_report_refs` declared on
+The worker may consume only the exact finalized predecessor evidence declared on
 its own delegation. The coordinator must put those exact server-returned report
-references into `create_delegation`; it must never copy a report reference from
+references into `open_assignment`; it must never copy an evidence reference from
 ordinary chat, a UI-rendered summary, a prior task, or a different project
 shard. A `cross_project_reference` or undeclared-reference rejection is an
 evidence/handoff defect, not a retryable read: stop that read, reconcile the
@@ -687,8 +734,8 @@ Never guess a path, reuse stale metadata, publish a bare path/link or raw ID, or
 expose a private path in errors, logs, worker messages, or external messages.
 
 For user-facing plan review, progress, decisions, and the final response, emit
-only a clickable Markdown link in the exact form of the server-provided
-`markdown_link` from the current `ready` view, copied byte-for-byte. It is the
+only the clickable Markdown link from the current server-provided ready view,
+copied byte-for-byte. It is the
 exact Markdown link with its localized readable label
 and exact returned absolute path. Never reconstruct it from compact refs or
 path fields; never use a backticked or bare path, a code block, or a line break
@@ -744,11 +791,12 @@ behavior. Use bounded discovery for a missing/stale index; use harvest only
 when explicitly activated.
 
 If no durable documentation changed, use a finalized worker-owned report with
-an explicit English `Documentation impact` status, rationale, and affected
-surfaces. An implementation or verification report may supply this no-impact
+an explicit English `Documentation impact` assessment. Name affected paths
+when impact exists; otherwise explain why there is no impact. An implementation or verification report may supply this no-impact
 evidence directly, avoiding redundant synthesis or an empty documentation edit.
 The phrase “documentation-impact report ID” refers only to a durable
-`report_id` in evidence; public calls use the compact `report_ref`.
+internal evidence identifiers; public calls use only server-returned compact
+evidence references.
 Otherwise create a bounded English evidence-synthesis/documentation-impact
 delegation with the exact relevant report refs, dispatch its returned rendered
 brief, wait for that worker to submit and finalize its own synthesis report, and
@@ -783,7 +831,7 @@ remain optional advisory evidence.
 
 After sufficient completed outcome evidence settles, the coordinator chooses
 `ready`, `ready_with_risks`, or `not_ready` from that evidence and automatically
-attempts `submit_governance_closure` for every supported relevant subject. It
+attempts `close_task` for every supported relevant subject. It
 then performs the supported scoped inspection needed to confirm the intended
 record. When initiatives are relevant, use only active-registry shapes and
 exact returned handles; a suggested subject is not a complete callable payload.
@@ -806,7 +854,7 @@ answer. Disclose the actual advisory limitation and continue safe work when
 possible.
 
 For a verified transient storage or inspection failure, make one bounded safe
-retry with the exact returned retry handle and unchanged idempotency semantics.
+retry with the exact returned retry handle and unchanged retry semantics.
 If that retry or the supported inspection remains unavailable, retain the
 outcome and disclose `closure_unconfirmed`; schema, reference, or evidence
 errors require correction rather than an unchanged retry. This never becomes a

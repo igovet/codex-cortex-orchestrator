@@ -124,14 +124,60 @@ class EffectiveContractCoverageTests(unittest.TestCase):
             idempotency_key="replacement-owner",
         )[0]
         replacement_id = replacement["delegation"]["delegation_id"]
-        projected = replacement["dispatch_brief"]["effective_contract"]
+        projected = self.store.read_delegation(delegation_id=replacement_id, after_sequence=0, limit=1)["worker_brief"]["effective_contract"]
         self.assertEqual(projected["revision"], 1)
-        self.assertEqual(projected["assigned_items"], [{"item_ref": self.item, "category": "acceptance", "text": "Expose advisory conformance.", "assignment_role": "owned"}, {"item_ref": self.items[1], "category": "constraint", "text": "Preserve compatibility.", "assignment_role": "owned"}, {"item_ref": self.items[2], "category": "requirement", "text": "Cover the requirement.", "assignment_role": "owned"}, {"item_ref": self.items[3], "category": "verification", "text": "Run focused tests.", "assignment_role": "owned"}])
+        self.assertEqual(projected["assigned_items"], [{"item_ref": self.item, "category": "acceptance", "ordinal": 0, "text": "Expose advisory conformance.", "assignment_role": "owned"}, {"item_ref": self.items[1], "category": "constraint", "ordinal": 0, "text": "Preserve compatibility.", "assignment_role": "owned"}, {"item_ref": self.items[2], "category": "requirement", "ordinal": 0, "text": "Cover the requirement.", "assignment_role": "owned"}, {"item_ref": self.items[3], "category": "verification", "ordinal": 0, "text": "Run focused tests.", "assignment_role": "owned"}])
         self._submit(key="replacement-complete", coverage_status="complete", verification=["Replacement verified."], delegation=replacement_id)
         result = self.store.inspect_task(task_id=self.task, after_sequence=0)
         self.assertEqual(result["aggregate_coverage"]["status"], "ready")
         self.assertEqual(result["execution_outcome"]["outcome"], "completed")
         self.assertEqual(len(result["aggregate_coverage"]["items"][0]["superseded_report_refs"]), 1)
+
+    def test_parent_replacement_without_manual_routing_inherits_only_parent_scope(self) -> None:
+        """Parent-linked rework receives the parent's active owned scope exactly."""
+        task = self.store.create_task(
+            objective="Parent scope.", user_request_original="Parent scope.", user_language="en",
+            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["A", "B"],
+            constraints=["C"], acceptance_criteria=["D"], verification_plan=["E"], context={}, idempotency_key="parent-task",
+        )[0]["task"]["task_id"]
+        items = [item["item_ref"] for item in self.store.inspect_task(task_id=task, after_sequence=0)["effective_contract"]["items"]]
+        parent = self.store.create_delegation(
+            task_id=task, objective="Own one item.", role="worker", profile_name="general",
+            scope="One item.", instructions="Submit evidence.", model="gpt-5.6-luna",
+            reasoning_effort="high", outcome_assignments={"owned": [items[0]]}, idempotency_key="single-parent",
+        )[0]["delegation"]["delegation_id"]
+        replacement = self.store.create_delegation(
+            task_id=task, parent_delegation_id=parent, objective="Rework one item.", role="worker",
+            profile_name="general", scope="Inherited.", instructions="Submit replacement evidence.",
+            model="gpt-5.6-luna", reasoning_effort="high", idempotency_key="single-replacement",
+        )[0]
+        assigned = self.store.read_delegation(delegation_id=replacement["delegation"]["delegation_id"], after_sequence=0, limit=1)["worker_brief"]["effective_contract"]["assigned_items"]
+        self.assertEqual([item["item_ref"] for item in assigned], [items[0]])
+        self.assertTrue(all(item["assignment_role"] == "owned" for item in assigned))
+
+    def test_initial_owner_without_predecessor_owns_current_effective_catalogue(self) -> None:
+        """A bounded execution worker must not require a synthetic plan report."""
+        task = self.store.create_task(
+            objective="Direct bounded work.", user_request_original="Direct bounded work.", user_language="en",
+            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["Create one artifact."],
+            constraints=["One worker."], acceptance_criteria=["Artifact exists."],
+            verification_plan=["Verify the artifact."], context={}, idempotency_key="direct-owner-task",
+        )[0]["task"]["task_id"]
+        expected = {
+            item["item_ref"]
+            for item in self.store.inspect_task(task_id=task, after_sequence=0)["effective_contract"]["items"]
+        }
+        opened = self.store.create_delegation(
+            task_id=task, objective="Create the artifact.", role="worker", profile_name="general",
+            scope="Bounded direct implementation.", instructions="Create and verify it.",
+            model="gpt-5.6-luna", reasoning_effort="high", idempotency_key="direct-owner",
+            derive_assignment_scope=True,
+        )[0]
+        assigned = self.store.read_delegation(
+            delegation_id=opened["delegation"]["delegation_id"], after_sequence=0, limit=1,
+        )["worker_brief"]["effective_contract"]["assigned_items"]
+        self.assertEqual({item["item_ref"] for item in assigned}, expected)
+        self.assertTrue(all(item["assignment_role"] == "owned" for item in assigned))
 
     def test_active_assignment_survives_unrelated_revision_and_retired_item_is_rejected(self) -> None:
         self.store.record_user_decision(
