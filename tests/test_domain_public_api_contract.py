@@ -553,7 +553,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 ("noncanonical", {**valid, "schema": "cortex/report/plan/v2"}),
                 ("wrong-schema", {**valid, "schema": "cortex/report/result/v3"}),
                 ("missing-summary", {key: value for key, value in valid.items() if key != "summary"}),
-                ("missing-verification-facts", {**valid, "verification_facts": []}),
+                ("missing-verification-facts", {key: value for key, value in valid.items() if key != "verification_facts"}),
             )
             for name, content in cases:
                 before = self._row_counts(root)

@@ -164,6 +164,13 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertIn("observable facts", evidence["properties"]["verification_facts"]["description"].lower())
         self.assertNotIn("closure evidence", evidence["properties"]["verification_facts"]["description"].lower())
 
+    def test_result_publication_schema_requires_observable_verification_facts(self) -> None:
+        contract = PUBLIC_TOOLS["publish_result"]["inputSchema"]
+        evidence = contract["properties"]["evidence"]
+        self.assertIn("verification_facts", evidence["required"])
+        self.assertIn("verification_facts", contract["description"])
+        self.assertIn("at least one", contract["description"])
+
         invalid = {
             "continuation_ref": "c_" + "a" * 32,
             "assignment_ref": "d_0123456789ab",
