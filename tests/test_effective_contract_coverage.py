@@ -179,6 +179,44 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         self.assertEqual({item["item_ref"] for item in assigned}, expected)
         self.assertTrue(all(item["assignment_role"] == "owned" for item in assigned))
 
+    def test_debugger_completed_report_has_owned_aggregate_coverage(self) -> None:
+        """A debugger fixes defects, so its completed result must cover owned items."""
+        task = self.store.create_task(
+            objective="Debug coverage attribution.", user_request_original="Debug coverage attribution.", user_language="en",
+            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["Fix the defect."],
+            constraints=["Keep the correction focused."], acceptance_criteria=["The aggregate is covered."],
+            verification_plan=["Run the regression."], context={}, idempotency_key="debugger-task",
+        )[0]["task"]["task_id"]
+        item_refs = [item["item_ref"] for item in self.store.inspect_task(task_id=task, after_sequence=0)["effective_contract"]["items"]]
+        debugger = self.store.create_delegation(
+            task_id=task, objective="Diagnose and fix the defect.", role="debugger", profile_name="debugger",
+            scope="Fix the assigned defect.", instructions="Publish completed result evidence.", model="gpt-5.6-luna",
+            reasoning_effort="high", outcome_assignments={"owned": item_refs}, idempotency_key="debugger-delegation",
+        )[0]["delegation"]["delegation_id"]
+        started = self.store.submit_report(
+            task_id=task, delegation_id=debugger, mode="begin", report_type="result",
+            idempotency_key="debugger-result-begin",
+        )[0]
+        report_id = started["report"]["report_id"]
+        self.store.submit_report(
+            task_id=task, delegation_id=debugger, mode="append", report_id=report_id, section="result",
+            content={
+                "schema": "cortex/report/result/v2", "summary": "Debugger evidence.", "outcome": "fixed",
+                "changes": ["Focused correction."], "verification": ["Regression passed."], "risks": [],
+                "deviations": [], "unresolved": [], "contract_coverage": [
+                    {"item_ref": item, "status": "complete", "verification": ["Regression passed."]}
+                    for item in item_refs
+                ],
+            }, idempotency_key="debugger-result-append",
+        )
+        self.store.submit_report(
+            task_id=task, delegation_id=debugger, mode="finalize", report_id=report_id,
+            status="completed", idempotency_key="debugger-result-finalize",
+        )
+        aggregate = self.store.inspect_task(task_id=task, after_sequence=0)["aggregate_coverage"]
+        self.assertEqual(aggregate["status"], "ready")
+        self.assertTrue(all(item["reason"] == "current_verified_claim" for item in aggregate["items"]))
+
     def test_active_assignment_survives_unrelated_revision_and_retired_item_is_rejected(self) -> None:
         self.store.record_user_decision(
             task_id=self.task, subject_type="task", subject_id=self.task, decision_type="steer", prompt="Add a separate check.",

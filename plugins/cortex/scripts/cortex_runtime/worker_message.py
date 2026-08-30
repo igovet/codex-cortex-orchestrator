@@ -197,7 +197,7 @@ def packaged_profile_assignment_policy(profile_name: object) -> str | None:
     """
     if profile_name not in _packaged_profiles():
         return None
-    review = {"accessibility_auditor", "build_verification", "code_reviewer", "database_architect", "debugger", "explorer", "performance_engineer", "qa_engineer", "security_auditor", "technical_writer"}
+    review = {"accessibility_auditor", "build_verification", "code_reviewer", "database_architect", "explorer", "performance_engineer", "qa_engineer", "security_auditor", "technical_writer"}
     if profile_name == "planner":
         return "planning"
     return "review" if profile_name in review else "owner"

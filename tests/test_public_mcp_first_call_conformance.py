@@ -188,6 +188,27 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertEqual(failure["details"]["path"], "$.evidence")
         self.assertEqual(failure["details"]["field"], "acceptance_checks")
 
+    def test_result_publication_keeps_status_at_request_top_level(self) -> None:
+        contract = PUBLIC_TOOLS["publish_result"]["inputSchema"]
+        evidence = {
+            "schema": "cortex/report/result/v3", "summary": "Done.",
+            "verification": [], "risks": [], "deviations": [], "unresolved": [],
+            "outcome": "Partial remediation.", "changes": [],
+            "verification_facts": [{"state": "not_run", "summary": "No command."}],
+            "documentation_impact": "No documentation impact.",
+        }
+        valid = {
+            "continuation_ref": "c_" + "a" * 32,
+            "assignment_ref": "d_0123456789ab",
+            "evidence": evidence,
+            "status": "partial",
+        }
+        _validate_schema(contract, valid)
+        with self.assertRaisesRegex(ValueError, "unsupported property"):
+            _validate_schema(contract, {**valid, "evidence": {**evidence, "status": "partial"}})
+        self.assertIn("only at the publication request top level", contract["properties"]["status"]["description"])
+        self.assertIn("never inside evidence", contract["description"])
+
     def test_task_read_advertises_server_formatted_plan_link_as_the_user_surface(self) -> None:
         contract = PUBLIC_TOOLS["read_task"]
         handles = contract["outputSchema"]["properties"]["handles"]
