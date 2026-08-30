@@ -1,6 +1,82 @@
 # Changelog
 
+## [1.12.2] - 2026-08-31
+
+### Fixed
+
+- Preserved closed, operation-specific callable handle schemas in compact MCP
+  outputs so evidence consumption and report publication no longer fail after
+  a successful ledger commit because unrelated canonical handles leaked into
+  post-commit validation.
+- Required failed or partial QA evidence to create owned corrective work and an
+  independent rerun of failed and affected checks before closure.
+- Advertised packaged assignment classes and their governance prerequisites so
+  rework profile selection is admissible on the first attempt; a corrected
+  retry no longer hides a routing failure from live acceptance.
+- Isolated native-dispatch receipts by coordinator session and added an atomic
+  active-dispatch index under the session lock. Settled or foreign history,
+  filename order, and timestamps no longer participate in worker routing.
+- Installed PyYAML explicitly in the GitHub release gate and synchronized
+  first-call, catalogue-digest, release, and rework regression coverage.
+
+## [1.12.1] - 2026-08-28
+
+### Fixed
+
+- Removed active single-call report writes: all new reports use the assembled
+  `begin` → `append` → `finalize` or `abort` protocol, while historical
+  finalized one-chunk evidence remains readable.
+- Required caller-generated idempotency keys for every mutation, including
+  exact replay/conflict behavior after a post-commit response loss.
+- Made current effective-contract coverage deterministic across steering,
+  ownership transfer, supersession, report arrival order, and closure review.
+- Replaced static native-host argument projection with a host-neutral dispatch
+  brief, and restricted report bodies to declared consuming delegations.
+- Aligned UTF-8 operation budgets, maintenance/index recovery, prompt-only
+  decisions, advisory closure evidence, source packaging, and documentation
+  with the V12 stabilization contract.
+
+### Verification
+
+- Added the deterministic source-mode all-15-operation first-valid-call regression
+  and the owned-PTY `scripts/cortex-live-smoke` verifier.
+
+## Historical/internal milestone — 2026-08-28 (pre-1.12.1 development)
+
+- Added fixed canonical semantic report schemas with a single unchanged
+  `source_text` value and non-gating semantic classification.
+- Restricted ready plan approval relations to completed semantic-valid
+  canonical plan reports while preserving legacy and invalid reports as
+  immutable evidence.
+- Restored public bounded `single` submission alongside the assembled
+  `begin` → sequential `append` → `finalize` (or `abort`) report protocol.
+- Required caller-provided idempotency keys on every ledger mutation, with
+  byte-equivalent same-key replay and non-mutating different-payload conflicts.
+- Restricted report bodies/chunks to declared consuming workers through
+  `consumer_delegation_ref`; coordinator reads return metadata/manifests only,
+  while worker body reads produce structural consumption receipts.
+- Replaced language-suffixed decision fields with neutral `prompt` and exact
+  original-language `response_original`; retired `prompt_en` and `response_en`
+  are not accepted for new decisions.
+- Documented semantic delegation receipts, scoped worker context, aggregate
+  request/rendering budgets, host lifecycle/schema boundaries, and advisory
+  governance/closure behavior. Documentation impact was material and the
+  affected project/feature/security/help surfaces were synchronized.
+
 ## [12.0.0] - 2026-08-27
+
+### Added
+
+- Add the packaged coordinator-communication policy. Coordinator-to-user
+  messages lead with result, impact, and next step; use the latest meaningful
+  user language; suppress unchanged waits; hide internal ledger details by
+  default; progressively disclose technical detail; and permit only safe
+  optional contextual humor. Worker and durable ledger/report content remain
+  English.
+- Include the eleventh packaged skill in source candidates and require its
+  deterministic lint, marketplace, and release-gate checks. This is static
+  contract enforcement only; no runtime dispatcher, A/B evaluation, or
+  model-quality gate was added.
 
 ### Changed
 
@@ -35,7 +111,7 @@
   Luna remains the default and omits a native model override; Terra and Sol
   pass exact overrides; all preserve `low`, `medium`, `high`, `xhigh`, or
   `max` effort with `fork_turns="none"`.
-- Add immutable single and chunked report submission. A stable report ID can
+- Add immutable one-chunk and chunked report submission. A stable report ID can
   move through `begin`, ordered labeled `append`, exact-manifest `finalize`, or
   `abort`; bounded `read_reports` returns only whole selected JSON chunks and
   metadata within cursor and byte limits. Task/delegation inspections expose

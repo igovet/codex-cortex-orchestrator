@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Remove only the exact persistent Cortex development runtime when confirmed.
+set -euo pipefail
+
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/cortex-dev-reset --confirm
+
+Remove the exact $HOME/.cortex-dev Cortex candidate runtime. This command
+refuses the active HOME, repository, broad paths, and symlinked targets.
+EOF
+  exit 0
+fi
+if [[ "${1:-}" != "--confirm" || $# -ne 1 ]]; then
+  echo "error: cortex-dev-reset requires the explicit --confirm argument" >&2
+  exit 2
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+project_dir="$(cd -- "${script_dir}/.." && pwd -P)"
+active_home="$(cd -- "${HOME:?HOME is required}" && pwd -P)"
+dev_home="${active_home}/.cortex-dev"
+
+python3 -B - "${active_home}" "${dev_home}" "${project_dir}" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+active_home = Path(sys.argv[1]).resolve(strict=True)
+requested = Path(sys.argv[2]).absolute()
+project_root = Path(sys.argv[3]).resolve(strict=True)
+target = active_home / ".cortex-dev"
+if requested != target or target in {Path("/"), active_home, project_root}:
+    raise SystemExit("error: refusing a non-dedicated Cortex dev reset target")
+if target == Path.cwd().resolve():
+    raise SystemExit("error: refusing to remove the current working directory")
+if not target.exists():
+    raise SystemExit("error: Cortex dev runtime does not exist")
+if target.is_symlink() or not target.is_dir():
+    raise SystemExit("error: Cortex dev runtime must be a regular directory")
+for path in target.rglob("*"):
+    if path.is_symlink():
+        raise SystemExit(f"error: refusing reset through symlink: {path.relative_to(target)}")
+    if not path.is_dir() and not path.is_file():
+        raise SystemExit(f"error: refusing reset of non-regular entry: {path.relative_to(target)}")
+shutil.rmtree(target)
+PY

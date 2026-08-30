@@ -28,6 +28,8 @@ text required by the task or decision contract.
   timeline records remain SQLite-only. Never copy a verified path into worker
   messages, external channels, raw logs, or error details, and never publish a
   stale/failed projection.
-- Preserve an exact user decision only in its designated original-text field;
-  place a sanitized English normalization separately. A recorded authorization
+- Preserve an exact user decision only in its designated original-response
+  field, together with the neutral prompt and language; do not generate or
+  accept translated or duplicate language-specific fields. Redact sensitive values in
+  the original response as required by this policy. A recorded authorization
   assertion is evidence, not a credential or approval token.

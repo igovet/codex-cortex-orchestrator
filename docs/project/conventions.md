@@ -10,7 +10,7 @@
   repository state.
 - Treat activated bundled skill text as host-supplied context. Never call
   `read_mcp_resource`, `resources/read`, or a Cortex tool to fetch a `skill://`
-  URI; the eleven-tool registry has no skill-resource reader.
+  URI; the fifteen-tool registry has no skill-resource reader.
 - Treat Cortex as a durable coordination ledger. The coordinator owns only a
   model-held dynamic orchestration DAG and governance; the backend owns storage
   integrity, immutable evidence, bounded reads, and derived host-private
@@ -23,8 +23,9 @@
   graph; it is advisory history, not a backend-executed workflow.
 - A requested or necessary main plan requires a fresh verified host-private
   Markdown link and explicit localized approve/revise/reject/cancel input.
-  Record approval against its exact report/digest, then pass that decision ID to
-  every plan-dependent delegation. Do not start implementation or research
+  Record approval against its exact report/digest, then pass that compact
+  decision ref in `input_decision_refs` to every plan-dependent delegation. Do
+  not start implementation or research
   beyond discovery/planning first. A C1 skip is valid only without a user plan
   request and with explicit rationale.
 - Retain C1/C2/C3 as advisory baselines: bounded low-risk work / multi-step or
@@ -37,7 +38,7 @@
   delegate and coordinate native workers, read reports, decide rework, record
   advisory closure, and synthesize the final answer.
 - Preserve the coordinator's sole project-read exception: bounded knowledge
-  routing through every applicable `AGENTS.md`, `docs/project/index.md`,
+  routing through the host-injected `AGENTS.md` context, `docs/project/index.md`,
   `docs/features/index.md`, and only task-relevant pages selected from those
   indexes. The bundled orchestrator skill alone owns the exact route and
   six-part per-delegation template: documents to consume first, applicable
@@ -64,15 +65,15 @@
 - Before `create_delegation` or native spawn, require those six labels exactly
   once, in order, with non-empty delegation-specific content. Empty, omitted,
   TODO/TBD/unknown, or generic placeholder sections are invalid.
-- Keep the public facade at exactly the eleven canonical action-specific tools in
+- Keep the public facade at exactly the fifteen canonical action-specific tools in
   `public_contracts.py`. Coordinator and worker catalogs are identical.
 - Let the active MCP schema own exact fields, types, sizes, enumerations, and
   response shapes. Documentation mirrors semantics and the exact tool names but
   is not validator input.
 - Supply the exact resolved repository/worktree as `project_root` only to
-  `create_task`; retain `handles.task_ref` for the seven task-anchored calls
-  and canonical `task_id` as durable evidence. Never copy a UI-rendered task
-  ID into a public task call or infer a root from MCP metadata, thread identity, the
+  `create_task`; retain `handles.task_ref` for the seven task-anchored calls.
+  The returned canonical `task_id` is non-callable durable evidence. Never copy
+  a UI-rendered task ID into a public task call or infer a root from MCP metadata, thread identity, the
   plugin process `cwd`, hooks, or project/database directory scanning.
 - Create a versioned task/result contract before the first project delegation:
   preserve `user_request_original` and `user_language`; store an English
@@ -81,53 +82,81 @@
   original request. Treat optional `create_task.context` as arbitrary task JSON,
   never as a root binding.
 - Before `create_task`, require non-empty meaningful `requirements`,
-  `constraints`, `acceptance_criteria`, and `verification_plan` arrays. Optional
+  `constraints`, and `acceptance_criteria` arrays; the persisted verification plan is derived deterministically. Optional
   context cannot replace them; record a bounded assumption and verification
   item instead of an unknown/placeholder array.
 - Keep delegation `scope` a required non-empty text boundary of worker ownership;
   put detailed execution in `instructions` and reject object scope.
 - Call `submit_governance_closure` with required `subject_type`, the exact
-  existing `subject_id`, one `verdict`, and bounded opaque JSON `evidence`.
-  A task subject uses the exact anchored task ID and omits initiative-only
-  status/completion fields; an initiative subject uses the exact returned ID
-  related to the anchored task. Never invent a closure digest field.
-- Reuse returned task, delegation, report, initiative, assessment, and closure
-  IDs and every digest/cursor byte-for-byte. They are opaque durable references,
-  not bearer capabilities: never parse, concatenate, reconstruct, normalize,
-  reformat, or append a suffix.
+  existing compact `subject_ref`, one `verdict`, and bounded opaque JSON
+  `evidence`. A task subject uses the exact anchored `task_ref` as
+  `subject_ref` and omits initiative-only `initiative_status`; opaque
+  `completion_notes` are valid for either subject. An initiative subject uses
+  the exact returned `initiative_ref` as `subject_ref`.
+  Durable `subject_id` values are evidence only. Never invent a closure digest
+  field.
+- After sufficient finalized worker evidence, select `ready`,
+  `ready_with_risks`, or `not_ready`, then let the closure call automatically
+  attempt the advisory write and inspect the intended record. `ready_with_risks`
+  never requires user confirmation. Keep the independent `execution_outcome`
+  projection separate from `advisory_closure` bookkeeping.
+- `inspect_task` exposes the exact four-field `execution_outcome`:
+  `evidence_status`, `finalized_report_count`, `completed_report_count`, and
+  `outcome`. The finalized count covers every finalized report; the completed
+  count covers semantically valid canonical finalized results with status
+  `completed`. `outcome` is `null` before the first semantically valid canonical
+  finalized result and then reflects the latest such result as `completed` or
+  `incomplete`, without claiming native lifecycle. It exposes
+  `advisory_closure` with `record_status` and `latest_record`. A closure cannot
+  change execution evidence. `submit_governance_closure` returns
+  `closure_confirmation` with `inspection_status`, `reason`, and `attempts`;
+  only one same-idempotency retry is allowed for a verified transient
+  persistence or inspection failure. If the result is `unconfirmed`, disclose
+  advisory uncertainty without changing the evidence projection.
+- Reuse returned compact task/entity refs and every digest/cursor byte-for-byte.
+  Durable `*_id` values are opaque non-callable evidence, not bearer
+  capabilities. Never parse, concatenate, reconstruct, normalize, reformat, or
+  append a suffix to any ref or ID.
 - Treat the `task_ref` on initiative operations only as the locator for the
   saved project ledger, never as governance permission or a lifecycle gate.
-- Use idempotency keys for retried writes. Same normalized payload returns the
-  original record; conflicting content must fail without mutation.
-- Treat reports as immutable evidence. Pass only finalized relevant report IDs
+- Every mutation requires a caller-generated operation-scoped idempotency key.
+  Reuse that exact key unchanged only for an
+  exact normalized-payload retry; the same payload replays the original result
+  and conflicting content returns a non-mutating `idempotency_conflict`.
+- Treat reports as immutable evidence. Pass only finalized relevant report refs
   and their exact manifest digests to later delegations. Worker consumption is
-  evidenced only by `read_reports(reader_kind="worker", consumer_delegation_id=…)`
-  receipts; coordinator reads never substitute for that evidence.
+  evidenced by a `read_reports` call with the consuming worker's own exact
+  `consumer_delegation_ref` (the delegation must declare the input), plus its receipt;
+  coordinator reads never substitute for that evidence.
 - The owning native worker alone calls `submit_report` for its plan, result,
-  verification, synthesis, or documentation-impact evidence. The coordinator
-  creates/dispatches the delegation, waits, and reads its finalized report; a
-  report gap leads to follow-up, rework, or parent-linked replacement.
+  verification, synthesis, or documentation-impact evidence. Its completion
+  handoff returns a concise `Summary` and exact `Report ref`; the coordinator
+  consumes that handoff and does not reread the body merely to summarize it. A
+  downstream worker reads the finalized report only when its declared work
+  requires the body. A report gap leads to follow-up, rework, or replacement.
 - Use the immutable report types `progress`, `result`, `synthesis`, and `plan`.
   A plan's review policy is `informational` or `required`; review is a
   coordinator-owned ordinary-chat hold, never a backend gate. A required review
   needs an explicit unambiguous response to that exact finalized plan digest;
   silence and unrelated text are not approval.
-- Use `single`, `begin`, sequential `append`, `finalize`, and `abort` report
-  modes. A single report is at most 65,536 bytes; each appended chunk is at most
-  32,768 bytes; a report has at most 256 chunks and 8 MiB total. Resume an
-  interrupted assembly from its manifest and `next_chunk_index`; never restart,
-  skip, overwrite, or append after finalization/abort. Use an explicit
+- Use the semantic publication operation for one complete terminal report outcome.
+  The server owns storage and derives replay identity from the delegation,
+  phase, assembly state, and canonical payload. Exact ambiguous retries replay;
+  changed payloads conflict and require an explicit recovery/rework delegation.
+  Never restart, overwrite, or publish after terminal completion. Use an explicit
   superseding report for replacement.
 - Preserve `read_reports` request order and its 20-report maximum; select only
-  needed sections, respect its maximum 65,536-byte content budget, and continue
-  with the returned cursor until complete. `max_bytes=0` is metadata-only
-  recovery. A worker must name its own delegation and may read only declared
+  needed sections, use compact `report_refs`, and continue through its fixed 65,536-byte server pages
+  with the returned cursor until complete. Omitting a consuming delegation is metadata-only
+  recovery. A worker must name its
+  own delegation and may read only declared
   finalized inputs; retain the exact receipt digest, chunk indexes, and cursor
-  transitions. Bound task/delegation/governance inspection with `after_sequence`
-  plus `limit` and preserve `next_sequence`/`has_more`.
-- Use `record_user_decision` only when coordinator policy has identified an
-  ordinary-chat response as a direct user decision. Append the exact response in
-  `response_original`, retain `response_en` as English normalization, and bind
+  transitions. Continue task/delegation/governance inspection with `after_sequence`
+  and preserve `next_sequence`/`has_more`; pages are fixed at 50 events.
+- Use the matching narrow decision record operation only when coordinator policy has identified an
+  ordinary-chat response as a direct user decision. Use neutral `prompt`, append
+  the exact original-language response in `response_original`, and retain no
+  `prompt_en`/`response_en` duplicate fields. Bind
   plan/report decisions to the exact canonical digest. Only plan `approve`
   additionally binds a current ready approval view and opaque approval handle;
   plan `request_revision` and `cancel` retain the exact plan digest/response
@@ -149,8 +178,8 @@
   dependencies, links, and closure interpretation.
 - Accept any transition among `proposed`, `active`, `paused`, `completed`,
   `closed`, and `cancelled`. Preserve unresolved/cyclic dependency warnings.
-- Treat `ready`, `ready_with_risks`, and `not_ready` as model-authored advisory
-  verdicts, never backend lifecycle outcomes.
+- Treat `ready`, `ready_with_risks`, and `not_ready` as coordinator-selected
+  advisory verdicts, never execution outcomes or backend lifecycle states.
 - Keep agent profiles advisory. Profiles describe roles and quality bars but do
   not select models, pin efforts, authorize tools, or enforce capabilities.
 - Select one exact packaged `profile_name` for every ordinary delegation and
@@ -161,19 +190,33 @@
 - Choose one exact model/effort pair per delegation. Canonical recommendations
   are `high` for Luna, Terra, and Sol; all support `low`, `medium`, `high`,
   `xhigh`, and `max`.
+- Route Luna first, including Explorer and ordinary discovery; increase Luna
+  effort before changing models. Terra is for evidence-backed genuinely complex
+  non-security work or planning, while Sol is for security work and review.
 - For native dispatch use `fork_turns="none"` and preserve the exact effort.
   Omit the native `model` argument for logical Luna because it is the configured
   default; pass exact Terra or Sol overrides.
 - Map each successful durable delegation to exactly one native host spawn. The
   first worker with a profile uses its exact profile name; same-profile
-  siblings use the server-issued `_2`, `_3`, and later numeric suffixes. Copy
-  the returned native arguments byte-for-byte, including the exact rendered
-  message and explicit effort; never assemble an ad-hoc prompt, omit a spawn,
-  dispatch twice, or reuse one worker for multiple delegations. Reconcile an
-  ambiguous host result by exact native handle before replacement.
+  siblings use the server-issued `_2`, `_3`, and later numeric suffixes. Map
+  the returned host-neutral `dispatch_brief` to the active host operation,
+  preserving its exact rendered message and effort semantics; never assemble an
+  ad-hoc prompt, omit a spawn, dispatch twice, or reuse one worker for multiple
+  delegations. Reconcile an ambiguous host result by exact native handle before
+  replacement.
+- Keep the standard Codex To-Do projection limited to current pipeline stages
+  and review state. Refresh it whenever either changes; never use it for worker
+  subtasks, implementation checklists, or report-body copies. Concise handoff
+  summaries carry current stage/state, outcome, next owner/action, pipeline or
+  review delta, changed/verified surface, exact report ref/digest, and residual
+  risk or unrun checks so routine coordinator body reads are unnecessary.
+- Treat planner-authored implementation microtasks as evidence for the
+  model-owned orchestration DAG only. They are not backend jobs, scheduling
+  instructions, worker-subtask checklists, or report-body copies.
 - Do not add a server-owned model fallback, worker recovery route, wave/gate
-  state machine, plan approval, receipt protocol, host binding, or lifecycle
-  authorization.
+  state machine, plan-approval gate, receipt-gated lifecycle, host binding, or
+  lifecycle authorization. Coordinator-owned plan review and worker handoff
+  delivery receipts remain valid advisory/evidence practices.
 - V12 ships no lifecycle hooks. Native spawn/wait/stop state is outside
   the ledger and never a prerequisite for report access or completion.
 - Keep every native worker commentary/update, inter-worker message, final
@@ -199,9 +242,10 @@
   impact on worker reports. Missing documentation evidence leads to model-owned
   rework, replacement, or risk disclosure, never a backend gate.
 - For that no-impact close, create/update an initiative with the exact task
-  relationship, the exact documentation-impact report ID, and every other
-  required finalized report link. Cite the exact report IDs and returned digests
-  in closure evidence, close the exact returned initiative, then inspect
+  relationship, the exact documentation-impact `report_ref`, and every other
+  required finalized report link. Cite the exact compact report refs and
+  returned digests in closure evidence, close the exact returned initiative,
+  then inspect
   governance in task scope and initiative scope. Never accept a self-asserted
   `documentation_not_required`, a report-only final initiative, or a durable
   `ready` claim before the closure write and both inspections agree.
@@ -235,12 +279,26 @@
 - Keep secrets, credentials, personal data, raw reports, prompts, worker
   transcripts, and private diagnostics out of documentation, fixtures, issues,
   commits, and logs.
-- Keep end-user install/update on the README's GitHub Marketplace flow. Use
-  `./scripts/sync-cortex.sh` only for explicitly authorized repository
-  source synchronization; `--dry-run`/`--check` are validation modes.
+- Keep end-user install/update on the README's GitHub Marketplace flow. Every
+  interactive repository live-dev test starts through `./scripts/cortex-dev`:
+  it isolates `HOME` and `CODEX_HOME` under the exact persistent
+  `$HOME/.cortex-dev` candidate directory, refreshes the candidate cache/version
+  there, and only then launches Codex. Use `./scripts/cortex-dev-reset --confirm`
+  only to remove that dedicated candidate; its path guards must never be
+  weakened. Direct `./scripts/sync-cortex.sh` is not a live-dev mechanism and
+  must never synchronize the user's real installed plugin; `--dry-run`/`--check`
+  are read-only validation modes.
 - Delegate the smallest non-destructive checks that prove affected behavior,
   broaden in proportion to risk, and report every unrun release or live-host
   check.
+- Live tests use ordinary interactive Codex inside a named background `tmux`
+  session only, never `codex exec`; create the session with `-d`, send the
+  launcher and targeted input with `tmux send-keys`, capture a bounded pane,
+  and clean up. Run `./scripts/cortex-dev` before the targeted input, verify
+  and record its printed isolated `HOME`/`CODEX_HOME` target and refreshed cache
+  version, then keep the smoke narrow and record the exact command and outcome.
+  A terminal-permission prompt/denial or ordinary-Codex startup failure is
+  failed or unverified from the bounded capture, never inferred as success.
 - After behavior, interface, command, diagram, or version changes, delegate a
   documentation verifier to re-read README, SECURITY, release readiness, and
   all affected Markdown and validate links, Mermaid syntax, tool names, paths,

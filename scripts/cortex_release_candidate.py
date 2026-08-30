@@ -16,6 +16,21 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
+from cortex_payload_manifest import (
+    RuntimePayloadError,
+    ensure_managed_directory,
+    runtime_payload_closure,
+    validate_directory_topology,
+    validated_directory_root,
+)
+
+_PROVENANCE_PATH = Path(__file__).resolve().parents[1] / "plugins/cortex/scripts/cortex_runtime/provenance.py"
+_PROVENANCE_SPEC = importlib.util.spec_from_file_location("cortex_candidate_provenance", _PROVENANCE_PATH)
+if _PROVENANCE_SPEC is None or _PROVENANCE_SPEC.loader is None:
+    raise ImportError(f"unable to load canonical provenance module: {_PROVENANCE_PATH}")
+_PROVENANCE = importlib.util.module_from_spec(_PROVENANCE_SPEC)
+_PROVENANCE_SPEC.loader.exec_module(_PROVENANCE)
+
 
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
@@ -38,12 +53,19 @@ PUBLIC_RELEASE_FILES = (
     "docs/features/lifecycle-telemetry/index.md",
     "docs/features/orchestration-ledger/index.md",
     "docs/features/plugin-packaging/index.md",
+    "docs/features/coordinator-communication/index.md",
     ".agents/plugins/marketplace.json",
 )
 SUPPORT_SCRIPTS = (
+    "scripts/cortex_candidate_location.py",
+    "scripts/cortex_payload_manifest.py",
+    "scripts/cortex_candidate_receipt.py",
     "scripts/cortex-host-preflight.py",
+    "scripts/cortex-live-smoke",
     "scripts/cortex-prompt-lint.py",
     "scripts/cortex_release_candidate.py",
+    "scripts/cortex-dev",
+    "scripts/cortex-dev-reset",
     "scripts/render_cortex_tool_catalog.py",
     "scripts/sync-cortex.sh",
     "scripts/validate-cortex-marketplace.py",
@@ -53,12 +75,18 @@ PLUGIN_STATIC_FILES = (
     "plugins/cortex/.codex-plugin/plugin.json",
     "plugins/cortex/.mcp.json",
     "plugins/cortex/profiles.json",
+    "plugins/cortex/runtime-payload.json",
+    "plugins/cortex/agents/openai.yaml",
+    "plugins/cortex/hooks/hooks.json",
+    "plugins/cortex/hooks/cortex_activation.py",
+    "plugins/cortex/hooks/cortex_lifecycle_observer.py",
     "plugins/cortex/scripts/cortex.py",
 )
 PLUGIN_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
     "context-compaction",
+    "coordinator-communication",
     "cortex-control",
     "documentation-sync",
     "find-skills",
@@ -67,27 +95,10 @@ PLUGIN_SKILLS = (
     "output-validation",
     "progress-accounting",
 )
-ACTIVE_PLUGIN_PYTHON = (
-    "plugins/cortex/scripts/cortex.py",
-    "plugins/cortex/scripts/cortex_runtime/__init__.py",
-    "plugins/cortex/scripts/cortex_runtime/canonical_json.py",
-    "plugins/cortex/scripts/cortex_runtime/delegation.py",
-    "plugins/cortex/scripts/cortex_runtime/mcp_api.py",
-    "plugins/cortex/scripts/cortex_runtime/model_routing.py",
-    "plugins/cortex/scripts/cortex_runtime/public_contracts.py",
-    "plugins/cortex/scripts/cortex_runtime/routing.py",
-    "plugins/cortex/scripts/cortex_runtime/v12_contract.py",
-    "plugins/cortex/scripts/cortex_runtime/v12_maintenance.py",
-    "plugins/cortex/scripts/cortex_runtime/v12_projections.py",
-    "plugins/cortex/scripts/cortex_runtime/v12_service.py",
-    "plugins/cortex/scripts/cortex_runtime/v12_store.py",
-    "plugins/cortex/scripts/cortex_runtime/worker_message.py",
-)
 PLUGIN_ROOT = Path("plugins/cortex")
 FORBIDDEN_PARTS = frozenset({"__pycache__", ".codex"})
 FORBIDDEN_SUFFIXES = frozenset({".pyc", ".pyo"})
 RETIRED_PLUGIN_PATHS = frozenset({
-    Path("plugins/cortex/hooks"),
     Path("plugins/cortex/scripts/cortex_hook.py"),
     Path("plugins/cortex/scripts/cortex-launcher"),
     Path("plugins/cortex/scripts/cortex_runtime/core"),
@@ -132,6 +143,67 @@ class CandidateManifest:
 
     files: tuple[Path, ...]
 
+    def records(self, root: Path) -> tuple[dict[str, object], ...]:
+        """Return the canonical, byte-addressed records for this manifest."""
+        base = root.resolve()
+        records: list[dict[str, object]] = []
+        for relative in self.files:
+            path = _require_regular(base, relative)
+            payload = _normalized_payload(relative, path.read_bytes())
+            records.append({
+                "path": relative.as_posix(),
+                "bytes": len(payload),
+                "sha256": _PROVENANCE.payload_digest(payload),
+            })
+        return tuple(records)
+
+    def digest(self, root: Path) -> str:
+        """Return a deterministic SHA-256 identity for the exact file payload."""
+        encoded = json.dumps(
+            {"files": self.records(root)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return _PROVENANCE.records_digest(self.records(root))
+
+    def plugin_digest(self, root: Path) -> str:
+        """Hash only the installable plugin payload (the Codex cache scope)."""
+        return _PROVENANCE.records_digest(self.plugin_records(root))
+
+    def plugin_records(self, root: Path) -> tuple[dict[str, object], ...]:
+        """Return only the declared installable-plugin records.
+
+        A source release candidate also contains repository delivery artifacts
+        (marketplace registration, documentation, and support scripts).  Those
+        are deliberately not present in Codex's installed plugin cache.  This
+        method is the explicit boundary: it never reads a repository-only file
+        when verifying an installed package, while retaining exact file/type/
+        digest closure for every file below ``plugins/cortex``.
+        """
+        base = root.resolve()
+        records: list[dict[str, object]] = []
+        for relative in self.files:
+            if not relative.is_relative_to(PLUGIN_ROOT):
+                continue
+            path = _require_regular(base, relative)
+            payload = _normalized_payload(relative, path.read_bytes())
+            records.append({
+                "path": relative.as_posix(),
+                "bytes": len(payload),
+                "sha256": _PROVENANCE.payload_digest(payload),
+            })
+        if not records:
+            raise CandidateError("candidate manifest has no installable plugin payload")
+        return tuple(records)
+
+    def installable_plugin_manifest(self) -> "CandidateManifest":
+        """Project the full delivery manifest onto the installed-cache scope."""
+        files = tuple(relative for relative in self.files if relative.is_relative_to(PLUGIN_ROOT))
+        if not files:
+            raise CandidateError("candidate manifest has no installable plugin payload")
+        return CandidateManifest(files)
+
 
 def _load_json(path: Path, label: str) -> dict[str, object]:
     try:
@@ -141,6 +213,11 @@ def _load_json(path: Path, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise CandidateError(f"{label} must be an object")
     return value
+
+
+def _normalized_payload(relative: Path, payload: bytes) -> bytes:
+    """Exclude the generated cache version from content identity."""
+    return _PROVENANCE.normalized_payload(relative.as_posix(), payload)
 
 
 def _safe_relative(raw: str, label: str) -> Path:
@@ -175,7 +252,24 @@ def _plugin_payload_files(root: Path) -> set[Path]:
     files: set[Path] = set()
     for base, directories, names in os.walk(plugin, followlinks=False):
         current = Path(base)
-        for name in [*directories, *names]:
+        for name in directories:
+            path = current / name
+            relative = path.relative_to(root)
+            if path.is_symlink():
+                raise CandidateError(f"installable plugin contains a symlink: {relative}")
+            try:
+                mode = path.lstat().st_mode
+            except OSError as exc:
+                raise CandidateError(f"installable plugin directory is unreadable: {relative}") from exc
+            if not stat.S_ISDIR(mode):
+                raise CandidateError(f"installable plugin directory is not a directory: {relative}")
+            if relative in RETIRED_PLUGIN_PATHS or any(
+                retired in relative.parents for retired in RETIRED_PLUGIN_PATHS
+            ):
+                raise CandidateError(f"installable plugin retains retired V11 residue: {relative}")
+            if any(part in FORBIDDEN_PARTS for part in relative.parts):
+                raise CandidateError(f"installable plugin contains runtime state: {relative}")
+        for name in names:
             path = current / name
             relative = path.relative_to(root)
             if path.is_symlink():
@@ -198,6 +292,14 @@ def _plugin_payload_files(root: Path) -> set[Path]:
             if not stat.S_ISREG(mode):
                 raise CandidateError(f"installable plugin has a non-regular payload: {relative}")
             files.add(relative)
+    try:
+        validate_directory_topology(
+            plugin,
+            {relative.relative_to(PLUGIN_ROOT) for relative in files},
+            "installable plugin",
+        )
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
     return files
 
 
@@ -398,9 +500,19 @@ def _markdown_release_closure(root: Path, seeds: Iterable[Path]) -> set[Path]:
     return discovered
 
 
+def _runtime_payload_files(root: Path) -> set[Path]:
+    try:
+        return set(runtime_payload_closure(root).files)
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
+
+
 def source_candidate_manifest(root: Path) -> CandidateManifest:
     """Derive the exact allowlisted candidate from public manifests and imports."""
-    root = root.resolve()
+    try:
+        root = validated_directory_root(root, "repository root")
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
     installable_plugin_files = _plugin_payload_files(root)
     files = {
         Path(item)
@@ -408,7 +520,7 @@ def source_candidate_manifest(root: Path) -> CandidateManifest:
             *PUBLIC_RELEASE_FILES,
             *SUPPORT_SCRIPTS,
             *PLUGIN_STATIC_FILES,
-            *ACTIVE_PLUGIN_PYTHON,
+            *_runtime_payload_files(root),
         )
     }
     plugin_manifest = _load_json(root / "plugins/cortex/.codex-plugin/plugin.json", "plugin manifest")
@@ -465,7 +577,18 @@ def _validate_candidate_paths(tree: Path, manifest: CandidateManifest) -> None:
     actual: set[Path] = set()
     for base, directories, files in os.walk(tree, followlinks=False):
         current = Path(base)
-        for name in [*directories, *files]:
+        for name in directories:
+            path = current / name
+            relative = path.relative_to(tree)
+            if path.is_symlink():
+                raise CandidateError(f"candidate contains a symlink: {relative}")
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                raise CandidateError(f"candidate directory is not a directory: {relative}")
+            if any(part in FORBIDDEN_PARTS for part in relative.parts):
+                raise CandidateError(f"candidate contains runtime state: {relative}")
+            if _secret_prone(relative):
+                raise CandidateError(f"candidate contains a secret-prone path: {relative}")
+        for name in files:
             path = current / name
             relative = path.relative_to(tree)
             if path.is_symlink():
@@ -484,6 +607,14 @@ def _validate_candidate_paths(tree: Path, manifest: CandidateManifest) -> None:
         missing = sorted(set(manifest.files) - actual)
         extra = sorted(actual - set(manifest.files))
         raise CandidateError(f"candidate manifest mismatch; missing={missing}; extra={extra}")
+    try:
+        validate_directory_topology(
+            tree,
+            {relative for relative in manifest.files},
+            "candidate",
+        )
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
 
 
 def _validate_public_files(tree: Path) -> None:
@@ -536,7 +667,10 @@ def _validate_documented_script_commands(tree: Path, manifest: CandidateManifest
 
 def validate_candidate_tree(tree: Path, manifest: CandidateManifest | None = None) -> CandidateManifest:
     """Prove the produced candidate is exact, import-closed, and publishable."""
-    tree = tree.resolve()
+    try:
+        tree = validated_directory_root(tree, "candidate root")
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
     active = manifest or source_candidate_manifest(tree)
     _validate_candidate_paths(tree, active)
     _validate_public_files(tree)
@@ -552,7 +686,7 @@ def validate_candidate_tree(tree: Path, manifest: CandidateManifest | None = Non
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     for command, label in (
-        ([sys.executable, "-B", str(validator), "--root", str(tree)], "marketplace validation"),
+        ([sys.executable, "-B", str(validator), "--root", str(tree), "--candidate"], "marketplace validation"),
         ([sys.executable, "-B", str(catalog_renderer), "--root", str(tree), "--check"], "tool catalog validation"),
     ):
         checked = subprocess.run(
@@ -571,19 +705,96 @@ def validate_candidate_tree(tree: Path, manifest: CandidateManifest | None = Non
 
 def build_source_candidate(root: Path, destination: Path) -> CandidateManifest:
     """Copy only exact allowlisted working-tree files into a fresh directory."""
-    root = root.resolve()
-    destination = destination.resolve()
+    try:
+        root = validated_directory_root(root, "repository root")
+        destination = validated_directory_root(destination, "candidate root", allow_missing=True)
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
     if destination.exists() and any(destination.iterdir()):
         raise CandidateError(f"candidate destination is not empty: {destination}")
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination = ensure_managed_directory(destination, "candidate root")
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
     manifest = source_candidate_manifest(root)
     for relative in manifest.files:
         source = _require_regular(root, relative)
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target, follow_symlinks=False)
+    # Stamp the staged manifest after copying.  Its version field is excluded
+    # from the canonical digest, so this is deterministic and makes a direct
+    # black-box candidate build independently self-verifying.
+    staged_manifest = destination / "plugins/cortex/.codex-plugin/plugin.json"
+    payload = json.loads(staged_manifest.read_text(encoding="utf-8"))
+    payload["version"] = (
+        f"{str(payload.get('version', '')).split('+', 1)[0]}+codex.sha256."
+        f"{manifest.plugin_digest(destination)[:16]}"
+    )
+    staged_manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _validate_candidate_paths(destination, manifest)
     return manifest
+
+
+def candidate_digest(root: Path, manifest: CandidateManifest | None = None) -> str:
+    """Hash an already-built candidate without importing any candidate code."""
+    active = manifest or source_candidate_manifest(root)
+    return active.digest(root)
+
+
+def plugin_tree_digest(plugin_root: Path, manifest: CandidateManifest) -> str:
+    """Hash an installed plugin tree using repository-relative manifest paths."""
+    # Do not resolve the cache root before checking it: a symlink at the
+    # version directory would otherwise be silently accepted as a valid
+    # candidate located elsewhere.
+    try:
+        plugin_root = validated_directory_root(plugin_root, "installed candidate root")
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
+    records: list[dict[str, object]] = []
+    prefix = PLUGIN_ROOT.parts
+    expected: set[Path] = set()
+    for relative in manifest.files:
+        if relative.parts[: len(prefix)] != prefix:
+            continue
+        installed_relative = Path(*relative.parts[len(prefix) :])
+        expected.add(installed_relative)
+        path = _require_regular(plugin_root, installed_relative)
+        payload = _normalized_payload(relative, path.read_bytes())
+        records.append({
+            "path": relative.as_posix(),
+            "bytes": len(payload),
+                "sha256": _PROVENANCE.payload_digest(payload),
+        })
+    actual: set[Path] = set()
+    for base, directories, names in os.walk(plugin_root, followlinks=False):
+        current = Path(base)
+        for name in directories:
+            path = current / name
+            if path.is_symlink():
+                raise CandidateError(f"installed candidate contains unsafe path: {path.relative_to(plugin_root)}")
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                raise CandidateError(f"installed candidate contains unsafe path: {path.relative_to(plugin_root)}")
+        for name in names:
+            path = current / name
+            if path.is_symlink() or not path.is_file():
+                raise CandidateError(f"installed candidate contains unsafe path: {path.relative_to(plugin_root)}")
+        actual.update((current / name).relative_to(plugin_root) for name in names)
+    if actual != expected:
+        raise CandidateError(
+            "installed candidate payload differs from source manifest: "
+            f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+        )
+    try:
+        validate_directory_topology(plugin_root, expected, "installed candidate")
+    except RuntimePayloadError as exc:
+        raise CandidateError(str(exc)) from None
+    return _records_digest(records)
+
+
+def _records_digest(records: Iterable[dict[str, object]], prefix: str | None = None) -> str:
+    selected = [record for record in records if prefix is None or str(record["path"]).startswith(prefix)]
+    return _PROVENANCE.records_digest(selected)
 
 
 def required_head_drift(root: Path, manifest: CandidateManifest) -> list[str]:
@@ -610,5 +821,6 @@ def required_head_drift(root: Path, manifest: CandidateManifest) -> list[str]:
 
 __all__ = [
     "CandidateError", "CandidateManifest", "build_source_candidate",
-    "required_head_drift", "source_candidate_manifest", "validate_candidate_tree",
+    "candidate_digest", "plugin_tree_digest", "required_head_drift",
+    "source_candidate_manifest", "validate_candidate_tree",
 ]

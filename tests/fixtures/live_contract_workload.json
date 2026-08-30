@@ -1,0 +1,11 @@
+{
+  "prompt": "The selected route is $cortex:orchestrator. Exercise the Cortex live contracts using Cortex MCP tools for ledger operations and orchestration evidence. Native collaboration/subagents are allowed and required for worker dispatch and report ownership under the orchestrator contract. Do not run shell commands, inspect source, modify files, start nested live-dev, or start nested tmux. Derive every Cortex call solely from the tools' advertised schemas and descriptions. Verify exact caller idempotency, the canonical current user-decision contract without deprecated aliases, one bounded delegation, canonical incremental report assembly, and both report-metadata and authorized report-body reads. Make exactly one task-creation request and require exactly one non-replayed success for it. Never repeat or replay any successful mutation; only an explicitly transport-ambiguous result may be retried, and only when the advertised retry contract authorizes an exact retry. If any mutation is repeated, do not emit the success sentinel. Dispatch one bounded native worker and use its owned report. After every live call succeeds and no mutation was repeated, reply on a separate line exactly CORTEX_LIVE_CONTRACTS_OK. Do not emit the marker on any failure.",
+  "success_marker": "CORTEX_LIVE_CONTRACTS_OK",
+  "evidence_patterns": [
+    "(?i)create_task",
+    "(?i)record_user_decision",
+    "(?i)read_reports",
+    "(?i)submit_report",
+    "CORTEX_LIVE_CONTRACTS_OK"
+  ]
+}

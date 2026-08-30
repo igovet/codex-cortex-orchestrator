@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 12.0.0 projects selected host-private plan and finalized-report evidence
+Cortex 1.12.2 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read
@@ -95,9 +95,14 @@ Every output path is derived from server-generated validated identifiers rather
 than caller-supplied export paths. Generated files are ordinary, readable
 Markdown: plans and reports are structured human-readable documents with
 labeled headings, normal lists, and paragraphs, not raw nested field dumps.
-Authored Markdown in task or report content is preserved verbatim: the renderer
-does not add backslashes, entity-escape HTML, or otherwise rewrite the content.
-Structured JSON is canonical database data only; it is never dumped as a JSON
+The renderer owns the document hierarchy: ordinary authored strings are data,
+not executable Markdown, and are sanitized context-sensitively so headings,
+lists, tables, blockquotes, HTML, rules, and fences cannot inject structure.
+Readable punctuation is retained. Only explicitly typed blocks (such as a code
+block) emit their intended formatting. The optional `cortex/report-view/v1`
+envelope is parsed only at render time; malformed, unknown, or legacy content
+uses the safe generic fallback without changing canonical report acceptance or
+persistence. Structured JSON is canonical database data only; it is never dumped as a JSON
 object, script block, `<pre>` block, entity-encoded payload, or opaque blob into
 a human view.
 
@@ -131,7 +136,7 @@ exact absolute path it returned. The accompanying summary is localized to the
 user's language and explains what evidence the particular page contains.
 
 The published form is the server-provided `markdown_link` field copied
-byte-for-byte, such as `[Open plan](/absolute/path/to/t_ref/plans/current.md)`:
+byte-for-byte, including its readable label and absolute destination:
 its readable label and destination are already bound to the verified artifact.
 Cortex never uses a bare or backticked path, a code block, a constructed path,
 or a line break inside the destination.
@@ -142,10 +147,41 @@ canonical SQLite evidence inline. The user still receives the substantive task
 state; view delivery is an aid, not a gate on planning, acceptance, decisions,
 or completion.
 
-Durable internal fields and generated view content are English. Original user
-language is retained only in explicitly labelled `*_original` fields, with a
-separate English `*_en` field. The localized coordinator message is a delivery
-layer and does not replace that durable English evidence.
+## Task inspection and closure bookkeeping
+
+Task, delegation, governance, closure, decision, and timeline records are not
+rendered as Markdown views. Use `inspect_task` and `inspect_governance` for
+bounded human-readable inspection of those records. `inspect_task` exposes two
+separate projections: `execution_outcome`, which is neutral finalized-report
+evidence, and `advisory_closure`, which describes whether an advisory record is
+present. The execution projection contains `evidence_status`,
+`finalized_report_count`, `completed_report_count`, `effective_revision`,
+`coverage_status`, and `outcome`. It derives deterministically from current
+effective-contract coverage and makes no native-lifecycle claim. The
+closure projection contains `record_status`
+and `latest_record` (or `null`).
+Neither projection is a native-host lifecycle signal.
+
+After sufficient completed evidence, the coordinator selects `ready`,
+`ready_with_risks`, or `not_ready`, attempts the advisory closure, and inspects
+the intended record automatically. `ready_with_risks` is not a request for
+user confirmation. The closure result's `closure_confirmation` reports
+`inspection_status` (`confirmed` or `unconfirmed`), the exact reason
+(`record_inspected`, `persistence_unavailable`, `inspection_unavailable`, or
+`record_not_observed`), and `attempts` (1 or 2). At most one same-idempotency
+retry is made for a verified transient persistence or inspection failure. An
+unconfirmed advisory record is disclosed as bookkeeping uncertainty while the
+independent `execution_outcome` remains intact; advisory-view availability does
+not alter execution evidence.
+
+Durable worker-authored fields and generated view content are English. Existing
+task original user language is retained in explicitly labelled `*_original`
+fields. Decision records retain exact `response_original` without an English
+duplicate. Canonical
+product-facing report/handoff payloads may instead carry one optional
+unchanged `source_text` value, rendered once as inert source material without
+a language tag or translated/original duplicate. The localized coordinator
+message is a delivery layer and does not replace canonical evidence.
 
 ## Plan review and user decisions
 
@@ -158,13 +194,17 @@ reviewable plan; immutable historical revisions appear at
 content to the canonical report so review cannot silently drift to altered
 text.
 
-`record_user_decision` records `approve`, `reject`, `request_revision`,
-`clarification`, `cancel`, `accept_risk`, or `override` against an exact task,
-plan, initiative, delegation, or report. For plan and report decisions, the
-decision is bound to the canonical `sha256:<64-lowercase-hex>` subject digest;
-a plan must be finalized and completed. Only `decision_type=approve` requires
-the exact server-issued `approval_handle` from a current ready `approval_view`,
-plus the matching plan digest, view digest, and view source sequence. The
+The matching narrow decision record operation records `approve`, `reject`, `request_revision`,
+`clarification`, `cancel`, `accept_risk`, `override`, or `steer` against an exact task,
+plan, initiative, delegation, or report. Its closed canonical request preserves
+the task/subject refs, decision type, neutral `prompt`, exact
+`response_original`, and `user_language`; `subject_digest` is included for
+plan and report subjects only. For plan and report decisions, the decision is bound to the canonical
+`sha256:<64-lowercase-hex>` subject digest; a plan must be finalized and
+completed. Only `decision_type=approve` requires the exact server-issued
+`approval_handle` from a current ready `approval_view`, plus the matching plan
+digest, view digest, and view source sequence. A ready plan read also exposes
+`handles.decision_binding` with those existing decision-input names. The
 `request_revision` and `cancel` decisions preserve the exact finalized plan
 digest and user response but do not require a volatile approval-view binding;
 intervening non-plan timeline events therefore do not block saving that
@@ -182,21 +222,21 @@ approval, and a revised plan's new report ID/digest needs a new decision.
 
 ## Chunked reports
 
-Large reports are stored and projected through an explicit lifecycle:
+Every new report is stored and projected through an explicit lifecycle:
 
 ```text
-single
 begin → append* → finalize
 begin → abort
 ```
 
-`single` records one canonical JSON body up to 64 KiB. `begin` opens a stable
-report ID, `append` adds sequential labeled complete-JSON chunks up to 32 KiB,
-and `finalize` requires the exact chunk count and manifest digest. `abort`
+Large reports use `begin` to open a stable report ID, `append` to add sequential
+labeled complete-JSON chunks up to 32 KiB,
+and `finalize` computes the canonical chunk count and manifest digest. `abort`
 retains an incomplete stream without pretending that it is complete. A report
 is limited to 256 chunks and 8 MiB; assembling and retained task totals are
 also bounded. `read_reports` applies optional section selection, an opaque
-cursor, and a maximum 65,536-byte budget, and returns only whole chunks;
+cursor, and a fixed 65,536-byte server page. It
+returns only whole chunks;
 it does not expose a partial chunk stream as completed evidence. The matching
 human-readable report view is likewise derived from the canonical complete
 evidence and source sequence.
@@ -215,6 +255,10 @@ just Markdown rendering. In particular, tests and review should demonstrate:
 - dynamic status handling that returns a path only for verified `ready` views;
 - plan revision/digest/review semantics, evidence-only user decisions, and
   bounded reads of complete chunked reports; and
+- separate `execution_outcome` and `advisory_closure` task-inspection
+  projections, automatic closure inspection after sufficient evidence,
+  bounded retry, and disclosure of `closure_confirmation`=`unconfirmed`
+  without changing neutral execution evidence; and
 - a Russian-user Luna/high scenario in which durable artifacts remain English,
   coordinator publication is localized, verified clickable links are used when
   ready, canonical evidence is summarized inline otherwise, and the project

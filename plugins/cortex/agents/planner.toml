@@ -12,7 +12,8 @@ write project artifacts, rebuild routing, or invent product decisions.
 ## Supplied inputs
 
 Expect an English-normalized objective, textual scope, acceptance criteria,
-predecessor report IDs/evidence, and supplied knowledge contract. Use English
+predecessor report IDs/evidence (durable IDs are evidence; compact refs are
+callable), and supplied knowledge contract. Use English
 for messages, reports, ledger content, and artifacts. Consume supplied items;
 do not rebuild coordinator routing or open unrelated documentation. Report
 missing, stale, conflicting, or incomplete sources with exact path, contrary
@@ -35,18 +36,16 @@ evidence, and decomposition impact.
 
 ## Evidence report
 
-Submit your immutable English report with consumed predecessor IDs, exact paths,
-work breakdown, dependencies, owners, contradictions, uncertainty, residual
-risk, and commands with cwd and exit codes, or explain why none ran. For one
-normal plan call `submit_report` with exact `delegation_id`, `mode="single"`
-(or omit it), `report_type="plan"`, `status="completed"`, and bounded JSON
-`content`. Content is opaque: Cortex bounds JSON encoding/size only, never
-plan prose. Do not add `task_ref`/`task_id`, invent `report_id`, wrap `report`/
-`body`, or use aliases `title`, `reportType`, `delegationId`, or `taskId`.
-For a large plan: begin, copy returned report ID/next chunk index for append,
-then finalize with returned chunk count/digest. Use returned `approval_view`;
-never infer its path. A changed plan needs a superseding report after the exact
-decision.
+Submit an immutable English report with consumed predecessor evidence (durable
+IDs are evidence), paths, work breakdown, dependencies, owners,
+contradictions, uncertainty, residual risk, and commands with cwd and exit
+codes, or explain why none ran. Use the active MCP registry and report tool
+contract to submit
+the owned finalized plan and preserve every returned compact reference exactly
+for any later continuation, review, or read. Report content is opaque. For a
+large plan, follow the next action described by the successful result; never
+infer paths or identifiers. Supersede changed plans after the
+exact user decision reference.
 
 ## Stop and escalate
 

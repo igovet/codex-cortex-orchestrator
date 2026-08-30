@@ -74,12 +74,13 @@ class V12TimelineRepairTests(unittest.TestCase):
             objective=objective,
             user_request_original=objective,
             user_language="en",
-            task_contract_version="cortex/task-contract/v1",
+            task_contract_version="cortex/task-contract/v2-criteria-derived",
             requirements=["Preserve the canonical timeline."],
             constraints=["No additional constraints."],
             acceptance_criteria=["The task timeline is ordered and complete."],
             verification_plan=["Inspect the bounded task timeline."],
             context={},
+            idempotency_key=f"timeline-task-{objective}",
         )[0]["task"]["task_id"]
 
     @staticmethod
@@ -102,7 +103,15 @@ class V12TimelineRepairTests(unittest.TestCase):
             ),
             model="gpt-5.6-luna",
             reasoning_effort="high",
+            idempotency_key=f"timeline-delegation-{task_id}-{number}",
         )[0]["delegation"]["delegation_id"]
+
+    @staticmethod
+    def _report(store: V12Store, task_id: str, delegation_id: str, report_type: str, content: object) -> dict[str, object]:
+        started = store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="begin", report_type=report_type, idempotency_key=f"timeline-report-begin-{delegation_id}-{report_type}")[0]
+        report_id = started["report"]["report_id"]
+        store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="append", report_id=report_id, section="body", content=content, idempotency_key=f"timeline-report-append-{report_id}")
+        return store.submit_report(task_id=task_id, delegation_id=delegation_id, mode="finalize", report_id=report_id, status="completed", idempotency_key=f"timeline-report-finalize-{report_id}")[0]["report"]
 
     def test_profile_names_are_used_for_native_workers_and_numbered_for_siblings(self) -> None:
         store = self._store()
@@ -118,12 +127,13 @@ class V12TimelineRepairTests(unittest.TestCase):
                 instructions="Return bounded worker-name evidence.",
                 model="gpt-5.6-luna",
                 reasoning_effort="high",
+                idempotency_key=f"profile-name-delegation-{number}",
             )
             return str(result["delegation"]["native_task_name"])
 
-        self.assertEqual(create(1), "general")
-        self.assertEqual(create(2), "general_2")
-        self.assertEqual(create(3), "general_3")
+        names = [create(index) for index in range(1, 4)]
+        self.assertTrue(all(re.fullmatch(r"general_d_[0-9a-f]{12}", name) for name in names))
+        self.assertEqual(len(set(names)), 3)
 
     def test_plan_revision_feedback_survives_intervening_timeline_activity(self) -> None:
         store = self._store()
@@ -137,14 +147,9 @@ class V12TimelineRepairTests(unittest.TestCase):
             instructions="Return the initial plan evidence.",
             model="gpt-5.6-luna",
             reasoning_effort="high",
+            idempotency_key="revision-feedback-delegation",
         )[0]["delegation"]["delegation_id"]
-        report = store.submit_report(
-            task_id=task_id,
-            delegation_id=delegation_id,
-            report_type="plan",
-            status="completed",
-            content={"steps": ["Keep the plan digest stable."]},
-        )[0]["report"]
+        report = self._report(store, task_id, delegation_id, "plan", {"steps": ["Keep the plan digest stable."]})
         plan_id, plan_digest = report["report_id"], report["content_digest"]
 
         # This advances the task chronology after the plan was materialized,
@@ -160,7 +165,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             linked_task_ids=[task_id],
             linked_report_ids=[],
             notes=[],
-            idempotency_key=None,
+            idempotency_key="revision-feedback-initiative",
         )
 
         result, replayed = store.record_user_decision(
@@ -169,15 +174,14 @@ class V12TimelineRepairTests(unittest.TestCase):
             subject_id=plan_id,
             subject_digest=plan_digest,
             decision_type="request_revision",
-            prompt_en="What should be revised?",
+            prompt="What should be revised?",
             response_original="Please clarify the verification step.",
-            response_en="Please clarify the verification step.",
             user_language="en",
             approval_handle=None,
             approval_view_content_digest=None,
             approval_view_source_sequence=None,
             supersedes_decision_id=None,
-            idempotency_key=None,
+            idempotency_key="revision-feedback-decision",
         )
         self.assertFalse(replayed)
         decision = result["decision"]
@@ -205,13 +209,7 @@ class V12TimelineRepairTests(unittest.TestCase):
         task_id = self._task(store, "Repair this canonical timeline.")
         delegations = [self._delegation(store, task_id, number) for number in range(1, 5)]
         reports = [
-            store.submit_report(
-                task_id=task_id,
-                delegation_id=delegations[number],
-                report_type="result",
-                status="completed",
-                content={"report": number + 1},
-            )[0]["report"]["report_id"]
+            self._report(store, task_id, delegations[number], "result", {"report": number + 1})["report_id"]
             for number in range(3)
         ]
         begun = store.submit_report(
@@ -219,15 +217,16 @@ class V12TimelineRepairTests(unittest.TestCase):
             delegation_id=delegations[3],
             report_type="result",
             mode="begin",
+            idempotency_key="repair-fourth-report-begin",
         )[0]["report"]["report_id"]
-        appended = store.submit_report(
+        store.submit_report(
             task_id=task_id,
             delegation_id=delegations[3],
             report_id=begun,
             mode="append",
-            chunk_index=0,
             section="body",
             content={"report": 4},
+            idempotency_key="repair-fourth-report-append",
         )[0]
         store.submit_report(
             task_id=task_id,
@@ -235,8 +234,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             report_id=begun,
             mode="finalize",
             status="completed",
-            expected_chunk_count=1,
-            expected_content_digest=appended["current_content_digest"],
+            idempotency_key="repair-fourth-report-finalize",
         )
         reports.append(begun)
         store.set_governance_mode(
@@ -246,7 +244,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             risk_factors=[],
             source="model",
             initiative_id=None,
-            idempotency_key=None,
+            idempotency_key="timeline-governance-mode",
         )
         store.record_user_decision(
             task_id=task_id,
@@ -254,12 +252,11 @@ class V12TimelineRepairTests(unittest.TestCase):
             subject_id=task_id,
             subject_digest=None,
             decision_type="approve",
-            prompt_en="Continue the bounded timeline test.",
+            prompt="Continue the bounded timeline test.",
             response_original="Continue.",
-            response_en="Continue.",
             user_language="en",
             supersedes_decision_id=None,
-            idempotency_key=None,
+            idempotency_key="timeline-task-decision",
         )
         initiative_id = store.record_initiative(
             task_id=task_id,
@@ -272,7 +269,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             linked_task_ids=[],
             linked_report_ids=reports[:3],
             notes=[],
-            idempotency_key=None,
+            idempotency_key="timeline-initiative",
         )[0]["initiative"]["initiative_id"]
         store.submit_governance_closure(
             task_id=task_id,
@@ -284,7 +281,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             follow_ups=[],
             initiative_status="closed",
             completion_notes=[],
-            idempotency_key=None,
+            idempotency_key="timeline-closure",
         )
 
         v11_sentinel = self.home / ".codex" / "cortex" / "v11" / "cortex.db"
@@ -340,10 +337,7 @@ class V12TimelineRepairTests(unittest.TestCase):
         expected = [
             "task_created",
             *(["delegation_created"] * 4),
-            *(["report_submitted"] * 3),
-            "report_started",
-            "report_chunk_appended",
-            "report_submitted",
+            *(["report_started", "report_chunk_appended", "report_submitted"] * 4),
             "governance_mode_set",
             "user_decision_recorded",
             "initiative_created",
@@ -380,9 +374,8 @@ class V12TimelineRepairTests(unittest.TestCase):
             post_read_sequences = tuple(row[0] for row in connection.execute(
                 "SELECT sequence FROM timeline WHERE task_id=? ORDER BY sequence", (task_id,)
             ).fetchall())
-        self.assertEqual(len(read_rows), before_read_count + 1)
-        self.assertEqual(read_rows[-1], ("report_read", report_id))
-        self.assertEqual(receipt_rows, [(report_id, "coordinator")])
+        self.assertEqual(len(read_rows), before_read_count)
+        self.assertEqual(receipt_rows, [])
 
         with sqlite3.connect(database) as connection:
             marker = connection.execute("SELECT value FROM v12_metadata WHERE key='timeline_backfill_v1'").fetchone()
@@ -454,15 +447,16 @@ class V12TimelineRepairTests(unittest.TestCase):
         delegation_id = self._delegation(store, task_id, 1)
         report_id = store.submit_report(
             task_id=task_id, delegation_id=delegation_id, report_type="result", mode="begin",
+            idempotency_key="current-report-begin",
         )[0]["report"]["report_id"]
-        appended = store.submit_report(
+        store.submit_report(
             task_id=task_id,
             delegation_id=delegation_id,
             report_id=report_id,
             mode="append",
-            chunk_index=0,
             section="body",
             content={"state": "final"},
+            idempotency_key="current-report-append",
         )[0]
         store.submit_report(
             task_id=task_id,
@@ -470,12 +464,11 @@ class V12TimelineRepairTests(unittest.TestCase):
             report_id=report_id,
             mode="finalize",
             status="completed",
-            expected_chunk_count=1,
-            expected_content_digest=appended["current_content_digest"],
+            idempotency_key="current-report-finalize",
         )
         store.set_governance_mode(
             task_id=task_id, mode="minimal", rationale=None, risk_factors=[], source="model", initiative_id=None,
-            idempotency_key=None,
+            idempotency_key="current-governance-mode",
         )
         store.record_user_decision(
             task_id=task_id,
@@ -483,12 +476,11 @@ class V12TimelineRepairTests(unittest.TestCase):
             subject_id=task_id,
             subject_digest=None,
             decision_type="approve",
-            prompt_en="Proceed with the current task.",
+            prompt="Proceed with the current task.",
             response_original="Proceed.",
-            response_en="Proceed.",
             user_language="en",
             supersedes_decision_id=None,
-            idempotency_key=None,
+            idempotency_key="current-task-decision",
         )
         initiative_id = store.record_initiative(
             task_id=task_id,
@@ -501,7 +493,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             linked_task_ids=[],
             linked_report_ids=[report_id],
             notes=[],
-            idempotency_key=None,
+            idempotency_key="current-initiative",
         )[0]["initiative"]["initiative_id"]
         store.submit_governance_closure(
             task_id=task_id,
@@ -513,7 +505,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             follow_ups=[],
             initiative_status="closed",
             completion_notes=[],
-            idempotency_key=None,
+            idempotency_key="current-closure",
         )
         snapshot = store.inspect_task(task_id=task_id, after_sequence=0, limit=50)
         self.assertEqual(
@@ -548,9 +540,7 @@ class V12TimelineRepairTests(unittest.TestCase):
         task_a = self._task(store, "Conflicting revision lineage A.")
         task_b = self._task(store, "Conflicting revision lineage B.")
         delegation = self._delegation(store, task_a, 1)
-        report_id = store.submit_report(
-            task_id=task_a, delegation_id=delegation, report_type="result", status="completed", content={"task": "a"},
-        )[0]["report"]["report_id"]
+        report_id = self._report(store, task_a, delegation, "result", {"task": "a"})["report_id"]
         initiative_id = store.record_initiative(
             task_id=task_a,
             goal="Do not link contradictory legacy evidence.",
@@ -562,7 +552,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             linked_task_ids=[],
             linked_report_ids=[report_id],
             notes=[],
-            idempotency_key=None,
+            idempotency_key="conflicting-initiative",
         )[0]["initiative"]["initiative_id"]
         with sqlite3.connect(store.database_path) as connection:
             revision = json.loads(connection.execute(
@@ -603,12 +593,8 @@ class V12TimelineRepairTests(unittest.TestCase):
         task_b = self._task(store, "Ambiguous initiative lineage B.")
         delegation_a = self._delegation(store, task_a, 1)
         delegation_b = self._delegation(store, task_b, 2)
-        report_a = store.submit_report(
-            task_id=task_a, delegation_id=delegation_a, report_type="result", status="completed", content={"task": "a"},
-        )[0]["report"]["report_id"]
-        report_b = store.submit_report(
-            task_id=task_b, delegation_id=delegation_b, report_type="result", status="completed", content={"task": "b"},
-        )[0]["report"]["report_id"]
+        report_a = self._report(store, task_a, delegation_a, "result", {"task": "a"})["report_id"]
+        report_b = self._report(store, task_b, delegation_b, "result", {"task": "b"})["report_id"]
         initiative_id = store.record_initiative(
             task_id=task_a,
             goal="Keep this initiative unscoped during the repair.",
@@ -620,7 +606,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             linked_task_ids=[],
             linked_report_ids=[report_a, report_b],
             notes=[],
-            idempotency_key=None,
+            idempotency_key="ambiguous-initiative",
         )[0]["initiative"]["initiative_id"]
         with sqlite3.connect(store.database_path) as connection:
             connection.execute("DELETE FROM timeline WHERE event_type <> 'task_created'")

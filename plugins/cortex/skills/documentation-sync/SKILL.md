@@ -31,7 +31,7 @@ When durable knowledge changed:
 2. Create a dedicated documentation-sync worker, normally using the advisory
    `technical_writer` profile. Compose the orchestrator's authoritative
    delegation knowledge contract into its instructions with the relevant
-   report IDs and a concise textual scope boundary.
+   finalized evidence references and a concise textual scope boundary.
 3. Assign every affected surface among the harvest documents in
    `docs/project/` and `docs/features/` plus affected public documentation.
    Do not edit unrelated pages simply to demonstrate that synchronization ran.
@@ -40,7 +40,8 @@ When durable knowledge changed:
 5. For material documentation impact, create a separate verification
    delegation. That worker verifies documentation against current source,
    tests, commands, links, feature ownership, and the change reports, then
-   publishes the evidence by report ID.
+   publishes the evidence through the applicable semantic documentation
+   publication operation.
 6. Use writer and verification reports to decide whether corrective
    documentation work or a residual-risk disclosure is needed.
 7. When the active tool returns a current contained digest-verified final
@@ -58,12 +59,13 @@ finalized worker-owned report with an explicit English documentation-impact
 section and material/no-impact rationale. An existing implementation or
 verification report qualifies only when it already contains that explicit
 section. When the evidence is absent or spread across reports, the coordinator
-creates a bounded evidence-synthesis/documentation-impact delegation, passes
-the exact report IDs, waits, and reads the worker-submitted finalized rationale
-report; the coordinator never calls `submit_report` or self-asserts
-`documentation_not_required`. The orchestrator links the exact task, that
-documentation-impact report ID, and every other required report in the final
-initiative, then cites those exact report IDs and returned digests in closure
+  creates a bounded evidence-synthesis/documentation-impact assignment, passes
+  the exact finalized evidence references, waits, and reads the worker-submitted
+  finalized rationale publication; the coordinator never publishes on behalf of
+  a worker or self-asserts `documentation_not_required`. The orchestrator links
+  the exact task, that documentation-impact evidence, and every other required
+  finalized evidence in the final initiative, then cites the server-returned
+  references and digests in the closure evidence
 `evidence` before task-scoped and initiative-scoped governance inspection.
 For light/full governance, missing or unconsumed required documentation-impact
 records reject closure, while still never requiring a documentation edit for a

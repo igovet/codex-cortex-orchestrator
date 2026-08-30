@@ -1,16 +1,17 @@
 {
   "name": "cortex",
-  "version": "12.0.0+codex.20260827114000",
+  "version": "1.12.2+codex.sha256.f733eb328b8b2468",
   "description": "Durable local coordination ledger for model-owned multi-agent governance.",
   "author": {
     "name": "igovet"
   },
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate durable multi-agent work",
-    "longDescription": "Adds 22 advisory agent profiles and ten coordination skills around a local Cortex v12 ledger. Cortex stores project-scoped tasks, model-authored delegations, immutable reports, governance assessments, initiatives, and advisory closures. The coordinator model owns decomposition, native agent dispatch, exact model and effort selection, governance depth, rework, verification, and the final answer. The ledger enforces only data integrity, idempotency, project isolation, and safe bounded validation: governance records never become lifecycle gates.",
+    "longDescription": "Cortex 1.12.2 provides 22 advisory agent profiles and a local durable coordination ledger. It exposes exactly 15 uniform semantic operations for project-scoped tasks, model-authored assignments, immutable worker publications, pending and recorded user decisions, governance assessments, and advisory closure. The coordinator model owns decomposition, host-neutral dispatch mapping, exact model and effort selection, governance depth, rework, verification, and the final answer. The activation guard and sanitized lifecycle observer provide host-side ordering and bounded observation only; native spawn input remains host-owned and authoritative worker context is delivered at SubagentStart. The ledger enforces data integrity, idempotency, project isolation, and bounded validation; governance records never become lifecycle gates.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [
@@ -22,6 +23,6 @@
       "Advisory agent profiles"
     ],
     "logo": "./assets/logo.png",
-    "defaultPrompt": "Coordinate this task with Cortex V12. Choose proportional governance, delegate useful independent work, preserve report evidence, and keep governance advisory."
+    "defaultPrompt": "Coordinate this task with Cortex 1.12.2 using durable worker evidence, proportional governance, and verified closure."
   }
 }

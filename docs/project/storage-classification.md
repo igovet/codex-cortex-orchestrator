@@ -19,10 +19,10 @@ rework, close, or answer the user.
 Only `create_task` carries the exact resolved `project_root` and stores the
 canonical association on the task. The seven task-anchored public calls carry
 the compact `task_ref`; the three entity-derived public calls resolve their
-owner from delegation or report IDs. A `task_ref` is `t_` plus a 12-hex task
+owner from delegation or report refs. A `task_ref` is `t_` plus a 12-hex task
 suffix, scanned only across private V12 shards and rejected on zero or ambiguous
-matches. Full `task_id` remains canonical database evidence and a below-public
-schema direct-service locator. No trusted MCP metadata, plugin process `cwd`,
+matches. Full `task_id` remains canonical database evidence, not a public
+request locator. No trusted MCP metadata, plugin process `cwd`,
 thread identity, or lifecycle hook supplies the root. The native worker brief
 carries the saved root for working-directory context.
 Optional task `context` is arbitrary JSON rather than a root binding. The task
@@ -36,14 +36,18 @@ criteria, and verification plan.
 | --- | --- | --- | --- |
 | Schema and project metadata | `schema_migrations`, `v12_metadata`, SQLite pragmas | Store bootstrap/validation | Canonical database-family, schema-v1, and project-hash integrity metadata |
 | Task/result contract | `tasks` | `create_task`; `inspect_task` | Canonical project-scoped exact original request/language plus English outcome, requirements, constraints, acceptance criteria, verification plan, and bounded context |
+| Effective outcome contract | `effective_contract_revisions`, `effective_contract_items` | Bootstrap, user `steer` decision; `inspect_task` | Revisioned active view of task-contract items with stable `o_` references; retired items remain historical while unaffected active references stay stable |
 | Delegation assignments and projected briefs | `delegations` plus its saved task association | Coordinator `create_delegation`; delegation/task reads | Canonical bounded assignment with required textual ownership scope, exact model/effort, and compiled knowledge contract in `instructions`; the projected native brief adds the task's saved root for context, never host authority |
+| Outcome assignments and coverage | `delegation_outcome_assignments`, `report_contract_coverage` | Delegation/report writes; `inspect_task` aggregate/conformance projections | Per-revision owned/contributing/evidence-producing responsibility and immutable finalized-report coverage claims with verification details; used to identify missing, partial, unverified, stale, and contradictory active evidence, never a backend gate |
 | Worker evidence | `reports`, `report_chunks`, `report_usage` | `submit_report`; compact task/delegation references; bounded `read_reports` body/chunk reads | Immutable progress/result/synthesis/plan content, manifest/digest, review policy, assembly state, chunks, and quotas; private and potentially sensitive |
-| User decision evidence | `user_decisions` | `record_user_decision`; task/governance references and decision views | Append-only coordinator-asserted ordinary-chat response, English prompt/normalization, language, subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
+| Execution-outcome projection | Derived from finalized rows in `reports` | `inspect_task`; `submit_governance_closure` result | Exact `execution_outcome` fields are `evidence_status`, `finalized_report_count`, `completed_report_count`, and `outcome`: every finalized report contributes to the first count, while only semantically valid canonical finalized results determine the completed count and nullable `completed`/`incomplete` outcome, independently of advisory closure bookkeeping and without claiming native lifecycle |
+| User decision evidence | `user_decisions` | narrow decision record operations; task/governance references and decision views | Append-only coordinator-asserted ordinary-chat response, neutral prompt, exact original-language response, language, subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
 | Mode history | `governance_assessments` | `set_governance_mode`; governance/task reads | Append-only advisory model/user-override assessments |
 | Initiative projection | `initiatives` | `record_initiative` and initiative closure | Current project-level goal/risk/status/notes projection |
 | Initiative history | `initiative_revisions` | Initiative writes/closure; governance reads | Append-only revisions including link state |
 | Initiative relationships | `initiative_links` | `record_initiative`; governance reads | Current parent/dependency/task/report links and unresolved/cyclic warnings |
-| Closure statements | `governance_closures` | `submit_governance_closure`; inspection | Immutable advisory task/initiative verdict and evidence |
+| Closure statements | `governance_closures` | `submit_governance_closure`; inspection | Immutable advisory task/initiative verdict and evidence; does not establish or rewrite user-work execution outcome |
+| Closure confirmation | Derived from closure persistence plus intended inspection | `submit_governance_closure` result | `closure_confirmation` with `inspection_status`, `reason`, and bounded `attempts`; transient uncertainty is disclosed and never becomes execution state |
 | Ordered chronology | `timeline` | Every semantic mutation; scoped reads | Canonical sequence ordering for incremental inspection |
 | Retry records | `idempotency` | Mutations | Operation/key payload digest and original result; private retry integrity state |
 | Projection queue and metadata | `projection_jobs` and projection metadata | Semantic mutations enqueue; best-effort host materializer and returned `human_view` status | Canonical scheduling/freshness metadata for derived views; no filesystem failure can roll back a valid ledger mutation |
@@ -57,8 +61,8 @@ criteria, and verification plan.
 ## Schema integrity
 
 An existing database is accepted only when its V12 application ID, schema
-version, ordered `v12-initial` plus `v12-schema-v1-human-views` additive
-migration history, and stored project hash match. New bootstrap is
+version, complete ordered additive migration history through
+`v12-effective-outcome-coverage`, and stored project hash match. New bootstrap is
 transactional. Normal writes use SQLite transactions and WAL so concurrent
 reports, user decisions, assessments, initiative revisions, and projection-job
 enqueue operations remain atomic and ordered.
@@ -71,6 +75,13 @@ each legacy report body as one finalized canonical chunk. The retained legacy
 non-null report-header field receives only an inert compatibility value for
 new chunked reports; canonical report evidence remains in immutable chunks.
 Unknown or future layouts fail closed, and V11 is never opened or imported.
+
+The same additive history creates the effective-contract revision, item,
+assignment, and coverage tables. Bootstrap materializes revision 1 from the
+immutable task contract. A later user `steer` decision creates a new effective
+revision, retiring only named active items and adding only the stated
+replacements; it does not rewrite the immutable original task contract or
+unaffected coverage.
 
 The state, project-shard, task, and view directories are created or reconciled
 to `0700`. Before every SQLite open, symlink and non-regular database paths are
@@ -101,9 +112,11 @@ not storage corruption or lifecycle rejection.
 
 ## Idempotency
 
-Mutations accept optional operation-scoped idempotency keys. A normalized
-payload digest is stored with the original JSON result. An exact replay returns
-that result and marks it replayed; different content for the same operation/key
+Every mutation requires a caller-generated operation-scoped idempotency key. Its
+exact key is retained for
+returns the server-issued key, and a normalized payload digest is stored with
+the original JSON result. An exact replay returns that result and marks it
+replayed; different content for the same operation/key
 returns a non-mutating conflict.
 
 Idempotency protects retries. It is neither authentication nor proof that
@@ -135,6 +148,22 @@ revisions, whose immutable payloads remain audit history.
 No mode, status, warning, closure verdict, or missing record is an
 authorization datum. Core tools must not consult governance storage to decide
 whether coordination is allowed.
+
+The execution projection and advisory closure projection are deliberately
+separate. `execution_outcome` contains `evidence_status`
+(`finalized_reports_present` or `no_finalized_reports`),
+`finalized_report_count`, `completed_report_count`, and `outcome`. The finalized
+count covers every finalized report. The completed count covers semantically
+valid canonical finalized results with status `completed`; `outcome` is `null`
+until any semantically valid canonical result is finalized, then reflects the
+latest such result as `completed` or `incomplete`. This does not represent
+native lifecycle state.
+It remains independent of any advisory record. After sufficient evidence, the
+coordinator automatically attempts the closure and intended bounded inspection.
+One same-idempotency retry is allowed for a verified transient persistence or
+inspection failure; a remaining
+`closure_confirmation.inspection_status=unconfirmed` reports bookkeeping
+uncertainty without changing the execution projection.
 
 The final documentation-impact decision is model-owned rather than a storage
 gate. Material impact is represented through documentation worker/verifier

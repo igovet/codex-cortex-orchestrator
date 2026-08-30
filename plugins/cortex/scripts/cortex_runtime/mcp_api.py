@@ -7,136 +7,77 @@ service results as JSON-RPC MCP tool results.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
+from cortex_runtime.provenance import verify_runtime
+from cortex_runtime.event_journal import EventJournal
+from cortex_runtime.raw_diagnostic import append as raw_diagnostic
+from cortex_runtime.observation_generation import ObservationGenerationError, candidate_codex_home, claim_generation, write_ready_receipt
 from cortex_runtime.v12_service import V12ServiceError
-from cortex_runtime.v12_contract import MAX_PAGE_LIMIT, record_ref, task_ref, task_ref_parts
+from cortex_runtime.v12_contract import MCP_OPERATION_MAX_BYTES, record_ref, record_ref_parts, task_ref, task_ref_parts
+from cortex_runtime.semantic_registry import OPERATION_NAMES, error_contract, spec_for
 
 
-MCP_PROTOCOL_VERSION = "2025-06-18"
-_MAX_TOOLS = 11
+# MCP core versions understood by this deliberately core-only server.  The
+# newest version is selected for clients that offer it; the older entry keeps
+# the established stdio contract available to clients that have not upgraded
+# yet.  Optional 2025-11-25 extensions (Tasks, elicitation, sampling) remain
+# unadvertised and are not accepted merely because the version is selected.
+MCP_SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
+MCP_PROTOCOL_VERSION = MCP_SUPPORTED_PROTOCOL_VERSIONS[0]
+_MAX_TOOLS = len(OPERATION_NAMES)
 # MCP stdio is JSONL.  Enforce this at the byte transport boundary before a
 # JSON parser can allocate for an unbounded physical line.  The terminating
 # newline is part of the physical frame when present.
 MAX_PHYSICAL_JSONL_FRAME_BYTES = 256 * 1024
 _FRAME_READ_LIMIT = MAX_PHYSICAL_JSONL_FRAME_BYTES + 1
 _MAX_REQUEST_ID_BYTES = 512
-_SERVER_STATE_CODES = frozenset({"storage_unavailable", "ledger_corrupt", "schema_unsupported", "ledger_error"})
-_RECOVERY_ACTIONS = {
-    "validation_error": "Do not retry a shortened or UI-ellipsized value. For task-anchored tools, reuse structuredContent.handles.task_ref from the last success, then correct any remaining field shape.",
-    "invalid_argument": "Correct the named argument and call the same tool again.",
-    "invalid_identifier": "Do not retry a shortened value. For task-anchored tools, reuse structuredContent.handles.task_ref byte-for-byte; otherwise reuse the exact emitted identifier.",
-    "content_invalid": "Supply finite JSON within the advertised size and depth bounds.",
-    "cross_project_reference": "Use references that belong to the supplied task and its resolved project shard.",
-    "task_not_found": "Use the task_ref emitted by create_task and verify it was copied byte-for-byte.",
-    "task_ref_ambiguous": "Do not guess or expand the task_ref. Use the exact task_ref from the successful create_task result.",
-    "delegation_not_found": "Use a delegation_id emitted for the supplied task_id.",
-    "report_not_found": "Use a report_id emitted for the supplied task_id.",
-    "initiative_not_found": "Use an initiative_id from the same resolved project ledger.",
-    "decision_not_found": "Use a decision_id emitted for the supplied task_id.",
-    "idempotency_conflict": "Reuse the exact retry handle and byte-identical arguments for the same mutation. A new mutation receives a distinct server retry handle.",
-    "task_exists": "Use a new task_id, or omit task_id and let Cortex mint one.",
-    "delegation_exists": "Use a new delegation_id, or omit delegation_id and let Cortex mint one.",
-    "report_exists": "Use a new report_id, or omit report_id and let Cortex mint one.",
-    "invalid_model_selection": "Select one advertised model and one advertised reasoning_effort as the required atomic pair.",
-    "profile_unavailable": "Select an advertised packaged profile after the plugin profile catalogue is available; do not substitute the free-form role.",
-    "governance_gate_preapproval": "Before plan approval, use only the allowed planner path or the explicitly parent-linked discovery path with its finalized planner handoff.",
-    "governance_gate_links_required": "For a post-approval delegation, include the finalized plan in input_report_refs and the exact approved decision in approval_decision_ref. Keep any additional finalized evidence reports in input_report_refs.",
-    "governance_gate_evidence_mismatch": "Refresh the finalized plan and approval decision, then reuse their current compact refs; do not construct or substitute approval evidence.",
-    "documentation_impact_required": "Before closure, create a post-approval technical_writer delegation with the approved plan in input_report_refs, approval_decision_ref, and every relevant finalized result report; then have its worker submit a finalized result.",
-    "documentation_impact_evidence_missing": "Read the finalized technical_writer documentation-impact result through read_reports as coordinator. Verify its delegation includes the approved plan, approval decision, and relevant finalized result refs; do not use coordinator-authored evidence as a substitute.",
-    "initiative_closure_required": "Close every initiative related to the task first. Then submit_governance_closure with subject_type=task and subject_ref exactly equal to task_ref.",
-    "invalid_report": "Use report metadata allowed by the selected mode and report_type; plan-only metadata requires a plan creation.",
-    "invalid_report_operation": "Use exactly the fields required by the selected report mode and omit fields belonging to other modes.",
-    "report_chunk_too_large": "Reduce this content chunk to the advertised report chunk bound and retry the same next chunk index.",
-    "report_quota_exceeded": "Reduce retained or assembling report content before creating another report chunk.",
-    "report_state_conflict": "Inspect report metadata with read_reports and use an operation valid for its current assembly state.",
-    "report_chunk_conflict": "Keep the acknowledged chunk unchanged, or use the next_chunk_index from the accepted append.",
-    "report_chunk_out_of_order": "Append exactly the next_chunk_index acknowledged by the report receipt.",
-    "report_manifest_mismatch": "Read report metadata, then finalize with the exact current chunk count and content digest.",
-    "report_cursor_invalid": "Restart read_reports without cursor, or copy the last returned cursor byte-for-byte.",
-    "report_cursor_scope_mismatch": "Reuse the cursor only with the exact original task_id, report_ids order, and sections filter.",
-    "report_cursor_stale": "Restart read_reports without cursor because the selected report snapshot changed.",
-    "invalid_governance_mode": "Use one advertised governance mode and source value.",
-    "invalid_initiative_status": "Use one advertised initiative status value.",
-    "invalid_initiative_parent": "Choose an existing same-project parent that does not introduce a parent cycle.",
-    "invalid_closure_subject": "Match subject_type to subject_ref. For a task closure use subject_ref exactly equal to task_ref; omit initiative_status, while opaque completion_notes are allowed.",
-    "invalid_decision_subject": "Use an existing subject of the selected type in the supplied task scope.",
-    "invalid_decision_type": "Use one advertised decision_type value.",
-    "decision_subject_not_finalized": "Finalize the selected plan report with completed status before recording a plan decision.",
-    "decision_subject_digest_mismatch": "Copy the current selected subject digest byte-for-byte before recording the decision.",
-    "approval_view_required": "For plan approval, read the exact finalized plan until its returned approval_view is ready, then copy its handle and view identifiers byte-for-byte.",
-    "approval_view_not_ready": "Refresh the exact plan read until a new ready approval_view is returned; do not construct a path or reuse a stale view.",
-    "approval_view_mismatch": "Use the exact report and ready approval_view values returned together by Cortex.",
-    "approval_handle_not_found": "Use only the opaque approval_handle returned in the ready approval_view.",
-    "approval_handle_mismatch": "Use the exact plan report digest, view digest, source sequence, and single-use approval_handle from one ready approval_view.",
-    "approval_handle_consumed": "Read the plan again and obtain a new ready approval_view before recording a different decision.",
-    "decision_response_required": "Ask the user for one new explicit approve, request-revision, or cancel response after the ready view, then record that response.",
-    "decision_response_reused_original": "The original task request cannot be reused as plan approval; ask for one new explicit response after the ready view.",
-}
-_PUBLIC_ERROR_MESSAGES = {
-    "validation_error": "The supplied arguments do not satisfy the advertised tool schema.",
-    "invalid_argument": "A supplied public argument is invalid.",
-    "invalid_identifier": "A supplied Cortex identifier is invalid.",
-    "content_invalid": "A supplied JSON value is invalid.",
-    "cross_project_reference": "A supplied reference is outside the task's project scope.",
-    "task_not_found": "The referenced task does not exist in the resolved V12 shard.",
-    "task_ref_ambiguous": "The compact task locator is ambiguous and was not resolved.",
-    "delegation_not_found": "The referenced delegation does not exist in the anchored task.",
-    "report_not_found": "The referenced report does not exist in the anchored task.",
-    "initiative_not_found": "The referenced initiative does not exist in the resolved V12 shard.",
-    "decision_not_found": "The referenced user decision does not exist in the anchored task.",
-    "idempotency_conflict": "The idempotency key was already used for different arguments.",
-    "task_exists": "The supplied task identifier already exists.",
-    "delegation_exists": "The supplied delegation identifier already exists.",
-    "report_exists": "The supplied report identifier already exists.",
-    "invalid_model_selection": "The supplied model and reasoning-effort selection is invalid.",
-    "profile_unavailable": "The selected packaged profile is unavailable.",
-    "governance_gate_preapproval": "The delegation is not permitted before plan approval.",
-    "governance_gate_links_required": "The delegation is missing required approved-plan evidence.",
-    "governance_gate_evidence_mismatch": "The supplied approved-plan evidence is inconsistent.",
-    "documentation_impact_required": "A worker-owned documentation-impact assessment is required before closure.",
-    "documentation_impact_evidence_missing": "The required documentation-impact evidence has not been durably consumed.",
-    "initiative_closure_required": "Every task-related initiative requires a distinct closure before task closure.",
-    "invalid_report": "The supplied report metadata is invalid.",
-    "invalid_report_operation": "The supplied report operation is invalid.",
-    "report_chunk_too_large": "The supplied report chunk exceeds its allowed size.",
-    "report_quota_exceeded": "The report retention or assembly quota is exhausted.",
-    "report_state_conflict": "The report is not in a state that permits this operation.",
-    "report_chunk_conflict": "The supplied report chunk conflicts with an accepted chunk.",
-    "report_chunk_out_of_order": "The supplied report chunk is not the next accepted chunk.",
-    "report_manifest_mismatch": "The supplied report manifest does not match the current assembly.",
-    "report_cursor_invalid": "The supplied report cursor is invalid.",
-    "report_cursor_scope_mismatch": "The supplied report cursor belongs to a different read scope.",
-    "report_cursor_stale": "The supplied report cursor is stale.",
-    "invalid_governance_mode": "The supplied governance mode is invalid.",
-    "invalid_initiative_status": "The supplied initiative status is invalid.",
-    "invalid_initiative_parent": "The supplied initiative parent is invalid.",
-    "invalid_closure_subject": "The supplied closure subject is invalid.",
-    "invalid_decision_subject": "The supplied decision subject is invalid.",
-    "invalid_decision_type": "The supplied decision type is invalid.",
-    "decision_subject_not_finalized": "The selected decision subject is not finalized evidence.",
-    "decision_subject_digest_mismatch": "The supplied decision subject digest does not match.",
-    "approval_view_required": "The plan approval requires an exact ready approval view.",
-    "approval_view_not_ready": "The approval view is not currently ready.",
-    "approval_view_mismatch": "The supplied approval view does not match the plan.",
-    "approval_handle_not_found": "The supplied approval handle was not found.",
-    "approval_handle_mismatch": "The supplied approval handle does not match the ready plan view.",
-    "approval_handle_consumed": "The supplied approval handle has already been used.",
-    "decision_response_required": "The plan decision requires a new explicit user response.",
-    "decision_response_reused_original": "The original task request cannot be reused as a plan decision.",
-    "project_root_invalid": "The supplied project root is unavailable or is not a directory.",
-    "storage_busy": "The V12 ledger is temporarily busy.",
-}
-_PUBLIC_SERVICE_CODES = frozenset((*_RECOVERY_ACTIONS, *_SERVER_STATE_CODES, "project_root_invalid", "storage_busy"))
+_TOOLS_LIST_CURSOR_PREFIX = "cortex-tools-list-v1:"
 _SAFE_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_PATH_RE = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}|\[[0-9]{1,4}\]){0,16}$")
-_SAFE_EXPECTED_VALUES = frozenset({"restart_without_cursor", "advertised_input_schema"})
+_SAFE_EXPECTED_VALUES = frozenset({
+    "restart_without_cursor", "task_ref", "required_field", "no_extra_properties",
+    "string", "integer", "object", "array", "permitted_value", "constant",
+    "bounded_length", "bounded_range", "lowercase_section_label", "unique_items",
+    "permitted_input_shape", "bounded_json_value", "r_[0-9a-f]{12}",
+    "progress|result|synthesis|plan",
+})
+_SAFE_VALIDATION_REASONS = frozenset({
+    "required", "additional_property", "type", "enum", "constant", "length",
+    "range", "pattern", "unique_items", "conditional_shape", "encoded_size",
+    "canonical_semantic_invalid", "evidence_missing", "evidence_invalid",
+    "command_evidence_incomplete", "not_run_reason_missing", "evidence_state_invalid",
+    "documentation_impact_incomplete",
+    "contract_coverage_missing", "contract_coverage_invalid", "contract_coverage_extra",
+    "contract_coverage_duplicate", "contract_coverage_incomplete",
+})
+
+
+def catalogue_identity(public_tools: Mapping[str, Mapping[str, Any]]) -> dict[str, object]:
+    """Return safe, deterministic registration identity without exposing a list."""
+    catalogue = tuple(
+        {
+            "name": name, "description": str(contract["description"]),
+            "inputSchema": dict(contract["inputSchema"]),
+            "outputSchema": dict(contract["outputSchema"]),
+        }
+        for name, contract in public_tools.items()
+    )
+    return {
+        "catalogue_count": len(catalogue),
+        "catalogue_digest": hashlib.sha256(json.dumps(
+            catalogue, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")).hexdigest(),
+    }
 
 
 class _RpcError(Exception):
@@ -255,11 +196,38 @@ def _read_physical_jsonl_frame(stream: Any) -> tuple[str | None, bool]:
     return chunk, False
 
 
+def _tools_list_cursor(offset: int) -> str:
+    """Return the opaque continuation cursor for one catalog position."""
+    return f"{_TOOLS_LIST_CURSOR_PREFIX}{offset}"
+
+
+def _tools_list_offset(cursor: object, total: int) -> int | None:
+    """Resolve one tools/list cursor without accepting alternate spellings."""
+    if cursor is None or cursor == "":
+        return 0
+    if not isinstance(cursor, str) or not cursor.startswith(_TOOLS_LIST_CURSOR_PREFIX):
+        return None
+    suffix = cursor.removeprefix(_TOOLS_LIST_CURSOR_PREFIX)
+    if not suffix.isascii() or not suffix.isdecimal():
+        return None
+    offset = int(suffix)
+    return offset if 0 < offset < total else None
+
+
 def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") -> None:
     """Validate the compact JSON-Schema subset used by the V12 public API."""
     const = schema.get("const")
     if "const" in schema and value != const:
         raise _SchemaError(path, "value does not match the required constant")
+    # Validate the outer object shape before a discriminated union.  Without
+    # this ordering, an omitted common field (for example ``mode`` or the
+    # decision prose fields) can be reported as a misleading field from the
+    # first non-matching variant, forcing callers into trial-and-error.
+    if isinstance(value, Mapping):
+        required = schema.get("required")
+        for name in required if isinstance(required, list) else []:
+            if name not in value:
+                raise _SchemaError(f"{path}.{name}", f"missing required property {name!r}")
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
         for item in all_of:
@@ -278,7 +246,18 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
                 failures.append(error)
         else:
             if failures:
-                raise failures[0]
+                # A union commonly has a discriminator branch and one or more
+                # shape branches.  Returning the first failure made a useful
+                # missing-field error lose to a root-level ``not`` guard.
+                # Prefer the deepest safe JSON location, then a concrete
+                # missing/unsupported-field diagnostic, without exposing a
+                # caller value.
+                def failure_rank(error: _SchemaError) -> tuple[int, int]:
+                    return (
+                        error.path.count(".") + error.path.count("["),
+                        int(error.message.startswith(("missing required", "unsupported"))),
+                    )
+                raise max(failures, key=failure_rank)
             raise _SchemaError(path, "value does not match a permitted input shape")
     one_of = schema.get("oneOf")
     if isinstance(one_of, list):
@@ -286,8 +265,8 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
         failures: list[_SchemaError] = []
         alternatives = [item for item in one_of if isinstance(item, Mapping)]
         # Prefer a branch whose explicit discriminator already matches the
-        # supplied object.  This keeps a missing append/finalize field from
-        # being reported as the unrelated legacy-single branch.
+        # supplied object. This keeps a missing operation field from being
+        # reported as an unrelated report shape.
         if isinstance(value, Mapping):
             matching_discriminators = [
                 item for item in alternatives
@@ -369,7 +348,7 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
         required = schema.get("required")
         for name in required if isinstance(required, list) else []:
             if name not in value:
-                raise _SchemaError(path, f"missing required property {name!r}")
+                raise _SchemaError(f"{path}.{name}", f"missing required property {name!r}")
         if schema.get("additionalProperties") is False:
             extras = set(value) - set(property_map)
             if extras:
@@ -378,6 +357,74 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
             child_schema = property_map.get(name)
             if isinstance(child_schema, Mapping):
                 _validate_schema(child_schema, item, f"{path}.{name}")
+
+
+def _validate_public_call_shape(tool_name: str, arguments: Mapping[str, Any]) -> None:
+    """Enforce mode/subject relations without obscuring advertised tool types.
+
+    JSON-Schema intersections and partial ``oneOf`` branches collapse to
+    ``unknown`` in the Codex TypeScript tool declaration.  Keep the advertised
+    object flat and fully typed, then enforce its documented conditional rules
+    here before any storage lookup or mutation.
+    """
+
+    def require(*names: str) -> None:
+        for name in names:
+            if name not in arguments:
+                raise _SchemaError(f"$.{name}", f"missing required property '{name}'")
+
+    def forbid(*names: str) -> None:
+        for name in names:
+            if name in arguments:
+                raise _SchemaError(f"$.{name}", f"unsupported property '{name}'")
+
+    if tool_name == "submit_report":
+        mode = arguments.get("mode")
+        plan_fields = ("review_policy", "supersedes_report_ref")
+        if mode == "begin":
+            require("report_type")
+            forbid("report_ref", "status", "content", "section", "abort_reason_en")
+            if arguments.get("report_type") != "plan":
+                forbid(*plan_fields)
+        elif mode == "append":
+            require("report_ref", "section", "content")
+            forbid("report_type", "status", "abort_reason_en", *plan_fields)
+        elif mode == "finalize":
+            require("report_ref", "status")
+            forbid("report_type", "content", "section", "abort_reason_en", *plan_fields)
+        elif mode == "abort":
+            require("report_ref", "abort_reason_en")
+            forbid("report_type", "status", "content", "section", *plan_fields)
+    elif tool_name == "submit_governance_closure":
+        # The flat public schema keeps the first-call declaration concrete;
+        # task closures nevertheless cannot carry initiative-only state.
+        # Enforce that relation at the MCP boundary before service lookup.
+        if arguments.get("subject_type") == "task":
+            forbid("initiative_status")
+    elif tool_name == "record_user_decision":
+        subject_type = arguments.get("subject_type")
+        decision_type = arguments.get("decision_type")
+        approval_fields = ("approval_handle", "approval_view_content_digest", "approval_view_source_sequence")
+        if subject_type in {"task", "delegation", "initiative"}:
+            forbid("subject_digest", *approval_fields)
+        elif subject_type == "report":
+            require("subject_digest")
+            forbid(*approval_fields)
+        elif subject_type == "plan":
+            require("subject_digest")
+            if decision_type == "approve":
+                require(*approval_fields)
+            else:
+                forbid(*approval_fields)
+        if decision_type == "steer":
+            if subject_type != "task" or arguments.get("subject_ref") != arguments.get("task_ref"):
+                raise _SchemaError("$.subject_ref", "value does not match the required constant")
+            require("steering_delta")
+            delta = arguments.get("steering_delta")
+            if not isinstance(delta, Mapping) or not any(isinstance(delta.get(name), list) and delta.get(name) for name in ("retire_item_refs", "add")):
+                raise _SchemaError("$.steering_delta", "value does not match a permitted input shape")
+        else:
+            forbid("steering_delta")
 
 
 def _safe_details(value: object) -> dict[str, object]:
@@ -399,6 +446,9 @@ def _safe_details(value: object) -> dict[str, object]:
     expected = value.get("expected")
     if isinstance(expected, str) and expected in _SAFE_EXPECTED_VALUES:
         details["expected"] = expected
+    reason = value.get("reason")
+    if isinstance(reason, str) and reason in _SAFE_VALIDATION_REASONS:
+        details["reason"] = reason
     retry_after_ms = value.get("retry_after_ms")
     if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool) and 0 <= retry_after_ms <= 60_000:
         details["retry_after_ms"] = retry_after_ms
@@ -407,9 +457,7 @@ def _safe_details(value: object) -> dict[str, object]:
 
 def _safe_message(code: object) -> str:
     """Return a fixed public explanation without rendering exception text."""
-    if isinstance(code, str):
-        return _PUBLIC_ERROR_MESSAGES.get(code, "The tool request could not be completed.")
-    return "The tool request could not be completed."
+    return error_contract(code).message
 
 
 def _sqlite_is_busy(error: BaseException) -> bool:
@@ -426,16 +474,8 @@ def _sqlite_is_busy(error: BaseException) -> bool:
 
 
 def _recovery(code: str, details: object) -> tuple[bool, str]:
-    if code == "storage_busy":
-        return True, "Retry this same mutation once with the same idempotency_key after the stated delay."
-    if code == "storage_unavailable":
-        return True, "Retry the same idempotent mutation after local storage is available; do not change its idempotency_key."
-    action = _RECOVERY_ACTIONS.get(code)
-    if action is not None:
-        return False, action
-    if isinstance(details, Mapping) and details.get("field"):
-        return False, "Correct the named public field and call the same tool again."
-    return False, "Review the advertised tool schema and use only durable IDs and values emitted by Cortex."
+    contract = error_contract(code)
+    return contract.retryable, contract.action
 
 
 def _failure_text(*, code: str, details: object, mutation: str, retryable: bool, action: str) -> str:
@@ -445,12 +485,15 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
         path = details.get("path")
         field = details.get("field")
         expected = details.get("expected")
-        if isinstance(path, str):
+        reason = details.get("reason")
+        if isinstance(path, str) and not (path == "$" and isinstance(field, str)):
             parts.append(f"Location: {path}.")
-        elif isinstance(field, str):
+        if isinstance(field, str):
             parts.append(f"Field: {field}.")
         if isinstance(expected, str):
             parts.append(f"Expected: {expected[:256]}.")
+        if isinstance(reason, str):
+            parts.append(f"Reason: {reason}.")
         retry_after_ms = details.get("retry_after_ms")
         if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool):
             parts.append(f"Retry after: {retry_after_ms} ms.")
@@ -465,7 +508,8 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
 def _service_failure(error: V12ServiceError) -> dict[str, Any]:
     """Extract the service's bounded public code, message, details, and action."""
     candidate = getattr(error, "code", "ledger_error")
-    code = candidate if isinstance(candidate, str) and candidate in _PUBLIC_SERVICE_CODES else "ledger_error"
+    contract = error_contract(candidate)
+    code = contract.code
     details = _safe_details(getattr(error, "details", None))
     retryable, action = _recovery(code, details)
     return {
@@ -478,20 +522,69 @@ def _service_failure(error: V12ServiceError) -> dict[str, Any]:
 
 
 def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    details = _safe_details({"path": error.path, "expected": "advertised_input_schema"})
+    # Keep a closed-schema failure actionable without echoing arbitrary parser
+    # messages or caller values.  The schema validator itself records a safe
+    # JSON path; root-level required/additional-property failures need the
+    # bounded field name recovered from their fixed validator wording.
+    field: str | None = None
+    # For object-level additional-property failures the safe path identifies
+    # the containing object, while the fixed validator message identifies the
+    # actual unsupported child. Prefer that child so correction never removes
+    # the valid enclosing publication object.
+    named = re.fullmatch(
+        r"(?:missing required|unsupported) property '([a-z][a-z0-9_]{0,63})'|property '([a-z][a-z0-9_]{0,63})' is not permitted for this input shape",
+        error.message,
+    )
+    if named is not None:
+        field = named.group(1) or named.group(2)
+    if field is None:
+        direct = re.fullmatch(r"\$\.([a-z][a-z0-9_]{0,63})", error.path)
+        if direct is not None:
+            field = direct.group(1)
+        else:
+            nested = re.search(r"\.([a-z][a-z0-9_]{0,63})(?:\[[0-9]{1,4}\])?$", error.path)
+            if nested is not None:
+                field = nested.group(1)
+    message = error.message
+    reason, expected = ("conditional_shape", "permitted_input_shape")
+    for prefix, mapped_reason, mapped_expected in (
+        ("missing required", "required", "required_field"),
+        ("unsupported", "additional_property", "no_extra_properties"),
+        ("value has the wrong type", "type", "string"),
+        ("value is not one", "enum", "progress|result|synthesis|plan" if field == "report_type" else "permitted_value"),
+        ("value does not match the required constant", "constant", "constant"),
+        ("string is ", "length", "bounded_length"),
+        ("number is ", "range", "bounded_range"),
+        ("string does not match", "pattern", "lowercase_section_label" if field == "section" else "r_[0-9a-f]{12}" if field == "report_refs" else "permitted_value"),
+        ("array has ", "length", "bounded_length"),
+        ("array items must", "unique_items", "unique_items"),
+        ("JSON value exceeds", "encoded_size", "bounded_json_value"),
+    ):
+        if message.startswith(prefix):
+            reason, expected = mapped_reason, mapped_expected
+            break
+    details = _safe_details({"path": error.path, "field": field, "reason": reason, "expected": expected})
     retryable, action = _recovery("validation_error", details)
     if tool_name == "create_delegation" and "delegation_id" in arguments:
         action = (
             "create_delegation is creation-only: never pass delegation_id to it. "
             "For retrieval, call read_delegation({delegation_ref, after_sequence}) exactly "
             "with the emitted delegation_ref and durable sequence. For an exact mutation retry, "
-            "reuse the original complete create_delegation payload with its returned retry_handle."
+            "reuse the original complete create_delegation payload with its returned idempotency_key."
         )
-    elif tool_name in {"inspect_task", "read_delegation", "inspect_governance"} and "limit" in arguments:
-        action = (
-            f"Use an integer limit from 1 through {MAX_PAGE_LIMIT}; limit={MAX_PAGE_LIMIT} is the maximum. "
-            "For additional chronology, copy the returned next_sequence unchanged into after_sequence."
+    elif tool_name == "record_user_decision" and arguments.get("decision_type") == "approve":
+        required = (
+            "approval_handle",
+            "approval_view_content_digest",
+            "approval_view_source_sequence",
         )
+        missing = [name for name in required if name not in arguments]
+        if missing:
+            action = (
+                "For decision_type=approve, copy "
+                + ", ".join(missing)
+                + " byte-for-byte from one ready approval_view, then correct the request."
+            )
     return {
         "code": "validation_error",
         "message": _safe_message("validation_error"),
@@ -514,10 +607,10 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
     if not approval:
         result = {
             field: value[field]
-            for field in ("status", "path", "source_sequence", "content_digest")
+            for field in ("status", "source_sequence", "content_digest")
             if field in value
         }
-        if value.get("status") == "ready" and isinstance(value.get("path"), str) and value.get("path") and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
+        if value.get("status") == "ready" and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
             result["markdown_link"] = value["markdown_link"]
         return result
     result = {
@@ -525,14 +618,13 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
         for field in (
             "report_content_digest",
             "status",
-            "path",
             "source_sequence",
             "content_digest",
             "approval_handle",
         )
         if field in value
     }
-    if value.get("status") == "ready" and isinstance(value.get("path"), str) and value.get("path") and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
+    if value.get("status") == "ready" and isinstance(value.get("markdown_link"), str) and value.get("markdown_link"):
         result["markdown_link"] = value["markdown_link"]
     fallback: Mapping[str, Any] = {}
     if owner is not None and isinstance(owner.get("reports"), list):
@@ -542,14 +634,28 @@ def _public_view(value: object, *, approval: bool, owner: Mapping[str, Any] | No
                 break
     for canonical_name, compact_name in (("report_id", "report_ref"), ("delegation_id", "delegation_ref")):
         compact = record_ref(value.get(canonical_name)) or record_ref(fallback.get(canonical_name))
+        if compact is None:
+            emitted = value.get(compact_name)
+            if record_ref_parts(emitted, label=canonical_name) is not None:
+                compact = emitted
         if compact is not None:
             result[compact_name] = compact
     return result
 
 
 def _project_public_views(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Replace every public nested handle/view with its compact projection."""
-    result = dict(value)
+    """Replace nested views and remove legacy caller-owned receipt material.
+
+    The semantic MCP boundary owns command identity on the server.  The legacy
+    storage facade may still return its private receipt fields, but exposing
+    them in a semantic success teaches callers to invent properties that no
+    semantic input schema accepts.  Strip those implementation-only values at
+    the single transport composition boundary for every public operation.
+    """
+    result = {
+        key: item for key, item in value.items()
+        if key not in {"idempotency_key", "retry_handle"}
+    }
     for field, approval in (("human_view", False), ("approval_view", True)):
         projected = _public_view(result.get(field), approval=approval, owner=result)
         if projected is not None:
@@ -566,11 +672,16 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     for an authoritative durable identifier.
     """
     result: dict[str, Any] = {}
-    for field in ("idempotency_key", "retry_handle"):
-        candidate = value.get(field)
-        if isinstance(candidate, str) and candidate:
-            result[field] = candidate
-
+    assignment_ref = value.get("assignment_ref")
+    if isinstance(assignment_ref, str) and re.fullmatch(r"^d_[0-9a-f]{12}$", assignment_ref):
+        result["assignment_ref"] = assignment_ref
+    for field, pattern in (("bootstrap_capability", r"^wb_[0-9a-f]{32}$"), ("continuation_ref", r"^wc_[0-9a-f]{32}$")):
+        token = value.get(field)
+        if isinstance(token, str) and re.fullmatch(pattern, token):
+            result[field] = token
+    binding_ref = value.get("binding_ref")
+    if isinstance(binding_ref, str) and re.fullmatch(r"^cb_[0-9a-f]{32}$", binding_ref):
+        result["binding_ref"] = binding_ref
     def entity_id(candidate: object, name: str) -> str | None:
         value = candidate.get(name) if isinstance(candidate, Mapping) else None
         return value if isinstance(value, str) and value else None
@@ -583,16 +694,46 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     report_id = entity_id(value.get("report"), "report_id")
     initiative_id = next((entity_id(value.get(name), "initiative_id") for name in ("initiative", "assessment") if entity_id(value.get(name), "initiative_id") is not None), None)
     decision_id = entity_id(value.get("decision"), "decision_id")
+    emitted_decision_ref = value.get("decision_ref")
+    if not isinstance(emitted_decision_ref, str) or record_ref_parts(emitted_decision_ref, label="decision_ref") is None:
+        emitted_decision_ref = None
+    decision = value.get("decision")
+    if isinstance(decision, Mapping):
+        subject_type = decision.get("subject_type")
+        subject_id = decision.get("subject_id")
+        # A decision can immediately follow a plan/report clarification.  Keep
+        # that exact selected report in the callable envelope so a subsequent
+        # read cannot be redirected by stale coordinator state from another
+        # task.  The durable subject ID itself remains non-callable evidence.
+        if subject_type in {"plan", "report"} and isinstance(subject_id, str):
+            report_id = report_id or subject_id
+        elif subject_type == "delegation" and isinstance(subject_id, str):
+            delegation_id = delegation_id or subject_id
+        elif subject_type == "initiative" and isinstance(subject_id, str):
+            initiative_id = initiative_id or subject_id
+    # Public compact publication/family projections have intentionally
+    # removed canonical IDs. Treat their bounded emitted refs as authoritative
+    # handles rather than trying to reconstruct an internal record ID.
+    def emitted_ref(candidate: object, field: str, label: str) -> str | None:
+        item = candidate.get(field) if isinstance(candidate, Mapping) else None
+        return item if isinstance(item, str) and record_ref_parts(item, label=label) is not None else None
+    emitted_report_ref = emitted_ref(value.get("report"), "report_ref", "report_ref")
+    emitted_delegation_ref = (
+        emitted_ref(value.get("approval_view"), "delegation_ref", "delegation_ref")
+        or emitted_ref(value.get("report"), "delegation_ref", "delegation_ref")
+    )
     brief = value.get("worker_brief")
     task_id = task_id or entity_id(brief, "task_id")
     delegation_id = delegation_id or entity_id(brief, "delegation_id")
     action = value.get("next_action")
     action_task_ref = action.get("task_ref") if isinstance(action, Mapping) else None
     if not isinstance(action_task_ref, str) and isinstance(action, Mapping):
-        arguments = action.get("arguments")
-        action_task_ref = arguments.get("task_ref") if isinstance(arguments, Mapping) else None
+        suggested_subject = action.get("suggested_subject")
+        action_task_ref = suggested_subject.get("task_ref") if isinstance(suggested_subject, Mapping) else None
     reports = value.get("reports")
     if isinstance(reports, list):
+        if task_id is None:
+            task_id = next((entity_id(item, "task_id") for item in reports if entity_id(item, "task_id") is not None), None)
         report_ids = [item["report_id"] for item in reports if isinstance(item, Mapping) and isinstance(item.get("report_id"), str) and item["report_id"]]
         if report_ids:
             # Read order remains observable in the structured body; only the
@@ -605,13 +746,15 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
         result["cursor"] = cursor
     sequence = value.get("next_sequence")
     if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
-        result["next_sequence"] = sequence
+        result["after_sequence"] = sequence
     for field, approval in (("human_view", False), ("approval_view", True)):
         projected = _public_view(value.get(field), approval=approval, owner=value)
         if projected is not None:
             result[field] = projected
     compact = task_ref(task_id)
-    if compact is None and task_ref_parts(action_task_ref, allow_legacy=False) is not None:
+    if compact is None and task_ref_parts(value.get("task_ref")) is not None:
+        compact = value["task_ref"]
+    if compact is None and task_ref_parts(action_task_ref) is not None:
         compact = action_task_ref
     if compact is not None:
         result["task_ref"] = compact
@@ -619,27 +762,82 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
         compact_entity = record_ref(canonical)
         if compact_entity is not None:
             result[compact_name] = compact_entity
+    if emitted_decision_ref is not None:
+        result["decision_ref"] = emitted_decision_ref
+    if emitted_report_ref is not None:
+        result["report_ref"] = emitted_report_ref
+    if emitted_delegation_ref is not None:
+        result["delegation_ref"] = emitted_delegation_ref
     return result
+
+
+def _handles_for_output_schema(
+    value: Mapping[str, Any], output_schema: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Project callable handles through the operation's advertised contract.
+
+    ``_handles`` discovers authoritative values at fixed result locations, but
+    not every discovered relation is a useful next call for every operation.
+    A closed operation-specific handles schema is the authority for that
+    distinction.  Intersecting here prevents a generic result walker from
+    leaking an unrelated sibling handle or making a valid server result fail
+    its own advertised output contract.
+    """
+    discovered = _handles(value)
+    properties = output_schema.get("properties")
+    handles_schema = properties.get("handles") if isinstance(properties, Mapping) else None
+    if not isinstance(handles_schema, Mapping) or handles_schema.get("additionalProperties") is not False:
+        return discovered
+    advertised = handles_schema.get("properties")
+    if not isinstance(advertised, Mapping):
+        return {}
+    return {name: item for name, item in discovered.items() if name in advertised}
 
 
 def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
     structured = _project_public_views(value)
     compact_handles = json.dumps({"handles": structured["handles"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    serialized = json.dumps(structured, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    leading_view = None
+    for view_name in ("approval_view", "human_view"):
+        view = structured.get(view_name)
+        if isinstance(view, Mapping) and view.get("status") == "ready" and isinstance(view.get("markdown_link"), str):
+            leading_view = view["markdown_link"]
+            break
+    content = []
+    if leading_view is not None:
+        content.append({"type": "text", "text": leading_view})
+    content.extend([
+            {"type": "text", "text": serialized},
+            {"type": "text", "text": compact_handles + "\nThese are the exact server-issued callable values from this success. Use a value only where the next live advertised input schema accepts it, and do not infer additional request properties."},
+        ])
     return {
-        "content": [{"type": "text", "text": compact_handles + "\nCopy only structuredContent.handles compact typed refs and server-issued opaque tokens byte-for-byte; canonical durable IDs in any rendered evidence are non-callable. Task-anchored calls use task_ref. Entity-derived calls use delegation_ref, report_ref/report_refs, decision_ref, or initiative_ref as advertised. If structuredContent.next_action is present, it is the exact required next call and its task_ref must be copied byte-for-byte. Delegation recovery: create_delegation is creation-only; retrieve an existing delegation with read_delegation({delegation_ref, after_sequence}) exactly. Read all result data from structuredContent; it is not duplicated into TextContent so bounded 200-event pages remain one valid JSONL frame."}],
+        # MCP recommends serialized structured content in TextContent for
+        # clients that predate structuredContent.  Both blocks are derived
+        # from the same projected value; neither is an independent authority.
+        "content": content,
         "structuredContent": structured,
         "isError": False,
     }
 
 
 def _tool_error_result(failure: Mapping[str, Any], *, mutation: str) -> dict[str, Any]:
-    """Correctable tool errors intentionally have TextContent only.
+    """Return a safe, machine-readable tool failure envelope.
 
-    The text carries the stable Cortex code, safe reason, affected public
-    field/path when available, and one next action.  Omitting
-    ``structuredContent`` avoids presenting a second success-output shape to
-    clients that validate it against the advertised output schema.
+    The text and ``structuredContent.error`` carry the same stable Cortex
+    code, safe reason, retry guidance, and one next action.  Error results are
+    explicitly marked ``isError`` and are not success values for the tool's
+    advertised output schema.
     """
+    error = {
+        "code": str(failure["code"]),
+        "message": _safe_message(str(failure["code"])),
+        "retryable": bool(failure.get("retryable")),
+        "action": str(failure.get("action") or "Review the advertised input contract."),
+    }
+    details = failure.get("details")
+    if isinstance(details, Mapping) and details:
+        error["details"] = dict(details)
     return {
         "content": [{
             "type": "text",
@@ -651,7 +849,19 @@ def _tool_error_result(failure: Mapping[str, Any], *, mutation: str) -> dict[str
                 action=str(failure.get("action") or "Review the advertised input contract."),
             ),
         }],
+        "structuredContent": {"error": error},
         "isError": True,
+    }
+
+
+def _internal_ledger_failure() -> dict[str, Any]:
+    """Sanitize an unexpected dispatch fault into a non-retryable tool error."""
+    return {
+        "code": "ledger_error",
+        "message": _safe_message("ledger_error"),
+        "details": {},
+        "retryable": False,
+        "action": _recovery("ledger_error", {})[1],
     }
 
 
@@ -662,8 +872,13 @@ def serve_stdio(
     instructions: str,
 ) -> None:
     """Serve a fixed V12 MCP tool catalogue over standard input/output."""
+    package_root = Path(__file__).absolute().parents[2]
+    try:
+        verify_runtime(package_root, server_version, allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1")
+    except RuntimeError as exc:
+        raise SystemExit(f"Cortex candidate provenance verification failed: {exc}") from exc
     if len(public_tools) != _MAX_TOOLS:
-        raise RuntimeError("Cortex v12 requires exactly eleven public tools")
+        raise RuntimeError("Cortex public tool registry does not match semantic registry")
     for name, contract in public_tools.items():
         if not isinstance(name, str) or not isinstance(contract, Mapping):
             raise RuntimeError("Cortex v12 public tool registry is invalid")
@@ -672,9 +887,122 @@ def serve_stdio(
         if (
             not isinstance(contract.get("inputSchema"), Mapping)
             or not isinstance(contract.get("outputSchema"), Mapping)
+            or not isinstance(contract.get("runtimeOutputSchema"), Mapping)
             or not callable(contract.get("handler"))
         ):
             raise RuntimeError("Cortex v12 public tool binding is invalid")
+
+    catalog_tools = tuple(
+        {
+            "name": name,
+            "description": str(contract["description"]),
+            "inputSchema": dict(contract["inputSchema"]),
+            "outputSchema": dict(contract["outputSchema"]),
+        }
+        for name, contract in public_tools.items()
+    )
+    # MCP outputSchema is optional.  Keep the family-specific result schemas
+    # private to the runtime validation boundary below instead of repeating
+    # them in every deferred host-tool declaration.  The successful result's
+    # structuredContent remains unchanged and self-describing, while one
+    # complete tools/list response stays small enough for bounded host tool
+    # discovery without truncating later operations from the model's view.
+    # This is a digest of the complete advertised catalogue, not a second
+    # wire catalogue.  It gives the passive observer compact registration
+    # parity without retaining tool names or schemas in the event stream.
+    identity = catalogue_identity(public_tools)
+    catalogue_digest = str(identity["catalogue_digest"])
+    provenance = verify_runtime(
+        package_root, server_version,
+        allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
+    )
+    generation = None
+    try:
+        generation, _request = claim_generation(
+            package_root=package_root, build_id=provenance["build_id"],
+            candidate_version=package_root.name, catalogue_count=len(catalog_tools),
+            catalogue_digest=catalogue_digest,
+            # Live-dev supplies the exact nonce created for this tmux session.
+            # Passing it into the server-side claim prevents an older MCP
+            # process from taking over a newer session's lease.
+            session_nonce=os.environ.get("CORTEX_SESSION_NONCE"),
+        )
+        event_journal = EventJournal.from_generation(
+            generation=generation, build_id=provenance["build_id"],
+            code_home=candidate_codex_home(package_root),
+        )
+    except ObservationGenerationError:
+        # Observation is deliberately non-authoritative. Candidate identity and
+        # canonical MCP behavior remain intact when no live generation exists.
+        event_journal = EventJournal(None, build_id=provenance["build_id"])
+    server_ready_observed = False
+
+    def observe_call(
+        name: str, arguments: Mapping[str, Any], *, success: bool,
+        fault: str | None = None, result: Mapping[str, Any] | None = None,
+        failure: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a best-effort safe observation without changing MCP behavior."""
+        raw_diagnostic(kind="mcp_observation", payload={"operation": name, "arguments": arguments, "success": success, "fault": fault, "result": result, "failure": failure})
+        try:
+            specification = spec_for(name)
+            kind = specification.kind
+        except KeyError:
+            kind = "unknown"
+        command = kind == "command"
+        mutation: str | None = None
+        if command:
+            if success:
+                mutation = "replay" if isinstance(result, Mapping) and result.get("replayed") is True else "new"
+            elif isinstance(fault, str) and (fault.endswith("_conflict") or fault in {"command_conflict", "publication_conflict"}):
+                mutation = "conflict"
+            else:
+                mutation = "error"
+        task_anchor = arguments.get("task_ref")
+        assignment_anchor = arguments.get("assignment_ref")
+        if isinstance(result, Mapping):
+            task_anchor = task_anchor if isinstance(task_anchor, str) else result.get("task_ref")
+            assignment_anchor = assignment_anchor if isinstance(assignment_anchor, str) else result.get("assignment_ref")
+            report = result.get("report")
+            if isinstance(report, Mapping):
+                publication_type = report.get("report_type")
+                publication_status = report.get("status")
+            else:
+                publication_type = None
+                publication_status = None
+            brief = result.get("dispatch_brief")
+            delivery = result.get("host_delivery")
+            dispatch_marker = (
+                brief.get("dispatch_correlation_marker") if isinstance(brief, Mapping)
+                else delivery.get("dispatch_correlation_marker") if isinstance(delivery, Mapping)
+                else result.get("dispatch_correlation_marker")
+            )
+        else:
+            publication_type = None
+            publication_status = None
+            dispatch_marker = None
+        details = failure.get("details") if isinstance(failure, Mapping) else None
+        validation_location = details.get("path") if isinstance(details, Mapping) else None
+        validation_field = details.get("field") if isinstance(details, Mapping) else None
+        validation_expected = details.get("expected") if isinstance(details, Mapping) else None
+        if fault == "report_incomplete":
+            validation_expected = "complete_evidence_envelope"
+            corrective_action = "correct_publication_evidence"
+        elif fault == "validation_error":
+            corrective_action = "review_advertised_schema"
+        elif fault in {"invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found"}:
+            corrective_action = "reuse_typed_handle"
+        else:
+            corrective_action = None
+        event_journal.emit(
+            operation=name, kind=kind, success=success, fault=fault,
+            mutation=mutation, task_anchor=task_anchor,
+            assignment_anchor=assignment_anchor,
+            publication_type=publication_type, publication_status=publication_status,
+            dispatch_correlation_marker=dispatch_marker,
+            validation_location=validation_location, validation_field=validation_field,
+            validation_expected=validation_expected, corrective_action=corrective_action,
+        )
 
     def render(value: Mapping[str, Any]) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
@@ -683,7 +1011,7 @@ def serve_stdio(
         sys.stdout.write(render(value) + "\n")
         sys.stdout.flush()
 
-    def reply(request_id: object, result: Mapping[str, Any]) -> None:
+    def reply(request_id: object, result: Mapping[str, Any]) -> bool:
         payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
         if len(render(payload).encode("utf-8")) > MAX_PHYSICAL_JSONL_FRAME_BYTES:
             # A valid structured result must not be split across JSONL frames.
@@ -699,8 +1027,74 @@ def serve_stdio(
                     "data": {"cortex_code": "ledger_error"},
                 },
             })
-            return
+            return False
         write(payload)
+        return True
+
+    def finish_tool_call(
+        request_id: object, name: str, arguments: Mapping[str, Any],
+        result: Mapping[str, Any], *, success: bool, fault: str | None = None,
+        public_result: Mapping[str, Any] | None = None,
+        failure: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Write the final tool reply, then observe that exact wire outcome.
+
+        A handler success is not a client success until its complete physical
+        JSONL response fits the wire. This is the single terminal observation
+        point for every recognised public tool call.
+        """
+        wire_success = reply(request_id, result)
+        if wire_success:
+            observe_call(name, arguments, success=success, fault=fault, result=public_result, failure=failure)
+        else:
+            observe_call(name, arguments, success=False, fault="ledger_error")
+
+    def finish_malformed_tool_call(request_id: object, *, respond: bool) -> None:
+        """Record one safe terminal observation for a malformed call envelope."""
+        if respond:
+            rpc_error(request_id, -32602, "Invalid params")
+        observe_call("unknown", {}, success=False, fault="validation_error")
+
+    def finish_internal_tool_error(request_id: object, name: str, arguments: Mapping[str, Any]) -> None:
+        """Emit the standard JSON-RPC internal fault and one matching event."""
+        rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+        observe_call(name, arguments, success=False, fault="ledger_error")
+
+    def tools_list_page(request_id: object, cursor: object) -> Mapping[str, Any] | None:
+        """Build the largest complete catalog page that fits one JSONL frame.
+
+        MCP defines ``tools/list`` pagination through ``nextCursor``. Cortex
+        keeps its fixed public catalogue in the first bounded response because
+        ordinary Codex discovery consumes that response as the advertised
+        catalog. The wire carries each operation's complete input and output
+        schema; structuredContent remains unchanged on every call.
+        """
+        start = _tools_list_offset(cursor, len(catalog_tools))
+        if start is None:
+            return None
+        page: list[Mapping[str, Any]] = []
+        for offset in range(start, len(catalog_tools)):
+            candidate = [*page, catalog_tools[offset]]
+            next_offset = offset + 1
+            result: dict[str, Any] = {"tools": candidate}
+            if next_offset < len(catalog_tools):
+                result["nextCursor"] = _tools_list_cursor(next_offset)
+            payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+            if len(render(payload).encode("utf-8")) > MAX_PHYSICAL_JSONL_FRAME_BYTES:
+                if not page:
+                    # One declared tool cannot be safely represented at the
+                    # transport boundary. Keep the established sanitized
+                    # server error rather than emitting an oversized frame.
+                    return {"tools": candidate}
+                break
+            page = candidate
+        if not page:
+            return {"tools": []}
+        next_offset = start + len(page)
+        result = {"tools": page}
+        if next_offset < len(catalog_tools):
+            result["nextCursor"] = _tools_list_cursor(next_offset)
+        return result
 
     def rpc_error(request_id: object, code: int, message: str, *, data: Mapping[str, Any] | None = None) -> None:
         error: dict[str, Any] = {"code": code, "message": message}
@@ -709,6 +1103,11 @@ def serve_stdio(
         write({"jsonrpc": "2.0", "id": request_id, "error": error})
 
     session_state = "new"
+    # This binding is scoped to one stdio connection. It is established only
+    # by a successful open_task or a successful task-scoped call carrying an
+    # exact task_ref. A restarted server begins unbound and must receive an
+    # exact selector again; the transport never guesses from ledger recency.
+    active_task_ref: str | None = None
     while True:
         line, frame_rejected = _read_physical_jsonl_frame(sys.stdin)
         if frame_rejected:
@@ -743,6 +1142,9 @@ def serve_stdio(
                 raise _RpcError(-32600, "Invalid Request")
             params = request.get("params", {})
             if not isinstance(params, Mapping):
+                if method == "tools/call":
+                    finish_malformed_tool_call(request_id, respond=has_request_id)
+                    continue
                 raise _RpcError(-32602, "Invalid params")
 
             if method == "initialize":
@@ -753,8 +1155,15 @@ def serve_stdio(
                 if set(params) - {"protocolVersion", "capabilities", "clientInfo", "_meta"}:
                     raise _RpcError(-32602, "Invalid params")
                 client_info = params.get("clientInfo")
+                # Initialize is the only phase in which a server can select a
+                # compatible protocol.  Echo a supported request and
+                # counter-offer the newest supported version otherwise.  The
+                # client is responsible for disconnecting if it cannot accept
+                # that counter-offer, as required by MCP lifecycle negotiation.
                 if (
-                    params.get("protocolVersion") != MCP_PROTOCOL_VERSION
+                    not isinstance(params.get("protocolVersion"), str)
+                    or not params["protocolVersion"]
+                    or len(params["protocolVersion"].encode("utf-8")) > 64
                     or not isinstance(params.get("capabilities"), Mapping)
                     or not isinstance(client_info, Mapping)
                     or not isinstance(client_info.get("name"), str)
@@ -763,12 +1172,53 @@ def serve_stdio(
                     or not client_info["version"]
                 ):
                     raise _RpcError(-32602, "Invalid params")
-                reply(request_id, {
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                try:
+                    provenance = verify_runtime(package_root, server_version, allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1")
+                except RuntimeError as exc:
+                    raise SystemExit(f"Cortex candidate provenance verification failed: {exc}") from exc
+                requested_protocol_version = params["protocolVersion"]
+                negotiated_protocol_version = (
+                    requested_protocol_version
+                    if requested_protocol_version in MCP_SUPPORTED_PROTOCOL_VERSIONS
+                    else MCP_SUPPORTED_PROTOCOL_VERSIONS[0]
+                )
+                server_info = {"name": "cortex", "version": server_version}
+                # The launcher supplies provenance only for isolated candidate
+                # runs.  Keep it additive and read-only so normal MCP clients
+                # retain the stable semantic version contract.
+                server_info.update({
+                    "buildId": provenance["build_id"],
+                    "sourceDigest": provenance["source_digest"],
+                    "candidatePath": provenance["candidate_path"],
+                    "parityVerified": provenance["parity_verified"] == "true",
+                    "runtimeMode": provenance["runtime_mode"],
+                })
+                initialize_wire_success = reply(request_id, {
+                    "protocolVersion": negotiated_protocol_version,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "cortex", "version": server_version},
+                    "serverInfo": server_info,
                     "instructions": instructions,
                 })
+                # A ready observation is not an MCP operation result.  It is
+                # emitted only after the actual initialize reply has survived
+                # the physical JSONL boundary, and at most once per server
+                # process even if a client retries initialization incorrectly.
+                if initialize_wire_success and not server_ready_observed:
+                    event_journal.emit_server_ready(
+                        catalogue_count=len(catalog_tools),
+                        catalogue_digest=catalogue_digest,
+                    )
+                    if generation is not None:
+                        try:
+                            write_ready_receipt(
+                                generation, build_id=provenance["build_id"],
+                                catalogue_count=len(catalog_tools), catalogue_digest=catalogue_digest,
+                            )
+                        except ObservationGenerationError:
+                            # As with journal failure, receipt publication does
+                            # not retroactively falsify the wire reply.
+                            pass
+                    server_ready_observed = True
                 session_state = "initialize_response_sent"
                 continue
             if method == "notifications/initialized":
@@ -791,73 +1241,130 @@ def serve_stdio(
                 if set(params) - {"cursor", "_meta"}:
                     raise _RpcError(-32602, "Invalid params")
                 cursor = params.get("cursor")
-                if cursor not in {None, ""}:
+                result = tools_list_page(request_id, cursor)
+                if result is None:
                     raise _RpcError(-32602, "Invalid params")
-                reply(request_id, {"tools": [
-                    {
-                        "name": name,
-                        "description": str(contract["description"]),
-                        "inputSchema": dict(contract["inputSchema"]),
-                        "outputSchema": dict(contract["outputSchema"]),
-                    }
-                    for name, contract in public_tools.items()
-                ]})
+                reply(request_id, result)
                 continue
             if method != "tools/call":
                 raise _RpcError(-32601, "Method not found")
             if not has_request_id:
+                # A tools/call notification has no wire reply, but it still
+                # crossed the public composition boundary and must be visible
+                # to the observer exactly once when malformed. Valid tool-call
+                # notifications retain the established no-dispatch/no-reply
+                # behavior; valid non-tools notifications are handled above.
+                name = params.get("name")
+                arguments = params.get("arguments", {})
+                if (
+                    set(params) - {"name", "arguments", "_meta"}
+                    or not isinstance(name, str)
+                    or name not in public_tools
+                    or not isinstance(arguments, Mapping)
+                ):
+                    finish_malformed_tool_call(request_id, respond=False)
+                    continue
                 continue
             if set(params) - {"name", "arguments", "_meta"}:
-                raise _RpcError(-32602, "Invalid params")
+                finish_malformed_tool_call(request_id, respond=True)
+                continue
             name = params.get("name")
             arguments = params.get("arguments", {})
             if not isinstance(name, str) or name not in public_tools or not isinstance(arguments, Mapping):
-                raise _RpcError(-32602, "Invalid params")
+                # Do not retain an arbitrary unrecognised caller-provided
+                # name. The observation still proves an MCP call failed at
+                # the composition boundary.
+                finish_malformed_tool_call(request_id, respond=True)
+                continue
             contract = public_tools[name]
+            resolved_arguments = dict(arguments)
             try:
-                _validate_schema(contract["inputSchema"], arguments)
+                if _encoded_json_bytes(arguments, "$") > MCP_OPERATION_MAX_BYTES:
+                    raise _SchemaError("$", "JSON value exceeds the maximum encoded byte length")
+                input_schema = contract.get("_runtimeInputSchema", contract["inputSchema"])
+                _validate_schema(input_schema, arguments)
+                properties = input_schema.get("properties") if isinstance(input_schema, Mapping) else None
+                if (
+                    name != "open_task"
+                    and isinstance(properties, Mapping)
+                    and "task_ref" in properties
+                    and "task_ref" not in resolved_arguments
+                ):
+                    if active_task_ref is None:
+                        raise _SchemaError(
+                            "$.task_ref",
+                            "missing required property 'task_ref' because this MCP connection has no active task context",
+                        )
+                    resolved_arguments["task_ref"] = active_task_ref
+                _validate_public_call_shape(name, resolved_arguments)
             except _SchemaError as error:
-                reply(request_id, _tool_error_result(_validation_failure(error, tool_name=name, arguments=arguments), mutation=name))
+                failure = _validation_failure(error, tool_name=name, arguments=arguments)
+                finish_tool_call(request_id, name, arguments, _tool_error_result(failure, mutation=name), success=False, fault=str(failure["code"]), failure=failure)
                 continue
             try:
-                result = contract["handler"](**dict(arguments))
+                result = contract["handler"](**resolved_arguments)
             except V12ServiceError as error:
                 failure = _service_failure(error)
-                if str(failure["code"]) in _SERVER_STATE_CODES:
-                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": str(failure["code"])})
-                else:
-                    reply(request_id, _tool_error_result(failure, mutation=name))
+                finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault=str(failure["code"]), failure=failure)
             except sqlite3.Error as error:
                 if _sqlite_is_busy(error):
-                    reply(request_id, _tool_error_result({
+                    failure = {
                         "code": "storage_busy",
                         "message": _safe_message("storage_busy"),
                         "details": {"retry_after_ms": 100},
                         "retryable": True,
                         "action": _recovery("storage_busy", {})[1],
-                    }, mutation=name))
+                    }
+                    finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault="storage_busy", failure=failure)
                 else:
-                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+                    failure = _internal_ledger_failure()
+                    finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault="ledger_error", failure=failure)
             except (TypeError, ValueError):
                 # Public input validation and typed V12ServiceError cover all
                 # caller-correctable failures. A raw Python type/value error
                 # after dispatch is an implementation fault, not a second
                 # inconsistent tool-error protocol.
-                rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+                failure = _internal_ledger_failure()
+                finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault="ledger_error", failure=failure)
             except Exception:
-                rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+                failure = _internal_ledger_failure()
+                finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault="ledger_error", failure=failure)
             else:
                 if not isinstance(result, Mapping) or not _is_json_value(result):
-                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+                    finish_internal_tool_error(request_id, name, resolved_arguments)
                     continue
+                discovered_task_ref = _handles(result).get("task_ref")
                 result = _project_public_views(result)
-                result["handles"] = _handles(result)
+                # Validate against the complete closed private schema.  The
+                # compact outputSchema is discovery-only and intentionally
+                # permits additional observational receipt fields.
+                public_output_schema = contract["outputSchema"]
+                output_schema = contract["runtimeOutputSchema"]
+                if isinstance(public_output_schema, Mapping):
+                    result["handles"] = _handles_for_output_schema(result, public_output_schema)
                 try:
-                    _validate_schema(contract["outputSchema"], result)
-                except _SchemaError:
-                    rpc_error(request_id, -32603, "Cortex server state is unavailable", data={"cortex_code": "ledger_error"})
+                    if isinstance(output_schema, Mapping):
+                        _validate_schema(output_schema, result)
+                except _SchemaError as error:
+                    raw_diagnostic(
+                        kind="mcp_output_contract_violation",
+                        payload={
+                            "operation": name,
+                            "path": error.path,
+                            "message": error.message,
+                            "result": result,
+                        },
+                    )
+                    finish_internal_tool_error(request_id, name, resolved_arguments)
                     continue
-                reply(request_id, _success_tool_result(dict(result)))
+                if isinstance(discovered_task_ref, str) and task_ref_parts(discovered_task_ref) is not None:
+                    active_task_ref = discovered_task_ref
+                elif (
+                    isinstance(resolved_arguments.get("task_ref"), str)
+                    and task_ref_parts(resolved_arguments["task_ref"]) is not None
+                ):
+                    active_task_ref = resolved_arguments["task_ref"]
+                finish_tool_call(request_id, name, resolved_arguments, _success_tool_result(dict(result)), success=True, public_result=result)
         except _RpcError as error:
             if has_request_id:
                 rpc_error(request_id, error.code, error.message)

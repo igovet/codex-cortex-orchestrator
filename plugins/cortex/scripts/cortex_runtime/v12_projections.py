@@ -15,14 +15,18 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from cortex_runtime.v12_contract import PROJECTION_RENDERER_VERSION, task_ref
+from cortex_runtime.markdown_document import legacy_lines, plain_text
+from cortex_runtime.report_presenters import merge_report_payloads, render_report
 
 
 _MAX_RENDER_BYTES = 10 * 1024 * 1024
+_MAX_RENDER_FILES = 512
+_MAX_RENDER_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 def _digest_bytes(value: bytes) -> str:
@@ -36,53 +40,29 @@ def _markdown_link(relative: str, path: str) -> str:
 
 
 def _markdown_text(value: object) -> str:
-    """Preserve caller-provided text verbatim in a readable Markdown view.
+    """Compatibility wrapper for normalized plain text.
 
-    Human views are presentation-only and never parsed back into the ledger.
-    They must not add Markdown, HTML, or backslash escaping to caller text.
+    Older callers imported this private helper while the renderer still
+    emitted hard-breaks for every newline.  Keep the name stable, but delegate
+    to the typed presentation layer's plain-text normalization so a newline is
+    not silently turned into Markdown structure.
     """
-    normalized = str(value).replace("\r\n", "\n").replace("\r", "\n")
-    return normalized.replace("\n", "  \n")
+    return plain_text(value)
 
 
 def _markdown_value(value: object, indent: str = "") -> list[str]:
-    """Render structured ledger values as ordinary, readable Markdown lists.
-
-    This intentionally does not serialize values as JSON.  Keys and all
-    caller-authored strings retain their ordinary Markdown punctuation.  The
-    projection remains display-only and is never parsed back into the ledger.
-    """
-    if isinstance(value, Mapping):
-        lines: list[str] = []
-        for key, item in value.items():
-            label = _markdown_text(key)
-            if isinstance(item, (Mapping, Sequence)) and not isinstance(item, (str, bytes, bytearray)):
-                lines.append(f"{indent}- **{label}**")
-                lines.extend(_markdown_value(item, indent + "  "))
-            else:
-                rendered = _markdown_text(item).replace("\n", "\n" + indent + "  ")
-                lines.append(f"{indent}- **{label}:** {rendered}")
-        return lines or [f"{indent}- *(empty)*"]
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        lines = []
-        for item in value:
-            if isinstance(item, (Mapping, Sequence)) and not isinstance(item, (str, bytes, bytearray)):
-                lines.append(f"{indent}-")
-                lines.extend(_markdown_value(item, indent + "  "))
-            else:
-                rendered = _markdown_text(item).replace("\n", "\n" + indent + "  ")
-                lines.append(f"{indent}- {rendered}")
-        return lines or [f"{indent}- *(empty)*"]
-    return [f"{indent}{_markdown_text(value)}"]
+    """Compatibility wrapper for safe, heading-free legacy content lines."""
+    # Keep the historic argument accepted without allowing callers to create
+    # an indented code block accidentally.  Dedicated typed lists own nested
+    # indentation; this fallback only emits ordinary list/text lines.
+    prefix = " " * min(len(indent), 3) if indent else ""
+    return [prefix + line for line in legacy_lines(value)]
 
 
 def _inert(value: object) -> str:
-    """Render arbitrary ledger content as readable display-only Markdown.
-
-    The historical helper name is retained for callers, but its output is no
-    longer an embedded JSON document or an HTML ``<pre>`` block.
-    """
-    return "\n".join(_markdown_value(value)) + "\n\n"
+    """Render arbitrary legacy content without letting it create structure."""
+    lines = _markdown_value(value)
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def _text(value: object) -> str:
@@ -90,80 +70,21 @@ def _text(value: object) -> str:
 
 
 def _field_title(value: object) -> str:
-    """Turn storage-oriented field names into readable Markdown headings."""
-    labels = {
-        "implementation_work_breakdown": "Implementation Work Breakdown",
-        "ordered_verification": "Ordered Verification",
-        "test_acceptance_matrix": "Test Acceptance Matrix",
-        "observed_baseline": "Observed Baseline",
-        "requirements_and_boundaries": "Requirements & Boundaries",
-        "contradictions_and_risks": "Contradictions & Risks",
-        "consumed_inputs": "Consumed Inputs",
-    }
-    key = str(value).strip()
-    return _markdown_text(labels.get(key, key.replace("_", " ").replace("-", " ").title()))
-
-
-_ITEM_TITLE_FIELDS = ("stage", "title", "name", "objective", "test", "command")
-
-
-def _report_item_heading(item: Mapping[str, Any], index: int, heading_level: int) -> tuple[str, str | None]:
-    for field in _ITEM_TITLE_FIELDS:
-        value = item.get(field)
-        if value is None or isinstance(value, (Mapping, Sequence)) and not isinstance(value, (str, bytes, bytearray)):
-            continue
-        text = _markdown_text(value)
-        if field == "stage":
-            return f"{'#' * min(heading_level, 6)} Stage {index} — {text}", field
-        if field == "test":
-            return f"{'#' * min(heading_level, 6)} {text}", field
-        return f"{'#' * min(heading_level, 6)} {text}", field
-    return f"{'#' * min(heading_level, 6)} Item {index}", None
+    """Compatibility label helper; it never creates a Markdown heading."""
+    key = _markdown_text(value).strip()
+    return key.replace("_", " ").replace("-", " ").title() or "Detail"
 
 
 def _report_content(value: object, heading_level: int = 3, *, ordered: bool = False, compact: bool = False, omit_keys: set[str] | None = None) -> list[str]:
-    """Render report content as a structured document rather than a field dump."""
-    if isinstance(value, Mapping):
-        lines: list[str] = []
-        for key, item in value.items():
-            if omit_keys and str(key).lower() in omit_keys:
-                continue
-            level = min(heading_level, 6)
-            is_structured = isinstance(item, (Mapping, Sequence)) and not isinstance(item, (str, bytes, bytearray))
-            if compact and not is_structured:
-                lines.append(f"- **{_field_title(key)}:** {_markdown_text(item)}")
-                continue
-            lines.extend((f"{'#' * level} {_field_title(key)}", ""))
-            if isinstance(item, Mapping):
-                # Keep scalar leaves compact beneath their parent heading;
-                # headings are reserved for nested structured values.
-                lines.extend(_report_content(item, heading_level + 1, ordered=False, compact=True))
-            elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
-                # Verification plans are naturally read in order; other
-                # sequences retain ordinary unordered Markdown list semantics.
-                lines.extend(_report_content(item, heading_level + 1, ordered=str(key) == "ordered_verification", compact=compact))
-            else:
-                lines.extend((_markdown_text(item), ""))
-        return lines
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        lines = []
-        for index, item in enumerate(value, start=1):
-            if isinstance(item, Mapping):
-                # A bare ``-`` followed by indented headings is parsed as a
-                # code block by Markdown renderers.  Give each structured item
-                # a real heading instead, keeping all fields readable.
-                heading, title_field = _report_item_heading(item, index, heading_level)
-                lines.extend((heading, ""))
-                lines.extend(_report_content(item, heading_level + 1, ordered=False, compact=True, omit_keys={title_field} if title_field else None))
-            elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
-                prefix = f"{index}." if ordered else "-"
-                lines.extend((f"{prefix}", ""))
-                lines.extend(_report_content(item, heading_level + 1, ordered=ordered))
-            else:
-                prefix = f"{index}." if ordered else "-"
-                lines.extend((f"{prefix} {_markdown_text(item)}", ""))
-        return lines
-    return [_markdown_text(value), ""]
+    """Legacy compatibility helper with safe, heading-free output.
+
+    ``heading_level``/``compact``/``omit_keys`` remain accepted for old test
+    and plugin callers, but arbitrary JSON depth no longer controls Markdown
+    headings.  The dedicated presenters are the sole structured renderer.
+    """
+    if isinstance(value, Mapping) and omit_keys:
+        value = {key: item for key, item in value.items() if str(key).lower() not in omit_keys}
+    return _markdown_value(value)
 
 
 def _regular(path: Path, *, required: bool = False) -> bool:
@@ -324,7 +245,7 @@ def _migrate_legacy_task_directory(store: Any, task_id: str, task_ref_value: str
     return compact
 
 
-def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
+def _view_metadata(store: Any, task_id: str, relative: str, *, require_fresh: bool = True) -> dict[str, Any]:
     try:
         task_ref_value = _projection_task_ref(store, task_id)
         fragment = _task_relative(task_ref_value, relative).relative_to(Path("tasks") / task_ref_value)
@@ -334,12 +255,12 @@ def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
     except OSError:
         return {"status": "unavailable", "path": None}
     def read(connection: Any) -> dict[str, Any]:
-        row = connection.execute("SELECT source_sequence,content_digest,status FROM projection_files WHERE task_id=? AND relative_path=?", (task_id, relative)).fetchone()
+        row = connection.execute("SELECT source_sequence,renderer_version,content_digest,status FROM projection_files WHERE task_id=? AND relative_path=?", (task_id, relative)).fetchone()
         latest = connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM timeline WHERE task_id=?", (task_id,)).fetchone()[0]
         if row is None:
             return {"status": "stale", "path": None}
-        source_sequence, digest, status = int(row[0]), str(row[1]), str(row[2])
-        if status != "ready" or source_sequence < int(latest):
+        source_sequence, renderer_version, digest, status = int(row[0]), str(row[1]), str(row[2]), str(row[3])
+        if renderer_version != PROJECTION_RENDERER_VERSION or status != "ready" or (require_fresh and source_sequence < int(latest)):
             return {"status": "stale", "path": None}
         try:
             _regular(path, required=True)
@@ -365,7 +286,7 @@ def _view_metadata(store: Any, task_id: str, relative: str) -> dict[str, Any]:
         return {"status": "unavailable", "path": None}
 
 
-def human_view(store: Any, task_id: str, relative: str) -> dict[str, Any]:
+def human_view(store: Any, task_id: str, relative: str, *, require_fresh: bool = True) -> dict[str, Any]:
     """Return only user-facing report/plan links; other ledger data is SQLite-only."""
     candidate = Path(relative)
     allowed = (
@@ -375,7 +296,7 @@ def human_view(store: Any, task_id: str, relative: str) -> dict[str, Any]:
     )
     if not allowed:
         return {"status": "disabled", "path": None}
-    return _view_metadata(store, task_id, relative)
+    return _view_metadata(store, task_id, relative, require_fresh=require_fresh)
 
 
 def _task_data(store: Any, task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:
@@ -413,15 +334,16 @@ def _render_report(store: Any, report: Mapping[str, Any]) -> bytes:
     def read(connection: Any) -> list[dict[str, Any]]:
         return store._report_chunks(connection, str(report["report_id"]))
     chunks = store._read(read)
-    state = str(report["assembly_state"]).upper()
-    title = "Plan" if report.get("report_type") == "plan" else "Report"
-    if report["assembly_state"] == "aborted":
-        state = "ABORTED — NOT FINAL EVIDENCE"
-    lines = [f"# {title}", "", f"**Status:** {state}", ""]
-    for chunk in chunks:
-        section = "Content" if str(chunk["section"]).strip().lower() == "body" else _text(chunk["section"])
-        lines.extend((f"## {section}", "", *_report_content(chunk["content"])))
-    return ("\n".join(lines)).encode("utf-8")
+    # Chunk labels are storage metadata, not presentation sections.  Merge all
+    # immutable chunks into one semantic payload before selecting a presenter so
+    # equivalent single- and multi-chunk reports produce the same document.
+    payload = merge_report_payloads([chunk.get("content") for chunk in chunks])
+    body = render_report(
+        report_type=report.get("report_type"),
+        content=payload,
+        report=report,
+    )
+    return body.encode("utf-8")
 
 
 def _render_files(store: Any, task_id: str) -> tuple[dict[str, bytes], int, str]:
@@ -450,6 +372,15 @@ def materialize_task(store: Any, task_id: str) -> dict[str, Any]:
     """Best-effort materialize one task; canonical rows are never rolled back."""
     try:
         files, source_sequence, task_ref_value = _render_files(store, task_id)
+        # Preflight the complete batch before resolving a target or writing a
+        # temporary file.  Per-file validation in _safe_write remains a
+        # defense in depth, but an admitted batch must never partially
+        # materialize merely because its aggregate output is unsafe.
+        if len(files) > _MAX_RENDER_FILES:
+            raise OSError("projection file count exceeds the aggregate limit")
+        total_bytes = sum(len(body) for body in files.values())
+        if total_bytes > _MAX_RENDER_TOTAL_BYTES or any(len(body) > _MAX_RENDER_BYTES for body in files.values()):
+            raise OSError("projection output exceeds the aggregate limit")
         task_directory = _migrate_legacy_task_directory(store, task_id, task_ref_value)
         ordered = sorted(files)
         outcomes: dict[str, str] = {}

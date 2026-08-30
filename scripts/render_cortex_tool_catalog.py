@@ -18,12 +18,17 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL_RELATIVE = Path("plugins/cortex/skills/cortex-control/SKILL.md")
 ORCHESTRATOR_RELATIVE = Path("plugins/cortex/skills/orchestrator/SKILL.md")
+CONTROL_REFERENCE_RELATIVE = Path("plugins/cortex/skills/cortex-control/references/post-anchor-engine.md")
+ORCHESTRATOR_REFERENCE_RELATIVE = Path("plugins/cortex/skills/orchestrator/references/post-anchor-engine.md")
+MODEL_ROUTING_BEGIN = "<!-- BEGIN GENERATED CORTEX MODEL ROUTING -->"
+MODEL_ROUTING_END = "<!-- END GENERATED CORTEX MODEL ROUTING -->"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT, help="repository tree")
     parser.add_argument("--check", action="store_true", help="fail when bundled catalogues drift from their registries")
+    parser.add_argument("--write", action="store_true", help="update the marked generated routing block from profiles.json")
     return parser.parse_args()
 
 
@@ -41,10 +46,11 @@ def load_contracts(root: Path) -> dict[str, dict[str, Any]]:
     runtime_path = str(root / "plugins/cortex/scripts")
     if runtime_path not in sys.path:
         sys.path.insert(0, runtime_path)
-    from cortex_runtime.public_contracts import V12_TOOL_NAMES, build_public_contracts
+    from cortex_runtime.public_contracts import build_public_contracts
+    from cortex_runtime.semantic_registry import OPERATION_NAMES
 
     contracts = build_public_contracts()
-    if tuple(contracts) != V12_TOOL_NAMES or not contracts:
+    if tuple(contracts) != OPERATION_NAMES or not contracts:
         raise ValueError("runtime tool registry is not a non-empty canonical ordered catalogue")
     if any(not isinstance(name, str) or not name or not isinstance(value, Mapping) for name, value in contracts.items()):
         raise ValueError("runtime tool registry has an invalid entry")
@@ -107,6 +113,29 @@ def render_model_routing(rows: tuple[tuple[str, str, str], ...]) -> str:
     return "\n".join(lines)
 
 
+def update_model_routing(markdown: str, rows: tuple[tuple[str, str, str], ...]) -> str:
+    """Replace the marked generated routing table without touching surrounding guidance."""
+    block_pattern = re.compile(
+        rf"(?ms)^(?P<begin>{re.escape(MODEL_ROUTING_BEGIN)}\n)(?P<body>.*?)(?P<end>^{re.escape(MODEL_ROUTING_END)}$)"
+    )
+    table_pattern = re.compile(
+        r"(?ms)^\| Exact model \| Recommended effort \| Recommend for \|\n"
+        r"^\| --- \| --- \| --- \|\n(?:^\|.*\n?)+"
+    )
+
+    def replace_block(match: re.Match[str]) -> str:
+        body = match.group("body")
+        updated_body, count = table_pattern.subn(render_model_routing(rows) + "\n", body, count=1)
+        if count != 1:
+            raise ValueError("orchestrator model-routing table is missing or duplicated")
+        return match.group("begin") + updated_body + match.group("end")
+
+    updated, count = block_pattern.subn(replace_block, markdown, count=1)
+    if count != 1:
+        raise ValueError("orchestrator model-routing generated markers are missing or duplicated")
+    return updated
+
+
 def catalog_names(markdown: str) -> tuple[str, ...]:
     catalog = section(markdown, "Public semantic catalog")
     return tuple(re.findall(r"^\|\s*`([^`]+)`\s*\|", catalog, re.MULTILINE))
@@ -126,13 +155,15 @@ def routing_rows(markdown: str) -> tuple[tuple[str, str, str], ...]:
 
 def verify(root: Path) -> list[str]:
     contracts = load_contracts(root)
-    expected_tools = tuple(contracts)
     expected_routing = load_routing(root)
-    control = (root / CONTROL_RELATIVE).read_text(encoding="utf-8")
-    orchestrator = (root / ORCHESTRATOR_RELATIVE).read_text(encoding="utf-8")
+    control = (root / CONTROL_RELATIVE).read_text(encoding="utf-8") + (root / CONTROL_REFERENCE_RELATIVE).read_text(encoding="utf-8")
+    orchestrator = (root / ORCHESTRATOR_RELATIVE).read_text(encoding="utf-8") + (root / ORCHESTRATOR_REFERENCE_RELATIVE).read_text(encoding="utf-8")
     errors: list[str] = []
-    if catalog_names(control) != expected_tools:
-        errors.append("cortex-control public tool names differ from the uniform runtime catalogue")
+    if catalog_names(control):
+        errors.append("cortex-control must not duplicate the live MCP tool catalogue")
+    catalog = section(control, "Public semantic catalog").lower()
+    if not all(phrase in catalog for phrase in ("live advertised mcp registry", "sole authority", "must not duplicate")):
+        errors.append("cortex-control must defer the complete tool contract to the live MCP registry")
     if routing_rows(orchestrator) != expected_routing:
         errors.append("orchestrator model/effort routing rows differ from profiles.json")
     return errors
@@ -144,6 +175,18 @@ def main() -> int:
     try:
         contracts = load_contracts(root)
         routing = load_routing(root)
+        orchestrator_path = root / ORCHESTRATOR_REFERENCE_RELATIVE
+        if args.write:
+            if orchestrator_path.is_symlink() or not orchestrator_path.is_file():
+                raise ValueError("orchestrator skill must be a regular file for catalogue updates")
+            original = orchestrator_path.read_text(encoding="utf-8")
+            updated = update_model_routing(original, routing)
+            if updated != original:
+                orchestrator_path.write_text(updated, encoding="utf-8")
+                print("Updated orchestrator model-routing catalogue from profiles.json")
+            # A write operation is also a verification operation; avoid
+            # dumping the full catalogue into sync workflow output.
+            args.check = True
         if args.check:
             errors = verify(root)
             if errors:

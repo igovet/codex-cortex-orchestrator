@@ -18,7 +18,7 @@ durable `plan` report that plan-dependent nodes name as their predecessor.
 Maintain an evidence-backed DAG and persist its current projection through the
 existing task-linked initiative revision plus delegation/report/decision links.
 For each stage retain: its unique purpose; worker owner/profile/model/effort;
-scope and mutation boundary; named predecessor report/decision IDs; acceptance
+scope and mutation boundary; named predecessor evidence; acceptance
 and expected evidence; and state. Valid model-owned
 states are `proposed → waiting_predecessors → ready → dispatched →
 evidence_received → settled`, with `rework_required` returning to a new
@@ -33,16 +33,49 @@ Use this transition discipline:
    changes which assumption, risk, acceptance criterion, or predecessor.
 2. Decide whether current nodes still cover the outcome. Add, remove, reorder,
    retry, or create rework only for the evidence-backed delta, then append the
-   updated pipeline revision with its stage owners, input report/decision IDs,
+   updated pipeline revision with its stage owners, predecessor evidence,
    acceptance, evidence, and rationale. Completed worker reports remain
    immutable and are never relabeled as a new solution.
 3. Preserve parallelism only for non-overlapping ownership. Make a predecessor
    edge only when a later worker needs its evidence, particularly the finalized
    planner plan report for plan-dependent implementation or review.
-4. Dispatch the next ready worker through a new durable delegation. A retry or
-   rework uses `parent_delegation_id`; do not reuse a worker or invent a report.
+4. Dispatch the next ready worker through a new durable assignment. A retry or
+   rework uses the exact server-returned parent-assignment relation; do not reuse
+   a worker or invent evidence.
 5. Reassess C1/C2/C3, governance depth, residual risk, verification depth, and
    the final documentation branch after every material evidence arrival.
+
+A verification or QA report is settled only when its executed required checks
+support the assigned acceptance criteria. If such a report is failed or
+partial, records any failed executed check, or leaves a required check unrun,
+mark that verification stage `rework_required` and create bounded corrective
+ownership from the exact report evidence before closure. Route source defects
+to implementation rework and candidate, dependency, CI, provenance, or test
+harness defects to an owner for that release or verification infrastructure;
+do not discard them as unrelated environment noise. Only a genuinely external
+constraint that no in-scope worker can change may remain as an explicit
+limitation. After correction, dispatch an independent verifier to rerun the
+failed and affected gates. Unrelated new scope, a passing focused subset, or a
+later worker report cannot silently supersede the unresolved QA evidence.
+
+Before every new or rework delegation, perform an admission preflight against
+the current governance depth, the chosen profile's packaged ownership class,
+and the exact available predecessor evidence. In light/full governance,
+production-owner work requires finalized approved planner evidence; build that
+planning and approval chain first. When bounded C1 production work genuinely
+needs no plan, governance stays minimal from the outset—it is never downgraded
+after a rejected assignment. Test-only QA correction remains non-owning and
+must not be mislabeled as production remediation. Multiple workers or the mere
+presence of rework does not justify light/full governance. A planning-
+predecessor rejection proves a first-attempt orchestration defect; a later
+successful retry cannot make that verification run clean.
+
+After each revision, update the standard Codex To-Do projection from the latest
+DAG. To-Do contains only current pipeline stages and gate state, never worker subtasks,
+implementation checklists, or report bodies. Keep it concise and current with
+the persisted initiative revision; update it when a stage or gate changes, and
+when evidence adds, removes, reorders, retries, or reworks a node. The To-Do
+projection is for live progress only and is not a second durable task ledger.
 
 The C-level is advisory: C1 normally starts minimal, C2 light, and C3 full.
 Escalate or reduce the advisory starting-depth label only with recorded
@@ -55,15 +88,16 @@ label creates a backend wave, mandatory stage, model escalation, or new
 user-approval gate.
 
 The durable light/full governance gate is narrower: it validates the planner
-report/approval decision relation before downstream delegation. Its required
-relations are monotonic for the task: preserve the exact opaque plan report ID,
-plan digest, and approval decision ID in each successor input list. A failed,
+publication/approval decision relation before downstream assignment. Its required
+relations are monotonic for the task: preserve the exact opaque plan evidence
+reference, plan digest, and approval decision reference in each successor's
+declared predecessor evidence. A failed,
 partial, missing, or schema-rejected planner report requires correction, rework,
 or a parent-linked planner replacement—not a downgrade, native-prose
 substitute, explorer/QA/implementation bypass, or free-text instruction. After
 the replacement submits a finalized completed plan, obtain one new explicit
 localized user decision. If it is `approve`, read the plan to obtain the exact
-ready `approval_view`, copy its server-issued approval handle and exact
+ready approval view, copy its server-issued approval relation and exact
 report/view digest and sequence, and record approval against those exact values
 before dispatching downstream work. A `request_revision` or `cancel` decision
 is recorded against the exact finalized plan digest and response without a
@@ -110,11 +144,17 @@ names the approved plan/decision and relevant finalized result refs, followed
 by a coordinator report read. The report content remains opaque and no-impact
 does not require a documentation edit.
 
-Use `set_governance_mode` for an evidence-backed mode revision. Use
-`create_delegation` for new, replacement, or rework ownership. The model
+Use `assess_governance` for an evidence-backed governance assessment. Use
+`open_assignment` for new, replacement, or rework ownership. The model
 chooses the role, exact model, and reasoning effort for every delegation; the
 backend records the choice but never promotes a model, substitutes a profile,
 or chooses a recovery route.
+
+Routing remains Luna-first: Explorer and ordinary discovery always use Luna,
+with effort increased before a model change. Terra requires evidence of
+genuinely complex non-security work or planning; Sol is reserved for security
+work and review. Do not encode an automatic escalation ladder in a pipeline
+revision.
 
 A failed worker, partial report, missing report, or `not_ready` closure is
 evidence for the model's next decision, not a lifecycle barrier. Create a
@@ -127,7 +167,7 @@ project stage may start until finalized plan and explicit decision evidence
 exist.
 
 Before replacing a reportless worker, wait no more than 60 seconds per call;
-after the first quiet interval send the exact `native_task_name` an English
+after the first quiet interval send the exact native worker name an English
 checkpoint request, then inspect/list status after later intervals. If the
 worker remains running, keep waiting and update the user; silence never proves
 it is stuck. Interrupt and same-handle follow up only for explicit
@@ -136,9 +176,9 @@ user cancellation. If the child is live and its mutation scope is active, avoid
 overlapping write ownership. If its state is unknown, preserve uncertainty and
 do not infer that a durable delegation proves it started or stopped. Only failed
 or ambiguous authorized recovery permits blocked evidence and a replacement.
-Every semantic replacement or rework delegation uses
-`parent_delegation_id` and carries only relevant input report and user-decision
-IDs. Do not create a new task, skip a planner predecessor, or silently start a
+Every semantic replacement or rework assignment uses the exact emitted
+parent-assignment relation and carries only relevant predecessor evidence. Do
+not create a new task, skip a planner predecessor, or silently start a
 downstream stage to simulate recovery. C-level/timebox can shorten the count,
 never alter server-owned model routing.
 
@@ -147,13 +187,25 @@ behavior, or explicit external/destructive authorization. Never turn internal
 ledger status, mode, dependency, closure, retry, or worker conditions into a
 user decision.
 
+Pipeline progress is continuous until the requested outcome and closure
+evidence are complete. A worker completion, incomplete or waiting stage,
+technical/documentation/review error, Demo or production gate, or quiet host
+interval is evidence for the next safe coordinator action, not permission to
+end the task. Reconcile and dispatch, follow up, replace, or recover the next
+safe node automatically. The coordinator may pause before closure only after
+asking one genuine user question that materially changes requirements, scope,
+acceptance, or required external/destructive authority; after the answer,
+resume from that decision. Never leave an unfinished DAG stopped without such
+a question and an explicit recorded reason.
+
 When a genuine decision is required, ask one complete question in the language
 of the latest meaningful user message and end the turn. Silence is not an
-answer. Record the exact response and separate English normalization against
-the immutable subject/digest before using it. Follow up the same native child
-only when its live handle and ownership are known and ordinary host follow-up
-is safe; otherwise create a parent-linked replacement. Cortex does not
-guarantee same-child continuation.
+answer. Record the exact original response, together with the neutral question
+and language, against the immutable subject/digest
+before using it; do not generate or accept translated or duplicate language-specific fields. Follow
+up the same native child only when its live handle and ownership are known and
+ordinary host follow-up is safe; otherwise create a parent-linked replacement.
+Cortex does not guarantee same-child continuation.
 
 For plan review, `approve` applies only to the exact plan report and digest and
 requires the current ready approval view plus opaque approval handle. Plan
@@ -165,8 +217,8 @@ a new immutable plan/digest through the same live planner when possible (or a
 parent-linked replacement only when it is unavailable), then asks for a new
 decision. A requested/necessary main plan must have a finalized verified
 Markdown link and explicit localized approval. Record `approve` against its
-exact digest plus the ready-view binding and pass that decision ID to every
-plan-dependent delegation; do not
+exact digest plus the ready-view binding and pass that decision evidence to
+every plan-dependent assignment; do not
 dispatch implementation or research beyond discovery/planning first. Cancellation
 stops later dispatch by coordinator policy, not backend gate. If persistence is
 unavailable, never infer approval; proceed only from an unambiguous safe user

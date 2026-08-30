@@ -59,9 +59,10 @@ that decision.
    normally 2–8 in parallel for a large repository. Each inventories routes,
    commands, jobs, screens, handlers, policies, state, persistence,
    integrations, configuration, deployment paths, failure paths, and
-   behavior-revealing tests. Give each the scope report ID when relevant.
+   behavior-revealing tests. Give each the relevant finalized evidence reference
+   when applicable.
 3. **Architecture synthesis:** Create an `architect` delegation with the
-   relevant census report IDs. It deduplicates features, defines stable
+   relevant census evidence references. It deduplicates features, defines stable
    boundaries, maps cross-domain flows and shared infrastructure, identifies
    ADR-worthy decisions, and proposes the documentation taxonomy.
 4. **Planning:** When ownership, dependencies, acceptance, or verification
@@ -82,7 +83,8 @@ that decision.
    checks, and the final coverage statement.
 
 Independent delegations may run concurrently. A delegation that genuinely
-needs earlier evidence receives the relevant report IDs after those reports
+needs earlier evidence receives the relevant finalized evidence references after
+those publications
 exist. The model owns every adaptation and completion decision.
 
 ## Relationship to the final documentation stage
@@ -92,7 +94,8 @@ documentation delegations serve as the dedicated documentation-sync worker or
 workers for `docs/project/`, `docs/features/`, and any affected public
 documentation. After the final writing or corrective delegation, a separate
 worker verifies documentation through the completeness-review and verification
-evidence above. The coordinator decides readiness only from those report IDs;
+evidence above. The coordinator decides readiness only from those finalized
+evidence references;
 apart from its bounded index-driven routing reads, it never inspects or edits
 the documentation itself.
 
@@ -151,14 +154,17 @@ worker, or closure conditions are not user questions.
 ## Evidence and preservation
 
 Source, tests, executable configuration, schemas and migrations, and deployment
-definitions outrank generated documentation. When Codebase Memory is available
-and project instructions select it, bind it to the exact canonical project root
-and use graph search/trace/snippet tools first for structural discovery. Check
-index coverage for every cited path and bounded scope; confirm consequential
-claims in current source. Use repository-native enumeration as the completeness
-backstop and at most one bounded text/file-search fallback when the graph is
-unavailable, excludes the surface, or returns insufficient evidence. Record
-the coverage limitation rather than treating graph absence as proof.
+definitions outrank generated documentation. Codebase Memory is the mandatory
+first route for structural project-code discovery: bind it to the exact
+canonical project root and use its graph evidence before any local search.
+Check index coverage for every cited path and bounded scope; confirm
+consequential claims in current source. If the graph is unavailable, excludes
+the relevant surface, or returns insufficient evidence, record the concrete
+limitation and make exactly one bounded repository-native enumeration or
+file/text-search fallback. A fallback must name the failed or insufficient
+graph evidence and remain limited to the requested scope; never silently fall
+back, chain multiple fallback searches, or treat graph absence as proof of
+completeness.
 
 Run the repository's deterministic knowledge-census validator when available.
 Its result is advisory evidence for the model and verification worker, never a
