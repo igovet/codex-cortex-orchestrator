@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.12.1 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.12.2 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -158,11 +158,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.12.1+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.12.2+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.12.1` manifest is source-mode only and the
+in provenance strength. A plain `1.12.2` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -189,22 +189,22 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.12.1 and a suffix matching the complete normalized plugin payload;
+  1.12.2 and a suffix matching the complete normalized plugin payload;
 - exact fifteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
-  result projections, private successful-result schema validation, a complete catalogue below 65,536
+  result projections with closed operation-specific handles, private
+  successful-result schema validation, a complete catalogue below 65,536
   bytes, and the distinct success/correctable-error/server
   fault transport shapes;
-- explicit root only on `create_task`, `task_ref` on the seven task-anchored
-  tools, `delegation_ref`/`report_ref`/`report_refs` on entity-derived tools,
-  `subject_ref` and `initiative_ref` where applicable, arbitrary optional task
-  context, bounded task contract/language fields, required
+- explicit root only on `open_task`, compact typed task, assignment, report,
+  decision, and initiative references on their advertised consumers, arbitrary
+  optional task context, bounded task contract/language fields, required
   non-empty textual delegation scope with object rejection, exact model/effort,
   and required closure subject fields;
 - schema-v1 bootstrap/additive migration, project isolation, idempotency,
   concurrency, and ordered report reads;
-- bounded incremental inspection with compact report references and bodies or
-  whole chunks only through bounded `read_reports`;
+- bounded task inspection and evidence consumption through the advertised
+  continuation handles;
 - assembled report lifecycle, manifest digest and aggregate quota enforcement, plan
   review metadata, append-only digest-bound user decisions, safe resume, and
   task-scoped `report_chunk_appended` chronology/backfill behavior;
@@ -213,6 +213,12 @@ The release candidate must prove:
   under `project_root`;
 - private state modes, pre-open symlink/non-regular-file rejection, and
   oversized-frame drain/recovery;
+- QA/verification adaptation that assigns failed source, candidate, dependency,
+  CI, provenance, and harness checks to bounded rework and independently reruns
+  the failed and affected gates;
+- first-attempt profile admission: the live assignment schema classifies
+  packaged owner, review, and planning profiles; light/full owner work requires
+  approved planner evidence, while test-only QA correction remains non-owning;
 - append-only assessments/revisions/closures and nonblocking initiative
   warnings/verdicts;
 - self-contained bundled skill/profile lint covering coordinator-only,

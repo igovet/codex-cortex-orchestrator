@@ -35,6 +35,7 @@ DIAGNOSTIC_FIELDS = ("session_id", "turn_id", "agent_id", "parent_session_id", "
 ASSIGNMENT_OPEN_TOOLS = {"mcp__cortex__open_assignment", "mcp__cortex__create_delegation"}
 NATIVE_SPAWN_TOOLS = {"agent", "collaboration.spawn_agent", "collaborationspawn_agent", "spawn_agent"}
 DISPATCH_STATE_PREFIX = "dispatch-"
+COMPLETED_DISPATCH_HISTORY_LIMIT = 64
 CANONICAL_NATIVE_FIELDS = frozenset(("fork_turns", "message", "task_name"))
 HOST_NATIVE_METADATA_FIELDS = frozenset(("role", "model", "reasoning_effort"))
 SUPPORTED_NATIVE_MODELS = frozenset(("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
@@ -485,6 +486,93 @@ def _dispatch_state_root() -> Path | None:
         return None
 
 
+def _dispatch_session_root(session_id: object, turn_id: object = None, *, create: bool = False) -> Path | None:
+    """Return the private receipt namespace for one coordinator identity."""
+    identity = session_id if isinstance(session_id, str) and session_id else turn_id
+    if not isinstance(identity, str) or not identity:
+        return None
+    root = _dispatch_state_root()
+    if root is None:
+        return None
+    digest = _value_fingerprint(identity)
+    if digest is None:
+        return None
+    session_root = root / "sessions" / digest
+    if create:
+        try:
+            (session_root / "dispatch").mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(root / "sessions", 0o700)
+            os.chmod(session_root, 0o700)
+            os.chmod(session_root / "dispatch", 0o700)
+        except OSError:
+            return None
+    return session_root
+
+
+def _active_index_path(session_root: Path) -> Path:
+    return session_root / "active-dispatches.json"
+
+
+def _empty_active_index(session_digest: str) -> dict[str, Any]:
+    return {"version": 1, "session_digest": session_digest, "active": [], "next_claim_order": 1}
+
+
+def _read_active_index(session_root: Path, session_digest: str) -> dict[str, Any] | None:
+    """Read the exact active index; malformed state fails closed."""
+    path = _active_index_path(session_root)
+    if not path.exists():
+        return _empty_active_index(session_digest)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (not isinstance(value, dict) or set(value) != {"version", "session_digest", "active", "next_claim_order"}
+            or value.get("version") != 1 or value.get("session_digest") != session_digest
+            or not isinstance(value.get("active"), list)
+            or not isinstance(value.get("next_claim_order"), int) or value["next_claim_order"] < 1):
+        return None
+    active = value["active"]
+    if (len(active) != len(set(active))
+            or any(not isinstance(name, str) or re.fullmatch(r"dispatch-[0-9a-f]{64}\.json", name) is None for name in active)):
+        return None
+    return value
+
+
+def _write_active_index(session_root: Path, value: dict[str, Any]) -> bool:
+    path = _active_index_path(session_root)
+    try:
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(_json(value), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        return True
+    except OSError:
+        return False
+
+
+def _prune_consumed_history(session_root: Path, *, retain: int = COMPLETED_DISPATCH_HISTORY_LIMIT) -> None:
+    """Bound settled diagnostics without participating in active routing."""
+    try:
+        settled: list[tuple[int, str, Path]] = []
+        for path in (session_root / "dispatch").glob(DISPATCH_STATE_PREFIX + "*.json"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict) and value.get("state") == "consumed" and isinstance(value.get("consumed_at"), int):
+                settled.append((value["consumed_at"], path.name, path))
+        settled.sort(reverse=True)
+        for _consumed_at, _name, path in settled[retain:]:
+            try:
+                path.unlink()
+                path.with_suffix(".lock").unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
 def _dispatch_digest(assignment_ref: str, native_arguments: dict[str, Any]) -> str:
     canonical = json.dumps(
         {"assignment_ref": assignment_ref, "native_arguments": native_arguments},
@@ -556,8 +644,11 @@ def _record_pending_dispatch(event: dict[str, Any]) -> None:
     # host projection is literal-callable. Compute the private binding digest
     # here from the exact server projection; it never enters the host call.
     digest = _dispatch_digest(assignment_ref, args)
-    root = _dispatch_state_root()
-    if root is None:
+    session_id, turn_id = event.get("session_id"), event.get("turn_id")
+    session_root = _dispatch_session_root(session_id, turn_id, create=True)
+    identity = session_id if isinstance(session_id, str) and session_id else turn_id
+    session_digest = _value_fingerprint(identity)
+    if session_root is None or session_digest is None:
         return
     record = {
         "version": 1,
@@ -576,20 +667,31 @@ def _record_pending_dispatch(event: dict[str, Any]) -> None:
         # authoritative only after MCP evidence consumption succeeds.
         "native_arguments": args,
         "task_name_digest": _value_fingerprint(args["task_name"]),
-        "session_digest": _value_fingerprint(event.get("session_id")),
-        "turn_digest": _value_fingerprint(event.get("turn_id")),
+        "session_digest": session_digest,
+        "turn_digest": _value_fingerprint(turn_id),
         "fork_turns": "none",
         "created_at": time.time_ns(),
     }
-    try:
-        path = root / (DISPATCH_STATE_PREFIX + hashlib.sha256(digest.encode("ascii")).hexdigest() + ".json")
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(_json(record), encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    except OSError:
+    lock = _parent_dispatch_lock(identity, turn_id)
+    if fcntl is not None and lock is None:
         return
+    try:
+        index = _read_active_index(session_root, session_digest)
+        if index is None:
+            return
+        filename = DISPATCH_STATE_PREFIX + hashlib.sha256(digest.encode("ascii")).hexdigest() + ".json"
+        path = session_root / "dispatch" / filename
+        if filename in index["active"] or path.exists():
+            return
+        if not _write_dispatch_record(path, record):
+            return
+        updated = dict(index)
+        updated["active"] = [*index["active"], filename]
+        if not _write_active_index(session_root, updated):
+            # The unindexed receipt is inert history and cannot be claimed.
+            return
+    finally:
+        _release_dispatch_lock(lock)
 
 
 def _dispatch_lock(path: Path):
@@ -632,39 +734,47 @@ def _write_dispatch_record(path: Path, value: dict[str, Any]) -> bool:
 
 def _parent_dispatch_lock(parent_session_id: str, turn_id: object = None):
     """Serialize claims and lifecycle handoff for one coordinator stream."""
-    root = _dispatch_state_root()
-    if root is None:
-        return None
     identity = parent_session_id if isinstance(parent_session_id, str) and parent_session_id else turn_id
     if not isinstance(identity, str) or not identity:
         return None
-    path = root / ("parent-" + hashlib.sha256(identity.encode("utf-8")).hexdigest() + ".lock")
-    return _dispatch_lock(path)
+    session_root = _dispatch_session_root(parent_session_id, turn_id, create=True)
+    return _dispatch_lock(session_root / "session.lock") if session_root is not None else None
 
 
-def _dispatch_records(*, session_id: object, turn_id: object, states: set[str]) -> list[tuple[Path, dict[str, Any]]]:
-    """Read active private receipts for one exact coordinator session/turn."""
-    root = _dispatch_state_root()
-    if root is None:
+def _dispatch_records(*, session_id: object, turn_id: object, states: set[str]) -> list[tuple[Path, dict[str, Any]]] | None:
+    """Read only indexed active receipts for one exact coordinator session."""
+    identity = session_id if isinstance(session_id, str) and session_id else turn_id
+    session_digest = _value_fingerprint(identity)
+    session_root = _dispatch_session_root(session_id, turn_id)
+    if session_root is None or session_digest is None:
         return []
-    try:
-        paths = sorted(root.glob(DISPATCH_STATE_PREFIX + "*.json"))[:128]
-    except OSError:
-        return []
+    index = _read_active_index(session_root, session_digest)
+    if index is None:
+        return None
     matches: list[tuple[Path, dict[str, Any]]] = []
-    for path in paths:
+    retained: list[str] = []
+    for filename in index["active"]:
+        path = session_root / "dispatch" / filename
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict) or value.get("session_digest") != session_digest:
+            return None
+        if value.get("state") not in {"pending", "delivery_pending", "worker_bound"}:
+            # A crash between settling a receipt and rewriting the index is
+            # safely repaired under the caller's session lock.
             continue
-        if not isinstance(value, dict) or value.get("state") not in states:
-            continue
-        if value.get("session_digest") != _value_fingerprint(session_id):
-            continue
+        retained.append(filename)
         if turn_id is not None and value.get("turn_digest") != _value_fingerprint(turn_id):
             continue
-        matches.append((path, value))
-    matches.sort(key=lambda item: (item[1].get("spawn_claim_order", item[1].get("created_at", 0)), item[0].name))
+        if value.get("state") in states:
+            matches.append((path, value))
+    if retained != index["active"]:
+        repaired = dict(index)
+        repaired["active"] = retained
+        if not _write_active_index(session_root, repaired):
+            return None
     return matches
 
 
@@ -678,8 +788,15 @@ def _pending_worker_dispatch(parent_session_id: str) -> tuple[Path, dict[str, An
     host adapter, not a global unique-active-lease heuristic.
     """
     matches = _dispatch_records(session_id=parent_session_id, turn_id=None, states={"delivery_pending"})
+    if matches is None:
+        return None
     eligible = [(path, value) for path, value in matches if value.get("spawn_claim_digest")]
-    return eligible[0] if eligible else None
+    if not eligible or any(not isinstance(value.get("claim_order"), int) for _path, value in eligible):
+        return None
+    eligible.sort(key=lambda item: item[1]["claim_order"])
+    if len(eligible) > 1 and eligible[0][1]["claim_order"] == eligible[1][1]["claim_order"]:
+        return None
+    return eligible[0]
 
 
 def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]] | None:
@@ -702,6 +819,8 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         return None
     try:
         candidates = _dispatch_records(session_id=session_id, turn_id=turn_id, states={"pending", "delivery_pending"})
+        if candidates is None:
+            return None
         tool_use_id = event.get("tool_use_id")
         tool_digest = _value_fingerprint(tool_use_id) if isinstance(tool_use_id, str) and tool_use_id else None
         if tool_digest is not None:
@@ -743,16 +862,29 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
             metadata = set(supplied) & HOST_NATIVE_METADATA_FIELDS
             if metadata and metadata != set(HOST_NATIVE_METADATA_FIELDS):
                 return None
+        identity = session_id if isinstance(session_id, str) and session_id else turn_id
+        session_digest = _value_fingerprint(identity)
+        session_root = _dispatch_session_root(session_id, turn_id)
+        if session_root is None or session_digest is None:
+            return None
+        index = _read_active_index(session_root, session_digest)
+        if index is None or path.name not in index["active"]:
+            return None
+        claim_order = index["next_claim_order"]
         claimed = dict(record)
         claimed.update({
             "state": "delivery_pending",
             "delivery_pending_at": time.time_ns(),
             "spawn_claim_digest": tool_digest or _value_fingerprint("legacy-claim:" + path.name),
-            "spawn_claim_order": time.time_ns(),
+            "claim_order": claim_order,
             "host_input_digest": _value_fingerprint(_json(args)),
             "context_digest": _value_fingerprint(authoritative["message"]),
         })
         if not _write_dispatch_record(path, claimed):
+            return None
+        advanced = dict(index)
+        advanced["next_claim_order"] = claim_order + 1
+        if not _write_active_index(session_root, advanced):
             return None
         return path, claimed
     finally:
@@ -818,23 +950,24 @@ def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: 
         _release_dispatch_lock(parent_lock)
 
 
-def _pending_dispatch_exists() -> bool:
-    """Return whether any unconsumed host dispatch receipt is still active."""
-    root = _dispatch_state_root()
-    if root is None:
+def _session_has_active_dispatch(session_id: object, turn_id: object = None) -> bool:
+    """Return active receipt state for this coordinator namespace only."""
+    identity = session_id if isinstance(session_id, str) and session_id else turn_id
+    if not isinstance(identity, str) or not identity:
         return False
+    lock = _parent_dispatch_lock(identity, turn_id)
+    if fcntl is not None and lock is None:
+        return True
     try:
-        paths = sorted(root.glob(DISPATCH_STATE_PREFIX + "*.json"))[:128]
-    except OSError:
-        return False
-    for path in paths:
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict) and value.get("state") in {"pending", "delivery_pending", "worker_bound"}:
-            return True
-    return False
+        records = _dispatch_records(
+            session_id=session_id,
+            turn_id=None if isinstance(session_id, str) and session_id else turn_id,
+            states={"pending", "delivery_pending", "worker_bound"},
+        )
+        # Corrupt session-local authority fails closed for that session only.
+        return records is None or bool(records)
+    finally:
+        _release_dispatch_lock(lock)
 
 
 def _validate_native_dispatch(event: dict[str, Any], state_path: Path | None) -> bool:
@@ -854,31 +987,36 @@ def _mark_dispatch_consumed(event: dict[str, Any]) -> None:
     if not isinstance(supplied, dict) or not isinstance(supplied.get("assignment_ref"), str):
         return
     assignment_digest = _value_fingerprint(supplied["assignment_ref"])
-    root = _dispatch_state_root()
-    if root is None:
+    session_id, turn_id = event.get("session_id"), event.get("turn_id")
+    identity = session_id if isinstance(session_id, str) and session_id else turn_id
+    session_digest = _value_fingerprint(identity)
+    session_root = _dispatch_session_root(session_id, turn_id)
+    if session_root is None or session_digest is None:
+        return
+    lock = _parent_dispatch_lock(identity, turn_id)
+    if fcntl is not None and lock is None:
         return
     try:
-        paths = sorted(root.glob(DISPATCH_STATE_PREFIX + "*.json"))[:128]
-    except OSError:
-        return
-    for path in paths:
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(record, dict) or record.get("state") not in {"delivery_pending", "worker_bound"} or record.get("assignment_ref_digest") != assignment_digest:
-            continue
+        records = _dispatch_records(session_id=session_id, turn_id=None, states={"delivery_pending", "worker_bound"})
+        if records is None:
+            return
+        matched = [(path, record) for path, record in records if record.get("assignment_ref_digest") == assignment_digest]
+        if len(matched) != 1:
+            return
+        path, record = matched[0]
         consumed = dict(record)
         consumed.update({"state": "consumed", "authority": "authoritative", "consumed_at": time.time_ns()})
-        try:
-            temporary = path.with_suffix(".tmp")
-            temporary.write_text(_json(consumed), encoding="utf-8")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, path)
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        return
+        if not _write_dispatch_record(path, consumed):
+            return
+        index = _read_active_index(session_root, session_digest)
+        if index is None or path.name not in index["active"]:
+            return
+        updated = dict(index)
+        updated["active"] = [name for name in index["active"] if name != path.name]
+        if _write_active_index(session_root, updated):
+            _prune_consumed_history(session_root)
+    finally:
+        _release_dispatch_lock(lock)
 
 
 def _is_publication(tool_name: object) -> bool:
@@ -1090,7 +1228,7 @@ def main() -> int:
     # session presents the next spawn event.  Do not let an unselected/foreign
     # state file turn that mismatch into a silent allow.
     if (event_name == "PreToolUse" and _is_native_spawn(event.get("tool_name"))
-            and not state["selected"] and _pending_dispatch_exists()):
+            and not state["selected"] and _session_has_active_dispatch(session_id, turn_id)):
         _deny("Native dispatch does not match the pending server-issued assignment boundary.", event, reason_code="dispatch_mismatch")
         return 0
     if not state["selected"]:

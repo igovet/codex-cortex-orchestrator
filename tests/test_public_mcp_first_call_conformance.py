@@ -24,6 +24,7 @@ from cortex_runtime.mcp_api import (  # noqa: E402
     serve_stdio,
 )
 from cortex_runtime.delegation import validate_native_dispatch_projection  # noqa: E402
+from cortex_runtime.worker_message import packaged_profile_names  # noqa: E402
 
 EXPECTED_TOOLS = (
     "open_task", "read_task", "open_clarification", "record_clarification", "open_plan_review", "record_plan_review",
@@ -68,7 +69,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             self.assertNotIn("allOf", schema)
             self.assertIn("outputSchema", tool)
             self.assertEqual(tool["outputSchema"]["type"], "object")
-            self.assertNotIn("outputSchema", advertised[name])
+            self.assertEqual(advertised[name]["outputSchema"], tool["outputSchema"])
             self.assertNotIn("max_bytes", schema["properties"])
             self.assertNotIn("maxBytes", schema["properties"])
             self.assertNotIn("budget", schema["properties"])
@@ -183,13 +184,17 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
     def test_task_read_advertises_server_formatted_plan_link_as_the_user_surface(self) -> None:
         contract = PUBLIC_TOOLS["read_task"]
         handles = contract["outputSchema"]["properties"]["handles"]
+        runtime = contract["runtimeOutputSchema"]
         self.assertFalse(handles["additionalProperties"])
         self.assertNotIn("human_view", handles["properties"])
-        self.assertIn("markdown_link", contract["outputSchema"]["properties"]["human_view"]["properties"])
+        self.assertIn("markdown_link", runtime["properties"]["human_view"]["properties"])
         self.assertNotIn("approval_view", handles["properties"])
-        self.assertNotIn("path", contract["outputSchema"]["properties"]["human_view"]["properties"])
-        self.assertNotIn("path", contract["outputSchema"]["properties"]["approval_view"]["properties"])
-        self.assertIn("copy its server-formatted markdown_link byte-for-byte", handles["description"])
+        self.assertNotIn("path", runtime["properties"]["human_view"]["properties"])
+        self.assertNotIn("path", runtime["properties"]["approval_view"]["properties"])
+        self.assertIn(
+            "copy its server-formatted markdown_link byte-for-byte",
+            runtime["properties"]["handles"]["description"],
+        )
         self.assertIn("never render or reconstruct its host-private path", contract["description"].lower())
 
     def test_every_semantic_operation_advertises_only_its_own_callable_handles(self) -> None:
@@ -216,6 +221,22 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 handles = PUBLIC_TOOLS[name]["outputSchema"]["properties"]["handles"]
                 self.assertFalse(handles["additionalProperties"])
                 self.assertEqual(set(handles["properties"]), fields)
+
+    def test_assignment_profile_schema_advertises_first_attempt_admission_classes(self) -> None:
+        contract = PUBLIC_TOOLS["open_assignment"]
+        profile = contract["inputSchema"]["properties"]["mission"]["properties"]["profile_name"]
+        classes = profile["oneOf"]
+        self.assertEqual(len(classes), 3)
+        names = [name for item in classes for name in item["enum"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(set(names), set(packaged_profile_names()))
+        descriptions = " ".join(item["description"] for item in classes)
+        self.assertIn("light/full governance", descriptions)
+        self.assertIn("approved planner evidence", descriptions)
+        self.assertIn("Non-owning review", descriptions)
+        self.assertIn("Planning profile", descriptions)
+        self.assertIn("Before the first attempt", contract["description"])
+        self.assertIn("governance must remain minimal from the outset", contract["description"])
 
     def test_initialize_negotiates_current_and_legacy_core_versions(self) -> None:
         self.assertEqual(MCP_SUPPORTED_PROTOCOL_VERSIONS, ("2025-11-25", "2025-06-18"))
@@ -462,8 +483,14 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             self.assertNotIn("subject_ref", listed_clarification["inputSchema"]["properties"])
             self.assertIn("server derives the task subject", listed_clarification["description"])
             listed_record_decision = next(tool for tool in listed if tool["name"] == "record_clarification")
-            self.assertNotIn("outputSchema", listed_record_decision)
-            self.assertNotIn("outputSchema", listed_clarification)
+            self.assertEqual(
+                set(listed_record_decision["outputSchema"]["properties"]["handles"]["properties"]),
+                {"task_ref", "binding_ref", "decision_ref"},
+            )
+            self.assertEqual(
+                set(listed_clarification["outputSchema"]["properties"]["handles"]["properties"]),
+                {"task_ref", "binding_ref"},
+            )
             self.assertNotIn("steering_delta", json.dumps(listed_record_decision["inputSchema"]))
             for narrow_name, forbidden in {
                 "record_clarification": {"outcome", "add", "retire_item_refs"},
@@ -491,7 +518,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             self.assertTrue(replay_assignment["replayed"])
             self.assertEqual(replay_assignment["assignment_ref"], assignment["assignment_ref"])
             self.assertEqual(set(assignment["handles"]), {"assignment_ref"})
-            self.assertFalse(PUBLIC_TOOLS["open_assignment"]["outputSchema"]["additionalProperties"])
+            self.assertFalse(PUBLIC_TOOLS["open_assignment"]["runtimeOutputSchema"]["additionalProperties"])
             self.assertLess(len(json.dumps(assignment, ensure_ascii=False).encode()), 24 * 1024)
             assignment_ref = assignment["handles"]["assignment_ref"]
             # The native worker receives one compact server-issued host
@@ -532,6 +559,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             host_sequence.append("child_first_consume")
             self.assertEqual(host_sequence, ["native_spawn", "child_first_consume"])
             self.assertEqual(consumed["assignment_ref"], assignment_ref)
+            self.assertEqual(set(consumed["handles"]), {"assignment_ref", "continuation_ref"})
             self.assertEqual(consumed["evidence"]["state"], "none")
             self.assertGreaterEqual(consumed["effective_contract"]["revision"], 1)
             consumed_refs = [item["item_ref"] for item in consumed["effective_contract"]["planning_items"]]
@@ -673,6 +701,8 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             })
             self.assertFalse(documentation["replayed"])
             self.assertEqual(documentation["report"]["report_type"], "synthesis")
+            self.assertEqual(set(documentation["handles"]), {"report_ref"})
+            self.assertRegex(documentation["handles"]["report_ref"], r"^r_[0-9a-f]{12}$")
         finally:
             process.terminate()
             process.wait(timeout=5)

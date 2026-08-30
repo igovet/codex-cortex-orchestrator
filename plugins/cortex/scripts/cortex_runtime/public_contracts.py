@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cortex_runtime.model_routing import NATIVE_MODELS, NATIVE_REASONING_EFFORTS
-from cortex_runtime.worker_message import packaged_profile_names
+from cortex_runtime.worker_message import packaged_profile_assignment_policy, packaged_profile_names
 from cortex_runtime.semantic_registry import OPERATION_NAMES
 from cortex_runtime.v12_contract import (
     CLOSURE_SUBJECTS, DECISION_SUBJECTS, DECISION_TYPES, DIGEST_PATTERN,
@@ -638,7 +638,13 @@ def _compact_public_output_schema(full_schema: Mapping[str, Any]) -> dict[str, A
         """Retain validation shape while dropping prose from nested receipts."""
         # Bounds and prose are runtime concerns; type/pattern/enum are the
         # only discovery facts needed to copy a typed handle safely.
-        keep = {"type", "enum", "pattern", "const"}
+        # Keep the closed handle contract intact.  The stdio adapter uses the
+        # advertised handle schema to remove authoritative-but-unrelated
+        # handles before validating the complete private receipt.  Dropping
+        # ``additionalProperties`` made that filter treat every compact handle
+        # object as open, so assignment bootstrap and report publication could
+        # commit successfully and then fail their own output validation.
+        keep = {"type", "enum", "pattern", "const", "additionalProperties", "required"}
         result = {key: node[key] for key in keep if key in node}
         nested = node.get("properties")
         if isinstance(nested, Mapping):
@@ -743,6 +749,26 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         or tuple(sorted(profile_names)) != profile_names
     ):
         raise RuntimeError("Cortex v12 packaged profile catalogue is unavailable")
+    profile_groups = {
+        policy: tuple(name for name in profile_names if packaged_profile_assignment_policy(name) == policy)
+        for policy in ("owner", "review", "planning")
+    }
+    if set().union(*map(set, profile_groups.values())) != set(profile_names):
+        raise RuntimeError("Cortex v12 packaged profile assignment policy is unavailable")
+    assignment_profile = {
+        "description": (
+            "Explicit packaged worker-profile intent. Select its advertised assignment class before the first "
+            "call: under light/full governance an owner profile is admissible only when the declared predecessor "
+            "evidence includes a finalized approved planner report. Review profiles remain non-owning and a planner "
+            "profile creates that prerequisite. A failed QA report does not by itself make correction owner work: "
+            "use review ownership for test-only correction and owner work only for production mutation."
+        ),
+        "oneOf": [
+            {"type": "string", "enum": list(profile_groups["owner"]), "description": "Owner profile for production or assigned implementation/remediation. Under light/full governance it requires finalized approved planner evidence on the first attempt."},
+            {"type": "string", "enum": list(profile_groups["review"]), "description": "Non-owning review, QA, discovery, diagnostic, verification, or documentation profile. It may consume failed evidence without claiming production-source remediation."},
+            {"type": "string", "enum": list(profile_groups["planning"]), "description": "Planning profile that publishes the planner evidence required before later light/full owner work."},
+        ],
+    }
 
     contracts: dict[str, dict[str, Any]] = {
         "create_task": {
@@ -1257,10 +1283,10 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         "record_plan_review": {"description": "Record one exact plan-review response against its server-issued plan-review binding. The response outcome is restricted to the plan-review choices and is validated against the immutable approval relation.", "inputSchema": _closed({"task_ref": task_ref, "binding_ref": _string(minimum=35, maximum=35, pattern=r"^cb_[0-9a-f]{32}$"), "response_original": _string(maximum=65536), "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 language tag for the exact response, for example en or ru."), "outcome": _string(enum=("approve", "request_revision", "cancel"), maximum=32)}, ("task_ref", "binding_ref", "response_original", "user_language", "outcome")), "outputSchema": decision_output("plan-review", recorded=True)},
         "record_steering": {"description": "Record one exact steering response against its server-issued steering binding. The closed contract delta and optional supersession are applied atomically to the effective contract.", "inputSchema": _closed({"task_ref": task_ref, "binding_ref": _string(minimum=35, maximum=35, pattern=r"^cb_[0-9a-f]{32}$"), "response_original": _string(maximum=65536), "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 language tag for the exact response, for example en or ru."), "add": steering_delta["properties"]["add"], "retire_item_refs": steering_delta["properties"]["retire_item_refs"], "supersedes_decision_ref": _entity_ref("decision")}, ("task_ref", "binding_ref", "response_original", "user_language", "add", "retire_item_refs")), "outputSchema": decision_output("steering", recorded=True)},
         "open_assignment": {
-            "description": "Open one worker assignment from one coherent mission contract and atomically bind its effective contract plus declared typed report and decision evidence. This task-phase mutation is available only when no server-issued user decision remains pending; first perform the pending decision result's advertised next action. Immutable input reports and current server-owned outcome ownership determine any replacement/rework predecessor; callers never restate assignment lineage. Owner-profile rework must declare the relevant finalized predecessor evidence, and an ambiguous set of current owners is rejected before mutation. Review and documentation profiles consume evidence without taking ownership. The explicit profile expresses worker intent; Cortex selects the packaged model and reasoning recommendation from its server-owned routing table. Routing recommendations are output-only and never caller input. Decision evidence is resolved in the assignment; report evidence is consumed only through the assignment evidence operation.",
+            "description": "Open one worker assignment from one coherent mission contract and atomically bind its effective contract plus declared typed report and decision evidence. This task-phase mutation is available only when no server-issued user decision remains pending; first perform the pending decision result's advertised next action. Before the first attempt, reconcile the chosen profile's advertised assignment class with the latest governance assessment and exact predecessor evidence. Under light/full governance, owner work requires finalized approved planner evidence; if planning is unnecessary for a bounded C1 owner change, governance must remain minimal from the outset rather than being downgraded after a failed call. Immutable input reports and current server-owned outcome ownership determine any replacement/rework predecessor; callers never restate assignment lineage. Owner-profile rework must declare the relevant finalized predecessor evidence, and an ambiguous set of current owners is rejected before mutation. Review and documentation profiles consume evidence without taking ownership. The explicit profile expresses worker intent; Cortex selects the packaged model and reasoning recommendation from its server-owned routing table. Routing recommendations are output-only and never caller input. Decision evidence is resolved in the assignment; report evidence is consumed only through the assignment evidence operation.",
             "inputSchema": _closed({"task_ref": task_ref, "mission": _closed({
                 "role": _string(maximum=ROLE_MAX_LENGTH),
-                "profile_name": _string(enum=profile_names, maximum=ROLE_MAX_LENGTH, description="Explicit packaged worker-profile intent."),
+                "profile_name": assignment_profile,
                 "goal": _string(description="One concrete worker mission outcome."),
                 "constraints": _string(description="Execution boundary and scope constraints for this mission."),
                 "instructions": _string(description="Concrete task-specific worker instructions within the declared mission boundary."),

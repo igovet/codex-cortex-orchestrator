@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.12.2] - 2026-08-31
+
+### Fixed
+
+- Preserved closed, operation-specific callable handle schemas in compact MCP
+  outputs so evidence consumption and report publication no longer fail after
+  a successful ledger commit because unrelated canonical handles leaked into
+  post-commit validation.
+- Required failed or partial QA evidence to create owned corrective work and an
+  independent rerun of failed and affected checks before closure.
+- Advertised packaged assignment classes and their governance prerequisites so
+  rework profile selection is admissible on the first attempt; a corrected
+  retry no longer hides a routing failure from live acceptance.
+- Isolated native-dispatch receipts by coordinator session and added an atomic
+  active-dispatch index under the session lock. Settled or foreign history,
+  filename order, and timestamps no longer participate in worker routing.
+- Installed PyYAML explicitly in the GitHub release gate and synchronized
+  first-call, catalogue-digest, release, and rework regression coverage.
+
 ## [1.12.1] - 2026-08-28
 
 ### Fixed

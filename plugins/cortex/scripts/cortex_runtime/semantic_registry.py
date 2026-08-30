@@ -60,6 +60,7 @@ _ERROR_SPECS: tuple[ErrorSpec, ...] = (
     ErrorSpec("approval_handle_mismatch", "The supplied approval handle does not match the bound plan relation.", "Use the exact relation captured by the review binding."),
     ErrorSpec("approval_handle_consumed", "The supplied approval handle has already been used.", "Reconcile the original review binding; do not create a replacement relation."),
     ErrorSpec("decision_pending", "A server-issued user decision is still pending for this task.", "Record the next exact user response with the previously returned pending binding before any other task mutation."),
+    ErrorSpec("planning_predecessor_required", "The selected owner assignment is not admissible under the current light/full governance evidence.", "Treat this as a routing failure. Do not count a corrected retry as a clean first attempt: either complete the required planner publication and approval chain, or choose non-owning review work when the correction genuinely requires no production mutation."),
 )
 _ERROR_BY_CODE = {spec.code: spec for spec in _ERROR_SPECS}
 # These codes are emitted by long-lived storage/report paths outside the Phase

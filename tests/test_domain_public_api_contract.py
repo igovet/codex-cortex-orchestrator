@@ -19,7 +19,7 @@ if str(SCRIPTS) not in sys.path:
 
 from cortex import PUBLIC_TOOLS, SERVER_VERSION  # noqa: E402
 from cortex_runtime.domain_api import (  # noqa: E402
-    consume_assignment_evidence, open_assignment, open_task, open_clarification, publish_documentation,
+    assess_governance, consume_assignment_evidence, open_assignment, open_task, open_clarification, publish_documentation,
     publish_plan, publish_result, open_steering, record_clarification, record_steering, read_task,
 )
 from cortex_runtime.v12_contract import record_ref, task_ref  # noqa: E402
@@ -42,6 +42,46 @@ class DomainPublicApiContractTests(unittest.TestCase):
         for name in ("open_clarification", "open_steering"):
             self.assertNotIn("decision_id", set(PUBLIC_TOOLS[name]["inputSchema"]["properties"]))
         self.assertNotIn("subject_ref", set(PUBLIC_TOOLS["open_clarification"]["inputSchema"]["properties"]))
+
+    def test_first_attempt_assignment_admission_matches_governance_and_profile_class(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cortex-domain-admission-") as root:
+            light_task = open_task(task={
+                "project_root": root, "objective": "Preflight profile admission.",
+                "request_original": "Preflight profile admission.", "user_language": "en",
+                "outcomes": [{"requirement": "Route correction once.", "acceptance": ["No rejected first assignment attempt."]}],
+                "constraints": ["Use the current governance evidence."],
+            })["task"]
+            light_ref = task_ref(light_task["task_id"])
+            assess_governance(task_ref=light_ref, mode="light")
+            review = open_assignment(task_ref=light_ref, mission={
+                "role": "test-only corrective QA", "profile_name": "qa_engineer",
+                "goal": "Correct test-only evidence.", "constraints": "No production mutation.",
+                "instructions": "Publish independent QA evidence.",
+            })
+            self.assertRegex(review["assignment_ref"], r"^d_[0-9a-f]{12}$")
+            with self.assertRaises(V12ServiceError) as raised:
+                open_assignment(task_ref=light_ref, mission={
+                    "role": "production correction", "profile_name": "backend_dev",
+                    "goal": "Change production source.", "constraints": "Bounded mutation.",
+                    "instructions": "Implement the correction.",
+                })
+            self.assertEqual(raised.exception.code, "planning_predecessor_required")
+
+        with tempfile.TemporaryDirectory(prefix="cortex-domain-minimal-admission-") as root:
+            minimal_task = open_task(task={
+                "project_root": root, "objective": "Keep bounded owner work minimal.",
+                "request_original": "Keep bounded owner work minimal.", "user_language": "en",
+                "outcomes": [{"requirement": "Apply one bounded correction.", "acceptance": ["Owner assignment opens first try."]}],
+                "constraints": ["Planning is not required."],
+            })["task"]
+            minimal_ref = task_ref(minimal_task["task_id"])
+            assess_governance(task_ref=minimal_ref, mode="minimal")
+            owner = open_assignment(task_ref=minimal_ref, mission={
+                "role": "bounded production correction", "profile_name": "backend_dev",
+                "goal": "Apply one correction.", "constraints": "One ownership surface.",
+                "instructions": "Implement and verify the bounded correction.",
+            })
+            self.assertRegex(owner["assignment_ref"], r"^d_[0-9a-f]{12}$")
 
     def test_owner_rework_predecessor_is_derived_from_current_input_report_author(self) -> None:
         """Review evidence plus the current owner report needs no caller parent."""
@@ -155,7 +195,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
         with sqlite3.connect(V12Store(root).database_path) as connection:
             return tuple(int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in ("reports", "report_chunks", "report_operations"))
     def test_catalog_is_semantic_and_report_publication_has_no_caller_key(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.12.1")
+        self.assertEqual(SERVER_VERSION, "1.12.2")
         publication_tools = ("publish_plan", "publish_result", "publish_documentation")
         for name in publication_tools:
             publication = PUBLIC_TOOLS[name]

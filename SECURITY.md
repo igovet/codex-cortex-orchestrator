@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.12.1 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.12.2 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -143,6 +143,14 @@ enum distinct from the bounded human-readable `role`, and its renderer proof
 must be loaded. The returned `dispatch_brief` preserves the exact rendered
 message and selection for one matching host spawn. This semantic delegation
 receipt proves packaged profile and semantic dispatch data, not host lifecycle.
+Host-side one-shot dispatch correlation is isolated below a digest-named
+coordinator-session directory. A mode-0600 atomic active index contains only
+pending, delivery-pending, or worker-bound receipts and is updated under the
+same session lock as each lifecycle transition. Completed and foreign-session
+history, timestamps, and content-hash filename order are never routing
+authority; malformed or ambiguous active state fails closed for that session.
+Settled diagnostic history is independently capped at 64 receipts per session
+and cleanup is never a precondition for routing correctness.
 Normal spawning consumes
 that receipt directly; recovery uses `inspect_task` continuation data only
 after host reconciliation. Continuations never attest lifecycle, and native
@@ -526,8 +534,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.12.1+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.12.1` is
+`1.12.2+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.12.2` is
 accepted only when source mode is explicitly enabled and is never a publishable
 Marketplace artifact. Release validation also enforces Desktop metadata limits,
 including a 128-byte `defaultPrompt` and a maximum three-second `SessionEnd` hook

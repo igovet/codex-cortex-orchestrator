@@ -88,9 +88,9 @@ def verify_runtime(package_root: Path, server_version: str, environment: Mapping
     if not isinstance(manifest, dict) or not isinstance(manifest.get("version"), str):
         raise RuntimeError("candidate plugin manifest is invalid")
     version = manifest["version"]
-    match = re.fullmatch(r"(1\.12\.1)\+codex\.sha256\.([0-9a-f]{16})", version)
-    source_mode = allow_source_mode and (version == "1.12.1" or match is not None)
-    if (match is None and not source_mode) or server_version != "1.12.1":
+    match = re.fullmatch(r"(1\.12\.2)\+codex\.sha256\.([0-9a-f]{16})", version)
+    source_mode = allow_source_mode and (version == "1.12.2" or match is not None)
+    if (match is None and not source_mode) or server_version != "1.12.2":
         raise RuntimeError("candidate product version or build suffix is invalid")
     digest = package_digest(root)
     if match is not None and not digest.startswith(match.group(2)):

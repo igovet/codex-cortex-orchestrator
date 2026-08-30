@@ -1,6 +1,6 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.12.1 semantic companion supplied by the host after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.12.2 semantic companion supplied by the host after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel

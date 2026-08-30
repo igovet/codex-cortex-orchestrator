@@ -2,12 +2,20 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.12.1 ships two bounded native hook components: an activation guard and
+Cortex 1.12.2 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without
 rewriting the native spawn call. At `SubagentStart`, it supplies the
 server-owned worker context as host additional context.
+Each coordinator session owns a private receipt directory and an atomic active
+index containing only `pending`, `delivery_pending`, and `worker_bound`
+entries. Add, claim, bind, and consume transitions share that session's lock;
+consumption removes the receipt from the active index immediately. Historical
+or foreign-session files, content-hash filename order, and timestamps never
+participate in routing. Settled diagnostics are separately capped at the last
+64 consumed receipts per session; that cleanup is not required for correct
+active lookup.
 
 The observer records structural session and subagent start/stop markers plus
 the package build identity. These records let live verification prove that a

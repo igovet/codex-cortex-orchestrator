@@ -49,7 +49,7 @@ class V12CompatibilityTests(unittest.TestCase):
         }
 
     def test_version_and_exact_semantic_catalogue(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.12.1")
+        self.assertEqual(SERVER_VERSION, "1.12.2")
         self.assertEqual(tuple(PUBLIC_TOOLS), (
             "open_task", "read_task", "open_clarification", "record_clarification", "open_plan_review", "record_plan_review", "open_steering", "record_steering",
             "open_assignment", "consume_assignment_evidence", "publish_plan", "publish_result",

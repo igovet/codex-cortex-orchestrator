@@ -13,6 +13,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_github_release_gate_installs_every_direct_python_dependency() -> None:
+    workflow = (ROOT / ".github/workflows/cortex.yml").read_text(encoding="utf-8")
+    assert '"pytest>=8,<9"' in workflow
+    assert '"PyYAML>=6,<7"' in workflow
+
+
 def _renderer_module():
     path = ROOT / "scripts/render_cortex_tool_catalog.py"
     spec = importlib.util.spec_from_file_location("cortex_catalog_renderer_test", path)
@@ -113,9 +119,9 @@ exit 0
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
         after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
-        assert re.fullmatch(r"1\.12\.1\+codex\.sha256\.[0-9a-f]{16}", after_version)
+        assert re.fullmatch(r"1\.12\.2\+codex\.sha256\.[0-9a-f]{16}", after_version)
         assert before_version == after_version
-        staged_versions = list((codex_home / ".cortex-candidates").glob("1.12.1+codex.sha256.*"))
+        staged_versions = list((codex_home / ".cortex-candidates").glob("1.12.2+codex.sha256.*"))
         assert len(staged_versions) == 1
         assert (codex_home / "plugins/cache/cortex/cortex" / staged_versions[0].name).is_dir()
         assert not bytecode.exists()
@@ -316,7 +322,7 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     isolated_codex = stable_home / ".cortex-dev/.codex"
     receipt = json.loads((isolated_codex / ".cortex-candidate-receipt.json").read_text(encoding="utf-8"))
     stamped = receipt["candidate_version"]
-    assert re.fullmatch(r"1\.12\.1\+codex\.sha256\.[0-9a-f]{16}", stamped)
+    assert re.fullmatch(r"1\.12\.2\+codex\.sha256\.[0-9a-f]{16}", stamped)
     assert receipt["candidate_path"] == str(isolated_codex / "plugins/cache/cortex/cortex" / stamped)
     assert f"Cortex candidate version={stamped}" in first.stdout
     assert f"Cortex candidate path={receipt['candidate_path']}" in first.stdout
@@ -324,7 +330,7 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     assert f"fake ordinary codex candidate={receipt['candidate_path']}" in first.stdout
     # The base semantic version is permitted as display metadata only.  Its
     # unstamped cache directory must never be selected or printed as a path.
-    assert f"/plugins/cache/cortex/cortex/1.12.1\n" not in first.stdout
+    assert f"/plugins/cache/cortex/cortex/1.12.2\n" not in first.stdout
     first_receipt = (isolated_codex / ".cortex-candidate-receipt.json").read_bytes()
     second = subprocess.run(
         ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
@@ -372,5 +378,5 @@ exit 0
     )
     assert completed.returncode != 0
     assert "receipt was not committed" in completed.stdout + completed.stderr
-    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.12.1+codex.sha256.*"))
+    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.12.2+codex.sha256.*"))
     assert not (codex_home / ".cortex-candidate-receipt.json").exists()

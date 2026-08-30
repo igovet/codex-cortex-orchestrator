@@ -30,7 +30,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     from cortex_runtime.provenance import verify_runtime
     from cortex_runtime.public_contracts import build_public_contracts
     package_root = Path(__file__).resolve().parents[2]
-    identity = verify_runtime(package_root, "1.12.1", allow_source_mode=True)
+    identity = verify_runtime(package_root, "1.12.2", allow_source_mode=True)
     catalogue = tuple(
         {
             "name": name,

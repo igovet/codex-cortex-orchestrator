@@ -374,6 +374,32 @@ class WorkerHandoffContractTests(unittest.TestCase):
         self.assertIn("schema_unsupported", verification)
         self.assertIn("exact session", verification)
 
+    def test_failed_or_partial_qa_requires_owned_rework_and_independent_rerun(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        root = repository / "plugins" / "cortex" / "skills"
+        orchestrator = skill_contract(root, "orchestrator")
+        adaptive = (root / "adaptive-pipeline" / "SKILL.md").read_text(encoding="utf-8")
+        for contract in (orchestrator, adaptive):
+            normalized = " ".join(contract.split()).lower()
+            self.assertIn("failed or partial", normalized)
+            self.assertIn("failed executed check", normalized)
+            self.assertIn("required check unrun", normalized)
+            self.assertIn("rework_required", normalized)
+            self.assertIn("bounded corrective ownership", normalized)
+            self.assertIn("independent verifier", normalized)
+            for failure_class in ("candidate", "dependency", "ci", "provenance"):
+                self.assertIn(failure_class, normalized)
+            self.assertIn("passing focused subset", normalized)
+            self.assertIn("unresolved qa evidence", normalized)
+            self.assertIn("admission preflight", normalized)
+            self.assertIn("packaged ownership class", normalized)
+            self.assertIn("finalized approved planner evidence", normalized)
+            self.assertIn("governance stays minimal from the outset", normalized)
+            self.assertIn("test-only qa correction remains non-owning", normalized)
+            self.assertIn("multiple workers", normalized)
+            self.assertIn("first-attempt orchestration defect", normalized)
+            self.assertIn("successful retry cannot make that verification run clean", normalized)
+
     def test_orchestrator_routes_attachment_modes_and_separates_advisory_closure(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         root = repository / "plugins" / "cortex" / "skills"

@@ -39,6 +39,14 @@ def state_file(tmp_path: Path, turn: str) -> Path:
     return tmp_path / "plugin-data" / "activation" / f"turn-{digest}.json"
 
 
+def dispatch_record_paths(tmp_path: Path) -> list[Path]:
+    return list((tmp_path / "plugin-data" / "activation" / "sessions").glob("*/dispatch/dispatch-*.json"))
+
+
+def active_index_paths(tmp_path: Path) -> list[Path]:
+    return list((tmp_path / "plugin-data" / "activation" / "sessions").glob("*/active-dispatches.json"))
+
+
 def assert_codex_01491_pre_tool_success(payload: dict, *, updated_input: dict | None = None) -> None:
     """Validate the accepted non-blocking PreToolUse response shape.
 
@@ -338,7 +346,7 @@ def test_subagent_start_binds_assignment_but_worker_must_consume_it(tmp_path: Pa
     context = output["hookSpecificOutput"]["additionalContext"]
     assert context.endswith("server brief")
     assert "server-owned and authoritative" in context
-    records = list((tmp_path / "plugin-data" / "activation").glob("dispatch-*.json"))
+    records = dispatch_record_paths(tmp_path)
     assert len(records) == 1
     stored = json.loads(records[0].read_text())
     assert stored["state"] == "worker_bound"
@@ -494,7 +502,8 @@ def test_spawn_claim_queue_binds_two_parallel_assignments_without_reuse(tmp_path
                 "native_dispatch": {"fork_turns": "none", "message": "brief-" + assignment, "task_name": f"worker-{index}"},
             }},
         })
-    for index in range(2):
+    claim_order = (1, 0)
+    for index in claim_order:
         delivered = module._validate_native_dispatch({
             "hook_event_name": "PreToolUse", "session_id": parent, "turn_id": turn,
             "tool_name": "collaborationspawn_agent", "tool_use_id": f"spawn-{index}",
@@ -518,9 +527,9 @@ def test_spawn_claim_queue_binds_two_parallel_assignments_without_reuse(tmp_path
         bound = list(pool.map(bind, children))
     assert all(result[0] is True for result in bound)
     assert {result[1] for result in bound} == {"brief-" + assignment for assignment in assignments}
-    records = [json.loads(path.read_text()) for path in (tmp_path / "plugin-data" / "activation").glob("dispatch-*.json")]
+    records = [json.loads(path.read_text()) for path in dispatch_record_paths(tmp_path)]
     assert len(records) == 2 and all(record["state"] == "worker_bound" for record in records)
-    assert [record["assignment_ref"] for record in sorted(records, key=lambda record: record["spawn_claim_order"])] == assignments
+    assert [record["assignment_ref"] for record in sorted(records, key=lambda record: record["claim_order"])] == [assignments[index] for index in claim_order]
     child_states = [module._read_state(path) for _turn, path, _state in children]
     assert all(not state["anchored"] for state in child_states)
     assert {state["assignment_ref_digest"] for state in child_states} == {module._value_fingerprint(value) for value in assignments}
@@ -547,7 +556,7 @@ def test_native_spawn_accepts_bounded_opaque_host_message_and_records_delivery(t
     assert "did not rewrite" in output["additionalContext"]
     assert "worker alone" in output["additionalContext"]
     assert "coordinator must wait" in output["additionalContext"]
-    records = list((tmp_path / "plugin-data" / "activation").glob("dispatch-*.json"))
+    records = dispatch_record_paths(tmp_path)
     assert len(records) == 1
     stored = records[0].read_text()
     assert '"state":"delivery_pending"' in stored
@@ -558,6 +567,106 @@ def test_native_spawn_accepts_bounded_opaque_host_message_and_records_delivery(t
     code, replay = invoke(tmp_path, {"hook_event_name": "PreToolUse", "turn_id": turn, "tool_name": "Agent", "tool_input": host_args})
     assert code == 0
     assert replay["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_thousand_foreign_session_receipts_do_not_affect_current_spawn(tmp_path: Path) -> None:
+    """Routing starts at the exact coordinator namespace, never global files."""
+    activation = tmp_path / "plugin-data" / "activation"
+    foreign = activation / "sessions" / hashlib.sha256(b"foreign-session").hexdigest()
+    (foreign / "dispatch").mkdir(parents=True)
+    names = []
+    for index in range(1_000):
+        name = f"dispatch-{index:064x}.json"
+        names.append(name)
+        (foreign / "dispatch" / name).write_text(json.dumps({"state": "pending", "session_digest": foreign.name}))
+    (foreign / "active-dispatches.json").write_text(json.dumps({"version": 1, "session_digest": foreign.name, "active": names, "next_claim_order": 1}))
+
+    session, turn = "current-session", "current-turn"
+    assignment = {
+        "fork_turns": "none",
+        "message": "new server-rendered worker contract",
+        "task_name": "qa_engineer_d_0123456789ab",
+    }
+    invoke(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": session, "turn_id": turn, "prompt": "$cortex:orchestrator"})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_task", "tool_response": {"isError": False, "structuredContent": {"handles": {"task_ref": "t_0123456789ab"}}}})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_assignment", "tool_response": {"isError": False, "structuredContent": {"assignment_ref": "d_0123456789ab", "native_dispatch": assignment}}})
+
+    code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": turn, "tool_name": "collaboration.spawn_agent", "tool_use_id": "spawn-after-history", "tool_input": assignment})
+    assert code == 0
+    assert_codex_01491_pre_tool_success(allowed)
+    current = [json.loads(path.read_text()) for path in dispatch_record_paths(tmp_path) if json.loads(path.read_text()).get("session_digest") == hashlib.sha256(session.encode()).hexdigest()]
+    assert len(current) == 1 and current[0]["state"] == "delivery_pending"
+
+
+def test_thousand_consumed_receipts_in_current_session_do_not_affect_pending(tmp_path: Path) -> None:
+    session, turn = "history-session", "history-turn"
+    assignment = {"fork_turns": "none", "message": "active contract", "task_name": "qa_engineer_d_active"}
+    invoke(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": session, "turn_id": turn, "prompt": "$cortex:orchestrator"})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_task", "tool_response": {"isError": False, "structuredContent": {"handles": {"task_ref": "t_0123456789ab"}}}})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_assignment", "tool_response": {"isError": False, "structuredContent": {"assignment_ref": "d_0123456789ab", "native_dispatch": assignment}}})
+    index_path = active_index_paths(tmp_path)[0]
+    dispatch_dir = index_path.parent / "dispatch"
+    session_digest = hashlib.sha256(session.encode()).hexdigest()
+    for index in range(1_000):
+        (dispatch_dir / f"dispatch-{index:064x}.json").write_text(json.dumps({
+            "state": "consumed", "session_digest": session_digest, "consumed_at": index,
+        }))
+
+    code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": turn, "tool_name": "collaboration.spawn_agent", "tool_use_id": "spawn-with-history", "tool_input": assignment})
+    assert code == 0
+    assert_codex_01491_pre_tool_success(allowed)
+    active = json.loads(index_path.read_text())["active"]
+    assert len(active) == 1
+    assert json.loads((dispatch_dir / active[0]).read_text())["state"] == "delivery_pending"
+
+
+def test_three_sequential_workers_claim_bind_and_consume_first_attempt(tmp_path: Path) -> None:
+    session, turn = "three-worker-session", "three-worker-turn"
+    invoke(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": session, "turn_id": turn, "prompt": "$cortex:orchestrator"})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_task", "tool_response": {"isError": False, "structuredContent": {"handles": {"task_ref": "t_0123456789ab"}}}})
+    for index in range(3):
+        assignment_ref = f"d_{index:012d}"
+        native = {"fork_turns": "none", "message": f"worker contract {index}", "task_name": f"qa_engineer_{index}"}
+        invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_assignment", "tool_response": {"isError": False, "structuredContent": {"assignment_ref": assignment_ref, "native_dispatch": native}}})
+        code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": turn, "tool_name": "collaboration.spawn_agent", "tool_use_id": f"spawn-{index}", "tool_input": native})
+        assert code == 0
+        assert_codex_01491_pre_tool_success(allowed)
+        child_turn, agent = f"child-turn-{index}", f"agent-{index}"
+        code, started = invoke(tmp_path, {"hook_event_name": "SubagentStart", "session_id": session, "turn_id": child_turn, "agent_id": agent})
+        assert code == 0 and started["hookSpecificOutput"]["hookEventName"] == "SubagentStart"
+        code, consumed = invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": child_turn, "agent_id": agent, "tool_name": "mcp__cortex__consume_assignment_evidence", "tool_input": {"assignment_ref": assignment_ref}, "tool_response": {"isError": False, "structuredContent": {"assignment_ref": assignment_ref, "evidence": {"state": "none"}}}})
+        assert code == 0 and consumed is None
+        invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": child_turn, "agent_id": agent, "tool_name": "mcp__cortex__publish_result", "tool_response": {"isError": False, "structuredContent": {"publication_status": "completed", "report_ref": f"r_{index:012d}"}}})
+    index = json.loads(active_index_paths(tmp_path)[0].read_text())
+    assert index["active"] == []
+    assert index["next_claim_order"] == 4
+
+
+def test_corrupt_active_index_fails_closed_without_receipt_selection(tmp_path: Path) -> None:
+    session, turn = "corrupt-index-session", "corrupt-index-turn"
+    native = {"fork_turns": "none", "message": "worker contract", "task_name": "qa_engineer"}
+    invoke(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": session, "turn_id": turn, "prompt": "$cortex:orchestrator"})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_task", "tool_response": {"isError": False, "structuredContent": {"handles": {"task_ref": "t_0123456789ab"}}}})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_assignment", "tool_response": {"isError": False, "structuredContent": {"assignment_ref": "d_0123456789ab", "native_dispatch": native}}})
+    active_index_paths(tmp_path)[0].write_text("{broken")
+    code, denied = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": turn, "tool_name": "collaboration.spawn_agent", "tool_use_id": "spawn-corrupt", "tool_input": native})
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert json.loads(dispatch_record_paths(tmp_path)[0].read_text())["state"] == "pending"
+
+
+def test_consumed_history_cleanup_retains_only_bounded_session_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    module = load_activation_hook()
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path / "plugin-data"))
+    session_root = module._dispatch_session_root("cleanup-session", create=True)
+    assert session_root is not None
+    for index in range(70):
+        path = session_root / "dispatch" / f"dispatch-{index:064x}.json"
+        path.write_text(json.dumps({"state": "consumed", "consumed_at": index}))
+    module._prune_consumed_history(session_root)
+    retained = list((session_root / "dispatch").glob("dispatch-*.json"))
+    assert len(retained) == module.COMPLETED_DISPATCH_HISTORY_LIMIT == 64
+    assert min(json.loads(path.read_text())["consumed_at"] for path in retained) == 6
 
 
 def test_native_spawn_delivers_large_server_message_byte_identically(tmp_path: Path) -> None:
@@ -577,7 +686,7 @@ def test_native_spawn_delivers_large_server_message_byte_identically(tmp_path: P
     assert code == 0
     assert_codex_01491_pre_tool_success(output)
     assert "updatedInput" not in output["hookSpecificOutput"]
-    record = next((tmp_path / "plugin-data" / "activation").glob("dispatch-*.json"))
+    record = dispatch_record_paths(tmp_path)[0]
     stored = json.loads(record.read_text())
     assert stored["native_arguments"]["message"].encode("utf-8") == server_message.encode("utf-8")
     assert stored["context_digest"] == hashlib.sha256(server_message.encode("utf-8")).hexdigest()
@@ -605,7 +714,7 @@ def test_native_spawn_denies_multiple_pending_receipts_for_same_session_turn(tmp
     code, denied = invoke(tmp_path, {"hook_event_name": "PreToolUse", "turn_id": turn, "tool_name": "collaborationspawn_agent", "tool_input": {"fork_turns": "none", "message": "host representation", "task_name": "host-planner"}})
     assert code == 0
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-    records = list((tmp_path / "plugin-data" / "activation").glob("dispatch-*.json"))
+    records = dispatch_record_paths(tmp_path)
     assert len(records) == 2
     assert all('"state":"pending"' in record.read_text() for record in records)
 
@@ -635,7 +744,7 @@ def test_native_spawn_host_representation_is_allowed_once_and_replay_is_denied(t
     code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "turn_id": turn, "tool_name": "collaboration.spawn_agent", "tool_input": changed})
     assert code == 0
     assert_codex_01491_pre_tool_success(allowed)
-    records = list((tmp_path / "plugin-data" / "activation").glob("dispatch-*.json"))
+    records = dispatch_record_paths(tmp_path)
     assert len(records) == 1
     assert '"state":"delivery_pending"' in records[0].read_text()
     code, denied = invoke(tmp_path, {"hook_event_name": "PreToolUse", "turn_id": turn, "tool_name": "collaboration.spawn_agent", "tool_input": changed})
@@ -652,12 +761,13 @@ def test_native_spawn_receipt_becomes_authoritative_only_after_worker_consumes(t
     invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": parent, "turn_id": turn, "tool_name": "mcp__cortex__open_assignment", "tool_response": {"isError": False, "structuredContent": {"assignment_ref": assignment_ref, "native_dispatch": server_args}}})
     protected = dict(server_args, message="gAAAA" + "c" * 96)
     invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": parent, "turn_id": turn, "tool_name": "collaborationspawn_agent", "tool_input": protected})
-    records = list((tmp_path / "plugin-data" / "activation").glob("dispatch-*.json"))
+    records = dispatch_record_paths(tmp_path)
     assert len(records) == 1 and '"state":"delivery_pending"' in records[0].read_text()
     invoke(tmp_path, {"hook_event_name": "SubagentStart", "session_id": parent, "turn_id": child_turn, "agent_id": agent})
     invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": parent, "turn_id": child_turn, "agent_id": agent, "tool_name": "mcp__cortex__consume_assignment_evidence", "tool_input": {"assignment_ref": assignment_ref}, "tool_response": {"isError": False, "structuredContent": {"assignment_ref": assignment_ref, "evidence": {"state": "none"}}}})
     assert '"state":"consumed"' in records[0].read_text()
     assert '"authority":"authoritative"' in records[0].read_text()
+    assert json.loads(active_index_paths(tmp_path)[0].read_text())["active"] == []
 
 
 def test_native_spawn_rejects_shape_correlation_and_bounds_mismatches(tmp_path: Path) -> None:
@@ -685,14 +795,13 @@ def test_native_spawn_rejects_shape_correlation_and_bounds_mismatches(tmp_path: 
         assert code == 0
         assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "pending server-issued assignment boundary" in denied["hookSpecificOutput"]["permissionDecisionReason"]
-    for event in (
-        {"session_id": "foreign-session", "turn_id": turn},
-        {"turn_id": "foreign-turn"},
-    ):
-        code, denied = invoke(tmp_path, {"hook_event_name": "PreToolUse", **event, "tool_name": "collaborationspawn_agent", "tool_input": server_args})
-        assert code == 0
-        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-    records = list((tmp_path / "plugin-data" / "activation").glob("dispatch-*.json"))
+    foreign_session = "foreign-session"
+    foreign_state = tmp_path / "plugin-data" / "activation" / f"turn-{hashlib.sha256(('session:' + foreign_session).encode()).hexdigest()}.json"
+    foreign_state.write_text(json.dumps({"selected": True, "anchored": True}))
+    code, denied = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": foreign_session, "turn_id": turn, "tool_name": "collaborationspawn_agent", "tool_input": server_args})
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    records = dispatch_record_paths(tmp_path)
     assert len(records) == 1 and '"state":"pending"' in records[0].read_text()
 
     observed_host_args = dict(server_args, role="planner", model="gpt-5.6-luna", reasoning_effort="high")

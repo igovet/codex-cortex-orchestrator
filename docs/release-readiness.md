@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.12.1.
+Status: content-addressed production and development release contract for Cortex 1.12.2.
 
 ## Current release identity
 
-- semantic release label: 1.12.1
-- installable identity: `1.12.1+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.12.2
+- installable identity: `1.12.2+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
@@ -47,9 +47,10 @@ record may prohibit the model from taking the next safe meaningful step.
 The catalog is identical for every participant. There is no audience filter,
 capability matrix, host-bound authority, tool-name alias, or action selector. Each input
 schema is closed and is also the runtime validator's source. Every tool advertises a
-compact public result projection containing only essential handles, lifecycle states,
+compact public result projection containing only its closed operation-specific handles, lifecycle states,
 replay/continuation information, and next-action data; its complete successful-result
-schema remains private and is the runtime validator's authoritative contract before a
+schema remains private and is the runtime validator's authoritative contract. Unrelated
+canonical handles are filtered before a
 success is transported as JSON text plus `structuredContent` with
 `isError=false`. Caller-correctable errors are bounded sanitized text-only
 `isError=true` results with no `structuredContent`; server-state failures are
@@ -63,13 +64,14 @@ defers discovery for a mutation, it must retrieve the exact intact declaration
 needed for that operation. Missing or truncated declarations fail closed; no
 mutation contract may be guessed from names, descriptions, or partial output.
 
-Only `create_task` accepts the exact resolved `project_root` and stores the
+Only `open_task` accepts the exact resolved `project_root` and stores the
 canonical project association; it is the sole public project-root boundary. It
-returns compact `task_ref` for the seven task-anchored tools. The durable
-`task_id` in results is non-callable evidence. `read_delegation` instead uses
-`delegation_ref`; `submit_report` uses `delegation_ref` and continuation
-`report_ref`; and `read_reports` uses `report_refs`, resolving their task from
-those exact compact refs. Initiative calls use `task_ref` only as a locator,
+returns compact `task_ref` for task-anchored tools. The durable `task_id` in
+results is non-callable evidence. `open_assignment` emits the assignment handle
+consumed by `consume_assignment_evidence`; consumption emits the server-owned
+continuation used by exactly one publication, and each publication emits only
+its compact report handle. Initiative and decision calls use their advertised
+compact handles only,
 never as permission. The native worker brief carries the saved root only for
 working-directory context. No root is inferred from MCP metadata, thread
 identity, the plugin process `cwd`, or a lifecycle hook.
@@ -189,17 +191,21 @@ Release evidence must prove:
   owner, earlier dependencies, work, and verification; a correctable mapping
   failure remains in the same immutable assembly for corrective append rather
   than creating a terminal semantic-invalid plan or another planner delegation;
-- `read_reports` preserves requested order for 1–20 known compact `report_refs`, returns only
-  complete chunks within a 65,536-byte budget, and returns a selection-scoped
-  cursor without duplication; metadata-only reads omit a consuming delegation;
-- inspection pages use `after_sequence` with a fixed server-side page of 50, return stable
-  `next_sequence`/`has_more`, and expose compact report references while
-  `read_reports` remains the only bounded report body/chunk reader;
+- task inspection uses `after_sequence` with bounded server-owned continuation,
+  while assignment evidence consumption is the worker's only authoritative
+  route to declared predecessor bodies;
 - effective-contract item references remain stable across requirements,
   constraints, acceptance criteria, and verification expectations; current
   ownership is non-overlapping, finalized report coverage detects missing,
   partial, unverified, stale, and contradictory evidence, and user steering
   revises only affected items;
+- failed or partial QA, failed executed checks, and required unrun checks create
+  bounded corrective ownership for source or release/verification infrastructure
+  and require an independent rerun of failed and affected gates before closure;
+- the live assignment profile schema separates owner, review, and planning
+  classes; first-attempt routing keeps bounded no-plan C1 owner work minimal,
+  requires approved planner evidence for light/full owner work, and treats any
+  planning-predecessor rejection as a failed orchestration run even after retry;
 - advisory conformance review relates the active effective-contract revision,
   user decisions, finalized report manifests, completed coordinator-read
   digests, and aggregate coverage without becoming a lifecycle gate;
@@ -331,7 +337,7 @@ fifteen-tool semantic facade and runtime, schema-v1 store, host-private operator
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 and assets. It must not ship lifecycle hooks or lifecycle hook code.
 
-The package and repository metadata must consistently identify Cortex 1.12.1,
+The package and repository metadata must consistently identify Cortex 1.12.2,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the exact fifteen-tool semantic catalog. Stale claims about waves, gates, capabilities,
 plan authority, host epochs, receipt-gated lifecycle, required wait/read order,

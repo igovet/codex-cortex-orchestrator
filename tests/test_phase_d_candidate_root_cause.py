@@ -90,9 +90,9 @@ class CandidateRootCauseTests(unittest.TestCase):
         for name in (
             "open_clarification", "open_plan_review", "record_clarification", "record_plan_review", "open_steering", "record_steering",
         ):
-            decision_properties = contracts[name]["outputSchema"]["properties"]["decision"]["properties"]
+            decision_properties = contracts[name]["runtimeOutputSchema"]["properties"]["decision"]["properties"]
             self.assertFalse({"decision_id", "task_id", "subject_id"} & set(decision_properties))
-        publication = contracts["publish_plan"]["outputSchema"]
+        publication = contracts["publish_plan"]["runtimeOutputSchema"]
         self.assertFalse(publication["additionalProperties"])
         self.assertFalse(publication["properties"]["report"]["additionalProperties"])
         self.assertFalse(publication["properties"]["handles"]["additionalProperties"])

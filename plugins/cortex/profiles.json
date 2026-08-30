@@ -36,6 +36,8 @@
       "Stages are optional except for work made necessary by accepted evidence, user constraints, or selected governance depth.",
       "Planning, when needed, is a planner delegation whose finalized plan report is the predecessor from which plan-dependent pipeline stages are derived.",
       "A new report, failed check, changed risk, or user decision may add, remove, reorder, retry, or rework only unexecuted or newly required DAG nodes; completed evidence remains immutable.",
+      "Before every delegation, preflight the chosen profile's packaged ownership class against current governance and exact predecessor evidence: light/full production-owner work requires finalized approved planner evidence, while bounded C1 owner work without a planning need remains minimal from the outset and test-only QA correction remains non-owning.",
+      "A planning-predecessor rejection is a first-attempt orchestration failure; a later corrected retry cannot make that verification run clean.",
       "Implementation, review, verification, security, documentation-impact, documentation sync/verification, and knowledge harvest are worker-owned stages.",
       "The standard Codex To-Do projection contains only current pipeline stages and gate state, never worker subtasks, implementation checklists, or report bodies; refresh it whenever a stage or gate changes.",
       "The initiative and linked reports are durable evidence; To-Do is a concise live progress projection and must remain consistent with the latest persisted pipeline revision."

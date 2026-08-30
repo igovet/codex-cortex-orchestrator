@@ -45,6 +45,31 @@ Use this transition discipline:
 5. Reassess C1/C2/C3, governance depth, residual risk, verification depth, and
    the final documentation branch after every material evidence arrival.
 
+A verification or QA report is settled only when its executed required checks
+support the assigned acceptance criteria. If such a report is failed or
+partial, records any failed executed check, or leaves a required check unrun,
+mark that verification stage `rework_required` and create bounded corrective
+ownership from the exact report evidence before closure. Route source defects
+to implementation rework and candidate, dependency, CI, provenance, or test
+harness defects to an owner for that release or verification infrastructure;
+do not discard them as unrelated environment noise. Only a genuinely external
+constraint that no in-scope worker can change may remain as an explicit
+limitation. After correction, dispatch an independent verifier to rerun the
+failed and affected gates. Unrelated new scope, a passing focused subset, or a
+later worker report cannot silently supersede the unresolved QA evidence.
+
+Before every new or rework delegation, perform an admission preflight against
+the current governance depth, the chosen profile's packaged ownership class,
+and the exact available predecessor evidence. In light/full governance,
+production-owner work requires finalized approved planner evidence; build that
+planning and approval chain first. When bounded C1 production work genuinely
+needs no plan, governance stays minimal from the outset—it is never downgraded
+after a rejected assignment. Test-only QA correction remains non-owning and
+must not be mislabeled as production remediation. Multiple workers or the mere
+presence of rework does not justify light/full governance. A planning-
+predecessor rejection proves a first-attempt orchestration defect; a later
+successful retry cannot make that verification run clean.
+
 After each revision, update the standard Codex To-Do projection from the latest
 DAG. To-Do contains only current pipeline stages and gate state, never worker subtasks,
 implementation checklists, or report bodies. Keep it concise and current with

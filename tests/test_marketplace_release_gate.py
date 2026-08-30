@@ -1,4 +1,4 @@
-"""Semantic marketplace gate for the installable Cortex 1.12.1 package.
+"""Semantic marketplace gate for the installable Cortex 1.12.2 package.
 
 The gate exercises the registry-derived public domain API. Retired report chunk and
 phase APIs are intentionally absent; detailed migration and transport checks
@@ -89,7 +89,7 @@ class MarketplaceReleaseGate(unittest.TestCase):
         self._isolated_codex_home.cleanup()
 
     def test_packaged_candidate_has_one_semantic_catalog(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.12.1")
+        self.assertEqual(SERVER_VERSION, "1.12.2")
         self.assertEqual(tuple(PUBLIC_TOOLS), TOOLS)
         self.assertEqual(len(PUBLIC_TOOLS), len(TOOLS))
         for name in TOOLS:
@@ -107,7 +107,7 @@ class MarketplaceReleaseGate(unittest.TestCase):
     def test_source_candidate_is_publishable_and_has_no_retired_control_plane(self) -> None:
         manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
         self.assertEqual(manifest["name"], "cortex")
-        self.assertTrue(str(manifest["version"]).startswith("1.12.1"))
+        self.assertTrue(str(manifest["version"]).startswith("1.12.2"))
         self.assertLessEqual(len(manifest["interface"]["defaultPrompt"].encode("utf-8")), 128)
         hooks = json.loads((ROOT / "plugins/cortex/hooks/hooks.json").read_text())
         session_end = hooks["hooks"]["SessionEnd"]

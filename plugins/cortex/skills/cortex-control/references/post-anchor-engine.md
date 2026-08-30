@@ -1,9 +1,9 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.12.1 semantic companion supplied by the host after explicit cortex:orchestrator activation. Never select it for ordinary work or fetch its skill URI through MCP resources/read.
+description: Internal Cortex v1.12.2 semantic companion supplied by the host after explicit cortex:orchestrator activation. Never select it for ordinary work or fetch its skill URI through MCP resources/read.
 ---
 
-# Cortex Control v1.12.1
+# Cortex Control v1.12.2
 
 ## Preserved post-anchor capability inventory
 
@@ -357,6 +357,30 @@ implementation plan. Failed or changed evidence may add, remove, reorder,
 retry, or parent-link rework stages; completed reports stay immutable. Load the
 `adaptive-pipeline` overlay on such evidence changes, and load the relevant
 validation/documentation/harvest overlay only when its trigger applies.
+
+A verification or QA report is not settled when it is failed or partial,
+contains any failed executed check, or leaves a required check unrun. Mark its
+stage `rework_required`, create bounded corrective ownership from that exact
+report evidence, and keep closure blocked until an independent verifier reruns
+the failed and affected gates. Candidate stamp, dependency, CI, provenance,
+and test-harness failures require release or verification-infrastructure
+ownership just as source failures require implementation ownership; they are
+not disposable environment noise. Only a genuinely external constraint that
+no in-scope worker can change may remain as an explicit limitation. Unrelated
+new scope, a passing focused subset, or a later report must never silently
+supersede unresolved QA evidence.
+
+Before every new or rework delegation, perform an admission preflight against
+the current governance depth, the chosen profile's packaged ownership class,
+and the exact available predecessor evidence. In light/full governance,
+production-owner work requires finalized approved planner evidence; build that
+planning and approval chain first. When bounded C1 production work genuinely
+needs no plan, governance stays minimal from the outset—it is never downgraded
+after a rejected assignment. Test-only QA correction remains non-owning and
+must not be mislabeled as production remediation. Multiple workers or the mere
+presence of rework does not justify light/full governance. A planning-
+predecessor rejection proves a first-attempt orchestration defect; a later
+successful retry cannot make that verification run clean.
 
 The coordinator keeps the standard Codex To-Do projection aligned with this
 model-owned pipeline. It contains only current stages and review state, such as

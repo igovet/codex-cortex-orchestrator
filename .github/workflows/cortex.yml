@@ -29,8 +29,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install release-gate test dependency
-        run: python -m pip install --disable-pip-version-check --no-input "pytest>=8,<9"
+      - name: Install release-gate test dependencies
+        run: python -m pip install --disable-pip-version-check --no-input "pytest>=8,<9" "PyYAML>=6,<7"
       - name: Run the Cortex marketplace release gates
         run: |
           python -B scripts/cortex-prompt-lint.py

@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.12.1 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before any task-specific commentary, question, plan, or result. The first project operation is open_task, and no user question may be rendered until the matching durable clarification hold succeeds. Use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
+description: Explicit opt-in Cortex v1.12.2 coordinator for worker-only project execution, closed exact-path knowledge routing, durable evidence handoff, and model-owned advisory governance. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before any task-specific commentary, question, plan, or result. The first project operation is open_task, and no user question may be rendered until the matching durable clarification hold succeeds. Use the host-supplied skill context and never fetch skill URIs through MCP resources/read.
 ---
 
-# Cortex Orchestrator v1.12.1
+# Cortex Orchestrator v1.12.2
 
 ## Preserved post-anchor capability inventory
 
@@ -341,6 +341,30 @@ revise the DAG: add a specialist, remove an unneeded unstarted node, reorder
 unstarted nodes, retry a technical attempt, or add parent-linked rework. Never
 rewrite completed evidence, run coordinator project work, or invent a result to
 make the graph progress.
+
+A verification or QA report is not settled when it is failed or partial,
+contains any failed executed check, or leaves a required check unrun. Mark its
+stage `rework_required`, create bounded corrective ownership from that exact
+report evidence, and keep closure blocked until an independent verifier reruns
+the failed and affected gates. Candidate stamp, dependency, CI, provenance,
+and test-harness failures require release or verification-infrastructure
+ownership just as source failures require implementation ownership; they are
+not disposable environment noise. Only a genuinely external constraint that
+no in-scope worker can change may remain as an explicit limitation. Unrelated
+new scope, a passing focused subset, or a later report must never silently
+supersede unresolved QA evidence.
+
+Before every new or rework delegation, perform an admission preflight against
+the current governance depth, the chosen profile's packaged ownership class,
+and the exact available predecessor evidence. In light/full governance,
+production-owner work requires finalized approved planner evidence; build that
+planning and approval chain first. When bounded C1 production work genuinely
+needs no plan, governance stays minimal from the outset—it is never downgraded
+after a rejected assignment. Test-only QA correction remains non-owning and
+must not be mislabeled as production remediation. Multiple workers or the mere
+presence of rework does not justify light/full governance. A planning-
+predecessor rejection proves a first-attempt orchestration defect; a later
+successful retry cannot make that verification run clean.
 
 Load and apply the bundled `adaptive-pipeline` overlay whenever one of those
 adaptation triggers occurs. It is reachable only after explicit Cortex
