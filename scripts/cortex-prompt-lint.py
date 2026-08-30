@@ -32,6 +32,7 @@ COORDINATOR_COMMUNICATION = PLUGIN / "skills/coordinator-communication/SKILL.md"
 PROFILES = PLUGIN / "profiles.json"
 AGENTS = PLUGIN / "agents"
 PUBLIC_CONTRACTS = PLUGIN / "scripts/cortex_runtime/public_contracts.py"
+SEMANTIC_REGISTRY = PLUGIN / "scripts/cortex_runtime/semantic_registry.py"
 WORKER_RENDERER = PLUGIN / "scripts/cortex_runtime/worker_message.py"
 ROUTING = {
     "gpt-5.6-luna": "high",
@@ -184,6 +185,101 @@ PROMPT_SCHEMA_SAFE_FIXTURES = (
     "The report reader enforces declared same-task evidence inputs.",
     "Tool names and semantic purpose descriptions remain in the catalog.",
 )
+
+# Active model instructions must describe outcomes and semantic sequencing only.
+# The public catalogue is the sole owner of MCP operation and property names.
+# Keep this list deliberately explicit: ordinary prose such as "report" or
+# "decision" is valid, while a call-shape token is not.
+RETIRED_PUBLIC_OPERATIONS = (
+    "create_task", "create_delegation", "read_delegation", "submit_report",
+    "read_reports", "record_user_decision", "inspect_task",
+    "inspect_governance", "set_governance_mode", "submit_governance_closure",
+    "open_decision", "read_worker_wave", "wait_agent",
+)
+MCP_PARAMETER_NAMES = (
+    "task_contract_version", "user_request_original", "acceptance_criteria",
+    "verification_plan", "requirements", "constraints", "context", "instructions",
+    "native_task_name", "role", "source_text",
+    "task_ref", "assignment_ref", "delegation_ref", "report_ref", "report_refs",
+    "decision_ref", "input_report_refs", "input_decision_refs",
+    "parent_delegation_ref", "prompt_language", "response_original",
+    "user_language", "subject_type", "subject_ref", "subject_digest",
+    "approval_handle", "approval_view_content_digest", "approval_view_source_sequence",
+    "steering_delta", "report_type", "abort_reason_en", "idempotency_key",
+    "after_sequence", "project_root", "profile_name", "reasoning_effort",
+    "reader_kind", "consumer_delegation_ref", "chunk_index", "max_bytes",
+    "inputSchema", "outputSchema", "markdown_link",
+)
+INSTRUCTION_SURFACES = tuple(sorted((PLUGIN / "skills").rglob("*.md"))) + tuple(sorted(AGENTS.glob("*.toml")))
+
+
+def instruction_surface_violations(text: str) -> list[str]:
+    """Return retired operations or exact MCP property/recipe tokens in prose."""
+    violations: list[str] = []
+    for name in RETIRED_PUBLIC_OPERATIONS:
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text):
+            violations.append(f"retired operation {name}")
+    for name in MCP_PARAMETER_NAMES:
+        token = re.escape(name)
+        if (
+            re.search(rf"`{token}`", text)
+            or re.search(rf"(?<![A-Za-z0-9_]){token}\s*=", text)
+            or re.search(rf"[\"']{token}[\"']\s*:", text)
+        ):
+            violations.append(f"MCP parameter recipe {name}")
+    return violations
+
+
+def lint_instruction_surface_ownership(issues: list[str]) -> None:
+    """Enforce package-wide separation between semantic prose and MCP schemas."""
+    for path in INSTRUCTION_SURFACES:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            issues.append(f"{path.relative_to(ROOT)} is unreadable for package instruction lint: {exc}")
+            continue
+        violations = instruction_surface_violations(text)
+        if violations:
+            issues.append(f"{path.relative_to(ROOT)} contains forbidden instruction-surface tokens: " + ", ".join(violations))
+    fixtures = (
+        ("retired operation create_task", "Call create_task before dispatch."),
+        ("MCP parameter recipe task_ref", "Use `task_ref` exactly."),
+        ("MCP parameter recipe prompt_language", '"prompt_language": "en"'),
+    )
+    for expected, fixture in fixtures:
+        if expected not in ", ".join(instruction_surface_violations(fixture)):
+            issues.append(f"package instruction lint missed {expected!r}")
+    safe = (
+        "Use open_task to establish the task contract.",
+        "Open a durable clarification hold before showing the question.",
+        "Use publish_result for the worker-owned terminal outcome.",
+    )
+    for fixture in safe:
+        violations = instruction_surface_violations(fixture)
+        if violations:
+            issues.append(f"package instruction lint rejected semantic guidance: {fixture!r}: {violations!r}")
+
+
+def lint_worker_renderer_instruction_ownership(issues: list[str]) -> None:
+    """Lint only trusted renderer policy strings, not implementation payload keys."""
+    try:
+        tree = ast.parse(WORKER_RENDERER.read_text(encoding="utf-8"), filename=str(WORKER_RENDERER))
+    except (OSError, SyntaxError) as exc:
+        issues.append(f"{WORKER_RENDERER.relative_to(ROOT)} cannot be parsed for instruction lint: {exc}")
+        return
+    names = {"_TRUSTED_COMMON_POLICY", "_CLARIFICATION_CONTINUATION_POLICY"}
+    for node in tree.body:
+        target = node.targets[0].id if isinstance(node, ast.Assign) and node.targets and isinstance(node.targets[0], ast.Name) else None
+        if target not in names:
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError):
+            issues.append(f"{WORKER_RENDERER.relative_to(ROOT)} policy {target} is not a literal string")
+            continue
+        violations = instruction_surface_violations(value)
+        if violations:
+            issues.append(f"{WORKER_RENDERER.relative_to(ROOT)} policy {target} contains forbidden tokens: " + ", ".join(violations))
 
 COORDINATOR_AUTHORITY_PATTERNS = (
     (
@@ -340,25 +436,13 @@ COORDINATOR_PROTOCOL_PATTERNS = (
         ),
     ),
     (
-        "non-isolated or implicit-effort native dispatch",
+        "static host dispatch authority",
         re.compile(
             r"\bcoordinator\b(?:(?![.!?]).){0,180}"
             r"\b(?:may|can|should|must|is\s+allowed\s+to|is\s+authorized\s+to)\s+"
-            r"(?!not\b|never\b)(?:spawn|dispatch|call)\b(?:(?![.!?]).){0,160}"
-            r"(?:fork_turns\s*=?\s*(?:all|default)|omit\b(?:(?![.!?]).){0,50}"
-            r"(?:fork_turns|reasoning_effort)|inherit\b(?:(?![.!?]).){0,50}\bfork_turns\b)",
-            re.I,
-        ),
-    ),
-    (
-        "native model-override mismatch",
-        re.compile(
-            r"\bcoordinator\b(?:(?![.!?]).){0,180}"
-            r"\b(?:may|can|should|must|is\s+allowed\s+to|is\s+authorized\s+to)\s+"
-            r"(?!not\b|never\b)(?:"
-            r"omit\b(?:(?![.!?]).){0,60}\bmodel\b(?:(?![.!?]).){0,60}\b(?:terra|sol)\b|"
-            r"(?:pass|send|use)\b(?:(?![.!?]).){0,60}\b(?:explicit\s+)?(?:luna|gpt-5\.6-luna)\b"
-            r"(?:(?![.!?]).){0,60}\bmodel\b)",
+            r"(?!not\b|never\b)(?:treat|use|copy|dispatch)\b(?:(?![.!?]).){0,160}"
+            r"\b(?:dispatch[_ -]?brief|delegation receipt)\b(?:(?![.!?]).){0,120}"
+            r"\b(?:byte[- ]exact|host\s+arguments?|fork_turns|model override|luna omission)\b",
             re.I,
         ),
     ),
@@ -462,12 +546,8 @@ PROTOCOL_MUTATION_FIXTURES = (
         "The coordinator may reuse one native worker across multiple durable delegations.",
     ),
     (
-        "non-isolated or implicit-effort native dispatch",
-        "The coordinator may spawn a worker with fork_turns=all and omit reasoning_effort.",
-    ),
-    (
-        "native model-override mismatch",
-        "The coordinator may omit the model override for Terra.",
+        "static host dispatch authority",
+        "The coordinator may treat the dispatch brief as byte-exact host arguments.",
     ),
     (
         "non-English native-worker transcript",
@@ -501,8 +581,7 @@ PROTOCOL_SAFE_FIXTURES = (
     "The coordinator must never call create_task with empty requirements or verification arrays.",
     "The coordinator must never assemble an ad-hoc spawn or rewrite the returned native-dispatch payload.",
     "The coordinator must never reuse one native worker across multiple durable delegations.",
-    "The coordinator must never spawn with fork_turns=all or omit reasoning_effort.",
-    "The coordinator must never omit the model override for Terra or Sol and must not pass one for Luna.",
+    "The coordinator maps the host-neutral dispatch brief to the active host schema.",
     "A native worker must never localize commentary or final responses into the user's Russian language.",
     "The coordinator must never assert documentation_not_required without a worker-owned documentation-impact report.",
     "The coordinator must never use a free-form role label as loaded profile proof.",
@@ -676,38 +755,20 @@ def load_profiles(issues: list[str]) -> dict[str, Any]:
 
 
 def load_public_tools(issues: list[str]) -> list[str]:
-    """Read the literal runtime registry without importing plugin runtime code."""
+    """Read the dependency-free canonical registry without starting MCP runtime."""
     try:
-        tree = ast.parse(PUBLIC_CONTRACTS.read_text(encoding="utf-8"), filename=str(PUBLIC_CONTRACTS))
-    except (OSError, SyntaxError) as exc:
-        issues.append(f"{PUBLIC_CONTRACTS.relative_to(ROOT)} is unreadable: {exc}")
+        namespace = runpy.run_path(str(SEMANTIC_REGISTRY), run_name="_cortex_prompt_registry")
+        names = tuple(namespace["OPERATION_NAMES"])
+    except (OSError, SyntaxError, KeyError, TypeError, ValueError) as exc:
+        issues.append(f"{SEMANTIC_REGISTRY.relative_to(ROOT)} is unreadable: {exc}")
         return []
-    for node in tree.body:
-        target_names = []
-        if isinstance(node, ast.Assign):
-            target_names = [target.id for target in node.targets if isinstance(target, ast.Name)]
-            value = node.value
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            target_names = [node.target.id]
-            value = node.value
-        else:
-            continue
-        if "V12_TOOL_NAMES" not in target_names or value is None:
-            continue
-        try:
-            names = ast.literal_eval(value)
-        except ValueError as exc:
-            issues.append(f"{PUBLIC_CONTRACTS.relative_to(ROOT)} V12_TOOL_NAMES is not literal: {exc}")
-            return []
-        if not isinstance(names, tuple) or not names or any(not isinstance(name, str) or not name for name in names):
-            issues.append(f"{PUBLIC_CONTRACTS.relative_to(ROOT)} V12_TOOL_NAMES is invalid")
-            return []
-        if len(set(names)) != len(names):
-            issues.append(f"{PUBLIC_CONTRACTS.relative_to(ROOT)} V12_TOOL_NAMES has duplicates")
-            return []
-        return list(names)
-    issues.append(f"{PUBLIC_CONTRACTS.relative_to(ROOT)} has no V12_TOOL_NAMES registry")
-    return []
+    if not names or any(not isinstance(name, str) or not name for name in names):
+        issues.append(f"{SEMANTIC_REGISTRY.relative_to(ROOT)} operation registry is invalid")
+        return []
+    if len(set(names)) != len(names):
+        issues.append(f"{SEMANTIC_REGISTRY.relative_to(ROOT)} operation registry has duplicates")
+        return []
+    return list(names)
 
 
 def lint_worker_renderer(profiles: dict[str, Any], issues: list[str]) -> None:
@@ -732,6 +793,7 @@ def lint_worker_renderer(profiles: dict[str, Any], issues: list[str]) -> None:
     try:
         namespace = runpy.run_path(str(WORKER_RENDERER))
         renderer = namespace["render_worker_message"]
+        continuation_renderer = namespace.get("render_clarification_continuation")
     except (OSError, KeyError, RuntimeError, TypeError, ValueError) as exc:
         issues.append(f"{WORKER_RENDERER.relative_to(ROOT)} is not executable: {exc}")
         return
@@ -776,6 +838,11 @@ def lint_worker_renderer(profiles: dict[str, Any], issues: list[str]) -> None:
                     "reasoning_effort": "high",
                 },
                 decisions=[],
+                effective_scope={
+                    "planning_items" if name == "planner" else "assigned_items": [
+                        {"item_ref": "o_0123456789ab", "category": "requirement", "ordinal": 0, "text": "Preserve exact request"}
+                    ]
+                },
             )
         except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
             issues.append(f"renderer rejected advisory profile {name!r}: {exc}")
@@ -806,13 +873,12 @@ def lint_worker_renderer(profiles: dict[str, Any], issues: list[str]) -> None:
         missing_report_ownership = missing_concepts(
             trusted_common,
             (
-                ("own report submission",),
-                ("call `submit_report`", "call submit_report"),
-                ("exact `delegation_ref`",),
-                ("omit redundant `task_id`",),
-                ("never alter",),
-                ("ask the coordinator to submit",),
-                ("submission is unavailable",),
+                ("own publication",),
+                ("semantic publication operation",),
+                ("supplied assignment context",),
+                ("never publish for another",),
+                ("ask the coordinator to publish",),
+                ("publication is unavailable",),
             ),
         )
         if missing_report_ownership:
@@ -836,18 +902,47 @@ def lint_worker_renderer(profiles: dict[str, Any], issues: list[str]) -> None:
                 f"renderer does not require an English-only child transcript for {name!r}: "
                 f"{missing_english_transcript!r}"
             )
-        for exact_reference in (
-            '"task_ref":"t_456789abcdef"',
-            '"delegation_ref":"d_456789abcdef"',
-            '"input_report_refs":["r_456789abcdef"]',
-            '"input_decision_refs":["u_456789abcdef"]',
-            '"model":"gpt-5.6-luna"',
-            '"reasoning_effort":"high"',
-        ):
+        for exact_reference in ('"anchor":"d_456789abcdef"',):
             if exact_reference not in message:
                 issues.append(
                     f"renderer omits exact dispatch reference {exact_reference!r} for {name!r}"
                 )
+        for forbidden_property in tuple(f'"{name}":' for name in (
+            "task_ref", "delegation_ref", "assignment_ref", "report_ref",
+            "decision_ref", "binding_ref", "prompt_language", "response_original",
+            "input_report_refs", "input_decision_refs", "model", "reasoning_effort",
+            "reader_kind", "chunk_index", "after_sequence", "max_bytes",
+        )):
+            if forbidden_property in message:
+                issues.append(
+                    f"renderer leaks MCP property {forbidden_property!r} for {name!r}"
+                )
+    if not callable(continuation_renderer):
+        issues.append(f"{WORKER_RENDERER.relative_to(ROOT)} lacks the clarification continuation renderer")
+    else:
+        try:
+            continuation = continuation_renderer(
+                task={"task_id": "task-" + "a" * 64 + "-" + "b" * 32, "objective": "Continue."},
+                delegation={
+                    "delegation_id": "delegation-" + "c" * 64 + "-" + "d" * 32,
+                    "profile_name": "planner", "native_task_name": "planner",
+                    "objective": "Continue.", "scope": "Bounded.",
+                },
+                decision={
+                    "decision_id": "decision-" + "e" * 64 + "-" + "f" * 32,
+                    "subject_type": "task", "subject_id": "task-" + "a" * 64 + "-" + "b" * 32,
+                    "decision_type": "clarification", "response_original": "Proceed.",
+                },
+            )
+            continuation_message = continuation.get("message") if isinstance(continuation, dict) else None
+            if not isinstance(continuation_message, str):
+                issues.append("clarification continuation renderer lacks a message")
+            else:
+                for name in MCP_PARAMETER_NAMES:
+                    if f'"{name}":' in continuation_message or f"`{name}`" in continuation_message:
+                        issues.append(f"clarification continuation leaks MCP property {name!r}")
+        except (KeyError, TypeError, ValueError) as exc:
+            issues.append(f"clarification continuation renderer is not executable: {exc}")
 
 
 def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, Any]:
@@ -864,6 +959,24 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         PROGRESS: read(PROGRESS, issues),
         COORDINATOR_COMMUNICATION: read(COORDINATOR_COMMUNICATION, issues),
     }
+    # The activation kernels are intentionally lean.  Semantic parity checks
+    # must inspect the bounded post-anchor references as one logical contract,
+    # while the separate kernel-size/order checks below inspect only SKILL.md.
+    orchestrator_reference = read(
+        PLUGIN / "skills/orchestrator/references/post-anchor-engine.md", issues
+    )
+    control_reference = read(
+        PLUGIN / "skills/cortex-control/references/post-anchor-engine.md", issues
+    )
+    texts[ORCHESTRATOR] += "\n" + orchestrator_reference
+    texts[CONTROL] += "\n" + control_reference
+    # Retired translated decision fields must not reappear in project-facing
+    # skills or worker prompts as pseudo-parameters. The advertised schema is
+    # the only source of MCP argument names and shapes.
+    for path, text in texts.items():
+        for forbidden in ("prompt_en", "response_en"):
+            if forbidden in text:
+                issues.append(f"{path.relative_to(ROOT)} documents retired MCP argument {forbidden}")
     orchestrator, control, compaction = (
         texts[ORCHESTRATOR], texts[CONTROL], texts[COMPACTION]
     )
@@ -871,14 +984,14 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
 
     catalog = section(control, "Public semantic catalog")
     catalog_tools = re.findall(r"^\|\s*`([a-z_]+)`\s*\|", catalog, re.M)
-    if (
-        len(tools_from_runtime) != 11
-        or "record_user_decision" not in tools_from_runtime
-        or catalog_tools != tools_from_runtime
-    ):
+    if catalog_tools:
         issues.append(
-            f"{CONTROL.relative_to(ROOT)} must mirror the canonical uniform "
-            f"eleven-tool registry: runtime={tools_from_runtime!r}, catalog={catalog_tools!r}"
+            f"{CONTROL.relative_to(ROOT)} must not duplicate the live MCP catalog: "
+            f"documented={catalog_tools!r}"
+        )
+    if not all(phrase in catalog.lower() for phrase in ("live advertised mcp registry", "sole authority", "must not duplicate")):
+        issues.append(
+            f"{CONTROL.relative_to(ROOT)} must defer tool names, arguments, and response shapes to the live MCP registry"
         )
 
     all_skill_text = "\n".join(texts.values())
@@ -926,6 +1039,9 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("project source",),
             ("belong to workers",),
             ("AGENTS.md",),
+            ("host-injected",),
+            ("do not reread",),
+            ("nested", "override discovery"),
             ("docs/project/index.md",),
             ("docs/features/index.md",),
             ("harvest-refresh",),
@@ -1056,7 +1172,8 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("`read_mcp_resource`",),
             ("`resources/read`",),
             ("`skill://`",),
-            ("exactly eleven",),
+            ("sole authority",),
+            ("complete catalog",),
             ("coordinator-to-worker",),
             ("inter-worker",),
             ("commentary",),
@@ -1076,14 +1193,35 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         issues,
     )
     require_concepts(
+        section(orchestrator, "Route execution invariant")
+        + section(control, "Route execution invariant"),
+        ORCHESTRATOR,
+        "first-call route and passive activation receipt invariant",
+        (
+            ("first", "first project execution action"),
+            ("`open_task`",),
+            ("prose activation acknowledgement",),
+            ("Shell or repository inspection",),
+            ("worker dispatch",),
+            ("route violation",),
+            ("passive",),
+            ("exact isolated candidate",),
+            ("registered Cortex server",),
+            ("catalogue",),
+            ("observation",),
+            ("unverified environment",),
+        ),
+        issues,
+    )
+    require_concepts(
         section(control, "Coordination, failure, and nonblocking governance"),
         CONTROL,
-        "terminal create_task server-state and actual-message-language handling",
+        "terminal task-opening server-state and actual-message-language handling",
         (
-            ("create_task",),
+            ("open_task",),
             ("terminal task-anchoring boundary",),
             ("server-state failure",),
-            ("returns no `task_ref`",),
+            ("returns no task anchor",),
             ("stop Cortex orchestration immediately",),
             ("Do not start degraded project work",),
             ("use a fallback",),
@@ -1108,13 +1246,13 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("concatenate",),
             ("append a suffix", "suffix"),
             ("latest successful",),
-            ("coordinator never calls `submit_report`",),
+            ("coordinator never publishes a worker outcome",),
             ("worker",),
             ("plan",),
             ("verification",),
             ("synthesis",),
             ("documentation-impact", "documentation not required"),
-            ("parent-linked replacement",),
+            ("parent-linked replacement", "parent-linked recovery route"),
         ),
         issues,
     )
@@ -1123,21 +1261,21 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         + section(orchestrator, "Per-delegation model selection")
         + section(control, "Worker-message boundary"),
         ORCHESTRATOR,
-        "semantic delegation receipt and active-host dispatch boundary",
+        "host-neutral dispatch brief and active-host boundary",
         (
-            ("one corresponding host spawn",),
+            ("maps it once", "maps that brief once"),
             ("durable delegation",),
-            ("semantic delegation receipt",),
+            ("host-neutral dispatch brief",),
             ("active host schema",),
             ("rendered message",),
             ("task and delegation anchors", "task/delegation anchors"),
             ("input evidence",),
             ("profile proof",),
-            ("selected model/effort",),
+            ("model/effort recommendations",),
             ("ad-hoc",),
             ("one native worker for multiple", "one worker for multiple"),
             ("ambiguous host result",),
-            ("does not assert",),
+            ("no host lifecycle assertion",),
         ),
         issues,
     )
@@ -1154,10 +1292,10 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("digest",),
             ("approve/revise/cancel",),
             ("end the turn",),
-            ("one complete localized question",),
-            ("exact answer",),
+            ("one complete question",),
+            ("exact original response",),
             ("live handle",),
-            ("parent_delegation_ref",),
+            ("parent-linked replacement",),
             ("does not guarantee same-child", "never claim that Cortex guarantees same-child"),
         ),
         issues,
@@ -1169,8 +1307,8 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         (
             ("assembly operations",), ("chunks",), ("finalize",), ("abort",),
             ("continuation metadata", "continuation state"),
-            ("complete content digest",), ("cursor",), ("section",),
-            ("byte budget",), ("only full-body path",),
+            ("complete content digest",), ("continuation state",), ("section",),
+            ("server bounds", "bounded reads"), ("only full-body path",),
             ("same-project initiative lineage",),
             ("never cross a project shard",),
         ),
@@ -1203,7 +1341,7 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("preferred durable evidence",),
             ("not permission to start", "not prerequisites"),
             ("at most once",),
-            ("same idempotency key",),
+            ("same retry identity",),
             ("MCP server",), ("expected tool",), ("catalog",),
             ("report-read", "report read"), ("projection",),
             ("never block an honest final answer", "never blocks a safe final answer"),
@@ -1233,12 +1371,12 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("sufficient completed outcome evidence",),
             ("`ready`",), ("`ready_with_risks`",), ("`not_ready`",),
             ("automatically attempts", "automatically attempt"),
-            ("`submit_governance_closure`",),
+            ("`close_task`",),
             ("supported scoped inspection", "supported inspection"),
             ("never a user-facing blocker or question", "never becomes a user question"),
             ("never requires user confirmation", "never asks the user to confirm"),
             ("one bounded safe retry",),
-            ("unchanged idempotency semantics",),
+            ("unchanged retry semantics",),
             ("`closure_unconfirmed`",),
             ("user-facing open", "work as open", "work open"),
         ),
@@ -1259,7 +1397,6 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
             ("Documentation impact",),
             ("status",),
             ("rationale",),
-            ("affected surfaces",),
             ("documentation_not_required",),
             ("initiative",),
             ("exact task",),
@@ -1275,15 +1412,15 @@ def lint_skills(issues: list[str], tools_from_runtime: list[str]) -> dict[str, A
         (
             texts[ADAPTIVE], ADAPTIVE, "safe hold and replacement adaptation",
             (("one complete question",), ("end the turn",), ("Silence",),
-             ("exact response",), ("live handle",), ("parent_delegation_ref",),
+             ("exact original response",), ("live handle",), ("parent-linked replacement",),
              ("new plan/digest", "new immutable plan/digest")),
         ),
         (
             compaction, COMPACTION, "ID-complete compaction and report assembly recovery",
-            (("`task_ref`",), ("task/result contract",), ("subject digest",),
-             ("next chunk index",), ("projection paths",), ("fresh reverification",),
-             ("live native child handles",), ("Do not promise ID-less enumeration",),
-             ("parent_delegation_ref",)),
+            (("task anchor",), ("task/result contract",), ("subject",), ("digest",),
+             ("continuation state",), ("projection paths",), ("fresh reverification",),
+             ("live native child handles",), ("Do not promise identifier-less enumeration",),
+             ("parent-linked replacement",)),
         ),
         (
             texts[PROGRESS], PROGRESS, "meaningful localized progress with safe links",
@@ -1560,6 +1697,8 @@ def main() -> int:
     issues: list[str] = []
     lint_protocol_mutation_detector(issues)
     lint_prompt_schema_ownership(issues)
+    lint_instruction_surface_ownership(issues)
+    lint_worker_renderer_instruction_ownership(issues)
     tools = load_public_tools(issues)
     profiles = lint_skills(issues, tools)
     lint_worker_renderer(profiles, issues)

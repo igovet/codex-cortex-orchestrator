@@ -1,19 +1,25 @@
-# Lifecycle telemetry (retired)
+# Lifecycle telemetry
 
 <!-- GENERATED:START -->
 
-This page is retained only as a historical link target for the V12 release
-documentation closure. Lifecycle telemetry is not an active Cortex V12 feature.
+Cortex 1.12.1 ships two bounded native hook components: an activation guard and
+a sanitized lifecycle observer. The activation guard applies only after an
+explicit Cortex route selection. It validates task-anchoring order and
+correlates a native worker dispatch with a one-shot server receipt without
+rewriting the native spawn call. At `SubagentStart`, it supplies the
+server-owned worker context as host additional context.
 
-Cortex 12.1.0 ships no native lifecycle hooks and no lifecycle hook script.
-Host session, subagent start/stop, coordinator stop, wait output,
-environment state, and compaction events are not ledger records, authorization,
-completion evidence, or recovery inputs.
+The observer records structural session and subagent start/stop markers plus
+the package build identity. These records let live verification prove that a
+real child started, initialized Cortex MCP, consumed assignment evidence, and
+published one terminal outcome. Sensitive message bodies, handles, worker
+reports, and raw host payloads are not lifecycle telemetry.
 
-Native worker coordination belongs to the model and Codex host outside the
-eleven-tool ledger. A missing report or worker stop does not activate a server
-recovery route; the coordinator may disclose the evidence gap and create a
-replacement delegation directly.
+Lifecycle markers are not ledger authority, authorization, or completion
+evidence. The MCP backend still owns task state, assignment evidence,
+idempotency, publication, reconciliation, and closure. A spawn result or a
+`SubagentStart` marker alone never substitutes for the worker's successful
+server-side evidence consumption and terminal publication.
 
 The active feature registry is [features/index.md](../index.md). See the
 [orchestration ledger](../orchestration-ledger/index.md) and

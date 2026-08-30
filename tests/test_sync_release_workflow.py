@@ -70,10 +70,12 @@ if [[ "$1 $2 $3" == "plugin list --json" ]]; then
   exit 0
 fi
 if [[ "$1 $2" == "plugin add" ]]; then
-  version="$(python3 -B -c 'import json, os; print(json.load(open(os.path.join(os.environ["SYNC_TEST_REPO"], "plugins/cortex/.codex-plugin/plugin.json")))["version"])')"
+  staged_manifest="$(find "$CODEX_HOME/.cortex-candidates" -type f -path '*/plugins/cortex/.codex-plugin/plugin.json' -print -quit)"
+  version="$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$staged_manifest")"
   destination="$CODEX_HOME/plugins/cache/cortex/cortex/$version"
   mkdir -p "$destination"
-  cp -a "$SYNC_TEST_REPO/plugins/cortex/." "$destination/"
+  staged_plugin="$(dirname "$(dirname "$staged_manifest")")"
+  cp -a "$staged_plugin/." "$destination/"
   exit 0
 fi
 exit 0
@@ -111,9 +113,11 @@ exit 0
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
         after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
-        assert re.fullmatch(r"12\.1\.0\+codex\.\d{14}", after_version)
-        assert after_version > before_version
-        assert (codex_home / "plugins/cache/cortex/cortex" / after_version).is_dir()
+        assert after_version == "1.12.1"
+        assert before_version == "1.12.1"
+        staged_versions = list((codex_home / ".cortex-candidates").glob("1.12.1+codex.sha256.*"))
+        assert len(staged_versions) == 1
+        assert (codex_home / "plugins/cache/cortex/cortex" / staged_versions[0].name).is_dir()
         assert not bytecode.exists()
         assert not list((ROOT / "plugins/cortex").rglob("*.pyc"))
     finally:
@@ -126,3 +130,244 @@ exit 0
             for child in bytecode.iterdir():
                 child.unlink()
             bytecode.rmdir()
+
+
+def test_sync_rejects_symlinked_candidate_staging_root(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex-home"
+    home.mkdir()
+    codex_home.mkdir()
+    real_candidates = tmp_path / "real-candidates"
+    real_candidates.mkdir()
+    (codex_home / ".cortex-candidates").symlink_to(real_candidates, target_is_directory=True)
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_codex.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "CORTEX_PYTHON": sys.executable,
+    })
+    completed = subprocess.run(
+        ["bash", "scripts/sync-cortex.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode != 0
+    assert "candidate staging root" in completed.stdout + completed.stderr
+
+
+def test_sync_shell_path_rejects_symlinked_installed_version_parent(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex-home"
+    home.mkdir()
+    codex_home.mkdir()
+    real_cache = tmp_path / "real-cache"
+    real_cache.mkdir()
+    cache_parent = codex_home / "plugins" / "cache" / "cortex"
+    cache_parent.parent.mkdir(parents=True)
+    cache_parent.symlink_to(real_cache, target_is_directory=True)
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "plugin list --json" ]]; then
+  printf '%s\\n' '{"installed":[{"pluginId":"cortex@cortex","version":"1.12.1"}]}'
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "CORTEX_PYTHON": sys.executable,
+    })
+    completed = subprocess.run(
+        ["bash", "scripts/sync-cortex.sh", "--check"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode != 0
+    assert "installed candidate version root" in completed.stdout + completed.stderr
+
+
+def test_sync_shell_path_reuses_an_unchanged_isolated_candidate(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex-home"
+    home.mkdir()
+    codex_home.mkdir()
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+state="$CODEX_HOME/fake-installed-version"
+add_count="$CODEX_HOME/fake-add-count"
+if [[ "$1 $2 $3" == "plugin list --json" ]]; then
+  if [[ -f "$state" ]]; then
+    version="$(<"$state")"
+    printf '{"installed":[{"pluginId":"cortex@cortex","version":"%s"}]}\\n' "$version"
+  else
+    printf '%s\\n' '{"installed":[]}'
+  fi
+  exit 0
+fi
+if [[ "$1 $2" == "plugin add" ]]; then
+  count=0
+  [[ -f "$add_count" ]] && count="$(<"$add_count")"
+  printf '%s\\n' "$((count + 1))" >"$add_count"
+  staged_manifest="$(find "$CODEX_HOME/.cortex-candidates" -type f -path '*/plugins/cortex/.codex-plugin/plugin.json' -print -quit)"
+  version="$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$staged_manifest")"
+  destination="$CODEX_HOME/plugins/cache/cortex/cortex/$version"
+  mkdir -p "$destination"
+  staged_plugin="$(dirname "$(dirname "$staged_manifest")")"
+  cp -a "$staged_plugin/." "$destination/"
+  printf '%s\\n' "$version" >"$state"
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "CORTEX_PYTHON": sys.executable,
+    })
+    first = subprocess.run(
+        ["bash", "scripts/sync-cortex.sh"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    second = subprocess.run(
+        ["bash", "scripts/sync-cortex.sh"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert (codex_home / "fake-add-count").read_text(encoding="utf-8").strip() == "1"
+    assert "installed from this repository" in second.stdout
+
+
+def test_cortex_dev_launches_only_the_stamped_receipted_candidate_and_reuses_it(tmp_path: Path) -> None:
+    """The launcher must consume sync's receipt, never rebuild a base cache path."""
+    stable_home = tmp_path / "stable-home"
+    stable_home.mkdir()
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+state="$CODEX_HOME/fake-installed-version"
+count="$CODEX_HOME/fake-add-count"
+case "${1:-} ${2:-} ${3:-}" in
+  "plugin marketplace list") printf '%s\\n' '{"marketplaces":[]}' ; exit 0 ;;
+  "plugin marketplace add") exit 0 ;;
+  "plugin list --json")
+    if [[ -f "$state" ]]; then printf '{"installed":[{"pluginId":"cortex@cortex","version":"%s"}]}\\n' "$(<"$state")"; else printf '%s\\n' '{"installed":[]}' ; fi
+    exit 0 ;;
+  "plugin add cortex@cortex")
+    staged_manifest="$(find "$CODEX_HOME/.cortex-candidates" -type f -path '*/plugins/cortex/.codex-plugin/plugin.json' -print -quit)"
+    version="$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$staged_manifest")"
+    destination="$CODEX_HOME/plugins/cache/cortex/cortex/$version"
+    mkdir -p "$destination"
+    staged_plugin="$(dirname "$(dirname "$staged_manifest")")"
+    cp -a "$staged_plugin/." "$destination/"
+    printf '%s\\n' "$version" >"$state"
+    old=0; [[ -f "$count" ]] && old="$(<"$count")"; printf '%s\\n' "$((old + 1))" >"$count"
+    exit 0 ;;
+esac
+printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-missing}" "${CORTEX_BUILD_ID:-missing}"
+""",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(stable_home),
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "CORTEX_PYTHON": sys.executable,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    environment.pop("CODEX_HOME", None)
+    first = subprocess.run(
+        ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=90,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    isolated_codex = stable_home / ".cortex-dev/.codex"
+    receipt = json.loads((isolated_codex / ".cortex-candidate-receipt.json").read_text(encoding="utf-8"))
+    stamped = receipt["candidate_version"]
+    assert re.fullmatch(r"1\.12\.1\+codex\.sha256\.[0-9a-f]{16}", stamped)
+    assert receipt["candidate_path"] == str(isolated_codex / "plugins/cache/cortex/cortex" / stamped)
+    assert f"Cortex candidate version={stamped}" in first.stdout
+    assert f"Cortex candidate path={receipt['candidate_path']}" in first.stdout
+    assert "Cortex candidate receipt=" in first.stdout
+    assert f"fake ordinary codex candidate={receipt['candidate_path']}" in first.stdout
+    # The base semantic version is permitted as display metadata only.  Its
+    # unstamped cache directory must never be selected or printed as a path.
+    assert f"/plugins/cache/cortex/cortex/1.12.1\n" not in first.stdout
+    first_receipt = (isolated_codex / ".cortex-candidate-receipt.json").read_bytes()
+    second = subprocess.run(
+        ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=90,
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert (isolated_codex / ".cortex-candidate-receipt.json").read_bytes() == first_receipt
+    assert (isolated_codex / "fake-add-count").read_text(encoding="utf-8").strip() == "1"
+
+
+def test_isolated_sync_fails_when_installed_candidate_cannot_commit_its_receipt(tmp_path: Path) -> None:
+    owner = tmp_path / "owner"
+    home = owner / ".cortex-dev"
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True)
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-} ${3:-}" in
+  "plugin marketplace list") printf '%s\\n' '{"marketplaces":[]}' ; exit 0 ;;
+  "plugin marketplace add") exit 0 ;;
+  "plugin list --json") printf '%s\\n' '{"installed":[]}' ; exit 0 ;;
+  "plugin add cortex@cortex")
+    manifest="$(find "$CODEX_HOME/.cortex-candidates" -type f -path '*/plugins/cortex/.codex-plugin/plugin.json' -print -quit)"
+    version="$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$manifest")"
+    destination="$CODEX_HOME/plugins/cache/cortex/cortex/$version"; mkdir -p "$destination"
+    cp -a "$(dirname "$(dirname "$manifest")")/." "$destination/"; exit 0 ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(home), "CODEX_HOME": str(codex_home), "PATH": f"{tmp_path}:{environment['PATH']}",
+        "CORTEX_PYTHON": sys.executable, "CORTEX_ISOLATED_MARKETPLACE_RECONCILE": "1",
+        "CORTEX_ISOLATED_DEV_OWNER_HOME": str(owner), "CORTEX_ISOLATED_DEV_CODEX_HOME": str(codex_home),
+        "CORTEX_TEST_RECEIPT_WRITE_FAIL": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    completed = subprocess.run(
+        ["bash", "scripts/sync-cortex.sh"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=90,
+    )
+    assert completed.returncode != 0
+    assert "receipt was not committed" in completed.stdout + completed.stderr
+    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.12.1+codex.sha256.*"))
+    assert not (codex_home / ".cortex-candidate-receipt.json").exists()

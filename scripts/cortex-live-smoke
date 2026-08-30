@@ -1,0 +1,751 @@
+#!/usr/bin/env python3
+"""Transport-only tmux driver for an ordinary isolated Cortex live-dev session."""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import secrets
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import hashlib
+from pathlib import Path
+
+# This transport imports the receipt-selected candidate only for read-only
+# catalogue/lease observation.  A content-addressed candidate must not acquire
+# interpreter artefacts from that inspection.
+sys.dont_write_bytecode = True
+
+SESSION = "cortex-v12-smoke"
+# Use the ordinary default tmux client/server invocation.  The explicit
+# target remains the stable session/pane name, matching the operator command
+# that is known to submit Codex's collapsed paste state.
+TARGET = f"{SESSION}:0.0"
+SUBMIT_DRAIN_SECONDS = 5.0
+# Codex treats one large literal delivery as a collapsed paste acknowledgement.
+# Keep each transport delivery below that threshold while preserving one final
+# submission Enter for the complete prompt.
+PROMPT_CHUNK_CHARS = 512
+PROMPT_CHUNK_DRAIN_SECONDS = 0.1
+CAPTURE_MAX_BYTES = 20_000
+CAPTURE_OUTPUT_MAX_LINES = 1_000
+FAILURE_STAGES = frozenset({"receipt", "lease", "candidate_topology", "runtime_import", "generation", "journal_permissions", "journal_absent", "journal_schema", "journal_content", "unknown"})
+_STATE_ROOT = Path(tempfile.gettempdir()) / f"cortex-live-smoke-{os.getuid()}"
+_STATE_FILE = _STATE_ROOT / "session.json"
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def tmux(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["tmux", *args], text=True, capture_output=True, check=False)
+
+
+def exists() -> bool:
+    return tmux("has-session", "-t", f"={SESSION}").returncode == 0
+
+
+def fail(message: str) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return 2
+
+
+def transport_fail(reason: str) -> int:
+    """Report a bounded transport failure without prompt or terminal data."""
+    if reason not in {"session_missing", "pane_dead", "target_mismatch", "send_keys_exit"}:
+        reason = "send_keys_exit"
+    print(f"Cortex live-dev transport-failure={reason}", file=sys.stderr)
+    return 2
+
+
+def fail_stage(stage: str) -> int:
+    """Report a closed diagnostic category without paths, exception text, or ids."""
+    if stage not in FAILURE_STAGES:
+        stage = "unknown"
+    print(f"Cortex live-dev event-observation failure_stage={stage}", file=sys.stderr)
+    return 2
+
+
+def _validate_event_stream(raw: bytes, build_id: str) -> tuple[str, list[str]]:
+    """Validate only the bounded journal envelope, never inspect payload values."""
+    rows = raw.splitlines()
+    previous = 0
+    rendered: list[str] = []
+    for row in rows:
+        try:
+            value = json.loads(row.decode("ascii"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # A record that cannot be decoded as one JSON object violates the
+            # journal record envelope.  Keep content reserved for a valid
+            # envelope whose bounded fields contain an invalid value.
+            return "journal_schema", []
+        if not isinstance(value, dict):
+            return "journal_schema", []
+        required = {"sequence", "monotonic_ns", "operation", "kind", "outcome", "build_id"}
+        if required - set(value):
+            return "journal_schema", []
+        if (not isinstance(value["sequence"], int) or isinstance(value["sequence"], bool)
+                or value["sequence"] <= previous or value["build_id"] != build_id):
+            return "journal_schema", []
+        previous = value["sequence"]
+        rendered.append(row.decode("ascii"))
+    return "", rendered
+
+
+def _private_directory(path: Path) -> None:
+    """Create and validate one owner-only state directory without following links."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    details = path.lstat()
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+        raise OSError("private state directory is not a regular directory")
+    if details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o700:
+        raise OSError("private state directory is not owner-only")
+
+
+def _safe_private_file(path: Path) -> bool:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(details.st_mode) and not stat.S_ISLNK(details.st_mode) and details.st_uid == os.getuid() and stat.S_IMODE(details.st_mode) == 0o600
+
+
+def _safe_private_directory(path: Path) -> bool:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode) and details.st_uid == os.getuid() and stat.S_IMODE(details.st_mode) == 0o700
+
+
+def _new_capture_state(workdir: Path | None = None) -> dict[str, str | int]:
+    _private_directory(_STATE_ROOT)
+    capture_dir = _STATE_ROOT / f"{SESSION}-{secrets.token_hex(16)}"
+    capture_dir.mkdir(mode=0o700)
+    capture_path = capture_dir / "pane.raw"
+    descriptor = os.open(capture_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    # The event journal lives below the isolated Codex profile, not the stable
+    # profile or arbitrary project tree.  It is unique to this owned tmux
+    # session and selected project, so a verifier cannot accidentally inspect
+    # stale events from another live run.
+    if workdir is None:
+        # Unit callers that exercise state cleanup do not launch Codex.  Keep
+        # their synthetic observation beside the synthetic capture rather
+        # than touching a real profile; `start` always supplies a workdir.
+        event_root = capture_dir
+        project_fingerprint = "test"
+    else:
+        raw_home = Path(os.environ.get("HOME", ""))
+        if not raw_home.is_absolute() or raw_home.is_symlink():
+            raise OSError("current home is not a regular directory")
+        owner_home = raw_home.resolve()
+        if not owner_home.is_dir():
+            raise OSError("current home is not a regular directory")
+        isolated_home = owner_home / ".cortex-dev"
+        isolated_codex = isolated_home / ".codex"
+        _private_directory(isolated_home)
+        _private_directory(isolated_codex)
+        event_root = isolated_codex / ".cortex-mcp-events"
+        _private_directory(event_root)
+        project_fingerprint = hashlib.sha256(str(workdir.resolve()).encode("utf-8")).hexdigest()[:32]
+    event_dir = event_root / f"{SESSION}-{project_fingerprint}-{secrets.token_hex(12)}"
+    event_dir.mkdir(mode=0o700)
+    event_path = event_dir / "events.jsonl"
+    descriptor = os.open(event_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    observation_root = event_root.parent / ".cortex-mcp-observations" / "generations"
+    known_generations = []
+    session_snapshot: list[str] = []
+    raw_diagnostic = isolated_codex / ".cortex-raw-diagnostic" / "events.jsonl" if workdir is not None else capture_path
+    raw_inode = raw_diagnostic.stat().st_ino if raw_diagnostic.is_file() else 0
+    raw_offset = raw_diagnostic.stat().st_size if raw_diagnostic.is_file() else 0
+    if observation_root.is_dir() and not observation_root.is_symlink():
+        known_generations = sorted(item.name for item in observation_root.iterdir() if item.is_dir() and not item.is_symlink())
+    if workdir is not None:
+        session_root = isolated_codex / "sessions"
+        if session_root.is_dir() and not session_root.is_symlink():
+            session_snapshot = sorted(str(item.relative_to(isolated_codex)) for item in session_root.rglob("*.jsonl") if item.is_file() and not item.is_symlink())[:4096]
+    return {
+        "session": SESSION, "target": TARGET, "capture_dir": str(capture_dir),
+        "capture_path": str(capture_path), "event_dir": str(event_dir),
+        "event_path": str(event_path), "observation_root": str(observation_root),
+        "known_generations": json.dumps(known_generations), "session_snapshot": json.dumps(session_snapshot), "raw_diagnostic": str(raw_diagnostic), "raw_inode": raw_inode, "raw_offset": raw_offset, "selected_generation": "", "max_bytes": CAPTURE_MAX_BYTES,
+        "session_nonce": secrets.token_hex(32), "resume_session_id": "", "started_at_ns": time.time_ns(),
+        "binding_path": str(event_root.parent / ".cortex-live-binding.json"), "workdir": str(workdir.resolve()) if workdir is not None else "",
+        "workdir_fingerprint": hashlib.sha256(str(workdir.resolve()).encode("utf-8")).hexdigest() if workdir is not None else "",
+        "isolated_codex_fingerprint": hashlib.sha256(str(event_root.parent.resolve()).encode("utf-8")).hexdigest() if workdir is not None else "",
+    }
+
+
+def _write_state(state: dict[str, str | int]) -> None:
+    _private_directory(_STATE_ROOT)
+    temporary = _STATE_ROOT / f".session-{secrets.token_hex(8)}.tmp"
+    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        json.dump(state, file, sort_keys=True, separators=(",", ":"))
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, _STATE_FILE)
+    os.chmod(_STATE_FILE, 0o600)
+
+
+def _state() -> dict[str, str | int] | None:
+    if not _safe_private_file(_STATE_FILE):
+        return None
+    try:
+        value = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    expected = {"session", "target", "capture_dir", "capture_path", "event_dir", "event_path", "observation_root", "known_generations", "session_snapshot", "raw_diagnostic", "raw_inode", "raw_offset", "selected_generation", "max_bytes", "session_nonce", "resume_session_id", "started_at_ns", "binding_path", "workdir", "workdir_fingerprint", "isolated_codex_fingerprint"}
+    if not isinstance(value, dict) or set(value) != expected or value.get("session") != SESSION or value.get("target") != TARGET or value.get("max_bytes") != CAPTURE_MAX_BYTES or not isinstance(value.get("session_nonce"), str) or len(value["session_nonce"]) != 64:
+        return None
+    capture_dir = Path(str(value["capture_dir"]))
+    capture_path = Path(str(value["capture_path"]))
+    event_dir = Path(str(value["event_dir"]))
+    event_path = Path(str(value["event_path"]))
+    binding_path = Path(str(value["binding_path"]))
+    try:
+        root = _STATE_ROOT.resolve(strict=True)
+        candidate_dir = capture_dir.resolve(strict=True)
+    except OSError:
+        return None
+    if candidate_dir.parent != root or capture_path.parent != candidate_dir or not _safe_private_file(capture_path):
+        return None
+    if event_path.parent != event_dir or not _safe_private_directory(event_dir) or not _safe_private_file(event_path):
+        return None
+    if binding_path != Path(str(value["event_dir"])).parent.parent / ".cortex-live-binding.json":
+        return None
+    if binding_path.exists() and not _safe_private_file(binding_path):
+        return None
+    return value
+
+
+def _resume_session_id(previous: dict[str, str | int], workdir: Path) -> str | None:
+    """Extract one exact prior SessionStart identity from the owned journal."""
+    binding = Path(str(previous["binding_path"]))
+    if not _safe_private_file(binding):
+        return None
+    try:
+        value = json.loads(binding.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or value.get("source") != "cli" or not isinstance(value.get("session_id"), str):
+        return None
+    if (value.get("cwd") != str(workdir.resolve())
+            or value.get("workdir_fingerprint") != previous.get("workdir_fingerprint")
+            or value.get("isolated_codex_fingerprint") != previous.get("isolated_codex_fingerprint")
+            or value.get("session_nonce") != previous.get("session_nonce")):
+        return None
+    return value["session_id"]
+
+
+def _capture_binding(state: dict[str, str | int]) -> str:
+    """Correlate one coordinator SessionStart from the launch-bound raw stream."""
+    try:
+        codex_root = Path(str(state["binding_path"])).parent
+        raw_path = Path(str(state["raw_diagnostic"]))
+        details = raw_path.stat()
+        if (int(state["raw_inode"]) and details.st_ino != int(state["raw_inode"])) or details.st_size < int(state["raw_offset"]):
+            return "journal_rotation"
+        with raw_path.open("rb") as stream:
+            stream.seek(int(state["raw_offset"]))
+            raw = stream.read(CAPTURE_MAX_BYTES)
+        session_ids = set()
+        for line in raw.splitlines():
+            try:
+                row = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            payload = row.get("payload") if isinstance(row, dict) else None
+            if (isinstance(row, dict) and row.get("kind") == "lifecycle_payload" and isinstance(payload, dict)
+                    and payload.get("hook_event_name") == "SessionStart" and payload.get("source") in {"startup", "cli"}
+                    and isinstance(payload.get("session_id"), str) and payload.get("cwd") == state.get("workdir")
+                    and not payload.get("agent_id") and not payload.get("parent_session_id")):
+                session_ids.add(payload["session_id"])
+        if len(session_ids) != 1:
+            return "pending" if not session_ids else "ambiguous"
+        session_id = next(iter(session_ids))
+        session_root = codex_root / "sessions"
+        verified = False
+        for path in session_root.rglob("*.jsonl"):
+            if not _safe_private_file(path):
+                continue
+            with path.open(encoding="utf-8") as stream:
+                first = json.loads(next(stream))
+            payload = first.get("payload") if isinstance(first, dict) else None
+            if (isinstance(payload, dict) and payload.get("session_id") == session_id
+                    and payload.get("cwd") == state.get("workdir") and payload.get("source") == "cli"
+                    and not payload.get("parent_thread_id") and not payload.get("subagent")):
+                verified = True
+                break
+        if not verified:
+            return "metadata_mismatch"
+        binding = Path(str(state["binding_path"]))
+        record = {"session_id": session_id, "source": "cli", "cwd": str(state.get("workdir", "")),
+                  "workdir_fingerprint": state["workdir_fingerprint"],
+                  "isolated_codex_fingerprint": state["isolated_codex_fingerprint"],
+                  "session_nonce": state["session_nonce"]}
+        temporary = binding.with_suffix(".tmp")
+        temporary.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, binding)
+        os.chmod(binding, 0o600)
+        state["resume_session_id"] = session_id
+        _write_state(state)
+        return "captured"
+    except (OSError, StopIteration, UnicodeError, json.JSONDecodeError, ValueError):
+        return "invalid"
+
+def _discard_state() -> None:
+    """Delete only the helper's validated owner-only short-lived capture state."""
+    state = _state()
+    if state is None:
+        if _safe_private_file(_STATE_FILE):
+            _STATE_FILE.unlink(missing_ok=True)
+        return
+    capture_path = Path(str(state["capture_path"]))
+    capture_dir = Path(str(state["capture_dir"]))
+    event_path = Path(str(state["event_path"]))
+    event_dir = Path(str(state["event_dir"]))
+    capture_path.unlink(missing_ok=True)
+    event_path.unlink(missing_ok=True)
+    event_dir.rmdir()
+    capture_dir.rmdir()
+    _STATE_FILE.unlink(missing_ok=True)
+    try:
+        _STATE_ROOT.rmdir()
+    except OSError:
+        pass
+
+
+def _stop_pipe() -> None:
+    # This closes only the exact pane's output observer. It never supplies input.
+    tmux("pipe-pane", "-t", TARGET)
+
+
+def _launcher_command(launcher: Path, selected_workdir: Path, event_path: Path, *, resume_last: bool = False, resume_session_id: str | None = None) -> str:
+    # The packaged MCP process derives and claims its observation generation
+    # from the verified isolated candidate. No shell-provided event path is a
+    # supported host-to-plugin boundary.
+    if resume_last and resume_session_id:
+        codex_args = " resume " + shlex.quote(resume_session_id)
+    else:
+        codex_args = " resume --last" if resume_last else ""
+    return f"cd {shlex.quote(str(selected_workdir))} && CORTEX_LIVE_SMOKE_LAUNCH=1 {shlex.quote(str(launcher))}{codex_args}; status=$?; printf 'Cortex live-dev exit=%s\\n' \"$status\"; exit \"$status\""
+
+
+def _capture_pipe_command(capture_path: Path) -> str:
+    sink = Path(__file__).with_name("cortex-live-capture-sink").resolve()
+    return " ".join((shlex.quote(sys.executable), shlex.quote(str(sink)), "--path", shlex.quote(str(capture_path)), "--max-bytes", str(CAPTURE_MAX_BYTES)))
+
+
+def start(project_root: Path, workdir: Path | None = None, *, resume_last: bool = False) -> int:
+    launcher_root = project_root.resolve()
+    selected_workdir = (workdir or project_root).resolve()
+    if not selected_workdir.is_dir():
+        return fail("--workdir must name an existing directory")
+    launcher = launcher_root / "scripts" / "cortex-dev"
+    previous = _state() if resume_last else None
+    resume_id = _resume_session_id(previous, selected_workdir) if previous is not None else None
+    if resume_last and resume_id is None:
+        return fail("exact prior Codex session binding is unavailable for this workdir/profile")
+    if not resume_last:
+        raw_home = Path(os.environ.get("HOME", ""))
+        binding = raw_home / ".cortex-dev" / ".codex" / ".cortex-live-binding.json"
+        if _safe_private_file(binding):
+            binding.unlink(missing_ok=True)
+    if exists():
+        _stop_pipe()
+        tmux("kill-session", "-t", f"={SESSION}")
+    _discard_state()
+    # Establish the exact isolated profile before creating its nonce intent.
+    raw_home = Path(os.environ.get("HOME", ""))
+    isolated_home = raw_home.resolve() / ".cortex-dev"
+    isolated_codex = isolated_home / ".codex"
+    isolated_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    isolated_codex.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(isolated_home, 0o700); os.chmod(isolated_codex, 0o700)
+    try:
+        state = _new_capture_state(selected_workdir)
+        if resume_id is not None:
+            state["resume_session_id"] = resume_id
+            if previous is not None:
+                state["session_nonce"] = previous["session_nonce"]
+        _write_state(state)
+        launch_path = Path(str(state["binding_path"])).parent / ".cortex-live-launch.json"
+        launch_tmp = launch_path.with_suffix(".tmp")
+        binding_fingerprint = ""
+        binding_path = Path(str(state["binding_path"]))
+        if resume_id is not None and binding_path.is_file():
+            binding_fingerprint = hashlib.sha256(binding_path.read_bytes()).hexdigest()
+        launch_tmp.write_text(json.dumps({"cwd": str(selected_workdir), "session_nonce": state["session_nonce"], "mode": "resume" if resume_id is not None else "startup", "expected_binding_fingerprint": binding_fingerprint}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        os.chmod(launch_tmp, 0o600)
+        os.replace(launch_tmp, launch_path)
+        os.chmod(launch_path, 0o600)
+    except OSError:
+        _discard_state()
+        return fail("could not create owner-only live capture")
+
+    # Create the isolated profile and the nonce-bound intent before launch.
+    isolated_codex = Path(os.environ["HOME"]) / ".cortex-dev" / ".codex"
+    isolated_codex.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(isolated_codex.parent, 0o700); os.chmod(isolated_codex, 0o700)
+    intent = subprocess.run([sys.executable, "-B", str(project_root / "scripts" / "cortex_observation_generation.py"), "--code-home", str(isolated_codex), "--intent", "--session-nonce", str(state["session_nonce"])], text=True, capture_output=True, check=False)
+    if intent.returncode != 0:
+        _discard_state(); return fail("could not create nonce-bound live intent")
+
+    # Keep the pane at an ordinary interactive shell until the observer is
+    # attached.  The launcher is then entered as literal shell input and
+    # submitted with one standalone carriage return, matching the historical
+    # working tmux topology.  In particular, do not put a synthetic `read`
+    # gate or a `bash -c` launcher in the pane's initial process.
+    result = tmux("new-session", "-d", "-s", SESSION, "-c", str(selected_workdir), "bash")
+    if result.returncode != 0 or not exists():
+        _discard_state()
+        return fail("could not create the default-server live-dev session")
+    piped = tmux("pipe-pane", "-t", TARGET, _capture_pipe_command(Path(str(state["capture_path"]))))
+    if piped.returncode != 0:
+        tmux("kill-session", "-t", f"={SESSION}")
+        _discard_state()
+        return fail("could not attach owner-only output capture to the live session")
+    launcher_command = _launcher_command(launcher, selected_workdir, Path(str(state["event_path"])), resume_last=resume_last, resume_session_id=resume_id)
+    inserted = tmux("send-keys", "-l", "-t", TARGET, "--", launcher_command)
+    if inserted.returncode != 0:
+        _stop_pipe()
+        tmux("kill-session", "-t", f"={SESSION}")
+        _discard_state()
+        return fail("could not insert the fixed live-dev launcher")
+    launched = tmux("send-keys", "-t", TARGET, "C-m")
+    if launched.returncode != 0:
+        _stop_pipe()
+        tmux("kill-session", "-t", f"={SESSION}")
+        _discard_state()
+        return fail("could not submit the fixed live-dev launcher")
+    print(f"Cortex live-dev session={SESSION}")
+    print("Cortex live-dev server=default")
+    print("Cortex live-dev target=HOME/.cortex-dev/.codex")
+    print("Cortex live-dev capture=owner-only-output-stream")
+    print("Cortex live-dev events=owner-only-sanitized-stream")
+    print(f"Attach with: tmux -f /dev/null attach -t {SESSION}")
+    print(f"Observe with: {Path(__file__).name} capture")
+    print(f"Observe sanitized MCP events with: {Path(__file__).name} events")
+    print(f"Send a task prompt with: {Path(__file__).name} send --prompt-file FILE")
+    return 0
+
+
+def send_prompt(prompt_file: Path) -> int:
+    if not exists():
+        return transport_fail("session_missing")
+    try:
+        prompt = prompt_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return fail("cannot read prompt file as UTF-8")
+    if "\x00" in prompt:
+        return fail("prompt file contains NUL")
+    prompt = " ".join(prompt.split())
+    if not prompt:
+        return fail("prompt file must contain a non-empty task-specific prompt")
+    # Send the normalized prompt as bounded literal tmux key input.  A single
+    # large delivery is interpreted by Codex as collapsed paste; sub-threshold
+    # literal chunks avoid that acknowledgement state.  The explicit
+    # five-second drain below begins only after the complete insertion returns.
+    chunks = [prompt[index:index + PROMPT_CHUNK_CHARS] for index in range(0, len(prompt), PROMPT_CHUNK_CHARS)]
+    for index, chunk in enumerate(chunks):
+        inserted = tmux("send-keys", "-l", "-t", TARGET, "--", chunk)
+        if inserted.returncode != 0:
+            return transport_fail("target_mismatch" if not exists() else "send_keys_exit")
+        if index + 1 < len(chunks):
+            time.sleep(PROMPT_CHUNK_DRAIN_SECONDS)
+    if not exists():
+        return transport_fail("session_missing")
+    pane = tmux("display-message", "-p", "-t", TARGET, "#{pane_dead}")
+    if pane.returncode != 0:
+        return transport_fail("target_mismatch")
+    if pane.stdout.strip() == "1":
+        return transport_fail("pane_dead")
+    time.sleep(SUBMIT_DRAIN_SECONDS)
+    submitted = tmux("send-keys", "-t", TARGET, "Enter")
+    if submitted.returncode != 0:
+        return transport_fail("send_keys_exit")
+    print(f"Cortex live-dev prompt-inserted={prompt_file}")
+    print("Cortex live-dev wait-seconds=5")
+    print("Cortex live-dev submit-key-sent-count=1")
+    print("Cortex live-dev submit-key-sequence=Enter")
+    print("Cortex live-dev transport-only=yes")
+    return 0
+
+
+def send_enter() -> int:
+    """Send one explicit acknowledgement key; the operator/LLM owns the decision."""
+    if not exists():
+        return fail(f"session {SESSION!r} does not exist; run start first")
+    result = tmux("send-keys", "-t", TARGET, "Enter")
+    if result.returncode != 0:
+        return fail("could not send Enter to the exact live session")
+    print("Cortex live-dev enter-sent=Enter")
+    print("Cortex live-dev transport-only=yes")
+    return 0
+
+
+def _sanitize_terminal_observation(raw: bytes) -> str:
+    """Make a bounded PTY stream displayable; deliberately no readiness/error logic."""
+    value = raw.decode("utf-8", errors="replace")
+    value = _ANSI_OSC.sub("", value)
+    value = _ANSI_CSI.sub("", value)
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(char for char in value if char in "\n\t" or ord(char) >= 32)
+
+
+def capture(lines: int) -> int:
+    if lines < 1 or lines > CAPTURE_OUTPUT_MAX_LINES:
+        return fail(f"--lines must be between 1 and {CAPTURE_OUTPUT_MAX_LINES}")
+    state = _state()
+    if state is None:
+        return fail("owner-only output capture is unavailable; run start first")
+    capture_path = Path(str(state["capture_path"]))
+    try:
+        with capture_path.open("rb") as file:
+            file.seek(0, os.SEEK_END)
+            size = file.tell()
+            file.seek(max(0, size - CAPTURE_MAX_BYTES))
+            raw = file.read(CAPTURE_MAX_BYTES)
+    except OSError:
+        return fail("could not read owner-only output capture")
+    observation = _sanitize_terminal_observation(raw)
+    tail = observation.splitlines()[-lines:]
+    if tail:
+        print("\n".join(tail))
+    return 0
+
+
+def events(lines: int) -> int:
+    """Print a bounded exact-session MCP observation stream without judging it."""
+    if lines < 1 or lines > CAPTURE_OUTPUT_MAX_LINES:
+        return fail(f"--lines must be between 1 and {CAPTURE_OUTPUT_MAX_LINES}")
+    state = _state()
+    if state is None:
+        return fail("owner-only event observation is unavailable; run start first")
+    # Resolve only the exact nonce-bound lease generation; never scan or select newest.
+    # This is structural routing, not an acceptance/readiness parser: content
+    # is printed verbatim and the LLM remains responsible for interpretation.
+    try:
+        lease = Path(str(state["observation_root"])).parent / "lease.json"
+        if not _safe_private_file(lease): raise OSError
+        code_home = lease.parent.parent
+        owner_home = Path(os.environ.get("HOME", ""))
+        if not owner_home.is_absolute() or owner_home.is_symlink(): raise OSError
+        source_root = Path(__file__).resolve().parent.parent
+        # A private JSON file is not itself trust. Reuse the canonical receipt
+        # verifier used by the launcher: it proves the isolated target, signed
+        # receipt relation, exact stamped path/version/build, and complete
+        # installed plugin payload parity before its identity is allowed to
+        # select a lease or open an event file.
+        source_scripts = str(source_root / "scripts")
+        if source_scripts not in sys.path:
+            # The helper is also importable in source tests, where executing
+            # this extension-less script does not necessarily populate
+            # ``sys.path[0]`` with its own directory.  This is the canonical
+            # verifier's source location, never a candidate/source fallback.
+            sys.path.insert(0, source_scripts)
+        from cortex_candidate_receipt import CandidateReceiptError, read_runtime_verified_receipt  # noqa: PLC0415
+        from cortex_candidate_location import CandidateLocationError, from_verified_installed_receipt  # noqa: PLC0415
+        receipt = read_runtime_verified_receipt(
+            source_root=source_root, owner_home=owner_home,
+            isolated_home=owner_home / ".cortex-dev",
+            isolated_codex_home=code_home,
+        )
+        location = from_verified_installed_receipt(receipt, requested_root=receipt["candidate_path"])
+        candidate_path = str(location.plugin_root)
+        candidate_version = str(receipt["candidate_version"])
+        build_id = str(receipt["build_id"])
+        sys.path.insert(0, str(location.plugin_root / "scripts"))
+        from cortex_runtime.observation_generation import ObservationGenerationError, verify_lease_record  # noqa: PLC0415
+        from cortex import PUBLIC_TOOLS  # noqa: PLC0415
+        from cortex_runtime.mcp_api import catalogue_identity  # noqa: PLC0415
+        identity = catalogue_identity(PUBLIC_TOOLS)
+        try:
+            value = verify_lease_record(json.loads(lease.read_text(encoding="ascii")), session_nonce=str(state["session_nonce"]), candidate_path=candidate_path, build_id=build_id, candidate_version=candidate_version, catalogue_count=int(identity["catalogue_count"]), catalogue_digest=str(identity["catalogue_digest"]), allow_revoked=True)
+        except ObservationGenerationError:
+            # Lease identity/state failures are a closed lease category.  Do
+            # not let a stale nonce, signature, or lease shape collapse into
+            # the observer's generic unknown branch.
+            return fail_stage("lease")
+        generation = Path(str(state["observation_root"])) / str(value["generation_id"])
+        # The MCP process has not claimed the lease generation while the
+        # interactive Codex trust/composer is still initializing.  That is a
+        # normal unavailable-observation state, not an opaque verifier error.
+        if not generation.exists(): return fail_stage("journal_absent")
+        if not _safe_private_directory(generation): return fail_stage("generation")
+        request_path = generation / "request.json"
+        if not request_path.exists(): return fail_stage("journal_absent")
+        if not _safe_private_file(request_path): return fail_stage("generation")
+        # Re-open lease-owned control records with no-follow semantics after
+        # their lstat validation.  This closes the replacement window between
+        # validation and the event stream read; ready.json is optional while
+        # the ordinary MCP process is still initializing.
+        for control_path in (request_path, generation / "ready.json"):
+            if control_path.exists() and not _safe_private_file(control_path): return fail_stage("generation")
+            if control_path.exists():
+                descriptor = os.open(control_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                os.close(descriptor)
+        event_path = generation / "events.jsonl"
+        if not event_path.exists(): return fail_stage("journal_absent")
+        if not _safe_private_file(event_path): return fail_stage("journal_permissions")
+    # Imports are intentionally inside the trust boundary: a receipt failure
+    # happens before the packaged runtime exceptions exist in this process.
+    # Keep that failure indistinguishable from any other unavailable private
+    # observation source; this command must not leak verifier diagnostics.
+    except FileNotFoundError:
+        return fail_stage("journal_absent")
+    except PermissionError:
+        return fail_stage("journal_permissions")
+    except ImportError:
+        return fail_stage("runtime_import")
+    except (ValueError, KeyError):
+        return fail_stage("candidate_topology")
+    except Exception:  # noqa: BLE001
+        # Do not surface verifier messages, paths, or native values. The
+        # coordinator only needs a bounded category to decide whether the
+        # observation stream is usable.
+        return fail_stage("unknown")
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(event_path, flags)
+        with os.fdopen(descriptor, "rb") as file:
+            fcntl.flock(file.fileno(), fcntl.LOCK_SH)
+            file.seek(0, os.SEEK_END)
+            size = file.tell()
+            offset = max(0, size - CAPTURE_MAX_BYTES)
+            file.seek(offset)
+            raw = file.read(CAPTURE_MAX_BYTES)
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+        # A bounded tail may begin in the middle of an otherwise valid JSONL
+        # record.  Only complete records belong to the observable window.
+        if offset:
+            separator = raw.find(b"\n")
+            raw = b"" if separator < 0 else raw[separator + 1:]
+    except FileNotFoundError:
+        return fail_stage("journal_absent")
+    except PermissionError:
+        return fail_stage("journal_permissions")
+    except OSError:
+        return fail_stage("generation")
+    stage, validated = _validate_event_stream(raw, build_id)
+    if stage:
+        return fail_stage(stage)
+    tail = validated[-lines:]
+    if tail:
+        print("\n".join(tail))
+    return 0
+
+
+def status() -> int:
+    if not exists():
+        print(f"Cortex live-dev session={SESSION} has-session=no")
+        return 1
+    pane = tmux("display-message", "-p", "-t", TARGET, "#{pane_current_command}")
+    dead = tmux("display-message", "-p", "-t", TARGET, "#{pane_dead}")
+    print(f"Cortex live-dev session={SESSION} has-session=yes")
+    print(f"Cortex live-dev pane_current_command={pane.stdout.strip() or 'unknown'}")
+    print(f"Cortex live-dev pane_dead={dead.stdout.strip() or 'unknown'}")
+    state = _state()
+    print(f"Cortex live-dev capture={'available' if state else 'unavailable'}")
+    print(f"Cortex live-dev events={'available' if state else 'unavailable'}")
+    if state:
+        print(f"Cortex live-dev resume-binding={'captured' if _safe_private_file(Path(str(state['binding_path']))) else 'pending'}")
+        diagnostic = Path(str(state["binding_path"])).parent / ".cortex-live-binding-diagnostic.json"
+        if _safe_private_file(diagnostic):
+            try:
+                value = json.loads(diagnostic.read_text(encoding="utf-8"))
+                print(f"Cortex live-dev resume-binding-reason={value.get('reason', 'unknown') if value.get('reason') in {'attempt', 'captured'} else 'unknown'}")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                print("Cortex live-dev resume-binding-reason=unknown")
+    if state and state.get("resume_session_id"):
+        observed = False
+        try:
+            receipt = Path(str(state["binding_path"])).parent / ".cortex-live-launch.json"
+            value = json.loads(receipt.read_text(encoding="utf-8"))
+            pane = tmux("display-message", "-p", "-t", TARGET, "#{pane_current_command}")
+            dead = tmux("display-message", "-p", "-t", TARGET, "#{pane_dead}")
+            observed = (
+                value.get("mode") == "resume"
+                and value.get("active") is True
+                and bool(state.get("resume_session_id"))
+                and pane.returncode == 0 and pane.stdout.strip() == "codex"
+                and dead.returncode == 0 and dead.stdout.strip() == "0"
+            )
+        except (OSError, StopIteration, UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        print(f"Cortex live-dev resume-identity={'verified' if observed else 'pending-or-mismatch'}")
+    return 0
+
+
+def stop(interrupt: bool) -> int:
+    state = _state()
+    if state is not None:
+        isolated_codex = Path(os.environ.get("HOME", "")) / ".cortex-dev" / ".codex"
+        subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("cortex_observation_generation.py")), "--code-home", str(isolated_codex), "--revoke", "--session-nonce", str(state["session_nonce"])], text=True, capture_output=True, check=False)
+    if not exists():
+        # Keep the nonce-bound capture and event state for one final
+        # read-only historical observation.  The next start atomically clears
+        # this validated state before creating a new session.
+        print(f"Cortex live-dev session={SESSION} has-session=no")
+        return 0
+    _stop_pipe()
+    tmux("send-keys", "-t", TARGET, "C-c" if interrupt else "C-d")
+    result = tmux("kill-session", "-t", f"={SESSION}")
+    if result.returncode != 0 or exists():
+        return fail("could not remove the owned live-dev session")
+    # Revocation ends active authority, but cleanup must not erase the bounded
+    # audit stream before `events` can inspect the completed session.  A later
+    # start removes this exact validated state before minting a new lease.
+    print(f"Cortex live-dev session={SESSION} stopped")
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+    start_cmd = sub.add_parser("start", help="create session, attach output capture, and launch isolated cortex-dev")
+    start_cmd.add_argument("--workdir", type=Path, help="canonical Codex working directory")
+    start_cmd.add_argument("--resume-last", action="store_true", help="resume the most recent ordinary interactive Codex session for this workdir")
+    send = sub.add_parser("send", help="send one task-specific prompt and then Enter")
+    send.add_argument("--prompt-file", type=Path, required=True)
+    sub.add_parser("enter", help="send exactly one standalone Enter key to the exact session")
+    cap = sub.add_parser("capture", help="read bounded owner-only output-stream observation")
+    cap.add_argument("--lines", type=int, default=200)
+    events_cmd = sub.add_parser("events", help="read bounded owner-only sanitized MCP event observation")
+    events_cmd.add_argument("--lines", type=int, default=200)
+    sub.add_parser("status", help="show exact-session, pane, and output-capture state")
+    stop_cmd = sub.add_parser("stop", help="stop output capture and remove exact session")
+    stop_cmd.add_argument("--interrupt", action="store_true", help="send C-c before cleanup")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    root = Path(__file__).resolve().parent.parent
+    if args.command == "start":
+        return start(root, args.workdir, resume_last=args.resume_last)
+    if args.command == "send":
+        return send_prompt(args.prompt_file)
+    if args.command == "enter":
+        return send_enter()
+    if args.command == "capture":
+        return capture(args.lines)
+    if args.command == "events":
+        return events(args.lines)
+    if args.command == "status":
+        return status()
+    return stop(args.interrupt)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

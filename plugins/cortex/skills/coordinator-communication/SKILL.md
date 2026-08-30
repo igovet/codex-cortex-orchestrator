@@ -1,6 +1,6 @@
 ---
 name: coordinator-communication
-description: Mandatory coordinator-to-user communication policy for Cortex V12. Use with the host-supplied orchestrator and cortex-control skills after explicit Cortex activation; it does not add runtime dispatch, tool authority, or a worker policy.
+description: Mandatory coordinator-to-user communication policy for Cortex V12. After explicit activation, render no task-specific question before the orchestrator skill is fully loaded and the matching durable clarification hold succeeds; never preview a pending question in commentary. Use with the host-supplied orchestrator and cortex-control skills; it does not add runtime dispatch, tool authority, or a worker policy.
 ---
 
 # Coordinator communication
@@ -18,7 +18,7 @@ Keep every coordinator-to-worker message, inter-worker message, native worker
 transcript, worker-authored report narrative, decision normalization, ledger
 prose, and durable human-view source content in English. Canonical
 product-facing reports and handoffs may carry one optional unchanged
-`source_text` value as inert source material; existing task/decision original
+optional unchanged source value as inert source material; existing task/decision original
 user text remains in its designated field. This policy governs the separate
 coordinator-to-user surface; it never authorizes translating or exposing
 durable internal content.
@@ -46,7 +46,8 @@ assembly, or worker-recovery notices merely to show that work is still running.
 
 ## Detail, safety, and decisions
 
-Default-hide raw task/delegation/report/decision IDs, digests, cursors, ledger
+Default-hide raw task/delegation/report/decision IDs, digests, continuation
+tokens, ledger
 and governance jargon, private paths, raw diagnostics, and raw worker output.
 Reveal only the smallest relevant technical detail when the user asks for it,
 asks for diagnostics or architecture, or already uses the relevant term. Start
@@ -58,7 +59,10 @@ rules are satisfied.
 Ask one coherent, actionable question when a genuine user decision is needed.
 State the decision, its material consequence, and the available safe choices;
 do not disguise a choice as a status update or ask the user to interpret raw
-ledger evidence. For a blocker, state what is blocked, the known impact, the
+ledger evidence. When that question intentionally pauses orchestration, render
+its literal question and choices exactly once, in the final answer only.
+Commentary may state that a decision hold is being prepared, but must not quote,
+preview, paraphrase, or repeat the question or its choices. For a blocker, state what is blocked, the known impact, the
 safe next action, and exactly what user input or authority would unblock it.
 Do not claim a check passed without evidence, invent a cause, expose secrets or
 private diagnostics, or let friendly wording weaken ordinary approval,

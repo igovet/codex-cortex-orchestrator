@@ -25,6 +25,17 @@ global_config_backup_created="false"
 original_global_subagent_model_state=""
 original_global_config_mode=""
 cortex_python=""
+candidate_root=""
+candidate_version=""
+
+# `cortex-dev` sets these three values only after it has established the
+# lexical, non-symlinked `$HOME/.cortex-dev/.codex` boundary.  Normal source
+# sync remains usable for isolated test homes, but it must never attempt to
+# repair a marketplace registration unless this explicit live-dev boundary is
+# present and re-validated below.
+isolated_reconcile_enabled="${CORTEX_ISOLATED_MARKETPLACE_RECONCILE:-}"
+isolated_owner_home="${CORTEX_ISOLATED_DEV_OWNER_HOME:-}"
+isolated_expected_codex_home="${CORTEX_ISOLATED_DEV_CODEX_HOME:-}"
 
 usage() {
   cat <<'EOF'
@@ -96,26 +107,17 @@ print(sys.executable)' 2>&1)"; then
 
 validate_roots() {
   local validated
-  validated="$("${cortex_python}" -B - "${home_root}" "${codex_home}" <<'PY'
-import os, stat, sys
+  validated="$("${cortex_python}" -B - "${home_root}" "${codex_home}" "${script_dir}" <<'PY'
+import sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+from cortex_payload_manifest import RuntimePayloadError, validated_managed_directory
 
 def validate(value, label, must_exist):
-    path = Path(value).expanduser().absolute()
-    current = Path(path.anchor)
-    for part in path.parts[1:]:
-        current /= part
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISLNK(info.st_mode):
-            raise SystemExit(f"error: {label} must not traverse symlinks: {current}")
-    if must_exist and not path.is_dir():
-        raise SystemExit(f"error: {label} must be an existing directory: {path}")
-    if path.exists() and not path.is_dir():
-        raise SystemExit(f"error: {label} must be a directory: {path}")
-    return path
+    try:
+        return validated_managed_directory(Path(value), label, allow_missing=not must_exist)
+    except RuntimePayloadError as exc:
+        raise SystemExit(f"error: {exc}") from None
 
 print(validate(sys.argv[1], "HOME", True))
 print(validate(sys.argv[2], "CODEX_HOME", False))
@@ -132,6 +134,111 @@ validate_global_config_path() {
     echo "error: refusing to inspect non-regular Codex config: ${config_path}" >&2
     return 1
   }
+}
+
+validate_isolated_reconcile_target() {
+  [[ "${isolated_reconcile_enabled}" == "1" ]] || return 1
+  [[ -n "${isolated_owner_home}" && -n "${isolated_expected_codex_home}" ]] || {
+    echo "error: isolated marketplace reconciliation is missing its trusted target boundary" >&2
+    return 1
+  }
+  "${cortex_python}" -B - "${home_root}" "${codex_home}" "${isolated_owner_home}" "${isolated_expected_codex_home}" "${script_dir}" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[5])
+from cortex_payload_manifest import RuntimePayloadError, validated_managed_directory
+
+home, codex_home, owner_home, expected_codex = (Path(value) for value in sys.argv[1:5])
+try:
+    home = validated_managed_directory(home, "isolated HOME")
+    codex_home = validated_managed_directory(codex_home, "isolated CODEX_HOME")
+    owner_home = validated_managed_directory(owner_home, "isolated owner HOME")
+    expected_codex = validated_managed_directory(expected_codex, "isolated expected CODEX_HOME")
+except RuntimePayloadError as exc:
+    raise SystemExit(f"error: {exc}") from None
+
+expected_home = owner_home / ".cortex-dev"
+if home != expected_home or codex_home != expected_home / ".codex" or expected_codex != codex_home:
+    raise SystemExit("error: marketplace reconciliation is allowed only for the exact isolated $HOME/.cortex-dev/.codex target")
+PY
+}
+
+marketplace_registration_state() {
+  local marketplace_json="$1"
+  CORTEX_MARKETPLACE_LIST_JSON="${marketplace_json}" "${cortex_python}" -B - "${marketplace_root}" "${marketplace_name}" <<'PY'
+import json
+import os
+import sys
+
+expected_root, expected_name = sys.argv[1:]
+try:
+    payload = json.loads(os.environ.pop("CORTEX_MARKETPLACE_LIST_JSON"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"error: unable to parse isolated marketplace list: {exc}") from None
+rows = payload.get("marketplaces") if isinstance(payload, dict) else payload
+if not isinstance(rows, list):
+    raise SystemExit("error: isolated marketplace list has no marketplace array")
+matches = [row for row in rows if isinstance(row, dict) and row.get("name") == expected_name]
+if not matches:
+    print("missing")
+    raise SystemExit(0)
+if len(matches) != 1:
+    raise SystemExit("error: isolated marketplace list contains duplicate Cortex registrations")
+root = matches[0].get("root")
+if not isinstance(root, str) or not root:
+    raise SystemExit("error: isolated Cortex marketplace registration has no local root")
+# Do not resolve the returned path: a symlinked managed ancestor is not an
+# equivalent candidate source.  The freshly staged candidate was already
+# validated lexically, so equality is deliberately exact.
+print("same" if root == expected_root else "different")
+PY
+}
+
+reconcile_isolated_marketplace() {
+  # This is the only path that repairs a stale marketplace. It is intentionally
+  # unavailable to ordinary sync, check, and dry-run workflows so it cannot
+  # mutate a stable profile merely because an environment variable was set.
+  if [[ "${isolated_reconcile_enabled}" != "1" ]]; then
+    run codex plugin marketplace add "${marketplace_root}" --json >/dev/null
+    return
+  fi
+  validate_isolated_reconcile_target || return 1
+  if [[ "${mode}" == "check" ]]; then
+    echo "error: isolated marketplace reconciliation requires install mode" >&2
+    return 1
+  fi
+  if [[ "${mode}" == "dry-run" ]]; then
+    echo "would reconcile isolated Cortex marketplace at ${marketplace_root}"
+    return
+  fi
+  local listed state
+  listed="$(codex plugin marketplace list --json)" || {
+    echo "error: cannot inspect the isolated Cortex marketplace registration" >&2
+    return 1
+  }
+  state="$(marketplace_registration_state "${listed}")" || return 1
+  case "${state}" in
+    same)
+      echo "isolated Cortex marketplace source is current"
+      ;;
+    missing)
+      run codex plugin marketplace add "${marketplace_root}" --json >/dev/null || return 1
+      echo "registered isolated Cortex marketplace candidate"
+      ;;
+    different)
+      # The named CLI removal changes only the one Cortex registration.  It
+      # does not rewrite unrelated isolated marketplaces and never consults
+      # the user's stable Codex home.
+      run codex plugin marketplace remove "${marketplace_name}" --json >/dev/null || return 1
+      run codex plugin marketplace add "${marketplace_root}" --json >/dev/null || return 1
+      echo "replaced stale isolated Cortex marketplace candidate"
+      ;;
+    *)
+      echo "error: unexpected isolated marketplace registration state" >&2
+      return 1
+      ;;
+  esac
 }
 
 validate_cleanup_target() {
@@ -208,44 +315,86 @@ sync_model_routing_catalog() {
   fi
 }
 
-refresh_plugin_cache_version() {
-  # An install must land in a fresh Codex cache directory even when the
-  # semantic release version is unchanged.  Check and dry-run are strictly
-  # read-only, so they deliberately validate the manifest as it stands.
+prepare_candidate() {
   [[ "${mode}" == "install" ]] || return 0
-  "${cortex_python}" -B - "${plugin_source}/.codex-plugin/plugin.json" <<'PY'
-import json
-import os
-import re
+  local staging_root="${codex_home}/.cortex-candidates"
+  local temporary
+  if ! "${cortex_python}" -B - "${staging_root}" "${script_dir}" <<'PY'
 import sys
-import tempfile
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-path = Path(sys.argv[1])
-payload = json.loads(path.read_text(encoding="utf-8"))
-version = payload.get("version")
-match = re.fullmatch(r"(12\.1\.0\+codex\.)(\d{14})", version if isinstance(version, str) else "")
-if match is None:
-    raise SystemExit("error: plugin manifest version must be 12.1.0+codex.YYYYMMDDHHMMSS")
-previous = datetime.strptime(match.group(2), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-now = datetime.now(timezone.utc).replace(microsecond=0)
-next_value = max(now, previous + timedelta(seconds=1))
-payload["version"] = match.group(1) + next_value.strftime("%Y%m%d%H%M%S")
-encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-descriptor, temporary = tempfile.mkstemp(prefix=".plugin.json.", dir=path.parent)
+sys.path.insert(0, sys.argv[2])
+from cortex_payload_manifest import RuntimePayloadError, ensure_managed_directory
 try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(encoded)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, path.stat().st_mode & 0o777)
-    os.replace(temporary, path)
-    print(f"refreshed Cortex cache version: {payload['version']}")
-finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
+    ensure_managed_directory(Path(sys.argv[1]), "Cortex candidate staging root")
+except RuntimePayloadError as exc:
+    raise SystemExit(f"error: {exc}") from None
 PY
+  then
+    return 1
+  fi
+  chmod 700 -- "${staging_root}"
+  temporary="$(mktemp -d "${staging_root}/.candidate.XXXXXX")"
+  if ! "${cortex_python}" -B - "${project_dir}" "${temporary}" <<'PY'
+import sys
+from pathlib import Path
+root, destination = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root / "scripts"))
+from cortex_release_candidate import build_source_candidate, validate_candidate_tree  # noqa: E402
+manifest = build_source_candidate(root, destination)
+validate_candidate_tree(destination, manifest)
+print(destination / "plugins/cortex/.codex-plugin/plugin.json")
+PY
+  then
+    rm -rf -- "${temporary}"
+    return 1
+  fi
+  candidate_version="$(${cortex_python} -B - "${temporary}/plugins/cortex/.codex-plugin/plugin.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
+PY
+)"
+  [[ "${candidate_version}" =~ ^1\.12\.1\+codex\.sha256\.[0-9a-f]{16}$ ]] || {
+    rm -rf -- "${temporary}"
+    echo "error: staged candidate has invalid content-addressed version" >&2
+    return 1
+  }
+  candidate_root="${staging_root}/${candidate_version}"
+  if ! "${cortex_python}" -B - "${candidate_root}" "${script_dir}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from cortex_payload_manifest import RuntimePayloadError, validated_managed_directory
+try:
+    validated_managed_directory(Path(sys.argv[1]), "Cortex candidate version root", allow_missing=True)
+except RuntimePayloadError as exc:
+    raise SystemExit(f"error: {exc}") from None
+PY
+  then
+    rm -rf -- "${temporary}"
+    return 1
+  fi
+  if [[ -e "${candidate_root}" ]]; then
+    if ! "${cortex_python}" -B - "${project_dir}" "${candidate_root}" "${temporary}" <<'PY'
+import sys
+from pathlib import Path
+root, installed = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root / "scripts"))
+from cortex_release_candidate import plugin_tree_digest, source_candidate_manifest  # noqa: E402
+manifest = source_candidate_manifest(root)
+if plugin_tree_digest(installed / "plugins/cortex", manifest) != plugin_tree_digest(Path(sys.argv[3]) / "plugins/cortex", manifest):
+    raise SystemExit("candidate identity collision or tampered immutable staging path")
+PY
+    then
+      rm -rf -- "${temporary}"
+      return 1
+    fi
+    rm -rf -- "${temporary}"
+  else
+    mv -- "${temporary}" "${candidate_root}"
+  fi
+  marketplace_root="${candidate_root}"
+  marketplace_manifest="${marketplace_root}/.agents/plugins/marketplace.json"
+  echo "staged Cortex candidate: ${candidate_version}"
 }
 
 prepare_backup_directory() {
@@ -275,36 +424,65 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != base_version or base_version != "12.1.0":
-    raise SystemExit("plugin/server semantic version must match the 12.1.0 release manifest")
+if module.SERVER_VERSION != base_version or base_version != "1.12.1":
+    raise SystemExit("plugin/server semantic version must match the 1.12.1 release manifest")
 PY
 }
 
 plugin_version() {
+  if [[ -n "${candidate_version}" ]]; then
+    printf '%s\n' "${candidate_version}"
+    return
+  fi
   "${cortex_python}" -B - "${plugin_source}/.codex-plugin/plugin.json" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
 PY
 }
 
+reject_cache_collision() {
+  local installed="${codex_home}/plugins/cache/${marketplace_name}/${plugin_name}/$(plugin_version)"
+  "${cortex_python}" -B - "${project_dir}" "${installed}" "${script_dir}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+from cortex_payload_manifest import RuntimePayloadError, validated_managed_directory
+try:
+    root = validated_managed_directory(Path(sys.argv[1]), "repository root")
+    installed = validated_managed_directory(Path(sys.argv[2]), "installed candidate version root", allow_missing=True)
+except RuntimePayloadError as exc:
+    raise SystemExit(f"error: {exc}") from None
+if not installed.exists():
+    raise SystemExit(0)
+sys.path.insert(0, str(root / "scripts"))
+from cortex_release_candidate import plugin_tree_digest, source_candidate_manifest
+manifest = source_candidate_manifest(root)
+if not installed.is_dir() or plugin_tree_digest(installed, manifest) != manifest.plugin_digest(root):
+    raise SystemExit("error: immutable cache identity collision or tampered candidate; refusing overwrite")
+PY
+}
+
 content_matches() {
   local installed="${codex_home}/plugins/cache/${marketplace_name}/${plugin_name}/$(plugin_version)"
-  [[ -d "${installed}" ]] || return 1
-  "${cortex_python}" -B - "${project_dir}" "${installed}" <<'PY'
+  "${cortex_python}" -B - "${project_dir}" "${installed}" "${script_dir}" <<'PY'
 import hashlib
 import stat
 import sys
 import tempfile
 from pathlib import Path
 
-root = Path(sys.argv[1]).resolve()
-installed = Path(sys.argv[2]).resolve()
+sys.path.insert(0, sys.argv[3])
+from cortex_payload_manifest import RuntimePayloadError, validated_managed_directory
+try:
+    root = validated_managed_directory(Path(sys.argv[1]), "repository root")
+    installed = validated_managed_directory(Path(sys.argv[2]), "installed candidate version root")
+except RuntimePayloadError as exc:
+    raise SystemExit(f"error: {exc}") from None
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(root / "scripts"))
 from cortex_release_candidate import CandidateError, build_source_candidate, validate_candidate_tree
 
 RETIRED_PATHS = {
-    Path("hooks"),
     Path("scripts/cortex_hook.py"),
     Path("scripts/cortex-launcher"),
     Path("scripts/cortex_runtime/core"),
@@ -339,6 +517,28 @@ try:
 except (CandidateError, OSError, ValueError):
     raise SystemExit(1)
 PY
+}
+
+write_isolated_candidate_receipt() {
+  # The launcher never guesses an installed cache location.  Only the supported
+  # isolated reconciliation path writes this receipt, after native installation
+  # and exact source/candidate parity have both succeeded.
+  [[ "${mode}" == "install" && "${isolated_reconcile_enabled}" == "1" ]] || return 0
+  [[ -n "${candidate_version}" ]] || {
+    echo "error: isolated candidate receipt requires a stamped candidate version" >&2
+    return 1
+  }
+  validate_isolated_reconcile_target || return 1
+  "${cortex_python}" -B "${script_dir}/cortex_candidate_receipt.py" write \
+    --source-root "${project_dir}" \
+    --owner-home "${isolated_owner_home}" \
+    --isolated-home "${home_root}" \
+    --isolated-codex-home "${codex_home}" \
+    --candidate-version "${candidate_version}" >/dev/null || {
+      echo "error: isolated candidate receipt was not committed; refusing to authorize Cortex launch" >&2
+      return 1
+    }
+  echo "verified isolated Cortex candidate receipt"
 }
 
 capture_cortex_mcp_approval_override() {
@@ -455,6 +655,7 @@ backup_global_config_for_update() {
 
 check_global_subagent_model() {
   capture_global_subagent_model || return 1
+  reject_cache_collision || return 1
   if [[ "${global_subagent_model_state}" != "gpt-5.6-luna" ]]; then
     echo "outdated Codex global config: agents.default_subagent_model must be gpt-5.6-luna (found ${global_subagent_model_state})" >&2
     return 1
@@ -828,22 +1029,33 @@ install_or_check() {
   original_global_subagent_model_state="${global_subagent_model_state}"
   original_global_config_mode="${global_config_mode}"
   backup_global_config_for_update || return 1
-  if ! run codex plugin marketplace add "${marketplace_root}" --json >/dev/null; then
+  if ! reconcile_isolated_marketplace; then
     restore_cortex_mcp_approval_override || true
     return 1
   fi
-  if [[ -n "${version}" ]] && ! run codex plugin remove "${plugin_name}@${marketplace_name}" --json >/dev/null; then
-    restore_cortex_mcp_approval_override || true
-    return 1
-  fi
-  if ! run codex plugin add "${plugin_name}@${marketplace_name}" --json >/dev/null; then
-    restore_cortex_mcp_approval_override || true
-    return 1
+  # A matching content-addressed cache path is immutable: keep it and avoid
+  # remove/reinstall churn.  Only an absent or different installed version
+  # may go through the native replacement flow.
+  if [[ "${version}" == "${expected_version}" ]]; then
+    reject_cache_collision || {
+      restore_cortex_mcp_approval_override || true
+      return 1
+    }
+  else
+    if [[ -n "${version}" ]] && ! run codex plugin remove "${plugin_name}@${marketplace_name}" --json >/dev/null; then
+      restore_cortex_mcp_approval_override || true
+      return 1
+    fi
+    if ! run codex plugin add "${plugin_name}@${marketplace_name}" --json >/dev/null; then
+      restore_cortex_mcp_approval_override || true
+      return 1
+    fi
   fi
   ensure_global_subagent_model || return 1
   ensure_multi_agent_v2 || return 1
   ensure_cortex_mcp_approval_mode || return 1
   [[ "${mode}" == "dry-run" ]] || content_matches || { echo "error: installed plugin content differs from source" >&2; return 1; }
+  write_isolated_candidate_receipt || return 1
   if [[ "${mode}" == "dry-run" ]]; then
     echo "would install ${plugin_name}@${marketplace_name} from ${marketplace_root}"
   else
@@ -856,8 +1068,8 @@ validate_roots
 validate_global_config_path
 clean_plugin_bytecode
 sync_model_routing_catalog
-refresh_plugin_cache_version
 validate_sources
+prepare_candidate
 status=0
 install_or_check || status=1
 [[ "${status}" -eq 0 ]] || exit "${status}"

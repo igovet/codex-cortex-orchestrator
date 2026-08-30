@@ -41,7 +41,7 @@ criteria, and verification plan.
 | Outcome assignments and coverage | `delegation_outcome_assignments`, `report_contract_coverage` | Delegation/report writes; `inspect_task` aggregate/conformance projections | Per-revision owned/contributing/evidence-producing responsibility and immutable finalized-report coverage claims with verification details; used to identify missing, partial, unverified, stale, and contradictory active evidence, never a backend gate |
 | Worker evidence | `reports`, `report_chunks`, `report_usage` | `submit_report`; compact task/delegation references; bounded `read_reports` body/chunk reads | Immutable progress/result/synthesis/plan content, manifest/digest, review policy, assembly state, chunks, and quotas; private and potentially sensitive |
 | Execution-outcome projection | Derived from finalized rows in `reports` | `inspect_task`; `submit_governance_closure` result | Exact `execution_outcome` fields are `evidence_status`, `finalized_report_count`, `completed_report_count`, and `outcome`: every finalized report contributes to the first count, while only semantically valid canonical finalized results determine the completed count and nullable `completed`/`incomplete` outcome, independently of advisory closure bookkeeping and without claiming native lifecycle |
-| User decision evidence | `user_decisions` | `record_user_decision`; task/governance references and decision views | Append-only coordinator-asserted ordinary-chat response, neutral prompt, exact original-language response, language, subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
+| User decision evidence | `user_decisions` | narrow decision record operations; task/governance references and decision views | Append-only coordinator-asserted ordinary-chat response, neutral prompt, exact original-language response, language, subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
 | Mode history | `governance_assessments` | `set_governance_mode`; governance/task reads | Append-only advisory model/user-override assessments |
 | Initiative projection | `initiatives` | `record_initiative` and initiative closure | Current project-level goal/risk/status/notes projection |
 | Initiative history | `initiative_revisions` | Initiative writes/closure; governance reads | Append-only revisions including link state |
@@ -112,7 +112,8 @@ not storage corruption or lifecycle rejection.
 
 ## Idempotency
 
-The first mutation may omit an operation-scoped idempotency key. Its receipt
+Every mutation requires a caller-generated operation-scoped idempotency key. Its
+exact key is retained for
 returns the server-issued key, and a normalized payload digest is stored with
 the original JSON result. An exact replay returns that result and marks it
 replayed; different content for the same operation/key

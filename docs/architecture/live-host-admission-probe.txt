@@ -1,0 +1,19 @@
+You are already inside the real isolated live-dev Codex session. Do not start
+another tmux session, do not run cortex-dev, do not inspect the repository, and
+do not run shell or validation commands. Do not mutate Cortex state: do not
+open a task, create a delegation, ask a question, record an answer or decision,
+publish anything, or close anything.
+
+Inspect only the callable and deferred tool registry that is actually visible
+to you in this session. Report whether the semantic capability to record a
+user's answer or decision is:
+
+1. directly callable now;
+2. deferred or discoverable through an available tool-discovery mechanism; or
+3. absent.
+
+If it is present, report the exact model-visible normalized tool name as shown
+by the registry. Also report whether a discovery mechanism exists and whether
+the capability is currently callable without discovery. Do not infer or
+reconstruct names from memory, documentation, prompts, or skill text. Do not
+call any tool while performing this inspection.

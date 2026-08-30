@@ -11,7 +11,8 @@ human-view artifacts. Do not record token counts, hidden reasoning,
 secret-bearing prompts, private native handles, raw diagnostics, or raw
 conversation transcripts in repository files or ledger prose.
 
-Retain the canonical project root, `task_id` when one exists, the current
+Retain the canonical project root and the server-issued task anchor when one
+exists, the current
 delegation knowledge contract, and evidence-backed documentation discrepancies
 needed for later routing. Do not duplicate the knowledge pages or raw worker
 output in accounting records.
@@ -43,7 +44,7 @@ assembly, retry attempts, and internal worker-recovery chatter.
 Progress accounting does not authorize stopping orchestration. Once sufficient
 completed outcome evidence is available, the coordinator independently selects
 `ready`, `ready_with_risks`, or `not_ready`, automatically attempts supported
-`submit_governance_closure`, and performs supported inspection of the intended
+`close_task`, and performs supported inspection of the intended
 record. `ready_with_risks` never creates a confirmation hold or any other
 user-facing question. While the requested outcome remains unfinished, the
 coordinator continues to reconcile state and advance the next safe worker or
@@ -73,8 +74,8 @@ user cancellation. Do not expose recovery chatter, skip a planner dependency,
 or start downstream work without required report and plan-decision evidence.
 
 When the active tool returns a current contained digest-verified ready plan or
-report Markdown projection, copy its server-provided `markdown_link` field
-byte-for-byte as the clickable link, with a localized summary explaining why it
+report Markdown projection, copy its server-provided clickable link
+byte-for-byte, with a localized summary explaining why it
 matters. Never publish a bare path, raw
 task/delegation/report/decision ID, guessed location, stale projection, or
 private operational path. Only verified plan/report links are allowed as

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from cortex_runtime.v12_contract import REPORT_READ_MAX_BYTES, record_ref_parts, task_ref as compact_task_ref
+from cortex_runtime.v12_contract import REPORT_READ_MAX_BYTES, record_ref, record_ref_parts, task_ref as compact_task_ref
 from cortex_runtime.v12_store import V12Store, V12StoreError
 
 
@@ -28,37 +28,36 @@ def _normalize_execution_evidence(value: object) -> dict[str, Any]:
         evidence_status = value.get("evidence_status")
         finalized = value.get("finalized_report_count")
         completed = value.get("completed_report_count")
+        revision = value.get("effective_revision")
+        coverage_status = value.get("coverage_status")
         outcome = value.get("outcome")
         if (
             evidence_status in {"finalized_reports_present", "no_finalized_reports"}
             and isinstance(finalized, int) and not isinstance(finalized, bool) and finalized >= 0
             and isinstance(completed, int) and not isinstance(completed, bool)
             and 0 <= completed <= finalized
-            and outcome in {None, "completed", "incomplete"}
+            and isinstance(revision, int) and not isinstance(revision, bool) and revision >= 1
+            and coverage_status in {"ready", "ready_with_risks", "rework"}
+            and outcome in {"completed", "incomplete"}
             and (finalized > 0) == (evidence_status == "finalized_reports_present")
-            and (finalized > 0 or (completed == 0 and outcome is None))
-            and (completed == 0 or outcome is not None)
-            and (outcome != "completed" or completed > 0)
+            and (outcome == "completed") == (coverage_status == "ready")
         ):
             return {
                 "evidence_status": evidence_status,
                 "finalized_report_count": finalized,
                 "completed_report_count": completed,
+                "effective_revision": revision,
+                "coverage_status": coverage_status,
                 "outcome": outcome,
             }
     return {
         "evidence_status": "no_finalized_reports",
         "finalized_report_count": 0,
         "completed_report_count": 0,
-        "outcome": None,
+        "effective_revision": 1,
+        "coverage_status": "rework",
+        "outcome": "incomplete",
     }
-
-
-def _validate_report_read_budget(value: object) -> int:
-    """Validate the one canonical integer read budget at the service boundary."""
-    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= REPORT_READ_MAX_BYTES:
-        raise V12ServiceError("max_bytes is invalid", code="invalid_argument", details={"field": "max_bytes"})
-    return value
 
 
 def _task_store(task_ref: object) -> tuple[V12Store, str]:
@@ -149,6 +148,29 @@ def _mutation_store(store: V12Store, operation: str, **arguments: Any) -> dict[s
     # translate a server implementation detail back into an input.
     idempotency_key = arguments.get("idempotency_key")
     result_with_retry = dict(result) | {"replayed": bool(replayed)}
+    # A completed result is terminal evidence *and* consumes the delegation's
+    # sole normal-result slot.  Return that consequence alongside concrete
+    # semantic diagnostics so callers do not mistake a finalized receipt for
+    # permission to begin a corrective duplicate on the same delegation.
+    report = result_with_retry.get("report")
+    if (
+        operation == "submit_report"
+        and isinstance(report, Mapping)
+        and report.get("report_type") == "result"
+        and report.get("assembly_state") == "finalized"
+        and isinstance(report.get("report_id"), str)
+        and isinstance(report.get("semantic_status"), str)
+    ):
+        compact_report = record_ref(str(report["report_id"]))
+        if compact_report is not None:
+            diagnostics = report.get("coverage_diagnostics")
+            result_with_retry["result_slot"] = {
+                "state": "consumed",
+                "report_ref": compact_report,
+                "semantic_status": report["semantic_status"],
+                "coverage_diagnostics": diagnostics if isinstance(diagnostics, list) else [],
+                "replacement_requirement": "distinct_recovery_or_rework_delegation",
+            }
     if isinstance(idempotency_key, str):
         result_with_retry["idempotency_key"] = idempotency_key
     return _with_human_view(store, result_with_retry)
@@ -168,7 +190,11 @@ def _ready_approval_view(store: V12Store, report: Mapping[str, Any]) -> dict[str
     relative = f"plans/revisions/{report_id}.md"
     view: dict[str, Any] = {"status": "unavailable", "path": None}
     for _attempt in range(2):
-        candidate = store.human_view(task_id, relative)
+        # An approval relation is anchored to this immutable report/view
+        # snapshot. Global task chronology is deliberately irrelevant: later
+        # governance or initiative events cannot make the already-issued
+        # relation stale.
+        candidate = store.human_view(task_id, relative, require_fresh=False)
         if candidate.get("status") == "ready":
             view = candidate
             break
@@ -287,11 +313,15 @@ def create_task(
     requirements: Any,
     constraints: Any,
     acceptance_criteria: Any,
-    verification_plan: Any,
     context: Any = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Record one task in the caller's isolated V12 project ledger."""
+    # The public V13 task contract has one source of truth for verification:
+    # the required acceptance criteria.  Copy the list before storage so the
+    # derived entries participate byte-for-byte in the mutation payload and
+    # idempotency receipt without retaining a second caller-controlled input.
+    verification_plan = list(acceptance_criteria) if isinstance(acceptance_criteria, list) else acceptance_criteria
     return _mutation_store(
         _create_store(project_root),
         "create_task",
@@ -307,10 +337,10 @@ def create_task(
     )
 
 
-def inspect_task(*, task_ref: str, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
+def inspect_task(*, task_ref: str, after_sequence: int = 0) -> dict[str, Any]:
     """Read a task, its delegations/reports, and its ordered local timeline."""
     store, canonical = _task_store(task_ref)
-    return _call_task(canonical, "inspect_task", task_id=canonical, after_sequence=after_sequence, limit=limit, store=store)
+    return _call_task(canonical, "inspect_task", task_id=canonical, after_sequence=after_sequence, limit=50, store=store)
 
 
 def create_delegation(
@@ -328,6 +358,8 @@ def create_delegation(
     input_report_refs: list[str] | None = None,
     input_decision_refs: list[str] | None = None,
     outcome_assignments: dict[str, list[str]] | None = None,
+    bootstrap_provenance: dict[str, str] | None = None,
+    derive_assignment_scope: bool = False,
 ) -> dict[str, Any]:
     """Persist a coordinator-supplied delegation without selecting a route."""
     store, canonical = _task_store(task_ref)
@@ -349,13 +381,15 @@ def create_delegation(
         model=model,
         reasoning_effort=reasoning_effort,
         idempotency_key=idempotency_key,
+        bootstrap_provenance=bootstrap_provenance,
+        derive_assignment_scope=derive_assignment_scope,
     )
 
 
-def read_delegation(*, delegation_ref: str, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
+def read_delegation(*, delegation_ref: str, after_sequence: int = 0) -> dict[str, Any]:
     """Read one delegation; its durable ID resolves and verifies the owner task."""
     store, canonical = _record_store(delegation_ref, label="delegation_id")
-    return _call_task(canonical, "read_delegation", delegation_id=canonical, after_sequence=after_sequence, limit=limit, store=store)
+    return _call_task(canonical, "read_delegation", delegation_id=canonical, after_sequence=after_sequence, limit=50, store=store)
 
 
 def submit_report(
@@ -366,10 +400,7 @@ def submit_report(
     content: Any = None,
     report_ref: str | None = None,
     mode: str | None = None,
-    chunk_index: int | None = None,
     section: str | None = None,
-    expected_chunk_count: int | None = None,
-    expected_content_digest: str | None = None,
     abort_reason_en: Any = None,
     supersedes_report_ref: str | None = None,
     review_policy: str | None = None,
@@ -377,6 +408,11 @@ def submit_report(
 ) -> dict[str, Any]:
     """Append one report; the delegation ID resolves and verifies its task."""
     store, canonical_delegation = _record_store(delegation_ref, label="delegation_id")
+    if mode == "begin" and report_type == "result":
+        try:
+            store.admit_result_report(delegation_id=canonical_delegation, idempotency_key=idempotency_key)
+        except V12StoreError as exc:
+            raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
     return _mutation_store(
         store,
         "submit_report",
@@ -386,10 +422,7 @@ def submit_report(
         content=content,
         report_id=_record_in_task(store, report_ref, label="report_id"),
         mode=mode,
-        chunk_index=chunk_index,
         section=section,
-        expected_chunk_count=expected_chunk_count,
-        expected_content_digest=expected_content_digest,
         abort_reason_en=abort_reason_en,
         supersedes_report_id=_record_in_task(store, supersedes_report_ref, label="report_id"),
         review_policy=review_policy,
@@ -397,13 +430,12 @@ def submit_report(
     )
 
 
-def read_reports(*, report_refs: list[str], sections: list[str] | None = None, cursor: str | None = None, max_bytes: int = REPORT_READ_MAX_BYTES, consumer_delegation_ref: str | None = None) -> dict[str, Any]:
-    """Read bounded immutable report evidence for a worker or coordinator.
+def read_reports(*, report_refs: list[str], sections: list[str] | None = None, cursor: str | None = None, consumer_delegation_ref: str | None = None) -> dict[str, Any]:
+    """Read report metadata, or declared worker-owned report bodies.
 
-    A worker remains restricted to its declared predecessor reports.  A
-    coordinator read is deliberately a separate, auditable reader kind: it
-    can consume the authoritative body before a material orchestration
-    decision, but it cannot impersonate a worker handoff.
+    Calls without a consuming delegation are metadata-only and never create a
+    receipt.  A body read is attributable only to a delegation that declared
+    the exact finalized inputs.
     """
     if not isinstance(report_refs, list) or not report_refs:
         raise V12ServiceError("report_refs are invalid", code="invalid_argument", details={"field": "report_refs"})
@@ -414,7 +446,11 @@ def read_reports(*, report_refs: list[str], sections: list[str] | None = None, c
         if consumer_delegation_ref is None
         else _record_in_task(store, consumer_delegation_ref, label="delegation_id")
     )
-    return _call_task(canonical_reports[0], "read_reports", report_ids=canonical_reports, sections=sections, cursor=cursor, max_bytes=_validate_report_read_budget(max_bytes), consumer_delegation_id=consumer_delegation_id, reader_kind="worker" if consumer_delegation_id is not None else "coordinator", store=store)
+    # The public operation deliberately has no caller-selected byte budget.
+    # Metadata reads omit the consumer; worker reads receive one server-bounded
+    # body page and continue only with the returned opaque cursor.
+    page_bytes = REPORT_READ_MAX_BYTES if consumer_delegation_id is not None else 0
+    return _call_task(canonical_reports[0], "read_reports", report_ids=canonical_reports, sections=sections, cursor=cursor, max_bytes=page_bytes, consumer_delegation_id=consumer_delegation_id, store=store)
 
 
 def set_governance_mode(
@@ -479,7 +515,7 @@ def record_initiative(
     )
 
 
-def inspect_governance(*, task_ref: str, initiative_ref: str | None = None, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
+def inspect_governance(*, task_ref: str, initiative_ref: str | None = None, after_sequence: int = 0) -> dict[str, Any]:
     """Read task-, initiative-, or project-scoped governance information."""
     store, canonical = _task_store(task_ref)
     return _call_task(
@@ -488,7 +524,7 @@ def inspect_governance(*, task_ref: str, initiative_ref: str | None = None, afte
         task_id=canonical,
         initiative_id=_record_in_task(store, initiative_ref, label="initiative_id"),
         after_sequence=after_sequence,
-        limit=limit,
+        limit=50,
         store=store,
     )
 
@@ -517,10 +553,12 @@ def submit_governance_closure(
             )
     subject_id = canonical if subject_type == "task" else _record_in_task(store, subject_ref, label="initiative_id")
     try:
-        evidence = _normalize_execution_evidence(_call_task(canonical, "inspect_task", task_id=canonical, after_sequence=0, limit=1, store=store)["execution_outcome"])
+        execution_outcome = _normalize_execution_evidence(
+            _call_task(canonical, "inspect_task", task_id=canonical, after_sequence=0, limit=1, store=store)["execution_outcome"]
+        )
     except V12ServiceError:
         # Do not fabricate success if both inspection and persistence are down.
-        evidence = _normalize_execution_evidence(None)
+        execution_outcome = _normalize_execution_evidence(None)
     arguments = {
         "task_id": canonical, "subject_type": subject_type, "subject_id": subject_id,
         "verdict": verdict, "evidence": evidence, "unresolved_risks": unresolved_risks,
@@ -536,9 +574,9 @@ def submit_governance_closure(
             if error.code not in {"storage_busy", "storage_unavailable"}:
                 raise
             if attempt == 2:
-                return {"closure": None, "initiative": None, "warnings": [], "next_action": {"task_ref": compact_task_ref(canonical)}, "execution_outcome": evidence, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "persistence_unavailable", "attempts": attempt}, "replayed": False}
+                return {"closure": None, "initiative": None, "warnings": [], "next_action": {"task_ref": compact_task_ref(canonical)}, "execution_outcome": execution_outcome, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "persistence_unavailable", "attempts": attempt}, "replayed": False}
     assert persisted is not None
-    evidence = _normalize_execution_evidence(persisted.get("execution_outcome", evidence))
+    execution_outcome = _normalize_execution_evidence(persisted.get("execution_outcome", execution_outcome))
     closure = persisted.get("closure")
     closure_id = closure.get("closure_id") if isinstance(closure, Mapping) else None
     for attempt in (1, 2):
@@ -554,13 +592,13 @@ def submit_governance_closure(
             confirmation = "confirmed" if observed else "unconfirmed"
             reason = "record_inspected" if observed else "record_not_observed"
             return persisted | {
-                "execution_outcome": _normalize_execution_evidence(task_inspection.get("execution_outcome", evidence)),
+                "execution_outcome": _normalize_execution_evidence(task_inspection.get("execution_outcome", execution_outcome)),
                 "conformance_review": task_inspection.get("conformance_review"),
                 "closure_confirmation": {"inspection_status": confirmation, "reason": reason, "attempts": attempt},
             }
         except V12ServiceError:
             if attempt == 2:
-                return persisted | {"execution_outcome": evidence, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "inspection_unavailable", "attempts": attempt}}
+                return persisted | {"execution_outcome": execution_outcome, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "inspection_unavailable", "attempts": attempt}}
     raise AssertionError("bounded advisory inspection did not return")
 
 
@@ -588,6 +626,25 @@ def record_user_decision(
             "task decision subject_ref must equal task_ref",
             code="invalid_decision_subject",
             details={"field": "subject_ref", "expected": "task_ref"},
+        )
+    if decision_type == "steer":
+        if subject_type != "task" or subject_ref != task_ref:
+            raise V12ServiceError(
+                "steer decisions must target the anchored task",
+                code="invalid_decision_subject",
+                details={"field": "subject_ref", "expected": "task_ref"},
+            )
+        if not isinstance(steering_delta, Mapping) or set(steering_delta) - {"retire_item_refs", "add"}:
+            raise V12ServiceError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+        retired = steering_delta.get("retire_item_refs", [])
+        additions = steering_delta.get("add", [])
+        if not isinstance(retired, list) or not isinstance(additions, list) or (not retired and not additions):
+            raise V12ServiceError("steering_delta must contain at least one operation", code="invalid_argument", details={"field": "steering_delta"})
+    elif steering_delta is not None:
+        raise V12ServiceError(
+            "steering_delta is only permitted for steer decisions",
+            code="invalid_argument",
+            details={"field": "steering_delta"},
         )
     approval_fields = (approval_handle, approval_view_content_digest, approval_view_source_sequence)
     if subject_type == "plan" and decision_type == "approve" and any(value is None for value in approval_fields):

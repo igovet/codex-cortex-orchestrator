@@ -47,7 +47,8 @@ are worker-owned. A missing or contradictory report produces another bounded
 delegation rather than coordinator-side investigation.
 
 The only project-read exception is bounded knowledge routing. Before project
-delegation, the coordinator must read applicable `AGENTS.md`, the project and
+delegation, the host-injected `AGENTS.md` context already governs the task; the
+coordinator then reads the project and
 feature indexes, and only
 task-relevant pages selected from those indexes so it can compile the
 delegation's knowledge requirements. It may not use that exception for project
@@ -64,15 +65,15 @@ worktrees, existence/absence or unchanged-state, and `.codex`—are also
 worker-owned, regardless of read-only, plan, report-recovery, or direct user
 framing.
 
-## Uniform eleven-tool facade
+## Uniform fifteen-tool facade
 
-The facade exposes exactly eleven action-specific tools and one input schema for
+The facade exposes exactly fifteen action-specific tools and one input schema for
 every participant. There is no coordinator/worker projection or audience-based
 field filtering. `tools/list` is the authoritative registry, and runtime
 validation consumes the same schema objects.
 
 The catalog is intentionally small: six core coordination operations, four
-advisory-governance operations, and `record_user_decision` for ordinary-chat
+advisory-governance operations, and the three narrow decision record operations for ordinary-chat
 evidence. Native agent creation, waiting, filesystem changes, permissions, and
 external actions remain outside the ledger.
 
@@ -82,7 +83,7 @@ A task is the project-scoped root of delegations, reports, and decisions. Before
 the first project delegation, it records the versioned task/result contract:
 the exact arbitrary-Unicode `user_request_original`, `user_language`, English
 normalized `objective`, `requirements`, `constraints`, `acceptance_criteria`,
-and `verification_plan`. This contract preserves intent and acceptance context;
+and a verification plan derived deterministically from acceptance criteria. This contract preserves intent and acceptance context;
 it is neither an implementation plan nor a backend permission boundary.
 
 A delegation captures bounded objective, advisory role, scope, instructions,
@@ -113,12 +114,13 @@ report type. A plan's review policy is `informational` or `required`.
 explains the review, requests an unambiguous approve/revise/cancel response,
 and ends the turn. It is ordinary-chat model policy, not a backend gate.
 
-New reports use either an atomic bounded `single` lifecycle or an assembled
-`begin` followed by sequential `append` calls and `finalize`, or `begin`
-followed by `abort`. An appended chunk is limited to 32,768 bytes; a report to 256
-chunks and 8 MiB. A failed or interrupted assembly resumes from its stored
-manifest and next index. It is never restarted at zero, overwritten, or treated
-as finalized; a replacement explicitly supersedes its predecessor. Compact
+New reports use the semantic publication operation, which owns storage
+representation and completion atomically and records one terminal outcome per
+delegation/report-kind slot. The server derives replay identity from the phase,
+assembly state, and canonical payload: exact ambiguous retries replay, while a
+changed payload conflicts and requires a recovery/rework delegation. A report
+is never overwritten or reopened after terminal completion; a replacement
+explicitly supersedes its predecessor. Compact
 `report_ref` values can be passed to later delegations; durable report IDs remain
 evidence only. Ordinary inspection creates no receipt; worker handoff reads
 create immutable delivery receipts. Report status and
@@ -127,12 +129,12 @@ receipt presence are not backend acceptance or native lifecycle evidence.
 `read_reports` preserves the requested order for at most 20 unique known
 `report_refs` and is the only report body/chunk reader. It accepts an optional named-section
 selection, returns no more than 65,536 content bytes per call, and supplies a
-scope-bound cursor for exact resumption; `max_bytes=0` returns metadata only.
-Task, delegation, and governance inspection use `after_sequence` plus `limit`,
+scope-bound cursor for exact resumption; omitting a consuming delegation returns metadata only.
+Task, delegation, and governance inspection use `after_sequence` with fixed 50-event pages,
 return compact report references, and expose `timeline`, `next_sequence`, and
 `has_more` rather than opaque capability cursors.
 
-`record_user_decision` appends a coordinator-asserted ordinary-chat decision
+The matching narrow decision record operation appends a coordinator-asserted ordinary-chat decision
 against an existing task, delegation, plan, report, or same-project initiative.
 It retains neutral `prompt`, exact arbitrary-Unicode `response_original`, user
 language, subject identity, immutable plan/report digest where applicable, and
@@ -175,11 +177,10 @@ or `not_ready` may influence the explanation but cannot prevent rework, report
 access, or a final answer.
 
 The public task projection keeps its report-derived outcome separate from
-governance: `execution_outcome` contains exactly `evidence_status`,
-`finalized_report_count`, `completed_report_count`, and `outcome`. The finalized
-count covers every finalized report. The completed count and nullable
-`completed`/`incomplete` outcome derive only from semantically valid canonical
-finalized results; this does not claim native lifecycle.
+governance: `execution_outcome` contains `evidence_status`,
+`finalized_report_count`, `completed_report_count`, `effective_revision`,
+`coverage_status`, and `outcome`. It derives deterministically from current
+effective-contract coverage; this does not claim native lifecycle.
 `advisory_closure` reports `record_status` and
 `latest_record` (or `null`). A closure write returns
 `closure_confirmation` with `inspection_status`, `reason`, and `attempts`.
@@ -221,8 +222,7 @@ V12 creates a fresh database family under
 version 1 and includes a database-family application ID plus project metadata.
 It is not an upgrade of V11.
 
-The first mutation may omit an idempotency key and receives a server-issued
-`handles.idempotency_key`. The same key and normalized payload replay the
+Every mutation requires a caller-generated idempotency key. The same key and normalized payload replay the
 original result; a conflicting payload returns a non-mutating conflict. SQLite write transactions serialize concurrent revisions and keep
 timeline order atomic.
 

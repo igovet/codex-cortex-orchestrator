@@ -4,7 +4,7 @@
 
 ## Purpose and boundary
 
-Cortex 12.1.0 includes a local administrator CLI for explicit maintenance of
+Cortex 1.12.1 includes a local administrator CLI for explicit maintenance of
 one existing V12 project shard. It is implemented by
 [v12_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/v12_maintenance.py)
 and is deliberately outside the public MCP registry. It adds no twelfth tool,
@@ -159,7 +159,7 @@ storage, and carefully scoped deletion choices.
 ## Verification
 
 Release evidence must prove that the CLI is packaged without changing the
-eleven-tool MCP registry; rejects malformed/cross-shard task anchors, unsafe
+fifteen-tool MCP registry; rejects malformed/cross-shard task anchors, unsafe
 paths, modes, schemas, backup manifests, and confirmation strings; creates and
 validates project-shard backups; requires explicit offline restore
 acknowledgement; preserves canonical data during projection/backup retention;

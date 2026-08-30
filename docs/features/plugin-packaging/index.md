@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 12.1.0 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.12.1 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -14,7 +14,7 @@ and release-facing documentation must describe the same V12 contract.
 - [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) carries V12 version and UI metadata.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) defines the GitHub Marketplace entry.
-- [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the eleven-tool facade.
+- [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the fifteen-tool semantic facade.
 - [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the uniform catalog.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) defines bounded task/report constants and report-digest semantics.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 storage.
@@ -23,7 +23,7 @@ and release-facing documentation must describe the same V12 contract.
 - [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the attested native worker message.
 - [profiles.json](../../../plugins/cortex/profiles.json) defines advisory roles and model recommendations.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines the authoritative outcome-first coordinator contract.
-- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative eleven-tool and nonblocking semantics.
+- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative fifteen-tool semantic and nonblocking contract.
 - [coordinator-communication/SKILL.md](../../../plugins/cortex/skills/coordinator-communication/SKILL.md) defines the mandatory coordinator-to-user policy.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates repository package structure.
 - [cortex_release_candidate.py](../../../scripts/cortex_release_candidate.py) builds the explicit source candidate and docs closure.
@@ -34,7 +34,7 @@ and release-facing documentation must describe the same V12 contract.
 
 ## Current package contract
 
-The package exposes exactly eleven tools with identical coordinator and worker
+The package exposes exactly fifteen semantic tools with identical coordinator and worker
 schemas. Runtime validation uses the canonical registry's closed input schemas
 and validates successful results against each advertised `outputSchema`. Success
 returns canonical JSON as text plus `structuredContent` with `isError=false`.
@@ -46,7 +46,7 @@ control-plane route.
 The standard MCP `tools/list` response uses opaque `nextCursor` pagination when
 the complete catalog would exceed the 256 KiB physical JSONL frame bound. Each
 page contains complete tool definitions and is measured as its final JSON-RPC
-envelope; clients must follow `nextCursor` to receive the unchanged eleven-tool
+envelope; clients must follow `nextCursor` to receive the unchanged fifteen-tool
 catalogue.
 
 Only `create_task` accepts explicit `project_root`; it stores the canonical
@@ -55,7 +55,7 @@ calls. The durable `task_id` in results and ledger evidence is non-callable.
 The seven task-anchored tools use `task_ref`: `inspect_task`,
 `create_delegation`, `set_governance_mode`, `record_initiative`,
 `inspect_governance`, `submit_governance_closure`, and
-`record_user_decision`. The entity-derived tools use their compact emitted
+the narrow decision operations. The entity-derived tools use their compact emitted
 refs: `read_delegation` uses `delegation_ref`, `submit_report` uses
 `delegation_ref` (and continuation `report_ref`), and `read_reports` uses
 `report_refs`; these tools do not accept `task_ref` or durable `*_id` values.
@@ -69,11 +69,11 @@ together. Closure selects the existing subject with `subject_type` plus the
 compact `subject_ref`; durable `subject_id` is evidence only.
 
 The package keeps finalized-report evidence separate from advisory bookkeeping.
-`inspect_task` exposes `execution_outcome` with exact fields `evidence_status`,
-`finalized_report_count`, `completed_report_count`, and `outcome`. The finalized
-count covers every finalized report. The completed count and nullable
-`completed`/`incomplete` outcome derive only from semantically valid canonical
-finalized results and make no native-lifecycle claim. It also exposes
+`inspect_task` exposes `execution_outcome` with `evidence_status`,
+`finalized_report_count`, `completed_report_count`, `effective_revision`,
+`coverage_status`, and `outcome`. The outcome derives deterministically from
+current effective-contract coverage, not report arrival order or historical
+claims, and makes no native-lifecycle claim. It also exposes
 `advisory_closure` with the current record status. After sufficient evidence,
 the coordinator selects `ready`, `ready_with_risks`, or `not_ready`, then
 automatically attempts the advisory write and intended bounded inspection;
@@ -83,8 +83,8 @@ At most one same-idempotency retry is made for a verified transient persistence
 or inspection failure. An `unconfirmed` advisory result is disclosed without
 changing `execution_outcome` evidence.
 
-New reports support bounded one-chunk `single` submission or `begin`,
-sequential `append`, `finalize`, and `abort` under bounded chunk, assembling,
+New reports use `begin`, sequential `append`, `finalize`, and `abort` under
+bounded chunk, assembling,
 retained-content, and response limits. Plan reports
 carry informational/required review policy and immutable digest identity.
 Product-facing reports support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
@@ -98,7 +98,7 @@ relation.
 Planner-authored microtask fields are evidence for the model-owned DAG only;
 they do not create backend jobs, scheduling gates, or worker-subtask To-Do
 entries.
-`record_user_decision` appends coordinator-attributed exact original-language
+The matching narrow decision record operation appends coordinator-attributed exact original-language
 evidence for an exact subject using one closed canonical field set: neutral
 `prompt`, exact `response_original`, and `user_language`; retired `prompt_en`
 and `response_en` are not accepted. Plan/report decisions
@@ -173,8 +173,8 @@ continue to report any residue or catalog drift.
 
 The release candidate must prove:
 
-- manifest and Marketplace version 12.1.0 parity;
-- exact eleven-tool registry/runtime parity;
+- manifest and Marketplace version 1.12.1 parity;
+- exact fifteen-tool registry/runtime parity;
 - uniform participant catalog, closed input schemas, advertised successful
   `outputSchema` validation, and the distinct success/correctable-error/server
   fault transport shapes;
@@ -205,7 +205,7 @@ The release candidate must prove:
 - exact model/effort support, Luna override omission, and no server fallback;
 - advisory profile parity across registry and TOML files;
 - absence of lifecycle hooks and lifecycle hook code;
-- packaged maintenance-module parity without changing the eleven-tool registry,
+- packaged maintenance-module parity without changing the fifteen-tool registry,
   including task/shard anchoring, confirmation strings, backup validation,
   offline restore, projection safety, canonical-data retention, and zero
   project/V11 writes;
@@ -213,6 +213,12 @@ The release candidate must prove:
 - recursively valid public documentation links and documented commands;
 - absence of secret-prone, runtime-state, symlink, bytecode, or nested
   Marketplace artifacts.
+- source inclusion and source-mode execution of `tests/test_public_mcp_first_call_conformance.py`,
+  which exercises a first valid call for every advertised public tool using
+  exact emitted handles; and
+- source inclusion and documented use of `scripts/cortex-live-smoke` as the
+  owned-PTY verifier when the required controlling-terminal preflight cannot
+  be supplied by the driver.
 
 ## Security-sensitive packaging rules
 

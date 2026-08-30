@@ -43,8 +43,8 @@ codes, or explain why none ran. Use the active MCP registry and report tool
 contract to submit
 the owned finalized plan and preserve every returned compact reference exactly
 for any later continuation, review, or read. Report content is opaque. For a
-large plan, follow the active assembly sequence and its returned continuation
-metadata; never infer paths or identifiers. Supersede changed plans after the
+large plan, follow the next action described by the successful result; never
+infer paths or identifiers. Supersede changed plans after the
 exact user decision reference.
 
 ## Stop and escalate

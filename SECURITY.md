@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 12.1.0 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.12.1 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -21,7 +21,8 @@ Cortex treats the following as authoritative:
 - stable task, delegation, report, assessment, initiative, closure, and
   user-decision IDs;
 - strict public input schemas, enumerations, size limits, and reference checks;
-- operation-scoped idempotency keys and normalized-payload digests;
+- server-derived operation identities and normalized-payload digests for
+  semantic report publication replay;
 - immutable report chunks and finalized/aborted report assemblies, append-only
   governance assessments, user decisions, and closures, and append-only
   initiative revisions;
@@ -35,11 +36,11 @@ backend gates. Required plan review and a genuine user decision are owned by
 the coordinator in ordinary chat: a stored decision records the evidence but
 does not authenticate the user, grant authority, or authorize a later action.
 
-Coordinators and workers receive the same exact eleven-tool catalog. There is no
+Coordinators and workers receive the same exact fifteen-tool semantic catalog. There is no
 audience filtering, opaque coordinator or worker capability, host epoch, native
 child binding or lifecycle attestation, profile capability matrix, or session
 or environment identity. The worker brief does carry renderer/profile proof and
-a stateless native-dispatch projection; neither is host authority. IDs are
+a stateless host-neutral `dispatch_brief` projection; neither is host authority. IDs are
 references, not bearer credentials.
 
 Native subagent creation, waiting, permissions, filesystem edits, shell
@@ -61,8 +62,9 @@ project-facing action and every substantive analysis belongs to a delegated
 worker. Missing evidence requires another worker delegation, not direct
 coordinator access.
 
-For routing only, the coordinator must read applicable `AGENTS.md`, the project
-and feature indexes, and task-relevant pages selected from those indexes. The
+For routing only, the host-injected `AGENTS.md` context already governs the
+task. The coordinator then reads the project and feature indexes and
+task-relevant pages selected from those indexes. The
 bundled orchestrator skill is the sole authority for this bounded route and its
 six-part per-delegation knowledge contract. Profiles only consume the supplied
 contract; they cannot widen the route. Arbitrary documentation scanning,
@@ -88,17 +90,21 @@ The complete public catalog is defined in
 [`public_contracts.py`](plugins/cortex/scripts/cortex_runtime/public_contracts.py)
 and contains exactly:
 
-1. `create_task`
-2. `inspect_task`
-3. `create_delegation`
-4. `read_delegation`
-5. `submit_report`
-6. `read_reports`
-7. `set_governance_mode`
-8. `record_initiative`
-9. `inspect_governance`
-10. `submit_governance_closure`
-11. `record_user_decision`
+1. `open_task`
+2. `read_task`
+3. `open_clarification`
+4. `record_clarification`
+5. `open_plan_review`
+6. `record_plan_review`
+7. `open_steering`
+8. `record_steering`
+9. `open_assignment`
+10. `consume_assignment_evidence`
+11. `publish_plan`
+12. `publish_result`
+13. `publish_documentation`
+14. `assess_governance`
+15. `close_task`
 
 Every tool has a closed input object. Runtime validation consumes the same
 schema object advertised by `tools/list`. Unexpected properties, invalid
@@ -124,8 +130,8 @@ worker brief carries the saved root only for working-directory context.
 `create_task` records one versioned task/result contract: English-normalized
 `objective` for internal coordination; exact arbitrary-Unicode
 `user_request_original`; `user_language`; `task_contract_version`; bounded
-English `requirements`, `constraints`, `acceptance_criteria`, and
-`verification_plan`; and optional bounded JSON `context`. Original user wording
+English `requirements`, `constraints`, and `acceptance_criteria`; the service
+deterministically persists its verification plan from the acceptance criteria; and optional bounded JSON `context`. Original user wording
 is preserved and never replaced by the normalization. The result contract is
 not a backend execution plan or permission boundary. Optional `context` never
 supplies or overrides the root. `create_delegation.scope` is a required
@@ -134,9 +140,10 @@ of worker ownership, detailed execution belongs in `instructions`, and an
 object-shaped scope is invalid. Delegation `model` and `reasoning_effort` are
 required together and retained exactly. `profile_name` is an exact packaged
 enum distinct from the bounded human-readable `role`, and its renderer proof
-must be loaded. The returned native arguments preserve the exact rendered
+must be loaded. The returned `dispatch_brief` preserves the exact rendered
 message and selection for one matching host spawn. This semantic delegation
-receipt proves packaged profile and dispatch data, not host lifecycle. Normal spawning consumes
+receipt proves packaged profile and semantic dispatch data, not host lifecycle.
+Normal spawning consumes
 that receipt directly; recovery uses `inspect_task` continuation data only
 after host reconciliation. Continuations never attest lifecycle, and native
 commentary alone is never durable progression: a recovered child needs a
@@ -145,7 +152,9 @@ replacement. `submit_governance_closure` requires both `subject_type` and the
 matching compact task or initiative `subject_ref`; it records advisory evidence
 and does not gate safe work or a truthful user-facing answer.
 
-`record_user_decision` is the durable record of an ordinary-chat decision. It
+The narrow decision operations are the durable record of ordinary-chat
+decisions. `record_clarification`, `record_plan_review`, and
+`record_steering` each consume only the matching server-issued binding. They
 requires one canonical field set: `task_ref`, subject type/ref/digest, decision
 type, neutral `prompt`, exact arbitrary-Unicode `response_original`, and
 `user_language`. A plan decision binds only that completed, finalized plan
@@ -189,6 +198,25 @@ raw diagnostic logs, or unnecessarily sensitive operational details in:
 - governance rationales, risk factors, initiatives, closures, or follow-ups;
 - prompts, fixtures, tests, documentation, issues, commits, or generated views.
 
+The isolated live-dev MCP observation journal is an owner-only bounded
+diagnostic surface, not durable ledger evidence. It may retain only safe
+operation/outcome metadata, an optional registry-safe failure fault, build
+identity, and one-way anchor fingerprints. Its internal outcome vocabulary is
+not a public MCP error-code namespace.
+After a successful physical MCP initialization reply, one registration-only
+`server_ready` observation may additionally retain the verified build identity
+and a count plus one-way digest of the advertised catalogue. It must not retain
+tool names, definitions, request content, server paths, or host diagnostics.
+It must never retain raw references, request arguments, responses, prompts,
+reports, native task names, host messages, continuation capabilities, project
+paths, secrets, personal data, or raw exceptions. Symlinks, non-private modes,
+and oversized/corrupt journal state are observation failures. They must not
+change a successful canonical MCP mutation into a failure or trigger a retry;
+the live verifier records the resulting observation limitation. The runtime
+opens the isolated `CODEX_HOME` root and all journal descendants with a
+no-follow descriptor chain; it rejects a symlink, wrong owner, or wrong mode
+at any such ancestor and never creates a missing arbitrary `CODEX_HOME` root.
+
 Use English for every native worker commentary/update, inter-worker message,
 final response, tool-authored durable string, objective, requirement,
 instruction, worker-authored report narrative, and governance record. Decision
@@ -202,15 +230,14 @@ designated `user_request_original` or `response_original` fields with
 `user_language`; never overwrite or silently translate that source text.
 
 Reports may contain material engineering evidence, so exact emitted report refs should be
-passed to later workers instead of copying full reports into prompts. One
-bounded report uses `single`; a larger report uses `begin`, sequential indexed
-`append` calls with bounded lowercase section labels, then `finalize` with the
-expected chunk count and whole-report digest, or `abort` with a sanitized
-English reason. Chunks are immutable and ordered; finalized or aborted reports
-cannot be appended, and a replacement explicitly supersedes rather than edits
-its predecessor. The types are `progress`, `result`, `synthesis`, and `plan`;
-a `plan` report can declare `informational` or coordinator-owned `required`
-review policy without creating a backend gate.
+passed to later workers instead of copying full reports into prompts. The semantic publication
+operation owns storage representation and completion atomically; callers publish one complete
+terminal outcome for each delegation/report-kind slot. The server derives replay identity from
+the delegation, phase, assembly state, and canonical payload. An exact ambiguous retry replays
+its receipt, while a changed payload conflicts and must use active recovery/rework assignment
+semantics. Chunks remain immutable and ordered; finalized or aborted reports cannot be appended.
+The types are `progress`, `result`, `synthesis`, and `plan`; a `plan` report can declare
+`informational` or coordinator-owned `required` review policy without creating a backend gate.
 
 Canonical reports support the v1 schemas for all four report types and the
 additive v2 result, synthesis, and plan schemas. V2 adds structured coverage
@@ -224,6 +251,16 @@ named active items; it does not rewrite unrelated evidence. This evidence and
 the linked conformance projection guide model reasoning but never become a
 backend authorization or lifecycle gate.
 
+The current V3 specialist envelope is admitted before terminal finalization.
+It requires observable evidence, residual risks/deviations/unresolved items,
+and a documentation-impact decision. A planner receives the exact full current
+effective-contract token catalogue in its semantic brief and maps each current
+requirement, constraint, acceptance criterion, and derived verification item
+exactly once. Ordered plan stages also identify an owner, earlier dependencies,
+work, and verification. Predictable structural or mapping failures leave the
+same report assembling and consume no terminal result slot; V1/V2 history stays
+immutable and readable.
+
 Ordinary delegation/task inspection creates no receipt or lifecycle fact.
 `read_reports` returns at most 20 unique known reports in the exact requested
 order and is the only report body/chunk reader. Coordinator calls return
@@ -235,13 +272,12 @@ coordinator does not call it merely to summarize a completed worker report: the
 worker must return a concise `Summary` and exact `Report ref`. Downstream
 workers use `read_reports` when their declared work genuinely requires the
 report body. It returns only complete JSON
-chunks that fit its bounded integer `max_bytes` budget (at most 65,536 bytes), with a
-selection-scoped cursor for resume; `max_bytes=0` returns metadata only and no
-bodies. Inspection tools use
-`after_sequence` plus `limit`, return compact
+chunks that fit its fixed server-side page (at most 65,536 bytes), with a
+selection-scoped cursor for resume. Omitting the consuming delegation requests
+metadata only and no bodies. Inspection tools use
+`after_sequence` with a fixed server-side page of 50 events, return compact
 references and bounded timeline pages, and expose `next_sequence`/`has_more`.
-`handles.after_sequence`, `handles.chunk_index`, and
-`handles.idempotency_key` are copied unchanged into their matching literal
+`handles.after_sequence` and `handles.idempotency_key` are copied unchanged into their matching literal
 inputs. `handles.cursor` is the separate opaque `read_reports` continuation
 value. Root-level `next_sequence` and `next_chunk_index` are informational
 receipt fields, not aliases inside `handles`; neither they nor `retry_handle`
@@ -293,7 +329,8 @@ Do not edit `cortex.db`, WAL/SHM files, or metadata directly. Do not copy a
 database between project roots or synthesize IDs by scanning other project
 directories.
 
-Idempotency is uniform for mutations. A repeated operation/key with the same
+Every mutation requires a caller-generated idempotency key. A repeated
+operation/key with the same
 normalized payload returns the original record. Reuse with a different payload
 returns a non-mutating `idempotency_conflict`. Idempotency is a retry-safety
 mechanism, not authentication.
@@ -383,10 +420,12 @@ that may preserve an evidence-backed warning or recommendation without
 silently replacing the user's choice.
 
 Initiative status is limited to `proposed`, `active`, `paused`, `completed`,
-`closed`, and `cancelled`, but any transition among these values is accepted.
-The status is informational. Parent, dependency, task, and report links remain
-project-scoped. Missing or cyclic dependencies are returned as warnings; they
-do not block a later status revision or closure.
+`closed`, and `cancelled`. The status is informational. An existing initiative
+is revised only for a material goal, dependency graph, risk, status, parent, or
+cross-task change; ordinary delegation stage/rework, report, decision, and
+notes churn remains in the task timeline. Parent, dependency, task, and report
+links remain project-scoped. Missing or cyclic dependencies are returned as
+warnings; they do not block a later material revision or closure.
 
 Closure verdicts are `ready`, `ready_with_risks`, and `not_ready`. They are
 model-authored recommendations. A `not_ready` task can receive another
@@ -429,9 +468,9 @@ evidence.
 
 There is no mandatory server-owned spawn/wait/read/continue lifecycle. A native
 wait is an ordinary model/host coordination action. Each successful durable
-delegation returns one exact native-dispatch projection, which the coordinator
-copies byte-for-byte into exactly one matching host spawn and then awaits that
-worker's own report. The ledger does not launch or bind native agents. An
+delegation returns one exact host-neutral `dispatch_brief`, which Codex maps
+once to exactly one matching active host spawn and then awaits that worker's own
+report. The ledger does not launch or bind native agents. An
 ambiguous spawn is reconciled by exact host handle, never blindly duplicated; a
 reportless result may lead to an explicitly parent-linked replacement.
 
@@ -509,7 +548,7 @@ A useful report includes:
 
 ## Release safety checklist
 
-1. Verify the manifest is V12, the public registry has exactly eleven tools, and
+1. Verify the manifest is V12, the public registry has exactly fifteen tools, and
    coordinator and worker catalogs are identical.
 2. Verify the bundled skills make the root coordinator orchestration-only and
    delegate every source/code/config read, analysis, edit, command, test,
@@ -535,17 +574,17 @@ A useful report includes:
    host-private verified projection behavior, and V11 byte-for-byte
    preservation.
 6. Confirm lifecycle hook code and enabled hook declarations are absent.
-7. Verify the packaged maintenance CLI remains outside the eleven-tool catalog,
+7. Verify the packaged maintenance CLI remains outside the fifteen-tool semantic catalog,
    uses task/shard-derived host-private targets and exact confirmations,
    validates backups before retention/restore, requires offline `MCP_STOPPED`
    restore acknowledgement, preserves canonical data during projection/backup
    cleanup, and writes neither project nor V11 state.
 8. Confirm one durable delegation maps to one exact returned host spawn; the
-   healthy `create_delegation` response carries root-level `native_dispatch` and
-   `renderer`, with the complete worker message only once in
-   `native_dispatch.native_arguments.message`; `read_delegation` is recovery
-   only. Confirm `fork_turns="none"` and effort are explicit, Luna omits the native model
-   override, and Terra/Sol carry theirs.
+   healthy `create_delegation` response carries a host-neutral `dispatch_brief`
+   and renderer/profile proof; `read_delegation` is recovery only. Confirm that
+   Codex maps the semantic brief to its active spawn operation without treating
+   host argument names, lifecycle, model availability, or sandbox state as
+   Cortex authority.
 9. Run package validation, release-candidate validation, `git diff --check`, and
    `./scripts/sync-cortex.sh --dry-run`.
 10. Treat ordinary interactive tmux `codex` smoke as separate installed-host
