@@ -65,6 +65,17 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertIn("changes", PUBLIC_TOOLS["publish_result"]["inputSchema"]["properties"])
         self.assertIn("findings", PUBLIC_TOOLS["publish_documentation"]["inputSchema"]["properties"])
 
+    def test_publish_plan_advertises_required_empty_evidence_arrays(self) -> None:
+        contract = PUBLIC_TOOLS["publish_plan"]
+        schema = contract["inputSchema"]
+        self.assertIn("unresolved", schema["required"])
+        self.assertIn("risks", schema["required"])
+        self.assertIn("must be present", schema["properties"]["unresolved"]["description"])
+        self.assertIn("empty array", schema["properties"]["unresolved"]["description"])
+        self.assertIn("must be present", schema["properties"]["risks"]["description"])
+        self.assertIn("empty array", schema["properties"]["risks"]["description"])
+        self.assertIn("explicit empty", contract["description"])
+
     def test_assignment_and_task_opening_are_flat(self) -> None:
         self.assertNotIn("task", PUBLIC_TOOLS["open_task"]["inputSchema"]["properties"])
         self.assertNotIn("mission", PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"])

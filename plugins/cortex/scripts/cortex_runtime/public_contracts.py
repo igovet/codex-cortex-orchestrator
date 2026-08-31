@@ -41,8 +41,9 @@ def _read_data() -> dict[str, Any]:
     return {"description": "Server-produced semantic task data; private ledger identity is removed recursively.", "type": ["object", "array", "string", "number", "integer", "boolean", "null"]}
 
 
-def _texts(*, minimum: int = 0) -> dict[str, Any]:
-    return {"type": "array", "description": "Bounded semantic text values.", "minItems": minimum, "maxItems": TASK_CONTRACT_MAX_ITEMS, "items": _string()}
+def _texts(*, minimum: int = 0,
+           description: str = "Bounded semantic text values.") -> dict[str, Any]:
+    return {"type": "array", "description": description, "minItems": minimum, "maxItems": TASK_CONTRACT_MAX_ITEMS, "items": _string()}
 
 
 def _contract(description: str, inputs: Mapping[str, Any], outputs: Mapping[str, Any]) -> dict[str, Any]:
@@ -105,7 +106,12 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         "summary": _string(minimum=1, description="Concise publication summary."),
         "verification_facts": verification_facts,
         "outcome_coverage": outcome_coverage,
-        "risks": _texts(), "unresolved": _texts(),
+        "risks": _texts(
+            description="Required complete risk list. This property must be present; use an empty array when no risks are known.",
+        ),
+        "unresolved": _texts(
+            description="Required complete unresolved-item list. This property must be present; use an empty array when no items remain unresolved.",
+        ),
         "status": _string(enum=REPORT_STATUSES, maximum=16, description="Terminal semantic status."),
     }
     plan_publication = _closed({
@@ -116,7 +122,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             description="Explicit coordinator review policy for this immutable plan.",
         ),
         "stages": {"type": "array", "description": "Ordered implementation stages.", "minItems": 1, "maxItems": TASK_CONTRACT_MAX_ITEMS, "items": stage},
-    }, ("task_ref", "summary", "scope", "review_policy", "stages", "verification_facts", "outcome_coverage", "risks", "unresolved", "status"), description="Flat closed plan publication derived from this connection's assignment.")
+    }, ("task_ref", "summary", "scope", "review_policy", "stages", "verification_facts", "outcome_coverage", "risks", "unresolved", "status"), description="Flat closed plan publication derived from this connection's assignment. Every required property must be present; when there are no risks or unresolved items, supply the corresponding empty arrays.")
     result_publication = _closed({
         **publication_common,
         "outcome": _string(minimum=1, description="Observed execution outcome."),
@@ -169,7 +175,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "instructions": _string(minimum=1, description="Task-specific worker instructions."),
             "outcomes": outcome_names, "report_policy": report_policy,
         }, ("task_ref", "role", "profile_name", "model", "reasoning_effort", "responsibility", "goal", "scope", "instructions", "outcomes", "report_policy")), _closed({"native_dispatch": native_dispatch, "replayed": replayed}, ("native_dispatch", "replayed"))),
-        "publish_plan": _contract("Worker-only atomic plan publication; lineage is private.", plan_publication, receipt),
+        "publish_plan": _contract("Worker-only atomic plan publication; lineage is private. Publish the complete plan in one call, including explicit empty risk and unresolved-item arrays when neither has entries.", plan_publication, receipt),
         "publish_result": _contract("Worker-only atomic result publication; lineage is private.", result_publication, receipt),
         "publish_documentation": _contract("Worker-only atomic documentation publication; lineage is private.", documentation_publication, receipt),
         "assess_governance": _contract("Record advisory governance depth without a public record identifier.", _closed({"task_ref": task_ref, "mode": _string(enum=GOVERNANCE_MODES, maximum=16, description="Advisory governance mode."), "rationale": _string(description="Assessment rationale."), "risk_factors": _texts()}, ("task_ref", "mode")), receipt),

@@ -1,6 +1,6 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.13.0 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.13.1 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel

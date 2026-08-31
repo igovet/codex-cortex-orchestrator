@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.13.0 source, package, installed-host, and
+This page describes Cortex 1.13.1 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -83,14 +83,14 @@ The V12 protocol evidence must prove:
   a closure record cannot turn report evidence into a completion claim;
 - `close_task` returns `closure_confirmation` with
   `inspection_status`, `reason`, and `attempts` (1 or 2), and retries at most
-  once with the same idempotency key for a verified transient persistence or
+  once through server-owned replay reconciliation for a verified transient persistence or
   inspection failure. An `unconfirmed` result preserves and reports the
   independent `execution_outcome` evidence;
 - `publish_plan`, `publish_result`, and `publish_documentation` accept the
   corresponding immutable worker evidence. `publish_plan` requires an explicit
   `informational` or `required` review policy; publication is atomic at the
   semantic operation boundary;
-- canonical report bodies support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
+- private/internal publication bodies support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
   schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas;
   v2 coverage names only effective-contract items assigned to the reporting
   delegation and carries deviations, unresolved items, risks, and verification.
@@ -119,8 +119,8 @@ The V12 protocol evidence must prove:
   finalized report manifest digests, completed coordinator-report consumption,
   and aggregate coverage without becoming a dispatch, reporting, or closure
   admission gate;
-- interrupted report assembly retries the same append payload and idempotency key; it
-  rejects post-finalize/abort appends and overwrites, and uses explicit
+- interrupted private/internal publication assembly retries the same server-bound
+  append payload; it rejects post-finalize/abort appends and overwrites, and uses explicit
   supersession for a replacement;
 - `read_task` returns bounded server-produced task state, assignment, or evidence
   data; workers start with the assignment view and resume only with its
@@ -132,38 +132,31 @@ The V12 protocol evidence must prove:
 - `read_task` bounds task reads and returns the advertised `has_more` continuation
   state; no obsolete inspection or report-body operation is public;
 - ordinary `read_task` reads create no native lifecycle evidence;
-- The narrow decision record operations accept only an existing in-scope task, delegation,
-  plan, report, or same-project initiative subject; accepts the complete
-  canonical field set (`task_ref`, subject type/ref, decision type,
-  neutral `prompt`, exact `response_original`, and
-  `user_language`, with `subject_digest` for plan/report subjects only);
-  preserves attribution and supersession; and requires/validates the exact
-  immutable digest for plan and report subjects;
-- only plan `decision_type=approve` requires the exact finalized plan
-  revision/digest plus a current ready approval view and opaque approval handle;
-  the approval payload must also copy the matching view digest and source
-  sequence from that one returned ready relation; missing, renamed, extra, or
-  cross-mixed fields fail before mutation;
+- The narrow decision record operations accept an existing in-scope task and
+  their task-ref-only advertised fields; private subject/revision/digest
+  bindings remain server-owned. They preserve attribution and supersession;
+- only plan review approval requires a current private ready plan relation;
+  missing, renamed, extra, or cross-mixed public fields fail before mutation;
   plan `request_revision` and `cancel` preserve the exact finalized plan
   digest/response without volatile view binding, so intervening non-plan events
   cannot block saving feedback; silence/unrelated text is not approval, and
   clarification, pause, revision, cancellation, and plan review remain
   coordinator-owned ordinary-chat policy, never a backend gate or
   authorization claim;
-- missing closure, `not_ready`, initiative status, unfinished linked work,
+- missing closure, `not_ready`, private/internal initiative status, unfinished linked work,
   unresolved/cyclic dependency, and missing worker report do not block a new
   delegation, report, synthesis, rework, or final answer;
 - mode assessments append, the latest user override remains effective across
   later model assessments, and every revision remains in audit history;
 - every transition among the six initiative status values is accepted;
-- unresolved/cyclic dependencies remain warnings and initiative closure can
-  retain residual dependency risk;
-- task and report links cannot cross the current project ledger;
-- same-payload idempotent replay returns the original record and conflicting
+- unresolved/cyclic dependencies remain warnings and private/internal initiative
+  closure bookkeeping can retain residual dependency risk;
+- task and private/internal publication links cannot cross the current project ledger;
+- same-payload server-owned replay returns the original public receipt and conflicting
   replay does not mutate state;
 - concurrent reports, assessments, and initiative revisions commit without
   loss and timeline sequences remain ordered;
-- each accepted report append emits a task-scoped `report_chunk_appended`
+- each accepted private/internal publication append emits a task-scoped `report_chunk_appended`
   timeline event; the one-time normal-open V12 backfill appends only missing
   derived task chronology with a `backfill` marker, preserves existing timeline
   rows/report bodies, refreshes affected views best effort, and warns rather
@@ -192,8 +185,9 @@ exact private plan/report layout:
 ```
 
 The report-ID placeholders above name host-private storage files; they are not
-public MCP inputs. Public report operations use compact `report_ref` values,
-while canonical durable report IDs remain ledger/evidence fields.
+public MCP inputs. Worker publication operations use the worker-scoped
+`task_ref`; private assignment, continuation, and report IDs remain
+ledger/evidence fields.
 
 Task, decision, delegation, initiative, closure, governance, handoff, index,
 and timeline records remain in SQLite and are not emitted as user-facing
@@ -335,7 +329,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.13.0+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.13.1+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -384,7 +378,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.13.0` with
+successful `initialize`, report semantic version `1.13.1` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -474,8 +468,9 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     report carrying source material preserves one unchanged `source_text`
     value without a language duplicate, and the coordinator publishes a
     localized summary and verified ready link.
-13. A large result written through `begin`/ordered `append`/`finalize`, then
-    read through a section-scoped cursor and resumed without duplicate chunks.
+13. A large worker result submitted atomically through `publish_result`, then
+    read through the bounded `read_task` evidence view and resumed with
+    `continue=true` without duplicate evidence.
 14. A required-plan case where the user forbids coordinator project operations;
     project discovery/planning is worker-owned before the plan-review hold and
     the coordinator performs no project search.
@@ -556,15 +551,15 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.13.0/schema-v1 identifiers;
+- V12/1.13.1/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional
   task `context`, textual delegation scope, exact model/effort, bounded
   inspections, evidence only through `read_task`, and task-scoped closure
   fields;
-- report types, plan review policies, chunked report modes/limits/resume, and
-  exact user-decision subject/digest/original-language semantics;
+- publication schemas, plan review policies, private/internal chunk limits and
+  replay, and task-ref-only user-decision/original-language semantics;
 - storage paths;
 - model/effort and Luna omission rules;
 - exact packaged `profile_name` versus human-readable `role`, loaded renderer
@@ -579,13 +574,11 @@ configuration. Check:
   lifecycle, capabilities, and server recovery claims;
 - coordinator-only orchestration, worker-owned project action/analysis, and the
   conditional report-grounded documentation stage before closure;
-- opaque byte-for-byte compact refs, durable evidence IDs, digests/cursors,
-  worker-only `publish_*` operations, exact
-  task-versus-initiative closure fields, and ready claims only after closure
-  write plus scoped governance inspection;
+- opaque byte-for-byte public `task_ref` and server-rendered evidence values,
+  private durable IDs/digests/continuation, worker-only `publish_*` operations,
+  task-scoped closure fields, and advisory ready claims based on ledger evidence;
 - complete English-only child transcripts and a finalized worker-owned
-  documentation-impact report linked in the final initiative and cited in
-  closure evidence;
+  documentation-impact publication confirmed through `read_task` evidence;
 - single-authority bounded knowledge routing, complete non-empty
   per-delegation six-part contracts, non-empty task/result arrays, and profiles
   that consume rather than reconstruct routing;

@@ -603,7 +603,7 @@ def test_events_rejects_resigned_stale_lease(monkeypatch, tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("field,value", [
     ("candidate_path", "/tmp/not-the-candidate"),
-    ("candidate_version", "1.13.0+codex.sha256." + "0" * 16),
+    ("candidate_version", "1.13.1+codex.sha256." + "0" * 16),
     ("build_id", "sha256:" + "0" * 64),
     ("source_digest", "0" * 64),
     ("candidate_digest", "0" * 64),

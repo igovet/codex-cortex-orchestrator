@@ -33,6 +33,9 @@ def test_fresh_worker_receives_common_memory_and_review_policy():
     assert "actual graph call" in normalized
     assert "Never silently skip the graph" in normalized
     assert "A plan publication always declares one explicit review disposition" in message
+    assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
+    assert "never publishes a supplementary result or documentation outcome" in normalized
+    assert "separate evidence assignment followed by a fresh planning revision" in normalized
     assert rendered["renderer"]["common_policy_digest"] == (
         "sha256:" + hashlib.sha256(
             worker_message._MANDATORY_PROJECT_POLICY.encode("utf-8")

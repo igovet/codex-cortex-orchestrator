@@ -105,9 +105,10 @@ saved root for working-directory context. Optional task `context` remains
 arbitrary JSON. Delegation `scope` is required non-empty text (up to 65,536
 characters) describing the concise worker-ownership boundary; detailed
 execution belongs in `instructions`, and object scope is invalid. Governance
-closure names its existing task or initiative through required `subject_type`
-and compact `subject_ref`. A durable `subject_id` is evidence only and is not a
-callable public locator.
+`close_task` is task-scoped and accepts the exact task reference, advisory
+verdict, and bounded closure evidence. Any initiative linkage is
+private/internal ledger bookkeeping; durable IDs are evidence only and are not
+public locators.
 
 Reports are immutable `progress`, `result`, or `synthesis` evidence with
 `partial`, `completed`, `blocked`, or `failed` status; `plan` is the fourth
@@ -124,10 +125,9 @@ delegation/report-kind slot. The server derives replay identity from the phase,
 assembly state, and canonical payload: exact ambiguous retries replay, while a
 changed payload conflicts and requires a recovery/rework delegation. A report
 is never overwritten or reopened after terminal completion; a replacement
-explicitly supersedes its predecessor. Compact
-`report_ref` values can be passed to later delegations; durable report IDs remain
-evidence only. Ordinary inspection creates no receipt; worker handoff reads
-create immutable delivery receipts. Report status and
+explicitly supersedes its predecessor. Later assignments receive finalized
+evidence selected by `report_policy`; private report IDs remain evidence only.
+Report status and
 receipt presence are not backend acceptance or native lifecycle evidence.
 
 The bounded `read_task` evidence view is the public inspection surface for the

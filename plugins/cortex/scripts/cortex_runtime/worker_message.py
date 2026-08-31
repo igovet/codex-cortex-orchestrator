@@ -150,6 +150,12 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 - Historical publication evidence rows are immutable audit evidence only. New work uses the
   active semantic publication operation, which owns storage representation and
   completion atomically.
+- Assignment responsibility fixes the publication kind. A planning worker
+  completes all bounded discovery before publishing one terminal plan, then
+  stops project/tool work and emits its compact handoff; it never publishes a
+  supplementary result or documentation outcome. Material evidence discovered
+  later belongs to a separate evidence assignment followed by a fresh planning
+  revision and review.
 
 ## Native coordinator handoff
 
@@ -207,6 +213,10 @@ _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
   when material product, scope, external, destructive, security, privacy, or
   risk decisions remain; otherwise use informational review. Never omit the
   disposition or downgrade it to bypass coordinator review.
+- A planning worker completes all bounded discovery before publishing one
+  terminal plan, then stops project/tool work and never publishes a
+  supplementary result or documentation outcome. Later material evidence uses
+  a separate evidence assignment followed by a fresh planning revision.
 """
 
 

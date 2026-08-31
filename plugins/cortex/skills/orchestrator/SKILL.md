@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.13.0 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
+description: Explicit opt-in Cortex v1.13.1 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
 ---
 
-# Cortex Orchestrator v1.13.0
+# Cortex Orchestrator v1.13.1
 
 ## Activation and language
 

@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 1.13.0 projects selected host-private plan and finalized-report evidence
+Cortex 1.13.1 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read
@@ -222,11 +222,11 @@ approval, and a revised plan's new report ID/digest needs a new decision.
 
 ## Chunked reports
 
-Every new report is stored and projected through an explicit lifecycle:
+Private/internal publication storage may use an explicit assembly lifecycle:
 
 ```text
-begin → append* → finalize
-begin → abort
+private begin → append* → finalize
+private begin → abort
 ```
 
 Large evidence publication is immutable and bounded by the active semantic

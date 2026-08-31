@@ -77,12 +77,11 @@ canonical mutation + timeline + projection job
     └── best-effort host-private Markdown view (never project_root)
 ```
 
-Each semantic mutation also appends an ordered timeline event. Inspection uses
-`after_sequence=0` and `limit=50` by default (limit 1–200), and returns
-`next_sequence` plus `has_more` for bounded incremental context recovery.
-Task/delegation inspection returns
-compact evidence references; worker assignment bootstrap is the evidence route,
-and large reports stay section- and byte-bounded.
+Each semantic mutation appends an ordered private timeline event. Public
+`read_task` accepts `view=state|assignment|evidence` and optionally
+`continue=true` for the immediately preceding bounded read. It returns
+server-produced semantic data with private ledger identity removed; worker
+assignment bootstrap is the evidence route.
 Only `open_task` carries the exact resolved `project_root` and stores the
 canonical project association. Every task-anchored public arrow carries the
 14-character `task_ref` (`t_` plus a 12-hex task suffix), which scans only
@@ -95,9 +94,9 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | Tool | Semantic contract |
 | --- | --- |
 | `open_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful result fields; return preferred `task_ref`. |
-| `read_task` | Use `task_ref` to return compact task history after `after_sequence`, bounded by `limit`, plus persisted continuation data for host reconciliation. |
+| `read_task` | Use `task_ref` with `view=state|assignment|evidence`; use `continue=true` only to resume the immediately preceding bounded read. |
 | `open_assignment` | Use `task_ref` to store objective, role, packaged profile, scope, instructions, evidence inputs, and model/effort; return the host-neutral worker bootstrap. |
-| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker publishes immutable plan, result, or documentation evidence through the assignment-scoped continuation. |
+| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref`; Cortex derives the consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. |
 | `assess_governance` | Use `task_ref` to append a model or user-override assessment. |
 | `close_task` | Record the final advisory closure aggregate from durable evidence. |
 | `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
@@ -264,66 +263,51 @@ only active items and labels each one `complete`, `missing`, `partial`,
 `unverified`, `stale`, or `contradictory`. A user `steer` decision creates a
 new revision, replaces only each named outcome with its merged linked data, and
 unaffected references and evidence remain valid. The advisory conformance
-projection relates the active revision, decision refs, active non-superseded
-report manifests, complete all-section coordinator-read receipts, unresolved
+projection relates the active revision, private decision/report evidence,
+complete server-owned reads, unresolved
 specialist dispositions, and aggregate coverage. It
 guides model-owned rework, verification, and closure review; it cannot alter
 report/delegation lifecycle or block safe coordination.
 
-Every new report uses one stable ID across `begin`, sequential labeled `append` chunks up to
-32 KiB, exact-manifest `finalize`, or `abort`. The limits
-are 256 chunks and 8 MiB per report, eight assembling reports and 16 MiB of
-assembling content per task, and 128 MiB retained report content per task.
-Report timeline events record start, each accepted `report_chunk_appended`,
-final submission, or abort. A duplicate identical chunk is safe; a conflicting
-or out-of-order chunk is rejected.
+Private/internal report storage may retain immutable assembly metadata and
+chunking limits, but the public facade has no `begin`/`append`/`finalize`/`abort`
+operations. Public workers submit one complete plan, result, or documentation
+payload through the corresponding publication operation.
 
-Worker evidence reads support bounded sections, opaque scoped cursors, and a
-fixed 65,536-byte server page; metadata-only reads omit a consuming delegation.
-It returns only
-whole JSON chunks under a 224 KiB response ceiling. A small finalized one-chunk
-report may additionally expose compatibility `content`; incomplete/aborted
-content is never presented as completed evidence. Recovery resumes from
-canonical report metadata and cursor state, never from a generated Markdown
-view. The host-private task projection also contains the bounded receipt list,
-so database, timeline, and projection evidence agree without adding a twelfth
-public tool.
+Worker evidence reads are exposed through the bounded `read_task` evidence
+view. The public caller supplies no publication/assignment reference or cursor;
+continuation is retained by the server. Private/internal
+assembly state is never a public capability or recovery input.
 
-The read service preflights the complete report/chunk request and encoded
-response before materializing bodies, including the 224 KiB response ceiling.
+The read service preflights the bounded task/evidence response before
+materializing it.
 Projection rendering likewise preflights its aggregate output (512 files,
 32 MiB total, and 10 MiB per file) so an over-limit request produces no
 partial artifact set.
 
-`read_task` returns only the
-task-scoped timeline page selected by `after_sequence` and `limit`; they do not
-infer unlinked initiative history. On a normal V12 store open, the one-time
-conservative backfill appends only missing derived task events (including report
-chunk appends and unambiguous initiative/closure lineage), marks their payloads
-as `backfill` data, and queues derived-view refreshes. It never rewrites an
-existing timeline row or guesses ambiguous report-only lineage.
+`read_task` returns only the selected semantic view and its server-owned
+continuation; it does not infer unlinked private/internal initiative history.
+Private/internal storage repair may append only missing derived events and
+must never rewrite existing timeline rows or guess ambiguous lineage.
 
 Plan reports add `review_policy=informational|required` and may name a
 finalized predecessor. A required review is a coordinator-owned interaction;
 for light/full delivery the backend admits only an explicit approval bound to
 the exact current plan. The matching narrow decision record operation preserves an
 exact original response and attribution `user_via_coordinator` through one
-closed canonical request containing task and subject refs, decision type,
-neutral `prompt`, exact `response_original`, and user language; retired English
-duplicate fields are rejected. Plan/report decisions additionally require the
-canonical
-digest; only plan `approve` also requires the current ready approval-view
-digest/source sequence and opaque handle copied from one returned relation. Plan
-`request_revision` and `cancel`
-preserve the exact plan digest/response without volatile view binding, so
-unrelated timeline events do not block feedback. Approval does not transfer to
-a revised report ID/digest, and clarification is not approval.
+closed operation-specific request containing the task reference, neutral prompt
+or response, and user language as advertised; retired English duplicate fields
+are rejected. Decision subject and digest binding are derived privately from
+the matching open operation, never supplied as report/delegation locators.
+Approval does not transfer to a revised private plan identity, and clarification
+is not approval.
 
 ## Coordinator-only execution boundary
 
 The coordinator may define outcome/acceptance, select or revise governance,
-create and inspect tasks/delegations, choose exact worker model/effort,
-coordinate native workers, read reports, decide rework/replacement, record
+open and read tasks, open assignments, choose exact worker model/effort,
+coordinate native workers, read server-produced evidence, decide
+rework/replacement, record
 advisory closure, and synthesize the final answer. Before project delegation,
 the host-injected `AGENTS.md` context governs the task; it then reads the project and feature indexes, and
 task-relevant pages

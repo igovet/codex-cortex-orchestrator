@@ -31,14 +31,14 @@
 - An unresolved initiative dependency is intentionally storable as a warning.
   Do not treat an arbitrary unresolved ID as access to another project.
 
-## Idempotency and concurrency
+## Replay and concurrency
 
-- Idempotency keys are scoped by operation in one project ledger. Reuse the same
-  key only for the same normalized payload.
+- Replay identity is server-owned and scoped by operation, task, assignment
+  context, and canonical payload; callers do not submit replay keys.
 - `replayed=true` means the original mutation was returned; it is not a new
   event or proof that external work reran.
-- `idempotency_conflict` is non-mutating. Generate a new key only after making
-  a deliberate new write request.
+- A conflicting replay is non-mutating. Make a deliberate new write request only
+  after changing the semantic payload.
 - Concurrent writes are serialized by SQLite and receive ordered timeline
   sequences. Never infer semantic precedence from wall-clock completion alone.
 
@@ -69,15 +69,16 @@
 - The owning native worker alone calls the applicable `publish_*` operation. The coordinator never
   fills in a missing plan, result, verification, synthesis, or documentation
   rationale; it follows up, reworks, or creates a parent-linked replacement.
-- Report storage and replay identity are server-owned. Exact ambiguous publication
-  retries replay; changed payloads conflict and require recovery/rework. Do not
-  restart, append after finalization/abort, or overwrite immutable evidence.
+- Private/internal report storage and replay identity are server-owned. Exact
+  ambiguous publication retries replay; changed payloads conflict and require
+  recovery/rework. The public facade exposes no report-assembly operations;
+  private/internal assembly state remains inaccessible to callers.
 - `read_task` is the bounded public evidence view. Workers begin with its
   server-rendered assignment view, and continue the same read only with the
   server-owned continuation; no report-reference or consumer-delegation fields
   are accepted by the public facade.
-- Continue every inspection with `after_sequence` and only while
-  while `has_more` using the returned `next_sequence`.
+- Continue a bounded `read_task` only with `continue=true` when its response
+  reports `has_more`; the server retains the continuation privately.
 - A worker may end without a report. The coordinator can disclose the evidence
   gap and create a replacement; there is no backend recovery route.
 - Native wait output and worker prose are ordinary model/host context, not
@@ -124,8 +125,8 @@
 - Assessments append. A later row changes the projection without erasing history.
 - Initiative status is informational. Every transition among the six allowed
   values is accepted; there is no transition graph.
-- Unresolved/cyclic dependency warnings do not block status updates, task work,
-  or initiative closure.
+- Unresolved/cyclic dependency warnings do not block status updates or task work;
+  private/internal initiative closure bookkeeping may retain them as risk.
 - `ready`, `ready_with_risks`, and `not_ready` are advisory recommendations.
   `not_ready` does not disable `open_assignment` or require a repair wave.
 - Missing closure never blocks a final answer. Disclose material missing
@@ -135,14 +136,14 @@
   inspection. `ready_with_risks` never asks for user confirmation. Do not
   conflate the independent `execution_outcome` with advisory bookkeeping.
 - `read_task.execution_outcome` contains `evidence_status`,
-  `finalized_report_count`, `completed_report_count`, `effective_revision`,
+  finalized publication counts, `effective_revision`,
   `coverage_status`, and `outcome`. It derives deterministically from current
   effective-contract coverage, not report arrival order or historical claims;
   it is not a native-lifecycle claim. `advisory_closure` separately reports `record_status` and
   `latest_record`. Closure bookkeeping cannot change execution evidence.
 - `close_task` returns `closure_confirmation` with
   `inspection_status`, `reason`, and `attempts`. The service allows at most one
-  same-idempotency retry for a verified transient persistence or inspection
+  server-owned replay reconciliation for a verified transient persistence or inspection
   failure. If confirmation remains `unconfirmed`, disclose that advisory
   limitation while retaining the independent `execution_outcome` evidence.
 - `close_task` needs the exact task reference, one `verdict`, and bounded opaque
@@ -151,13 +152,11 @@
   locator. Omit optional risks/follow-ups to store empty lists.
 - The public closure call has no subject digest or initiative fields; keep any
   private/internal initiative ledger bookkeeping out of the public request.
-- The three narrow decision record operations are coordinator-asserted evidence. Use the matching advertised operation and preserve the exact user response.
-  and preserve the exact ordinary-chat response in `response_original`; do not
-  send retired `prompt_en`/`response_en` duplicate fields. Bind plan/report decisions to the exact
-  immutable digest. Only plan `approve` also requires a current ready approval
-  view and opaque handle. Plan `request_revision` and `cancel` deliberately do
-  not use volatile view binding, so non-plan timeline events cannot block saved
-  feedback. It neither authenticates the user nor grants authority.
+- The three narrow decision record operations are coordinator-asserted evidence.
+  Use the matching advertised operation and preserve the exact ordinary-chat
+  response in `response_original`; do not send translated duplicate fields.
+  Private plan/publication bindings are resolved by the server. The records
+  neither authenticate the user nor grant authority.
 - Ask a question only for a genuine product, requirement, scope, acceptance, or
   external/destructive authorization decision. Clarification, pause, plan
   revision, and cancellation are model-owned interaction policy, not a report,
@@ -166,21 +165,19 @@
 ## Conditional documentation stage
 
 - After worker-owned project verification, assess documentation impact from
-  reports before closure.
+  publications before closure.
 - Material behavior, architecture, interface, command, verification,
   convention, or feature-ownership changes require a documentation-sync worker
   and then a separate documentation-verifier worker.
-- A no-impact task uses one finalized worker-owned report with an explicit
+- A no-impact task uses one finalized worker-owned publication with an explicit
   English documentation-impact section and material/no-impact rationale, and
   creates no meaningless documentation edit. Use a bounded evidence-synthesis
   worker only when existing reports do not already contain that section; the
   coordinator never calls a worker-only `publish_*` operation or self-asserts the result.
-- The final no-impact initiative must link the exact task, the exact
-  documentation-impact `report_ref`, and every other required `report_ref`;
-  closure evidence cites those compact refs and returned digests. Durable report
-  IDs remain evidence only. A report-only initiative
-  cannot surface reliably in task scope. Close the exact initiative, then verify
-  task-scoped and initiative-scoped governance before claiming durable `ready`.
+- Before a no-impact close, use the bounded `read_task` evidence view to confirm
+  that the finalized documentation-impact publication and every other required
+  result are present in task coverage. Private report identities remain ledger
+  evidence only; callers close the task without supplying them.
 - Missing documentation update or verification evidence calls for rework,
   replacement, or explicit risk disclosure; it is never a backend gate.
 
@@ -233,7 +230,7 @@
   task and decision contracts retain user text in explicit `*_original` fields.
   Localize coordinator-to-user summaries,
   questions, decisions, and ready-view explanations.
-- The database is canonical; only plan and finalized-report Markdown views are
+- The database is canonical; only plan and finalized-publication Markdown views are
   host-private derived files under the V12 shard. Task, decision, delegation,
   initiative, closure, governance, handoff, index, and timeline data remain in
   SQLite. Never write a database, report, decision, projection, or project-local

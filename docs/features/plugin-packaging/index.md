@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.13.0 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.13.1 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -59,18 +59,22 @@ Only `open_task` accepts explicit `project_root`; it stores the canonical
 project association and returns a compact `task_ref` for later task-anchored
 calls. The durable `task_id` in results and ledger evidence is non-callable.
 The task-anchored tools use `task_ref`: `read_task`, `open_assignment`,
-`assess_governance`, `close_task`, and the six narrow decision operations.
-Publication operations use the server-issued assignment anchor and continuation;
+`assess_governance`, `close_task`, the six narrow decision operations, and the
+three worker-owned publication operations. Publications accept the worker-scoped
+`task_ref`; private assignment and continuation identity is derived from the
+connection after the worker has consumed its server-rendered assignment view;
 there are no separate delegation/report-read or initiative inspection tools, and
-no public call accepts durable `*_id` values.
+no public call accepts durable `*_id` values, assignment refs, report refs,
+initiative refs, cursors, or caller idempotency keys.
 No host metadata, plugin `cwd`, or hook binds a project. `open_task` records
 the exact original request and a concrete language tag beside the English
 objective and four non-empty, meaningful result-contract lists; `context`
 remains optional arbitrary JSON. Delegation `scope` is required non-empty text
 defining the concise worker-ownership boundary, not an object, and detailed
 execution belongs in `instructions`. Exact model and effort are required
-together. Closure selects the existing subject with `subject_type` plus the
-compact `subject_ref`; durable `subject_id` is evidence only.
+together. `close_task` is task-scoped and accepts the exact task reference,
+advisory verdict, and bounded evidence; private/internal subject and initiative
+ledger identity is never a public argument.
 
 The package keeps finalized-report evidence separate from advisory bookkeeping.
 `read_task` exposes `execution_outcome` with `evidence_status`,
@@ -87,9 +91,9 @@ At most one same-idempotency retry is made for a verified transient persistence
 or inspection failure. An `unconfirmed` advisory result is disclosed without
 changing `execution_outcome` evidence.
 
-New reports use `begin`, sequential `append`, `finalize`, and `abort` under
-bounded chunk, assembling,
-retained-content, and response limits. Plan reports
+The public publication operations accept one complete immutable plan, result,
+or documentation evidence payload. Private/internal report assembly state,
+chunking, and retained-content limits remain behind the facade. Plan reports
 carry informational/required review policy and immutable digest identity.
 Product-facing reports support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
 schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas. V2
@@ -156,11 +160,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.13.0+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.13.1+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.13.0` manifest is source-mode only and the
+in provenance strength. A plain `1.13.1` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -190,7 +194,7 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.13.0 and a suffix matching the complete normalized plugin payload;
+  1.13.1 and a suffix matching the complete normalized plugin payload;
 - exact fourteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private

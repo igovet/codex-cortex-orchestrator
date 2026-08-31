@@ -5556,6 +5556,12 @@ class V12Store:
                 (str(owner["delegation_id"]),),
             ).fetchone() is not None
             owner_policy = "planning" if has_planning_scope else "owner" if "owned" in assignment_roles else "review"
+            if owner_policy == "planning" and report_kind != "plan":
+                raise V12StoreError(
+                    "planning assignments may publish only plan reports",
+                    code="publication_kind_not_permitted",
+                    details={"assignment_policy": owner_policy, "publication_kind": report_kind, "allowed_publication_kind": "plan"},
+                )
             predecessor = self._inferred_assignment_predecessor(
                 connection,
                 task_id=str(task["task_id"]),

@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.13.0 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.13.1 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -51,7 +51,7 @@ coordinator model ── classify/revise C1 | C2 | C3 and minimal | light | full
         ├── construct/follow/adapt a worker-owned-stage DAG
         ├── planner worker → durable plan report → plan-dependent nodes
         ├── choose exact profile/model/effort per worker
-        ├── pass compact report_ref/decision_ref links as evidence
+        ├── pass server-selected predecessor evidence through worker context
         ├── adapt, delegate verification/rework, or request a real decision
         ├── conditionally delegate docs sync + docs verification
         └── submit advisory closure and synthesize the user answer
@@ -221,23 +221,17 @@ Steering additions name an active outcome and create a replacement revision
 whose linked metadata includes the new user fragment and decision relation;
 they do not create parallel coverage obligations.
 
-Canonical compact decision references match `u_[0-9a-f]{12}` and remain opaque
-evidence references, copied exactly from a successful receipt.
+Private/internal decision references may match an `u_[0-9a-f]{12}` storage
+pattern, but they remain non-callable evidence and never replace the public
+task reference.
 
 The matching narrow decision record operation appends coordinator-asserted ordinary-chat evidence, not
-backend authority. Its one canonical request contains `task_ref`,
-`subject_type`, `subject_ref`, `decision_type`, neutral `prompt`, exact
-arbitrary-Unicode `response_original`, and `user_language`. The original
-response is retained exactly; there are no `prompt_en` or `response_en`
-fields. It preserves the response, language, subject binding, and required
-immutable digest for plan/report subjects; task, delegation, and initiative
-decisions omit that digest. Only plan approval additionally binds a current ready approval view
-with `approval_handle`, `approval_view_content_digest`, and
-`approval_view_source_sequence` copied from one returned relation. A ready plan
-read also provides `handles.decision_binding` with exact decision-input names; plan
-revision/cancellation feedback preserves the exact plan digest and response
-without volatile view binding. Missing, renamed, extra, or cross-mixed fields
-are rejected before mutation.
+backend authority. Its public request is task-ref-only: it carries the exact
+response and user language, plus steering outcome changes where applicable. The
+original response is retained exactly; there are no translated duplicate fields.
+Private subject, revision, digest, and ready-view bindings are resolved by the
+server. Missing, renamed, extra, or cross-mixed fields are rejected before
+mutation.
 
 The native dispatch projection does not select an isolated worktree or
 workspace. Physical concurrent-writer isolation is therefore an unconfirmed
@@ -277,18 +271,16 @@ coordinator uses a finalized worker-owned report with an explicit English
 documentation-impact section and material/no-impact rationale and does not
 create an empty documentation edit. When existing finalized reports do not
 contain that section, one bounded evidence-synthesis worker submits it. The
-final initiative links the exact task, that documentation-impact `report_ref`,
-and every other required report; closure evidence cites their exact compact refs
-and returned
-digests before task-scoped and initiative-scoped governance inspection. A
+private/internal initiative bookkeeping links the exact task and documentation-impact
+evidence; closure evidence remains task-scoped and cites server-produced evidence.
+A
 self-asserted `documentation_not_required` value is invalid. This stage
 precedes closure; missing documentation evidence may
 cause model-owned rework, replacement, or disclosed risk, never a backend gate.
 
-Every mutation requires a caller-generated `idempotency_key`. Retrying the same
-operation with the same normalized payload replays the original result;
-reusing a key with a different payload is a non-mutating conflict. This is
-caller retry safety, not authentication or permission.
+Mutation replay identity is server-owned. Callers do not supply a replay key;
+the ledger reconciles identical semantic writes and rejects
+conflicting writes without treating replay as authentication or permission.
 
 ## Storage
 

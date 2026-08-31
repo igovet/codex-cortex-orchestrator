@@ -240,7 +240,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.13.0",
+        "1.13.1",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -723,7 +723,7 @@ def _publication_evidence(*, schema_kind: str, summary: str,
 def publish_plan(*, task_ref: str, summary: str, scope: str, review_policy: str,
                  stages: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
                  outcome_coverage: list[Mapping[str, Any]], risks: list[str], unresolved: list[str],
-                 status: str = "completed", _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+                 status: str, _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     evidence = _publication_evidence(schema_kind="plan", summary=summary, verification_facts=verification_facts,
                                      outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
                                      scope=scope, stages=[dict(item) for item in stages])
@@ -736,7 +736,7 @@ def publish_plan(*, task_ref: str, summary: str, scope: str, review_policy: str,
 def publish_result(*, task_ref: str, summary: str, outcome: str,
                    changes: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
                    outcome_coverage: list[Mapping[str, Any]], documentation_impact: str,
-                   risks: list[str], unresolved: list[str], status: str = "completed",
+                   risks: list[str], unresolved: list[str], status: str,
                    _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     evidence = _publication_evidence(schema_kind="result", summary=summary, verification_facts=verification_facts,
                                      outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
@@ -749,7 +749,7 @@ def publish_documentation(*, task_ref: str, summary: str,
                           findings: list[Mapping[str, Any]], recommendations: list[str],
                           verification_facts: list[Mapping[str, Any]], outcome_coverage: list[Mapping[str, Any]],
                           documentation_impact: str, risks: list[str], unresolved: list[str],
-                          status: str = "completed", _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+                          status: str, _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     evidence = _publication_evidence(schema_kind="documentation", summary=summary, verification_facts=verification_facts,
                                      outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
                                      findings=[dict(item) for item in findings], recommendations=list(recommendations),

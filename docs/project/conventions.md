@@ -99,68 +99,54 @@
   attempt the advisory write and inspect the intended record. `ready_with_risks`
   never requires user confirmation. Keep the independent `execution_outcome`
   projection separate from `advisory_closure` bookkeeping.
-- `read_task` exposes the exact four-field `execution_outcome`:
-  `evidence_status`, `finalized_report_count`, `completed_report_count`, and
-  `outcome`. The finalized count covers every finalized report; the completed
-  count covers semantically valid canonical finalized results with status
-  `completed`. `outcome` is `null` before the first semantically valid canonical
-  finalized result and then reflects the latest such result as `completed` or
-  `incomplete`, without claiming native lifecycle. It exposes
-  `advisory_closure` with `record_status` and `latest_record`. A closure cannot
-  change execution evidence. `close_task` returns
-  `closure_confirmation` with `inspection_status`, `reason`, and `attempts`;
-  only one same-idempotency retry is allowed for a verified transient
-  persistence or inspection failure. If the result is `unconfirmed`, disclose
-  advisory uncertainty without changing the evidence projection.
-- Reuse returned compact task/entity refs and every digest/cursor byte-for-byte.
-  Durable `*_id` values are opaque non-callable evidence, not bearer
+- `read_task` exposes the advertised semantic `state`, `assignment`, or
+  `evidence` view and removes private ledger identity. A bounded response may
+  set `has_more`; continue only the immediately preceding read with
+  `continue=true`. A closure cannot change the underlying evidence. If a
+  closure confirmation is unavailable, disclose advisory uncertainty without
+  changing the evidence projection.
+- Reuse the exact Cortex-issued `task_ref` byte-for-byte. Durable `*_id`, digest,
+  and private/internal cursor values are opaque non-callable ledger evidence, not bearer
   capabilities. Never parse, concatenate, reconstruct, normalize, reformat, or
-  append a suffix to any ref or ID.
-- Treat the `task_ref` on initiative operations only as the locator for the
-  saved project ledger, never as governance permission or a lifecycle gate.
-- Every mutation requires a caller-generated operation-scoped idempotency key.
-  Reuse that exact key unchanged only for an
-  exact normalized-payload retry; the same payload replays the original result
-  and conflicting content returns a non-mutating `idempotency_conflict`.
-- Treat reports as immutable evidence. Pass only finalized relevant report refs
-  and their exact manifest digests to later delegations. Worker consumption is
-  evidenced by the worker's bounded `read_task` evidence read with its own exact
-  `consumer_delegation_ref` (the delegation must declare the input), plus its receipt;
-  coordinator reads never substitute for that evidence.
+  append a suffix to the public task reference.
+- Public mutation replay identity is derived privately from task/assignment
+  context and canonical content; callers do not submit replay keys.
+- Treat publications as immutable evidence. `open_assignment.report_policy` selects
+  the relevant finalized predecessor evidence, and a fresh worker consumes the
+  server-rendered assignment view as its first Cortex call; coordinator reads
+  never substitute for that bootstrap.
 - The owning native worker alone calls the applicable `publish_plan`,
   `publish_result`, or `publish_documentation` operation for its plan, result,
   verification, synthesis, or documentation-impact evidence. Its completion
-  handoff returns a concise `Summary` and exact `Report ref`; the coordinator
-  consumes that handoff and does not reread the body merely to summarize it. A
-  downstream worker reads the finalized report only when its declared work
-  requires the body. A report gap leads to follow-up, rework, or replacement.
-- Use the immutable report types `progress`, `result`, `synthesis`, and `plan`.
+  handoff returns a concise summary; the coordinator consumes the bounded
+  server-produced evidence view through `read_task`. A downstream worker
+  receives finalized evidence only when its assignment report policy selects
+  it. A report gap leads to follow-up, rework, or replacement.
+- Private/internal storage may retain immutable report types `progress`, `result`,
+  `synthesis`, and `plan`; public workers use the three matching publication
+  operations.
   A plan's review policy is `informational` or `required`; review is a
-  coordinator-owned ordinary-chat hold, never a backend gate. A required review
-  needs an explicit unambiguous response to that exact finalized plan digest;
-  silence and unrelated text are not approval.
-- Use the semantic publication operation for one complete terminal report outcome.
+  coordinator-owned ordinary-chat hold. For light/full delivery, backend
+  admission also requires explicit approval of the exact current finalized
+  plan; silence, unrelated text, and approval of an older revision do not pass.
+- Use the semantic publication operation for one complete terminal publication outcome.
   The server owns storage and derives replay identity from the delegation,
   phase, assembly state, and canonical payload. Exact ambiguous retries replay;
   changed payloads conflict and require an explicit recovery/rework delegation.
   Never restart, overwrite, or publish after terminal completion. Use an explicit
-  superseding report for replacement.
-- Preserve the bounded `read_task` evidence view and select only
-  needed sections, use compact `report_refs`, and continue through its fixed 65,536-byte server pages
-  with the returned cursor until complete. Omitting a consuming delegation is metadata-only
-  recovery. A worker must name its
-  own delegation and may read only declared
-  finalized inputs; retain the exact receipt digest, chunk indexes, and cursor
-  transitions. Continue task/delegation/governance inspection with `after_sequence`
-  and preserve `next_sequence`/`has_more`; pages are fixed at 50 events.
+  superseding publication for replacement.
+- Preserve the bounded `read_task` state, assignment, and evidence views. When
+  `has_more` is true, continue only the immediately preceding read with
+  `continue=true`; the server retains the cursor privately. A worker may read
+  only the evidence selected for its consumed assignment.
 - Use the matching narrow decision record operation only when coordinator policy has identified an
   ordinary-chat response as a direct user decision. Use neutral `prompt`, append
   the exact original-language response in `response_original`, and retain no
-  `prompt_en`/`response_en` duplicate fields. Bind
-  plan/report decisions to the exact canonical digest. Only plan `approve`
-  additionally binds a current ready approval view and opaque approval handle;
-  plan `request_revision` and `cancel` retain the exact plan digest/response
-  without a volatile view binding. The attribution is evidence, not
+  translated duplicate fields. The server privately binds plan/publication
+  decisions to the relevant canonical evidence. Only plan `approve`
+  additionally checks a current private ready approval view; plan
+  `request_revision` and `cancel` retain the relevant plan evidence without a
+  public volatile binding. The attribution is evidence, not
   authentication, authority, a bearer token, or a workflow gate.
 - Ask a localized question only for a genuine product, requirement, scope,
   acceptance, or external/destructive-authorization decision, then end the
@@ -234,28 +220,25 @@
   to update harvest documentation under `docs/project/` and `docs/features/`,
   followed by a separate delegated documentation verification.
 - When there is no material documentation impact, require one finalized
-  worker-owned report with an explicit English documentation-impact section and
+  worker-owned publication with an explicit English documentation-impact section and
   material/no-impact rationale, and make no meaningless documentation edit. Use
   a bounded evidence-synthesis/documentation-impact worker when existing
-  reports do not already contain that section. The coordinator may use the
+  publications do not already contain that section. The coordinator may use the
   bounded routing exception to identify affected knowledge paths, but it neither
   edits nor verifies the documents, never calls a worker-only `publish_*` operation, and bases
-  impact on worker reports. Missing documentation evidence leads to model-owned
+  impact on worker publications. Missing documentation evidence leads to model-owned
   rework, replacement, or risk disclosure, never a backend gate.
-- For that no-impact close, create/update an initiative with the exact task
-  relationship, the exact documentation-impact `report_ref`, and every other
-  required finalized report link. Cite the exact compact report refs and
-  returned digests in closure evidence, close the exact returned initiative,
-  then inspect
-  governance in task scope and initiative scope. Never accept a self-asserted
-  `documentation_not_required`, a report-only final initiative, or a durable
-  `ready` claim before the closure write and both inspections agree.
+- For that no-impact close, confirm through `read_task` that the finalized
+  documentation-impact publication and every required implementation and
+  verification result are present in current task coverage. Never accept a
+  self-asserted `documentation_not_required` or a durable `ready` claim before
+  the task closure write succeeds.
 - Store V12 state only in the new schema-v1 namespace at
   `~/.codex/cortex/v12/projects/p-<project-hash>/cortex.db`. Never open, migrate,
   delete, or modify V11 databases.
 - Treat WAL/SHM files as SQLite machinery rather than evidence. Never repair a
   ledger by editing database files or derived content manually.
-- The database is canonical. Only plan and finalized-report Markdown views are
+- The database is canonical. Only plan and finalized-publication Markdown views are
   derived host-private files beside the V12 shard; task, decision, delegation,
   initiative, closure, governance, handoff, index, and timeline data remain in
   SQLite. Never use a view as a recovery input or worker prompt. Never write a

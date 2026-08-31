@@ -296,6 +296,64 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(handoff["data"]["reports"][0]["review_policy"], "informational")
             self.assertEqual(handoff["data"]["consumption_receipts"][0]["reader_kind"], "coordinator")
 
+    def test_planning_assignment_cannot_publish_supplementary_result_after_plan(self) -> None:
+        outcome = {
+            "outcome": "Plan the bounded change.",
+            "acceptance": ["Exactly one planning publication owns the current plan."],
+            "constraints": [],
+            "verification": [],
+        }
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, [outcome])
+            assignment = open_assignment(
+                task_ref=task["task_ref"], role="planner", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
+                goal="Publish the terminal plan.", scope="Bounded planning only.",
+                instructions="Complete discovery before publishing.",
+                outcomes=[outcome["outcome"]], report_policy="none",
+            )
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+            context: dict = {}
+            read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            common = {
+                "task_ref": worker_ref,
+                "verification_facts": [{"state": "not_run", "summary": "Planning does not execute delivery."}],
+                "outcome_coverage": [{"outcome": outcome["outcome"], "status": "planned", "verification": ["Mapped completely."]}],
+                "risks": [], "unresolved": [], "status": "completed",
+                "_connection_context": context,
+            }
+            publish_plan(
+                summary="Complete terminal plan.", scope="Bounded planning only.",
+                review_policy="required",
+                stages=[{"owner": "implementation", "work": ["Implement."], "verification": ["Run focused tests."]}],
+                **common,
+            )
+            before = read_task(
+                task_ref=task["task_ref"], view="evidence", report_policy="all_finalized",
+                _connection_context={},
+            )
+            self.assertEqual(len(before["data"]["reports"]), 1)
+
+            with self.assertRaises(V12ServiceError) as rejected:
+                publish_result(
+                    summary="Late supplementary evidence.", outcome="Discovery continued after the plan.",
+                    changes=[], documentation_impact="None.", **common,
+                )
+            self.assertEqual(rejected.exception.code, "publication_kind_not_permitted")
+
+            after = read_task(
+                task_ref=task["task_ref"], view="evidence", report_policy="all_finalized",
+                _connection_context={},
+            )
+            self.assertEqual(len(after["data"]["reports"]), 1)
+            self.assertIn("Complete terminal plan.", repr(after["data"]["reports"][0]))
+            self.assertNotIn("Late supplementary evidence.", repr(after["data"]))
+
     def test_unique_outcome_name_resolves_current_user_refined_revision(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
             task, outcomes = self._task(root)
@@ -386,7 +444,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.13.0")
+        self.assertEqual(SERVER_VERSION, "1.13.1")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

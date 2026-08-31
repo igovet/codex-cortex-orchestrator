@@ -24,6 +24,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
       PYTHONHASHSEED: "0"
+      PYTHONPATH: plugins/cortex/scripts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,6 +39,5 @@ jobs:
           bash -n scripts/sync-cortex.sh
           python -B scripts/validate-cortex-marketplace.py
           python -B scripts/verify-cortex-release.py --mode source
-          python -B -m pytest -q tests/test_marketplace_release_gate.py
-          python -B -m pytest -q tests/test_sync_release_workflow.py
+          python -B -m pytest -q
           git diff --check

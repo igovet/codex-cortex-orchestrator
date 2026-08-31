@@ -70,7 +70,7 @@ decision remains. The selected policy is persisted on the immutable plan report.
 
 ## Project-level initiatives
 
-An initiative is a durable project object for several tasks sharing a
+An initiative is a private/internal durable project object for several tasks sharing a
 long-lived goal, common risk, milestone/dependency relationship, or common final
 assessment. It may:
 
@@ -89,61 +89,52 @@ transition graph. Its required `task_ref` only anchors the saved project ledger;
 the returned durable `task_id` is non-callable evidence, and the task does not
 grant initiative permission or lifecycle authority.
 
-For one task, the coordinator also uses the task-linked initiative revision as
+For one task, the coordinator also uses the private/internal task-linked initiative revision as
 the durable projection of its model-owned orchestration DAG. A revision records
-the evidence-backed stages derived from the planner report (or the minimal C1
-task contract), each worker owner, predecessor report/decision refs, acceptance
+the evidence-backed stages derived from the planner publication (or the minimal C1
+task contract), each worker owner, private predecessor publication/decision identity, acceptance
 and expected evidence, and the current advisory state. The coordinator never
 writes the project solution plan: that is the planner worker's immutable `plan`
 report. New evidence can append a revision that adds, removes, reorders, retries,
 or parent-links rework stages. The backend stores this graph history but never
 executes it or parses free text as workflow control.
 
-The coordinator treats every returned compact task/entity reference, durable
-evidence ID, and digest as opaque byte-for-byte data. Compact refs are the only
-callable public locators; durable `*_id` values are non-callable evidence. It
+The coordinator treats the returned compact `task_ref` and server-rendered
+dispatch/evidence values as opaque byte-for-byte data. `task_ref` is the only
+callable public locator; private entity identity and durable `*_id` values are
+non-callable evidence. It
 never parses an embedded shard, reconstructs a value, normalizes it, or appends
 a suffix before another call.
 
-Task and report links must resolve in the current project. An unresolved
+Private/internal task and publication links must resolve in the current project. An unresolved
 dependency identifier is retained with `unresolved_dependency`; a dependency
 cycle is retained with `cyclic_dependency`. Warnings are model-visible evidence,
-not rejection reasons. A later status update or initiative closure remains
-allowed.
+not rejection reasons. A later private/internal status update remains allowed.
 
-The `read_task` evidence view uses the task only to anchor the project and
-returns initiatives/links related to that task, the effective mode projection,
-immutable initiative revision payloads, and a bounded timeline page. An
-optional compact `initiative_ref` narrows the view; the durable `initiative_id`
-is evidence only and does not authorize or gate the initiative.
+The public `read_task` evidence view uses only the task reference and exposes
+server-produced task evidence with private ledger identity removed. It supports
+the advertised `state`, `assignment`, and `evidence` views; `continue=true`
+continues the immediately preceding bounded read. Private/internal initiative
+links, revisions, and timeline projections may contribute to that evidence but
+are not public locators or inspection inputs.
 
 ## Plans and user decisions
 
-A plan is a finalized `report_type=plan` report. Its review policy is
-`informational` or `required`; an updated plan names a finalized predecessor
-through the plan-revision relation and receives a new immutable report ref and
-content-manifest digest. Informational plans do not pause work. Required review
+A plan is a complete `publish_plan` publication. Its review policy is
+`informational` or `required`; an updated plan names a private finalized
+predecessor through the plan-revision relation and receives new private
+immutable identity. Informational plans do not pause work. Required review
 creates a coordinator-owned pause only for plan-dependent work when explicit
 review or a real product, scope, destructive, external, security, privacy, or
 risk decision is needed. It never changes public-tool availability.
 
-The matching narrow decision record operation appends `user_via_coordinator` evidence for an exact
-task, plan, initiative, delegation, or report through one closed canonical
-request containing the task and subject refs, decision type, neutral `prompt`,
-exact arbitrary-Unicode `response_original`, and asserted user language; include
-`subject_digest` only for plan and report subjects. Retired `prompt_en` and
-`response_en` fields are rejected. Decision
-types are `approve`, `reject`, `request_revision`,
-`clarification`, `cancel`, `accept_risk`, `override`, and `steer`. Plan/report decisions
-require the canonical `sha256:<64-lowercase-hex>` subject digest; a plan must
-already be finalized and completed. Only plan `approve` additionally requires a
-current ready `approval_view` with its exact opaque handle, view digest, and
-source sequence. A ready plan read also returns `handles.decision_binding` with
-the existing decision-input names for direct field-for-field composition. Plan
-`request_revision` and `cancel` preserve the exact
-finalized plan digest and response without volatile view binding, so
-intervening non-plan events cannot block feedback. Missing or cross-mixed fields
-fail before mutation.
+The matching narrow decision record operation appends `user_via_coordinator`
+evidence for the task through its closed task-ref-only contract. It records the
+exact arbitrary-Unicode response and asserted user language; private plan,
+publication, and decision bindings are resolved by the server. Retired aliases,
+partial inputs, and mixed shapes are rejected. A plan review additionally
+checks the current private ready plan; revision and cancellation feedback
+remains task-scoped and is bound internally to the relevant immutable plan.
 Clarification is not approval, and approval of an old digest never transfers to
 a revised plan.
 
@@ -180,14 +171,14 @@ validates evidence only as finite JSON within its size bound. The verdict is one
 The exact anchored `task_ref` is the only public closure locator. Durable
 `task_id` values are evidence only and are not callable closure inputs.
 `unresolved_risks` and `follow_ups` are optional and default to empty lists.
-The closure call has no subject or digest argument. Required reports must be
-finalized and read before a ready closure is attempted.
+The closure call has no subject, publication, or digest argument. Required
+publications must be complete and read before a ready closure is attempted.
 
 The verdict is a recommendation. A task closure can cite acceptance and
-verification evidence, unresolved risks, and follow-ups. A long-lived
-initiative closure can aggregate task/report evidence, achieved goals,
+verification evidence, unresolved risks, and follow-ups. Private/internal
+initiative bookkeeping may aggregate task/publication evidence, achieved goals,
 unfinished milestones, accepted exceptions, residual risk, retrospective, and
-recommended future work.
+recommended future work; it is outside the public facade.
 
 The coordinator chooses the verdict from sufficient completed worker-report
 evidence after the documentation-impact stage. It then automatically attempts
@@ -216,7 +207,7 @@ inspection and returns `closure_confirmation`. Its `inspection_status` is
 `confirmed` when the intended record is observed, or `unconfirmed` with one of
 `record_inspected`, `persistence_unavailable`, `inspection_unavailable`, or
 `record_not_observed` as `reason`; `attempts` is always 1 or 2. Cortex makes at
-most one same-idempotency retry for a verified transient persistence or
+most one server-owned replay reconciliation for a verified transient persistence or
 inspection failure. If the write or inspection remains unavailable, the
 coordinator reports the unconfirmed advisory bookkeeping and retains the
 independent neutral execution evidence; the advisory limitation does not alter
@@ -224,16 +215,16 @@ the closure verdict.
 
 After `not_ready`, the model may create rework, delegate a specialist, request a
 real user decision, or provide a final answer that clearly discloses the
-limitation. The backend never chooses that route. An initiative may close with
-unfinished linked tasks or unresolved dependencies when those facts are
-recorded as residual risk.
+limitation. The backend never chooses that route. Private/internal initiative
+bookkeeping may retain unfinished linked tasks or unresolved dependencies as
+residual risk; it is not a public closure operation.
 
 After worker-reported project verification and before closure, the coordinator
-makes a report-grounded documentation-impact decision. Material behavior,
+makes a publication-grounded documentation-impact decision. Material behavior,
 architecture, interface, command, verification, convention, or
 feature-ownership changes require a documentation-sync worker plus a separate
 documentation-verifier worker. A no-impact task uses one finalized worker-owned
-report with an explicit English documentation-impact section and
+  publication with an explicit English documentation-impact section and
 material/no-impact rationale and creates no empty edit. When existing finalized
 reports do not already contain that section, a bounded English
 evidence-synthesis/documentation-impact worker submits a finalized synthesis;
@@ -241,19 +232,15 @@ evidence-synthesis/documentation-impact worker submits a finalized synthesis;
 `documentation_not_required`.
 
 The no-impact close has a deterministic evidence sequence. After every required
-publication is finalized, the coordinator creates or updates an initiative with
-the `linked_task_refs` and `linked_report_refs` arrays, containing compact
-`task_ref` and `report_ref` values, respectively, plus every other implementation
-and verification report link. Closure evidence cites those
-exact report references and returned digests. A report-only final initiative or
-self-asserted no-impact value is invalid. The coordinator closes that exact
-initiative, then uses the bounded `read_task` evidence view
-first in task scope and then in initiative scope. Both `read_task` evidence views must surface the
-task relationship, required report links, and closure before the coordinator
-claims a durable `ready` verdict. A failed write or inspection is disclosed as
-an advisory limitation and does not block an honest final answer. Missing
-documentation evidence can trigger rework, replacement, or risk disclosure; it
-never becomes a backend lifecycle gate.
+publication is complete, the coordinator uses task-scoped `read_task` evidence
+to confirm the worker-owned documentation-impact rationale and coverage.
+Private/internal initiative bookkeeping may retain task/publication links, but
+no initiative or publication reference is a public input. `close_task` derives
+its closure evidence from the task ledger; a self-asserted no-impact value is
+invalid. A failed private write or inspection is disclosed as an advisory
+limitation and does not block an honest final answer. Missing documentation
+evidence can trigger rework, replacement, or risk disclosure; it never becomes
+a backend lifecycle gate.
 
 ## Absolute nonblocking guarantee
 
@@ -278,8 +265,9 @@ and discloses only material missing evidence.
 
 The release/protocol test must prove append-only mode history, preservation of a
 user override, free initiative status transitions, unresolved/cyclic warning
-retention, initiative closure with residual dependency risk, rework after
-`not_ready`, plan/report digest binding, decision append-only behavior, and
+retention, private/internal initiative closure with residual dependency risk,
+rework after `not_ready`, private plan-publication digest binding, decision
+append-only behavior, and
 final-answer availability without closure or a current view. It must also prove
 that finalized worker-publication evidence yields the same independent
 `execution_outcome` even without an advisory record, that `read_task` exposes the separate

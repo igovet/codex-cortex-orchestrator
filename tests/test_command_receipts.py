@@ -124,6 +124,39 @@ def _source_stdio_tool_call(home: str, tool_name: str, arguments: dict) -> dict:
     return reply
 
 
+class PublicPublicationFirstCallTests(unittest.TestCase):
+    def test_publish_plan_first_stdio_call_accepts_explicit_empty_unresolved(self) -> None:
+        """The advertised complete shape must cross real MCP validation on its first call."""
+        with tempfile.TemporaryDirectory(prefix="cortex-plan-first-call-") as home:
+            arguments = {
+                "task_ref": "t_0123456789ab_" + "a" * 32,
+                "summary": "Plan.",
+                "scope": "Bounded scope.",
+                "review_policy": "required",
+                "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Run focused tests."]}],
+                "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
+                "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped to implementation."]}],
+                "risks": [],
+                "unresolved": [],
+                "status": "completed",
+            }
+            accepted = _source_stdio_tool_call(home, "publish_plan", arguments)
+            self.assertTrue(accepted["result"].get("isError"), accepted)
+            self.assertEqual(
+                accepted["result"]["structuredContent"]["error"]["code"],
+                "task_not_found",
+                accepted,
+            )
+
+            rejected = _source_stdio_tool_call(
+                home, "publish_plan", {key: value for key, value in arguments.items() if key != "unresolved"},
+            )
+            self.assertTrue(rejected["result"].get("isError"), rejected)
+            error = rejected["result"]["structuredContent"]["error"]
+            self.assertEqual(error["code"], "validation_error", rejected)
+            self.assertEqual(error["details"]["path"], "$.unresolved", rejected)
+
+
 def _cross_process_identical_receipt(
     root: str, home: str, ready: object, start: object, results: object,
 ) -> None:
