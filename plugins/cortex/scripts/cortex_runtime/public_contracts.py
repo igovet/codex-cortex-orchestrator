@@ -55,8 +55,19 @@ def _texts(*, minimum: int = 0,
 
 
 def _contract(description: str, inputs: Mapping[str, Any], outputs: Mapping[str, Any]) -> dict[str, Any]:
+    required = inputs.get("required")
+    required_names = tuple(
+        name for name in required
+        if isinstance(name, str)
+    ) if isinstance(required, list) else ()
+    required_clause = (
+        " Required properties for this call: "
+        + ", ".join(required_names)
+        + ". Before invoking, verify every required property is present in one complete request."
+    ) if required_names else ""
     exact = (
         description.rstrip()
+        + required_clause
         + " Follow the advertised closed input schema exactly: include every required property, "
         "use only advertised properties, and never invent supplementary fields."
     )
@@ -87,9 +98,23 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         "prompt": _string(minimum=1, description="Required complete neutral user-facing question. This opens a decision but does not answer, approve, cancel, or apply it."),
         "prompt_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 prompt language."),
     }, ("task_ref", "prompt", "prompt_language"))
+    clarification_open = _closed({
+        "task_ref": task_ref,
+        "prompt": _string(minimum=1, description="Required complete neutral user-facing question. This opens a decision but does not answer, approve, cancel, or apply it."),
+        "prompt_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 prompt language."),
+        "purpose": _string(enum=("clarification", "closure_review"), maximum=32, description="Required explicit question purpose. Use closure_review only after presenting the current verified result immediately before possible task closure; otherwise use clarification."),
+        "options": {
+            "type": "array",
+            "description": "Required complete semantic choices. Supply exactly answer for an ordinary clarification, or exactly revise then close for closure_review; render closure-review labels to the user in the prompt language.",
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": True,
+            "items": _string(enum=("answer", "revise", "close"), maximum=16),
+        },
+    }, ("task_ref", "prompt", "prompt_language", "purpose", "options"))
     answer = {
         "task_ref": task_ref,
-        "response_original": _string(description="Required exact direct user response, preserved without translation, paraphrase, inference, or synthetic approval."),
+        "response_original": _string(minimum=1, description="Required non-empty exact direct user response, preserved without translation, paraphrase, inference, or synthetic approval."),
         "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 response language."),
     }
     verification_fact = _closed({
@@ -156,7 +181,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         "task_name": _string(minimum=1, maximum=160, description="Exact native task name."),
         "model": _string(minimum=1, maximum=64, description="Optional native model override."),
         "reasoning_effort": _string(minimum=1, maximum=16, description="Optional native reasoning effort override."),
-    }, ("fork_turns", "message", "task_name"), description="Exact server-rendered native spawn instruction. Forward it byte-for-byte, immediately, and exactly once after a successful non-replayed assignment; never rewrite, supplement, select a latest assignment, or reconstruct identity. A replayed assignment must not trigger a second spawn.")
+    }, ("fork_turns", "message", "task_name", "reasoning_effort"), description="Exact server-rendered native spawn instruction. The selected effort is always explicit; the model property is omitted only for Luna so the configured default model is used, and is explicit for Terra or Sol. Forward the complete object immediately and exactly once after a successful non-replayed assignment; never omit, rewrite, supplement, select a latest assignment, or reconstruct identity. The host may protect the message as an opaque encrypted transport value before PreToolUse. A replayed assignment must not trigger a second spawn.")
 
     contracts = {
         "open_task": _contract("Coordinator-only first project execution operation. Open or exactly reconcile one task from one complete semantic contract before project inspection, governance, decisions, or assignment. All fields are flat, task_ref is the only returned identifier, and an ambiguous transport result permits only an identical retry, never a replacement task.", _closed({
@@ -173,8 +198,8 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "continue": {"type": "boolean", "description": "Optional continuation flag. Use true only after the immediately preceding read with the same task_ref, view, and report policy returned has_more=true; otherwise omit or use false."},
             "report_policy": report_policy,
         }, ("task_ref", "view")), _closed({"task_ref": task_ref, "view": _string(enum=("state", "assignment", "evidence"), maximum=16), "data": _read_data(), "has_more": {"type": "boolean", "description": "Whether continue=true is valid next."}}, ("task_ref", "view", "data", "has_more"))),
-        "open_clarification": _contract("Coordinator-only decision opening after choosing to ask one real clarification. Open the task's sole pending neutral question; do not answer it, infer a response, or supply binding, handle, decision, or private identity fields. A later direct user answer is recorded separately.", decision_open, receipt),
-        "record_clarification": _contract("Coordinator-only recording of a direct user answer after a successful clarification opening. Preserve the exact response and language; Cortex derives the sole pending binding internally, so never invent handles, decision identifiers, or inferred answers.", _closed(answer, ("task_ref", "response_original", "user_language")), receipt),
+        "open_clarification": _contract("Coordinator-only decision opening after choosing to ask one real clarification or the mandatory final result review. Before every close_task attempt, first present the current verified result and open closure_review with exactly the two advertised semantic options rendered in the user's language: revise the current task or close it. Never infer either choice, and never reuse a review after later work or evidence.", clarification_open, receipt),
+        "record_clarification": _contract("Coordinator-only recording of a direct user answer after a successful clarification opening. Preserve the exact response and language. Record answer for an ordinary clarification. For a pending closure review, record exactly revise or close; revise keeps the same task open for rework, while close is the only decision that can authorize close_task. Silence or unrelated prose never authorizes closure.", _closed({**answer, "outcome": _string(enum=("answer", "revise", "close"), maximum=16, description="Required explicit decision outcome. Use answer for an ordinary clarification; for closure review copy revise or close from the user's direct choice and never infer close from completion, silence, or unrelated text.")}, ("task_ref", "response_original", "user_language", "outcome")), receipt),
         "open_plan_review": _contract("Coordinator-only opening of review after reading the current finalized active plan and choosing to ask the user. This opens one neutral question and does not approve the plan; Cortex derives plan identity and digest, so never supply plan references, handles, digests, or view fields.", decision_open, receipt),
         "record_plan_review": _contract("Coordinator-only recording of the direct user decision after a successful plan-review opening. Approval requires explicit approval of the current plan; silence, unrelated text, or an old-plan decision is not approval. Cortex derives and validates the pending plan binding internally.", _closed({**answer, "outcome": _string(enum=("approve", "request_revision", "cancel"), maximum=32, description="Required explicit direct user decision for the pending current-plan review; never infer approval from silence or unrelated text.")}, ("task_ref", "response_original", "user_language", "outcome")), receipt),
         "open_steering": _contract("Coordinator-only decision opening after choosing to ask for one task-scope or outcome change. Open the sole pending neutral steering question; do not apply changes yet or supply binding, handle, item, revision, or private identity fields.", decision_open, receipt),
@@ -195,7 +220,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         "publish_result": _contract("Worker-only atomic terminal result publication for the current consumed non-planning assignment. Publish exactly one complete flat result in one call with outcome, required changes array, verification, full outcome coverage, documentation impact, risks, unresolved items, and status. Publish only this worker's evidence and never a supplementary replacement after success; identical retry reconciles as replay, while changed payload conflicts and requires a new assignment.", result_publication, receipt),
         "publish_documentation": _contract("Worker-only atomic terminal documentation-impact publication for the current consumed non-planning assignment. Publish exactly one complete flat assessment in one call, using explicit empty findings or recommendations arrays when none apply, plus verification, full outcome coverage, final documentation impact, risks, unresolved items, and status. Never publish for another assignment or add a supplementary publication after success; identical retry reconciles as replay, while changed payload conflicts and requires a new assignment.", documentation_publication, receipt),
         "assess_governance": _contract("Coordinator-only advisory assessment exactly after task opening and before the first worker assignment; semantic ownership belongs only to the coordinator. Select one explicit advertised depth before invocation; optional rationale and risk notes support but never replace that choice. This is not worker lifecycle, scheduling, or an authorization grant, and native workers never call it.", _closed({"task_ref": task_ref, "mode": _string(enum=GOVERNANCE_MODES, maximum=16, description="Required explicit coordinator depth selection made before invoking the assessment; choose only an advertised value and never infer it from rationale or risk notes alone."), "rationale": _string(description="Optional supporting assessment rationale; it never replaces the required explicit depth."), "risk_factors": _texts(description="Optional complete supporting risk-factor list; omit when not supplied or use an explicit empty array when the assessment found none.")}, ("task_ref", "mode")), receipt),
-        "close_task": _contract("Coordinator-only advisory closure after reconciling intended publications, verification facts, outcome coverage, documentation impact, and unresolved evidence. Cortex derives evidence atomically from the ledger; never supply report or evidence identifiers, handles, cursors, digests, or private identity. The verdict records the coordinator's evidence-backed conclusion and does not turn missing or unresolved evidence into success.", _closed({"task_ref": task_ref, "verdict": _string(enum=CLOSURE_VERDICTS, maximum=32, description="Required evidence-backed coordinator closure verdict chosen from advertised values; ready does not itself prove that unrun checks passed."), "unresolved_risks": _texts(description="Optional complete unresolved-risk list; omit when not supplied or use an explicit empty array only when none remain."), "follow_ups": _texts(description="Optional complete follow-up list; omit when not supplied or use an explicit empty array when none are needed."), "completion_notes": _texts(description="Optional complete closure notes; omit when not supplied or use an explicit empty array when none exist.")}, ("task_ref", "verdict")), receipt),
+        "close_task": _contract("Coordinator-only advisory closure after reconciling intended publications, verification facts, outcome coverage, documentation impact, and unresolved evidence from the ledger. Before every attempt, present that current result to the user and consume a current closure review in which the user explicitly chose close rather than revise. Cortex rejects absent, revision-requested, pending, reused-after-work, or stale review evidence. Never infer permission from silence, worker completion, or an earlier review, and never open a new task when the user requests revision.", _closed({"task_ref": task_ref, "verdict": _string(enum=CLOSURE_VERDICTS, maximum=32, description="Required evidence-backed coordinator closure verdict chosen from advertised values; ready does not itself prove that unrun checks passed."), "unresolved_risks": _texts(description="Optional complete unresolved-risk list; omit when not supplied or use an explicit empty array only when none remain."), "follow_ups": _texts(description="Optional complete follow-up list; omit when not supplied or use an explicit empty array when none are needed."), "completion_notes": _texts(description="Optional complete closure notes; omit when not supplied or use an explicit empty array only when none exist.")}, ("task_ref", "verdict")), receipt),
     }
     return {name: contracts[name] for name in V12_TOOL_NAMES}
 

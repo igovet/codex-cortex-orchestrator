@@ -151,6 +151,14 @@ response without a volatile view binding, so intervening non-plan timeline
 events cannot block saving feedback. A revision receives a new plan and digest;
 silence and unrelated text are not approval.
 
+Closure review is separate from ordinary clarification and plan decisions. Once
+the current result is shown, exactly two localized choices are presented:
+revise the same task or close it. Revision keeps the same `task_ref`; any later
+assignment, report, or decision stales a previously consumed close choice. The
+public `close_task` operation atomically requires the current consumed close
+choice. Internal advisory storage may stay policy-neutral, while this public
+boundary rejects stale or reused closure choices without scheduling work.
+
 ## Model-owned governance
 
 C1/C2/C3 are retained as advisory planning baselines: C1 is bounded low-risk
@@ -212,10 +220,9 @@ Profile/model/effort selection belongs to the coordinator. Agent profiles are
 advisory prompt templates and cannot authorize or reject a delegation.
 
 Luna, Terra, and Sol each support `low`, `medium`, `high`, `xhigh`, and `max`;
-their canonical recommended effort is `high`. Native dispatches use
-`fork_turns="none"` and carry the exact selected effort. Luna is the configured
-default, so logical Luna omits the native `model` argument. Terra and Sol are
-explicit overrides.
+their canonical recommended effort is `high`. Native dispatches preserve
+isolated history and exact effort. Luna omits the model override so the
+configured default is used; Terra and Sol carry their exact overrides.
 
 There is no server-owned fallback ladder. A replacement worker receives a fresh
 model/effort decision from the coordinator.

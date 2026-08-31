@@ -544,6 +544,7 @@ def submit_governance_closure(
     initiative_status: str | None = None,
     completion_notes: Any = None,
     idempotency_key: str | None = None,
+    require_closure_review: bool = False,
 ) -> dict[str, Any]:
     """Attempt advisory bookkeeping without changing neutral report evidence."""
     store, canonical = _task_store(task_ref)
@@ -567,6 +568,7 @@ def submit_governance_closure(
         "verdict": verdict, "evidence": evidence, "unresolved_risks": unresolved_risks,
         "follow_ups": follow_ups, "initiative_status": initiative_status,
         "completion_notes": completion_notes, "idempotency_key": idempotency_key,
+        "require_closure_review": require_closure_review,
     }
     persisted: dict[str, Any] | None = None
     for attempt in (1, 2):

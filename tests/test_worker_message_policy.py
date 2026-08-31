@@ -20,22 +20,29 @@ def _delegation() -> dict[str, str]:
     }
 
 
-def test_fresh_worker_receives_common_memory_and_review_policy():
+def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     rendered = worker_message.render_worker_message(task=_task(), delegation=_delegation(), decisions=[])
     message = rendered["message"]
-    normalized = " ".join(message.split())
+    policy = worker_message.assignment_worker_policy("explorer")
+    assert policy is not None
+    normalized = " ".join(policy["common_policy"].split())
 
-    assert "first Cortex action is the server-owned assignment read" in message
+    assert "Before any other action or tool call" in message
+    assert "assignment read is the sole authority" in message
+    assert "Codebase Memory as the mandatory first evidence route" not in message
+    assert len(message.encode("utf-8")) < 1_024
     assert "Codebase Memory as the mandatory first evidence route" in normalized
     assert "canonical `project_root` returned in the server-owned assignment context" in normalized
     assert "bounded repository-native enumeration or text-search fallback" in normalized
     assert "environment blocker" in normalized
     assert "actual graph call" in normalized
     assert "Never silently skip the graph" in normalized
-    assert "A plan publication always declares one explicit review disposition" in message
+    assert "A plan publication always declares one explicit review disposition" in policy["common_policy"]
     assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
     assert "never publishes a supplementary result or documentation outcome" in normalized
     assert "separate evidence assignment followed by a fresh planning revision" in normalized
+    assert policy["profile_name"] == "explorer"
+    assert policy["profile_instructions"]
     assert rendered["renderer"]["common_policy_digest"] == (
         "sha256:" + hashlib.sha256(
             worker_message._MANDATORY_PROJECT_POLICY.encode("utf-8")
@@ -43,9 +50,10 @@ def test_fresh_worker_receives_common_memory_and_review_policy():
     )
 
 
-def test_common_policy_is_not_only_a_dead_renderer_constant():
-    rendered = worker_message.render_worker_message(task=_task(), delegation=_delegation(), decisions=[])
-    assert rendered["message"].index("# Mandatory project-work invariants") < rendered["message"].index("# Cortex worker bootstrap")
+def test_common_policy_is_exposed_by_the_assignment_policy_boundary():
+    policy = worker_message.assignment_worker_policy("explorer")
+    assert policy is not None
+    assert policy["common_policy"] == worker_message._MANDATORY_PROJECT_POLICY.strip()
 
 
 def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_authority():
@@ -58,7 +66,6 @@ def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_aut
     # first Cortex action, before project work or any coordinator lifecycle
     # operation.  Keep the assertion semantic rather than prescribing a
     # public MCP argument shape.
-    first_action = message.index("Your first Cortex action")
-    assert message.index("server-owned assignment read", first_action) > first_action
-    assert "Do not invoke coordinator-only operations" in message
-    assert "assess_governance" in message
+    first_action = message.index("Before any other action or tool call")
+    assert message.index("server-owned Cortex", first_action) > first_action
+    assert "You are a worker, not a coordinator" in message

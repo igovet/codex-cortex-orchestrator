@@ -3999,11 +3999,22 @@ class V12Store:
                 if matches:
                     active_authors[author] = report
             if len(active_authors) > 1:
-                raise V12StoreError(
-                    "assignment predecessor evidence is ambiguous",
-                    code="invalid_argument",
-                    details={"field": "input_report_refs"},
-                )
+                # A broad server-owned report policy may intentionally supply
+                # evidence from several independent authors.  Those reports
+                # remain valid assignment inputs, but they do not imply one
+                # unique parent.  Preserve all evidence and leave the optional
+                # predecessor relation unset instead of blaming a private
+                # internal field the public caller cannot provide or repair.
+                if explicit_parent_delegation_id is None:
+                    return None
+                matched = active_authors.get(explicit_parent_delegation_id)
+                if matched is None:
+                    raise V12StoreError(
+                        "assignment parent conflicts with predecessor evidence",
+                        code="invalid_argument",
+                        details={"field": "parent_assignment_ref"},
+                    )
+                return matched
             predecessor = next(iter(active_authors.values()), None)
             if predecessor is not None and explicit_parent_delegation_id is not None:
                 if predecessor.get("delegation_id") != explicit_parent_delegation_id:
@@ -5857,6 +5868,70 @@ class V12Store:
                 details={"decision_type": str(pending["decision_type"])},
             )
 
+    def _require_current_closure_review(
+        self, connection: sqlite3.Connection, *, task_id: str,
+    ) -> None:
+        """Require an explicit current user choice before task closure.
+
+        The review is bound to the task timeline position at which the
+        question was opened.  Reads and advisory governance do not invalidate
+        it, while any later assignment, worker activity, publication, user
+        decision, or decision opening means the result changed and must be
+        shown again before another closure attempt.
+        """
+        review = connection.execute(
+            "SELECT b.issue_sequence,b.consumed_decision_id,d.decision_type AS outcome "
+            "FROM clarification_bindings b "
+            "LEFT JOIN user_decisions d ON d.decision_id=b.consumed_decision_id "
+            "WHERE b.project_hash=? AND b.task_id=? AND b.decision_type='closure_review' "
+            "ORDER BY b.issue_sequence DESC LIMIT 1",
+            (self.project_hash, task_id),
+        ).fetchone()
+        if review is None or review["consumed_decision_id"] is None:
+            raise V12StoreError(
+                "a current user closure review is required",
+                code="closure_review_required",
+            )
+        outcome = str(review["outcome"] or "")
+        if outcome == "request_revision":
+            raise V12StoreError(
+                "the user requested revision of the current task",
+                code="closure_revision_requested",
+            )
+        if outcome != "approve":
+            raise V12StoreError(
+                "the closure review decision is invalid",
+                code="closure_review_required",
+            )
+        invalidating_events = (
+            "clarification_binding_issued",
+            "delegation_created",
+            "outcome_ownership_transferred",
+            "worker_bootstrap_minted",
+            "worker_bootstrap_consumed",
+            "report_started",
+            "report_chunk_appended",
+            "report_submitted",
+            "report_aborted",
+            "user_decision_recorded",
+        )
+        placeholders = ",".join("?" for _ in invalidating_events)
+        changed = connection.execute(
+            f"SELECT sequence FROM timeline WHERE task_id=? AND sequence>? "
+            f"AND event_type IN ({placeholders}) "
+            "AND NOT (event_type='user_decision_recorded' AND decision_id=?) "
+            "ORDER BY sequence LIMIT 1",
+            (
+                task_id, int(review["issue_sequence"]), *invalidating_events,
+                str(review["consumed_decision_id"]),
+            ),
+        ).fetchone()
+        if changed is not None:
+            raise V12StoreError(
+                "the accepted closure review is stale after later task activity",
+                code="closure_review_stale",
+            )
+
     def read_decision_binding(self, *, task_id: Any, binding_ref: Any) -> dict[str, Any]:
         """Read current state for an already-issued exact binding."""
         anchor = self._task_identifier(task_id)
@@ -5881,12 +5956,26 @@ class V12Store:
         dtype = _required_text(decision_type, label="decision_type", maximum=32).lower()
         subject = anchor if subject_id is None and kind == "task" else self._record_identifier(subject_id, label="subject_id")
         assignment = None if assignment_id is None else self._record_identifier(assignment_id, label="assignment_id")
-        request_digest = _sha256_prefixed({"task_id": anchor, "subject_type": kind, "subject_id": subject, "decision_type": dtype, "prompt": text, "prompt_language": language}, label="clarification request")
-        prompt_digest = _sha256_prefixed(text, label="clarification prompt")
-
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
             revision = int(self._effective_contract(connection, anchor)["revision"])
+            closure_generation = None
+            if dtype == "closure_review":
+                generation_row = connection.execute(
+                    "SELECT COALESCE(MAX(sequence),0) AS sequence FROM timeline WHERE task_id=?",
+                    (anchor,),
+                ).fetchone()
+                closure_generation = int(generation_row["sequence"] if generation_row is not None else 0)
+            prompt_identity: object = text if closure_generation is None else {
+                "prompt": text, "task_sequence": closure_generation,
+            }
+            request_identity = {
+                "task_id": anchor, "subject_type": kind, "subject_id": subject,
+                "decision_type": dtype, "prompt": text, "prompt_language": language,
+                **({"task_sequence": closure_generation} if closure_generation is not None else {}),
+            }
+            request_digest = _sha256_prefixed(request_identity, label="clarification request")
+            prompt_digest = _sha256_prefixed(prompt_identity, label="clarification prompt")
             existing = connection.execute("SELECT * FROM clarification_bindings WHERE task_id=? AND subject_type=? AND subject_id=? AND decision_type=? AND prompt_digest=? AND effective_contract_revision=?", (anchor, kind, subject, dtype, prompt_digest, revision)).fetchone()
             if existing is not None:
                 return {"binding": self._decision_binding_projection(existing, task_id=anchor), "replayed": True}
@@ -5941,7 +6030,11 @@ class V12Store:
             "WHERE clarification_binding=? AND project_hash=?",
             (binding_ref, self.project_hash),
         ).fetchone()
-        if binding is None or str(binding["task_id"]) != task_id or str(binding["decision_type"]) != "clarification":
+        if (
+            binding is None
+            or str(binding["task_id"]) != task_id
+            or str(binding["decision_type"]) not in {"clarification", "closure_review"}
+        ):
             raise V12StoreError("clarification binding was not found", code="clarification_binding_not_found")
         bound_assignment = None if binding["assignment_id"] is None else str(binding["assignment_id"])
         if bound_assignment != assignment_id:
@@ -6260,12 +6353,23 @@ class V12Store:
                 clarification_row = connection.execute("SELECT * FROM clarification_bindings WHERE clarification_binding=? AND project_hash=?", (payload["clarification_binding"], self.project_hash)).fetchone()
                 if clarification_row is None:
                     raise V12StoreError("clarification binding was not found", code="clarification_binding_not_found")
-                expected_prompt_digest = _sha256_prefixed(payload["prompt"], label="clarification prompt")
                 binding_decision_type = str(clarification_row["decision_type"])
+                expected_prompt_digest = _sha256_prefixed(payload["prompt"], label="clarification prompt")
+                prompt_matches = (
+                    str(clarification_row["prompt"]) == payload["prompt"]
+                    and (
+                        binding_decision_type == "closure_review"
+                        or str(clarification_row["prompt_digest"]) == expected_prompt_digest
+                    )
+                )
                 # A plan-review binding represents a family; its consumed
                 # outcome is one of the legal plan decisions.
-                decision_matches = binding_decision_type == decision or (binding_decision_type == "plan_review" and kind == "plan" and decision in {"approve", "request_revision", "cancel"})
-                if (str(clarification_row["task_id"]) != anchor or str(clarification_row["subject_type"]) != kind or str(clarification_row["subject_id"]) != subject or not decision_matches or str(clarification_row["prompt_digest"]) != expected_prompt_digest or str(clarification_row["prompt"]) != payload["prompt"] or str(clarification_row["prompt_language"]) != payload["user_language"]):
+                decision_matches = (
+                    binding_decision_type == decision
+                    or (binding_decision_type == "plan_review" and kind == "plan" and decision in {"approve", "request_revision", "cancel"})
+                    or (binding_decision_type == "closure_review" and kind == "task" and decision in {"approve", "request_revision"})
+                )
+                if (str(clarification_row["task_id"]) != anchor or str(clarification_row["subject_type"]) != kind or str(clarification_row["subject_id"]) != subject or not decision_matches or not prompt_matches or str(clarification_row["prompt_language"]) != payload["user_language"]):
                     raise V12StoreError("clarification binding does not match the decision", code="clarification_binding_mismatch")
                 if int(clarification_row["effective_contract_revision"]) != int(self._effective_contract(connection, anchor)["revision"]):
                     raise V12StoreError("clarification binding is stale", code="clarification_binding_stale")
@@ -6568,7 +6672,7 @@ class V12Store:
                 warnings = [f"unresolved_{relationship}"] if not resolved else ([f"cyclic_{relationship}"] if path(target, source) else [])
                 connection.execute("UPDATE initiative_links SET is_resolved=?,warnings_json=? WHERE link_id=?", (int(resolved), _canonical_json(warnings, label="link warnings"), int(row["link_id"])))
 
-    def submit_governance_closure(self, *, task_id: Any, subject_type: Any, subject_id: Any, verdict: Any, evidence: Any, unresolved_risks: Any, follow_ups: Any, initiative_status: Any, completion_notes: Any, idempotency_key: Any) -> tuple[dict[str, Any], bool]:
+    def submit_governance_closure(self, *, task_id: Any, subject_type: Any, subject_id: Any, verdict: Any, evidence: Any, unresolved_risks: Any, follow_ups: Any, initiative_status: Any, completion_notes: Any, idempotency_key: Any, require_closure_review: Any = False) -> tuple[dict[str, Any], bool]:
         anchor = self._task_identifier(task_id)
         kind, decision = _required_text(subject_type, label="subject_type", maximum=16).lower(), _required_text(verdict, label="verdict", maximum=32).lower()
         if kind not in CLOSURE_SUBJECTS or decision not in CLOSURE_VERDICTS:
@@ -6581,7 +6685,9 @@ class V12Store:
             raise V12StoreError("initiative status is invalid", code="invalid_initiative_status")
         if kind != "initiative" and status_value is not None:
             raise V12StoreError("initiative_status requires an initiative closure", code="invalid_closure_subject")
-        payload = {"task_id": anchor, "subject_type": kind, "subject_id": subject, "verdict": decision, "evidence": _strict_json(evidence, label="evidence"), "unresolved_risks": _text_list(unresolved_risks, label="unresolved_risks"), "follow_ups": _text_list(follow_ups, label="follow_ups"), "initiative_status": status_value, "completion_notes": None if completion_notes is None else _strict_json(completion_notes, label="completion_notes")}
+        if not isinstance(require_closure_review, bool):
+            raise V12StoreError("closure review requirement is invalid", code="invalid_argument")
+        payload = {"task_id": anchor, "subject_type": kind, "subject_id": subject, "verdict": decision, "evidence": _strict_json(evidence, label="evidence"), "unresolved_risks": _text_list(unresolved_risks, label="unresolved_risks"), "follow_ups": _text_list(follow_ups, label="follow_ups"), "initiative_status": status_value, "completion_notes": None if completion_notes is None else _strict_json(completion_notes, label="completion_notes"), "require_closure_review": require_closure_review}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             self._task(connection, anchor)
             if kind == "task":
@@ -6597,6 +6703,8 @@ class V12Store:
                         "conformance_review": self._conformance_review(connection, anchor),
                         "verdict_adjustment": {"requested": decision, "recorded": recorded},
                     }
+                if payload["require_closure_review"]:
+                    self._require_current_closure_review(connection, task_id=anchor)
             initiative: dict[str, Any] | None = None
             conformance = self._conformance_review(connection, anchor)
             # Conformance is ledger evidence, not a workflow decision.  Keep

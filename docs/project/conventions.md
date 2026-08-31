@@ -60,8 +60,9 @@
   report, or when the user explicitly asks the coordinator to check them.
 - Compile the selected documents, applicable requirements, verification
   contract, ownership constraints, known documentation state, and explicit
-  further-discovery boundary into each delegation's `instructions` and native
-  brief. Profiles consume this supplied contract and never redo routing,
+  further-discovery boundary into each delegation's `instructions`. The native
+  brief is only compact bootstrap context; profiles consume the full supplied
+  contract after the mandatory first assignment read and never redo routing,
   reconstruct the template, or repeat the index-path list.
 - Before `open_assignment` or native spawn, require those six labels exactly
   once, in order, with non-empty delegation-specific content. Empty, omitted,

@@ -25,7 +25,7 @@ MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-EXPECTED_BASE_VERSION = "1.13.2"
+EXPECTED_BASE_VERSION = "1.14.0"
 EXPECTED_MCP = {"mcpServers": {"cortex": {"command": "python3", "args": ["./scripts/cortex.py"], "cwd": "."}}}
 RETIRED_PLUGIN_PATHS = {
     Path("hooks"),

@@ -240,7 +240,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.13.2",
+        "1.14.0",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -408,16 +408,26 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
                "model": selection.model, "reasoning_effort": selection.reasoning_effort,
                "input_report_refs": input_report_refs, "input_decision_refs": input_decision_refs}
     provenance = _worker_capability_provenance()
-    result = ledger.create_delegation(
-        task_ref=task_ref, objective=payload["objective"], role=payload["role"], profile_name=payload["profile_name"],
-        scope=payload["scope"], instructions=payload["instructions"], model=selection.model, reasoning_effort=selection.reasoning_effort,
-        input_report_refs=list(input_report_refs), input_decision_refs=input_decision_refs,
-        outcome_assignments=outcome_assignments,
-        parent_delegation_ref=None,
-        bootstrap_provenance=provenance,
-        derive_assignment_scope=True,
-        assignment_policy=assignment_policy,
-    )
+    try:
+        result = ledger.create_delegation(
+            task_ref=task_ref, objective=payload["objective"], role=payload["role"], profile_name=payload["profile_name"],
+            scope=payload["scope"], instructions=payload["instructions"], model=selection.model, reasoning_effort=selection.reasoning_effort,
+            input_report_refs=list(input_report_refs), input_decision_refs=input_decision_refs,
+            outcome_assignments=outcome_assignments,
+            parent_delegation_ref=None,
+            bootstrap_provenance=provenance,
+            derive_assignment_scope=True,
+            assignment_policy=assignment_policy,
+        )
+    except V12ServiceError as exc:
+        private_fields = {"input_report_refs", "input_decision_refs", "parent_assignment_ref"}
+        field = exc.details.get("field") if isinstance(exc.details, Mapping) else None
+        if field in private_fields:
+            raise V12ServiceError(
+                "server-owned assignment evidence could not be resolved",
+                code="ledger_error",
+            ) from None
+        raise
     delegation = result.get("delegation")
     if isinstance(delegation, Mapping) and isinstance(delegation.get("delegation_id"), str):
         result = dict(result)
@@ -474,6 +484,8 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
                           cursor: str | None = None) -> dict[str, Any]:
     """Resolve and consume the exact server-bound worker assignment page."""
     try:
+        from cortex_runtime.worker_message import assignment_worker_policy
+
         assignment = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)
         # ``read_delegation`` deliberately returns a projection envelope.  Do
         # not read task/dispatch identity from the envelope itself: doing so
@@ -512,6 +524,11 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
                 value = delegation_view.get(key)
                 if isinstance(value, str):
                     assignment_context[key] = value
+        policy = assignment_worker_policy(assignment_context.get("profile_name"))
+        if policy is None:
+            raise V12ServiceError("assignment worker policy is unavailable", code="profile_unavailable")
+        assignment_context["common_policy"] = policy["common_policy"]
+        assignment_context["profile_instructions"] = policy["profile_instructions"]
         if store.project_root is None:
             raise V12ServiceError("assignment project root is unavailable", code="ledger_error")
         assignment_context["project_root"] = str(store.project_root)
@@ -768,33 +785,83 @@ def _pending_binding(store: V12Store, task_id: str, *, decision_type: str) -> st
     return str(rows[0]["clarification_binding"])
 
 
+def _sole_pending_binding(store: V12Store, task_id: str) -> tuple[str, str]:
+    rows = store._read(lambda connection: connection.execute(
+        "SELECT clarification_binding,decision_type FROM clarification_bindings "
+        "WHERE task_id=? AND consumed_decision_id IS NULL ORDER BY issue_sequence",
+        (task_id,),
+    ).fetchall())
+    if len(rows) != 1:
+        raise V12ServiceError("exactly one user decision must be pending", code="clarification_binding_stale")
+    return str(rows[0]["clarification_binding"]), str(rows[0]["decision_type"])
+
+
 def _decision_receipt(task_ref: str, state: str, issued: Mapping[str, Any]) -> dict[str, Any]:
     return {"task_ref": task_ref, "state": state, "replayed": bool(issued.get("replayed"))}
 
 
-def open_clarification(*, task_ref: str, prompt: str, prompt_language: str) -> dict[str, Any]:
+def open_clarification(*, task_ref: str, prompt: str, prompt_language: str,
+                       purpose: str = "clarification",
+                       options: list[str] | None = None) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
+        if purpose == "closure_review":
+            if options != ["revise", "close"]:
+                raise V12ServiceError(
+                    "closure review requires exactly revise and close",
+                    code="invalid_argument", details={"field": "options"},
+                )
+            issued = DecisionAggregate(store).open_closure_review(
+                task_id=canonical, prompt=prompt, prompt_language=prompt_language,
+                subject_type="task", subject_id=canonical, assignment_id=None,
+            )
+            return _decision_receipt(task_ref, "pending_closure_review", issued)
+        if purpose != "clarification" or options not in (None, ["answer"]):
+            raise V12ServiceError(
+                "ordinary clarification does not accept closure review options",
+                code="invalid_argument", details={"field": "purpose" if purpose != "clarification" else "options"},
+            )
         issued = DecisionAggregate(store).open_clarification(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
             subject_type="task", subject_id=canonical, assignment_id=None,
         )
         return _decision_receipt(task_ref, "pending_clarification", issued)
+    except V12ServiceError:
+        raise
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
 def record_clarification(*, task_ref: str, response_original: str,
-                         user_language: str) -> dict[str, Any]:
+                         user_language: str, outcome: str | None = None) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
-        binding_ref = _pending_binding(store, canonical, decision_type="clarification")
+        binding_ref, decision_type = _sole_pending_binding(store, canonical)
+        if decision_type == "closure_review":
+            if outcome not in {"revise", "close"}:
+                raise V12ServiceError(
+                    "closure review requires an explicit revise or close outcome",
+                    code="invalid_argument", details={"field": "outcome"},
+                )
+            issued = DecisionAggregate(store).record_closure_review(
+                task_id=canonical, binding_ref=binding_ref, outcome=outcome,
+                response_original=response_original, user_language=user_language,
+                steering_delta=None,
+            )
+            return _decision_receipt(task_ref, "closure_review_recorded", issued)
+        if decision_type != "clarification" or outcome not in (None, "answer"):
+            raise V12ServiceError(
+                "ordinary clarification does not accept a closure outcome",
+                code="clarification_binding_mismatch", details={"field": "outcome"},
+            )
         issued = DecisionAggregate(store).record_clarification(
             task_id=canonical, binding_ref=binding_ref,
             response_original=response_original, user_language=user_language,
             steering_delta=None,
         )
         return _decision_receipt(task_ref, "clarification_recorded", issued)
+    except V12ServiceError:
+        raise
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
@@ -903,7 +970,7 @@ def close_task(*, task_ref: str, verdict: str, evidence: object | None = None,
     result = ledger.submit_governance_closure(
         task_ref=task_ref, subject_type="task", subject_ref=task_ref, verdict=verdict,
         evidence=evidence, unresolved_risks=unresolved_risks, follow_ups=follow_ups,
-        completion_notes=completion_notes,
+        completion_notes=completion_notes, require_closure_review=True,
     )
     return {"task_ref": task_ref, "state": "closed", "replayed": bool(result.get("replayed"))}
 

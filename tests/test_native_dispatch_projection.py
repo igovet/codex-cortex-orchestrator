@@ -28,13 +28,23 @@ class NativeDispatchProjectionTests(unittest.TestCase):
         args = validate_native_dispatch_projection(self.projection, assignment_ref="d_0123456789ab")
         self.assertEqual(args, self.projection["native_arguments"])
         self.assertNotIn("model", args)
-        self.assertNotIn("reasoning_effort", args)
+        self.assertEqual(args["reasoning_effort"], "high")
 
-    def test_server_defaults_cannot_become_native_routing(self) -> None:
-        # The legacy function accepts these values for call-site compatibility,
-        # but open_assignment does not receive coordinator choices. They must
-        # never cross the closed host-adapter boundary as invented routing.
-        self.assertEqual(set(self.projection["native_arguments"]), {"fork_turns", "message", "task_name"})
+    def test_coordinator_selected_routing_is_part_of_native_projection(self) -> None:
+        self.assertEqual(
+            set(self.projection["native_arguments"]),
+            {"fork_turns", "message", "task_name", "reasoning_effort"},
+        )
+
+        terra = native_dispatch_projection(
+            assignment_ref="d_0123456789ab",
+            task_name="implementation",
+            message="trusted bootstrap",
+            model="gpt-5.6-terra",
+            reasoning_effort="xhigh",
+        )
+        self.assertEqual(terra["native_arguments"]["model"], "gpt-5.6-terra")
+        self.assertEqual(terra["native_arguments"]["reasoning_effort"], "xhigh")
 
     def test_reconstruction_or_cross_assignment_fails_closed(self) -> None:
         changed = dict(self.projection)

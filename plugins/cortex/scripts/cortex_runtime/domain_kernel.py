@@ -222,6 +222,7 @@ class DecisionAggregate:
 
     _FAMILY_OPERATIONS = {
         "clarification": ("open_clarification", "record_clarification", "clarification"),
+        "closure_review": ("open_clarification", "record_clarification", "closure_review"),
         "plan_review": ("open_plan_review", "record_plan_review", "plan_review"),
         "steering": ("open_steering", "record_steering", "steer"),
     }
@@ -249,17 +250,26 @@ class DecisionAggregate:
             # transaction's BEGIN IMMEDIATE.  Slot identity, binding issue,
             # and the persisted binding revision therefore share one snapshot.
             revision = int(self.store._effective_contract(connection, task_id)["revision"])
+            closure_generation = None
+            if family == "closure_review":
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(sequence),0) AS sequence FROM timeline WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                closure_generation = int(row["sequence"] if row is not None else 0)
             request = {
                 "task_id": task_id, "prompt": prompt, "prompt_language": prompt_language,
                 "subject_type": subject_type, "subject_id": subject_id,
                 "assignment_id": assignment_id, "decision_type": decision_type,
                 "contract_revision": revision,
+                **({"closure_generation": closure_generation} if closure_generation is not None else {}),
             }
             slot = self._slot("decision/pending", {
                 "task_id": task_id, "subject_type": subject_type,
                 "subject_id": subject_id or task_id, "assignment_id": assignment_id,
                 "decision_type": decision_type, "prompt": prompt,
                 "prompt_language": prompt_language, "contract_revision": revision,
+                **({"closure_generation": closure_generation} if closure_generation is not None else {}),
             })
             def mutate(active: Any) -> Mapping[str, Any]:
                 issued = self.store.issue_clarification_binding(
@@ -272,7 +282,7 @@ class DecisionAggregate:
                 # second decision family.  It must be created/replayed in the
                 # same transaction as the binding, before a coordinator may
                 # render the corresponding product question.
-                if family == "clarification":
+                if family in {"clarification", "closure_review"}:
                     binding = issued.get("binding")
                     if not isinstance(binding, Mapping) or not isinstance(binding.get("clarification_binding"), str):
                         raise V12StoreError("clarification binding is unavailable", code="ledger_error")
@@ -309,6 +319,11 @@ class DecisionAggregate:
     def open_clarification(self, **kwargs: Any) -> dict[str, Any]:
         kwargs["family"] = "clarification"
         kwargs["decision_type"] = self._family_operation("clarification", 2)
+        return self.open(**kwargs)
+
+    def open_closure_review(self, **kwargs: Any) -> dict[str, Any]:
+        kwargs["family"] = "closure_review"
+        kwargs["decision_type"] = self._family_operation("closure_review", 2)
         return self.open(**kwargs)
 
     def open_plan_review(self, **kwargs: Any) -> dict[str, Any]:
@@ -392,7 +407,7 @@ class DecisionAggregate:
                 steering_delta=steering_delta,
                 _connection=connection,
             )
-            if family == "clarification":
+            if family in {"clarification", "closure_review"}:
                 decision = value.get("decision")
                 if not isinstance(decision, Mapping) or not isinstance(decision.get("decision_id"), str):
                     raise V12StoreError("clarification decision is unavailable", code="ledger_error")
@@ -414,6 +429,12 @@ class DecisionAggregate:
 
     def record_clarification(self, **kwargs: Any) -> dict[str, Any]:
         return self.record(family="clarification", **kwargs)
+
+    def record_closure_review(self, *, outcome: str, **kwargs: Any) -> dict[str, Any]:
+        if outcome not in {"revise", "close"}:
+            raise V12StoreError("closure review outcome is invalid", code="invalid_argument")
+        kwargs["decision_type_override"] = "request_revision" if outcome == "revise" else "approve"
+        return self.record(family="closure_review", **kwargs)
 
     def record_plan_review(self, *, outcome: str, **kwargs: Any) -> dict[str, Any]:
         if outcome not in {"approve", "request_revision", "cancel"}:

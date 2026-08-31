@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from cortex import PUBLIC_TOOLS
-from cortex_runtime.mcp_api import _validate_schema
+from cortex_runtime.mcp_api import _validation_failure, _validate_schema
 
 
 class CallerContractGuardTests(unittest.TestCase):
@@ -46,6 +46,18 @@ class CallerContractGuardTests(unittest.TestCase):
         self.assertIn("model", schema["required"])
         self.assertIn("reasoning_effort", schema["required"])
         self.assertEqual(schema["properties"]["model"]["enum"], ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
+
+    def test_missing_required_publication_fields_are_reported_together(self) -> None:
+        schema = PUBLIC_TOOLS["publish_result"]["inputSchema"]
+        with self.assertRaises(ValueError) as raised:
+            _validate_schema(schema, {})
+        error = raised.exception
+        self.assertEqual(
+            error.missing_fields,
+            tuple(schema["required"]),
+        )
+        failure = _validation_failure(error, tool_name="publish_result", arguments={})
+        self.assertEqual(failure["details"]["missing_fields"], list(schema["required"]))
 
 
 if __name__ == "__main__":

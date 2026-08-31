@@ -188,19 +188,19 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 # worker locator. Mission, scope, current outcome revision, decisions, and
 # predecessor report bodies are authoritative only in the first assignment
 # read and are deliberately not duplicated into the spawn prompt.
+# Native spawn output is a transport bootstrap, not the assignment itself.
+# Keep it small enough that Codex can forward the complete closed projection
+# without an ellipsized tool result.  The first assignment read below returns
+# the full common policy, packaged profile, task contract, and predecessor
+# evidence from the server-owned immutable snapshot.
 _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
 
-- Follow the packaged advisory profile below.
-- Your first Cortex action is the server-owned assignment read for the exact
-  worker-scoped task reference below. Do nothing else before it succeeds.
-- You are a worker, not another coordinator. Do not invoke coordinator-only operations,
-  including `assess_governance`; never create tasks, open or record
-  user decisions, create assignments, or close tasks. After bootstrap, use only
-  worker-owned reads and the publication matching this assignment.
-- Treat that read as the sole authority for mission, scope, current outcome
-  revision, decisions, and predecessor evidence.
-- Work only inside that assignment and publish its evidence yourself.
-- Use only the advertised Cortex tool contracts and the supplied task_ref.
+- Before any other action or tool call, consume the server-owned Cortex
+  assignment using the exact worker task reference below.
+- That assignment read is the sole authority for the full common policy,
+  packaged profile, mission, scope, outcomes, decisions, and evidence.
+- You are a worker, not a coordinator. If the assignment read fails, stop and
+  report the blocker; never reconstruct, replace, or broaden the assignment.
 """
 
 # The full common policy is retained for continuation/contract documentation,
@@ -297,6 +297,25 @@ def packaged_profile_assignment_policy(profile_name: object) -> str | None:
     return "review" if profile_name in review else "owner"
 
 
+def assignment_worker_policy(profile_name: object) -> dict[str, str] | None:
+    """Return the full trusted policy delivered by the first assignment read.
+
+    Native spawn carries only the compact immutable bootstrap.  The worker
+    receives this package-owned policy after the server has atomically bound
+    and consumed its exact assignment evidence, avoiding a large model-copied
+    spawn message while preserving the complete advisory profile.
+    """
+    loaded_name, instructions, profile_digest = _profile(profile_name)
+    if loaded_name is None or instructions is None or profile_digest is None:
+        return None
+    return {
+        "common_policy": _MANDATORY_PROJECT_POLICY.strip(),
+        "profile_name": loaded_name,
+        "profile_instructions": instructions.strip(),
+        "profile_digest": profile_digest,
+    }
+
+
 def _profile(profile_name: object) -> tuple[str | None, str | None, str | None]:
     """Load only an explicit package-owned profile selected by the coordinator."""
     if not isinstance(profile_name, str):
@@ -328,7 +347,6 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
     del bootstrap_capability
     profile_name, instructions, profile_digest = _profile(delegation.get("profile_name"))
     profile_state = "loaded" if instructions is not None else "unavailable"
-    trusted_profile = instructions or "# Advisory profile unavailable\n\nUse the explicit delegation scope and trusted common policy."
     worker_task_ref = _worker_task_ref(task.get("task_id"), delegation.get("delegation_id"))
     if worker_task_ref is None:
         raise ValueError("worker task reference is invalid")
@@ -339,9 +357,7 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
         },
     }
     message = "\n\n".join((
-        _MANDATORY_PROJECT_POLICY.strip(),
         _MINIMAL_WORKER_BOOTSTRAP.strip(),
-        "## Trusted advisory profile\n\n" + trusted_profile.strip(),
         "## Server-bound worker context\n\n```json\n" + _canonical(bootstrap).replace("```", "\\u0060\\u0060\\u0060") + "\n```",
     ))
     if len(message.encode("utf-8")) > WORKER_MESSAGE_MAX_BYTES:

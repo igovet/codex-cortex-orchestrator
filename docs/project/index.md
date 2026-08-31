@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.13.2 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.14.0 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -145,17 +145,22 @@ The task persists the exact `user_request_original` and `user_language` beside
 the English `objective`, active contract version, independent outcomes,
 constraints, linked acceptance criteria, a non-derived verification plan, and
 optional arbitrary-JSON `context`.
-The native worker brief carries the saved root only for project working context.
+The native worker brief is a compact bootstrap carrying only delivery context;
+the mandatory first assignment read supplies the full common policy, profile
+guidance, task evidence, and assignment scope. The saved root is used only for
+project working context.
 Each task outcome has a non-empty meaningful English requirement and linked
 acceptance criteria before task creation; acceptance is not copied into a
 standalone verification obligation, and optional context cannot replace an
 outcome. Every delegation carries
 the exact six-part knowledge block once, in order, with non-empty values before
-native spawn. A successful `open_assignment` returns a host-neutral
-`dispatch_brief` and renderer/profile proof. Codex maps the brief to the active
-host spawn operation; Cortex does not prescribe native argument names, model
-availability, or lifecycle. The `read_task` assignment view is the server-owned
-recovery/bootstrap surface and is required as the worker's first task read.
+native spawn. A successful `open_assignment` returns one compact closed native
+dispatch plus replay state, including exact effort and an explicit model only
+for non-default Terra or Sol. Codex
+forwards it unchanged to the active host spawn operation. The `read_task`
+assignment view is the server-owned
+full-policy/evidence surface and is required as the worker's first task read on
+both healthy and recovery paths.
 
 `publish_plan`, `publish_result`, and `publish_documentation` record immutable
 worker-owned evidence through semantic publication operations. The server owns storage,
@@ -261,6 +266,14 @@ confirmation. The closure result returns `closure_confirmation` with
 is allowed for a verified transient persistence or inspection failure. An
 `unconfirmed` result is advisory uncertainty only and does not change
 `execution_outcome` evidence.
+
+Closure review is distinct from ordinary clarification. After the current
+result is presented, exactly two localized choices are offered: revise the
+same task or close it. Revision preserves the same `task_ref`; any later
+assignment, report, or decision stales a previously consumed close choice. The
+public `close_task` path atomically requires the current consumed close choice,
+while internal advisory storage may remain policy-neutral. This boundary rule
+does not schedule work or block a truthful final answer.
 
 After a worker verifies the project result, the coordinator evaluates
 documentation impact from reports. Material behavior, architecture, interface,

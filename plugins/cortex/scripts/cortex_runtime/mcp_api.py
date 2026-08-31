@@ -88,10 +88,11 @@ class _RpcError(Exception):
 
 
 class _SchemaError(ValueError):
-    def __init__(self, path: str, message: str) -> None:
+    def __init__(self, path: str, message: str, *, missing_fields: tuple[str, ...] = ()) -> None:
         super().__init__(message)
         self.path = path
         self.message = message
+        self.missing_fields = missing_fields
 
 
 def _is_json_value(value: object) -> bool:
@@ -225,9 +226,12 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
     # first non-matching variant, forcing callers into trial-and-error.
     if isinstance(value, Mapping):
         required = schema.get("required")
-        for name in required if isinstance(required, list) else []:
-            if name not in value:
-                raise _SchemaError(f"{path}.{name}", f"missing required property {name!r}")
+        missing = tuple(name for name in required if isinstance(name, str) and name not in value) if isinstance(required, list) else ()
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            wording = "property" if len(missing) == 1 else "properties"
+            missing_path = f"{path}.{missing[0]}" if len(missing) == 1 else path
+            raise _SchemaError(missing_path, f"missing required {wording} {names}", missing_fields=missing)
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
         for item in all_of:
@@ -346,9 +350,12 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
         properties = schema.get("properties")
         property_map = properties if isinstance(properties, Mapping) else {}
         required = schema.get("required")
-        for name in required if isinstance(required, list) else []:
-            if name not in value:
-                raise _SchemaError(f"{path}.{name}", f"missing required property {name!r}")
+        missing = tuple(name for name in required if isinstance(name, str) and name not in value) if isinstance(required, list) else ()
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            wording = "property" if len(missing) == 1 else "properties"
+            missing_path = f"{path}.{missing[0]}" if len(missing) == 1 else path
+            raise _SchemaError(missing_path, f"missing required {wording} {names}", missing_fields=missing)
         if schema.get("additionalProperties") is False:
             extras = set(value) - set(property_map)
             if extras:
@@ -443,6 +450,14 @@ def _safe_details(value: object) -> dict[str, object]:
     field = value.get("field")
     if isinstance(field, str) and _SAFE_FIELD_RE.fullmatch(field):
         details["field"] = field
+    missing_fields = value.get("missing_fields")
+    if isinstance(missing_fields, (list, tuple)):
+        safe_missing = tuple(
+            name for name in missing_fields
+            if isinstance(name, str) and _SAFE_FIELD_RE.fullmatch(name)
+        )
+        if safe_missing and len(safe_missing) == len(missing_fields):
+            details["missing_fields"] = list(safe_missing[:32])
     expected = value.get("expected")
     if isinstance(expected, str) and expected in _SAFE_EXPECTED_VALUES:
         details["expected"] = expected
@@ -490,6 +505,9 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
             parts.append(f"Location: {path}.")
         if isinstance(field, str):
             parts.append(f"Field: {field}.")
+        missing_fields = details.get("missing_fields")
+        if isinstance(missing_fields, list) and missing_fields and all(isinstance(item, str) for item in missing_fields):
+            parts.append(f"Missing fields: {', '.join(missing_fields[:32])}.")
         if isinstance(expected, str):
             parts.append(f"Expected: {expected[:256]}.")
         if isinstance(reason, str):
@@ -532,11 +550,16 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
     # actual unsupported child. Prefer that child so correction never removes
     # the valid enclosing publication object.
     named = re.fullmatch(
-        r"(?:missing required|unsupported) property '([a-z][a-z0-9_]{0,63})'|property '([a-z][a-z0-9_]{0,63})' is not permitted for this input shape",
+        r"missing required property '([a-z][a-z0-9_]{0,63})'|"
+        r"missing required properties ((?:'[a-z][a-z0-9_]{0,63}'(?:, )?)+)|"
+        r"unsupported property '([a-z][a-z0-9_]{0,63})'|"
+        r"property '([a-z][a-z0-9_]{0,63})' is not permitted for this input shape",
         error.message,
     )
     if named is not None:
-        field = named.group(1) or named.group(2)
+        field = named.group(1) or named.group(3) or named.group(4)
+        if field is None and named.group(2):
+            field = re.search(r"'([a-z][a-z0-9_]{0,63})'", named.group(2)).group(1)
     if field is None:
         direct = re.fullmatch(r"\$\.([a-z][a-z0-9_]{0,63})", error.path)
         if direct is not None:
@@ -563,8 +586,20 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
         if message.startswith(prefix):
             reason, expected = mapped_reason, mapped_expected
             break
-    details = _safe_details({"path": error.path, "field": field, "reason": reason, "expected": expected})
+    details = _safe_details({
+        "path": error.path,
+        "field": field,
+        "missing_fields": error.missing_fields,
+        "reason": reason,
+        "expected": expected,
+    })
     retryable, action = _recovery("validation_error", details)
+    if error.missing_fields:
+        action = (
+            "Add every missing required property to one complete request: "
+            + ", ".join(error.missing_fields)
+            + ". Then call the same tool once with the corrected complete payload."
+        )
     if tool_name == "create_delegation" and "delegation_id" in arguments:
         action = (
             "create_delegation is creation-only: never pass delegation_id to it. "

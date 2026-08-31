@@ -662,7 +662,7 @@ class CommandReceiptTests(unittest.TestCase):
             context = get_context("fork")
             ready, results, start = context.Queue(), context.Queue(), context.Event()
             prompt = "Confirm shared admission."
-            open_arguments = {"task_ref": task["task_ref"], "prompt": prompt, "prompt_language": "en"}
+            open_arguments = {"task_ref": task["task_ref"], "prompt": prompt, "prompt_language": "en", "purpose": "clarification", "options": ["answer"]}
             workers = [context.Process(target=_stdio_tool_call, args=(home, "open_clarification", open_arguments, ready, start, results)) for _ in range(2)]
             for worker in workers: worker.start()
             self.assertEqual([ready.get(timeout=10) for _ in workers], [True, True])
@@ -693,11 +693,11 @@ class CommandReceiptTests(unittest.TestCase):
             self.assertEqual({item["task_ref"] for item in values}, {task["task_ref"]}, observed)
             self.assertEqual({item["state"] for item in values}, {"pending_clarification"}, observed)
             recorded = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "response_original": "Continue.", "user_language": "en",
+                "task_ref": task["task_ref"], "response_original": "Continue.", "user_language": "en", "outcome": "answer",
             })
             self.assertFalse(recorded["result"].get("isError"))
             changed = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "response_original": "Change the answer.", "user_language": "en",
+                "task_ref": task["task_ref"], "response_original": "Change the answer.", "user_language": "en", "outcome": "answer",
             })
             self.assertTrue(changed["result"].get("isError"))
             self.assertEqual(changed["result"]["structuredContent"]["error"]["code"], "clarification_binding_stale")
@@ -816,7 +816,7 @@ os.close = _observed_close
                         ready, results, start = context.Queue(), context.Queue(), context.Event()
                         arguments = {
                             "task_ref": task["task_ref"], "prompt": "Confirm shared sidecar admission.",
-                            "prompt_language": "en",
+                            "prompt_language": "en", "purpose": "clarification", "options": ["answer"],
                         }
                         workers = [context.Process(
                             target=_stdio_tool_call,

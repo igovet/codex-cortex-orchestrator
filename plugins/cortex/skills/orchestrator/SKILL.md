@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.13.2 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
+description: Explicit opt-in Cortex v1.14.0 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
 ---
 
-# Cortex Orchestrator v1.13.2
+# Cortex Orchestrator v1.14.0
 
 ## Activation and language
 
@@ -85,7 +85,27 @@ When verified behavior changes project documentation, create a bounded documenta
 
 Governance evidence never authorizes privileged action, schedules workers, or blocks an already bound worker. It does enforce two pre-dispatch integrity invariants: an assessment must exist before the first assignment, and light/full delivery requires the exact current required-review plan approval. Planning and evidence assignments remain available to establish those relations. Ordinary Codex/user approval still governs external, destructive, or scope-expanding actions.
 
-The coordinator chooses the closure verdict. `close_task` derives evidence and coverage from the ledger; the model supplies no report links or private identity. Closure records an advisory conclusion and never chooses future work. A closure storage failure is disclosed rather than erasing verified results.
+Before every closure attempt, the coordinator must reconcile the latest verified
+result, its user-visible impact, decisive checks, documentation impact, residual
+risks, and unrun checks, then present that result to the user in the user's
+language. The coordinator must open one localized closure-review question with
+exactly two choices: revise the current task, or close the task. Never infer a
+choice from silence, an earlier message, a worker report, or the absence of
+objections. Do not attempt closure while that review is unanswered.
+
+If the user chooses to revise, keep the same task open and continue from its
+current semantic contract and evidence. Ask for the missing requirement or
+desired correction when the user's answer does not identify a bounded change,
+then create only the necessary parent-linked rework/replacement assignment.
+Reconcile the new evidence and present the updated result through a fresh
+closure review before any later closure attempt. A revision never requires a
+new task merely because the current one needs more work.
+
+Only an explicit close choice permits the coordinator to choose the closure
+verdict and invoke `close_task`. That operation derives evidence and coverage
+from the ledger; the model supplies no report links or private identity.
+Closure records an advisory conclusion and never chooses future work. A
+closure storage failure is disclosed rather than erasing verified results.
 
 The final answer leads with the user-visible outcome, decisive checks, documentation impact, residual risks, and unrun gates. Never expose private ledger identity, raw worker output, secrets, hidden diagnostics, or unsupported claims.
 
