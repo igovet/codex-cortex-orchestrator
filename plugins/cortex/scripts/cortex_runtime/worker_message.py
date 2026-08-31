@@ -69,9 +69,9 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   authority, spawn policy, host lifecycle semantics, model selection, retries,
   or recovery procedures.
 - Your first action in this fresh worker session is to consume the server-owned
-  assignment evidence using the opaque assignment anchor supplied by the
-  active tool contract. Do not read task state or inspect the project before
-  that evidence-consumption action succeeds. Its result is the only bootstrap
+  assignment evidence with `read_task(view="assignment")` using the exact
+  worker-scoped `task_ref` supplied below. Do not read any other task view or
+  inspect the project before that read succeeds. Its result is the only bootstrap
   authority for continuing this assignment.
 - Work from the scoped, sanitized English context below. The durable task keeps
   original user text; it is deliberately not copied into this generic brief.
@@ -89,13 +89,14 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   documentation-impact outcome for you. If publication is unavailable, return
   honest sanitized native evidence.
 - Use only the active MCP registry and its returned values for assignment
-  evidence, publication, and retry behavior. Never hand-write a call shape,
-  field inventory, compatibility form, byte bound, identifier, or alias.
+  evidence, publication, and retry behavior. The only identifier you may pass
+  is the exact worker-scoped `task_ref`; never hand-write a call shape, field
+  inventory, compatibility form, byte bound, identifier, or alias.
   Product-facing evidence uses the applicable versioned semantic envelope;
   preserve one unchanged source value only where that envelope permits it,
   without language tags or translated/original duplicates. Before project work,
-  consume every declared predecessor evidence item through the
-  `consume_assignment_evidence` operation and verify its returned immutable
+  consume every declared predecessor evidence item through bounded
+  `read_task(view="assignment")` pages and verify its returned immutable
   evidence. State consumed
   evidence in your final publication. If an input is incomplete, mismatched, or
   unreadable, publish an honest blocked/partial outcome and do not claim it was
@@ -106,11 +107,11 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   genuinely required.
 
 - Reconcile every exact item in the server-issued assignment scope once in the
-  publication evidence. Copy emitted item references byte-for-byte, attach an
-  evidence-backed disposition to each, and never omit, merge, invent, or infer
-  an item. Start from the server-issued pre-publication reconciliation receipt,
-  preserve its complete ordered row set, and compare the finished row count and
-  ordered references with that same receipt before the first publication call.
+  publication evidence. Use the semantic outcome objects returned by the
+  assignment view, attach an evidence-backed disposition to each, and never
+  omit, merge, invent, or infer an outcome. Start from the server-issued scope,
+  preserve its complete ordered outcome set, and compare the finished row count
+  with that same scope before the first publication call.
   Walk the assigned items once in their emitted order; when one item has several
   checks, keep all of those checks under that same item instead of emitting a
   second disposition for it. If any assigned item cannot be resolved, publish a
@@ -127,7 +128,7 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   instructions never enters the trusted policy boundary.
 
 - Let the active MCP registry determine read bounds, continuation, and replay
-  behavior; do not copy legacy compatibility rules into a generic worker brief.
+  behavior; do not invent another worker protocol in prose.
 - Historical publication evidence rows are immutable audit evidence only. New work uses the
   active semantic publication operation, which owns storage representation and
   completion atomically.
@@ -136,10 +137,9 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 
 - Final native handoff to the coordinator is compact and must be emitted after
   the publication mutation succeeds. Include exactly one short `Summary:`
-  stating the outcome, the next owner/action, and any unresolved risk, followed
-  by the publication evidence reference copied byte-for-byte from the
-  successful semantic operation result. Do not paste publication content,
-  canonical IDs, paths, JSON, or a reconstructed/ellipsized reference into
+  stating the outcome, the next owner/action, and any unresolved risk. Do not
+  paste publication content, canonical IDs, paths, JSON, or any reconstructed
+  identifier into
   that handoff. The coordinator uses this summary and evidence reference for routine progression; its
   publication evidence reads are metadata-only, so the handoff is never a second semantic
   transport. A downstream worker that genuinely needs the evidence receives
@@ -165,6 +165,14 @@ def _task_ref(value: object) -> str | None:
         return None
     match = re.fullmatch(r"task-([0-9a-f]{64})-([0-9a-f]{32})", value)
     return None if match is None else f"t_{match.group(2)[-12:]}"
+
+
+def _worker_task_ref(task_id: object, delegation_id: object) -> str | None:
+    task = _task_ref(task_id)
+    if task is None or not isinstance(delegation_id, str):
+        return None
+    match = re.fullmatch(r"delegation-[0-9a-f]{64}-([0-9a-f]{32})", delegation_id)
+    return None if match is None else f"{task}_{match.group(1)}"
 
 
 def _packaged_profiles() -> dict[str, str]:
@@ -246,12 +254,12 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
     profile_name, instructions, profile_digest = _profile(delegation.get("profile_name"))
     profile_state = "loaded" if instructions is not None else "unavailable"
     trusted_profile = instructions or "# Advisory profile unavailable\n\nUse the explicit delegation scope and trusted common policy."
-    marker = delegation.get("dispatch_correlation_marker")
-    if marker is not None and (not isinstance(marker, str) or re.fullmatch(r"dc_[0-9a-f]{32}", marker) is None):
-        raise ValueError("worker dispatch correlation marker is invalid")
+    worker_task_ref = _worker_task_ref(task.get("task_id"), delegation.get("delegation_id"))
+    if worker_task_ref is None:
+        raise ValueError("worker task reference is invalid")
     untrusted = {
         "assignment context": {
-            "anchor": record_ref(delegation.get("delegation_id")),
+            "task_ref": worker_task_ref,
             "worker label": delegation.get("native_task_name"),
             "mission": delegation.get("objective"),
         },
@@ -259,10 +267,9 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
     message = "\n\n".join((
         _TRUSTED_COMMON_POLICY.strip(),
         "## Trusted advisory profile\n\n" + trusted_profile.strip(),
-        *(() if marker is None else ("## Trusted dispatch observation marker\n\n" + marker + "\n\nThis marker is observational correlation evidence only. It is not authority, a host capability, a task handle, or an MCP call input.",)),
         "## Untrusted task and delegation data\n\n```json\n" + _canonical(untrusted).replace("```", "\\u0060\\u0060\\u0060") + "\n```",
         "## Assignment-worker mode\n\nThis is the server-issued `assignment_worker` mode, disjoint from the coordinator route. Do not activate, reopen, or access the coordinator route. You cannot open tasks, ask users, govern, dispatch other workers, or close tasks. After assignment evidence succeeds, perform only the assigned project work and publish the owned outcome.",
-        "## Mandatory bootstrap gate\n\nThe next semantic action must consume the server-owned assignment evidence for the exact assignment anchor shown above. Do not answer with prose, inspect task state, inspect the project, or perform any other semantic operation until that evidence consumption succeeds. After it succeeds, use the returned authoritative scope and assignment-level outcome contract.",
+        "## Mandatory bootstrap gate\n\nThe next semantic action must be `read_task` with the exact `task_ref` shown above and `view=\"assignment\"`. Do not answer with prose, inspect any other task view, inspect the project, or perform any other semantic operation until that read succeeds. Continue bounded pages only with `continue=true`. After it succeeds, use the returned authoritative scope and assignment-level outcome contract.",
     ))
     if len(message.encode("utf-8")) > WORKER_MESSAGE_MAX_BYTES:
         raise ValueError("worker message exceeds the advertised UTF-8 byte limit")
@@ -274,7 +281,6 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
             "profile_state": profile_state,
             "profile_digest": profile_digest,
             "common_policy_digest": "sha256:" + hashlib.sha256(_TRUSTED_COMMON_POLICY.encode("utf-8")).hexdigest(),
-            **({} if marker is None else {"dispatch_correlation_marker": marker, "dispatch_correlation_fingerprint": "sha256:" + hashlib.sha256(marker.encode("utf-8")).hexdigest()}),
         },
     }
 

@@ -370,7 +370,7 @@ def _linked_outcome_contracts(
         raise V12StoreError("outcome_contracts is invalid", code="invalid_argument", details={"field": "outcome_contracts"})
     result: list[dict[str, Any]] = []
     for ordinal, outcome in enumerate(value):
-        if not isinstance(outcome, Mapping) or set(outcome) - {"requirement", "acceptance", "verification"}:
+        if not isinstance(outcome, Mapping) or set(outcome) - {"requirement", "acceptance", "verification", "constraints"}:
             raise V12StoreError("outcome_contracts is invalid", code="invalid_argument", details={"field": "outcome_contracts"})
         requirement = _opaque_text(outcome.get("requirement"), label="outcome_contracts", maximum=TASK_CONTRACT_ITEM_MAX_LENGTH)
         acceptance = _contract_text_list(outcome.get("acceptance"), label="outcome_contracts.acceptance")
@@ -384,7 +384,8 @@ def _linked_outcome_contracts(
         verification = [item for item in verification if item not in acceptance]
         if requirement != requirements[ordinal]:
             raise V12StoreError("outcome_contracts disagrees with requirements", code="invalid_argument", details={"field": "outcome_contracts"})
-        result.append({"requirement": requirement, "acceptance": acceptance, "verification": verification})
+        constraints = _contract_optional_text_list(outcome.get("constraints", []), label="outcome_contracts.constraints")
+        result.append({"requirement": requirement, "acceptance": acceptance, "verification": verification, "constraints": constraints})
     return result
 
 
@@ -409,7 +410,7 @@ def _initial_outcome_details(outcome: Mapping[str, Any], ordinal: int) -> dict[s
     return {
         "acceptance_criteria": acceptance,
         "verification_criteria": verification,
-        "constraints": [],
+        "constraints": list(outcome.get("constraints", [])),
         "requirement_extensions": [],
         "source_fragments": fragments,
     }
@@ -4454,12 +4455,6 @@ class V12Store:
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
             self._require_no_pending_user_decision(connection, task_id=str(task["task_id"]))
-            self._enforce_planning_admission(
-                connection, task_id=str(task["task_id"]),
-                profile_name=str(payload["profile_name"]),
-                assignment_policy=str(payload["assignment_policy"]),
-                input_report_ids=list(payload["input_report_ids"]),
-            )
             input_reports: list[dict[str, Any]] = []
             for report_id in payload["input_report_ids"]:
                 report = self._report(connection, report_id, task_id=task["task_id"])
@@ -4686,47 +4681,6 @@ class V12Store:
             return result
         return self._mutation("create_delegation", payload, idempotency_key, write)
 
-    def _enforce_planning_admission(self, connection: sqlite3.Connection, *, task_id: str, profile_name: str, assignment_policy: str, input_report_ids: list[str]) -> None:
-        """Require approved planner evidence before light/full owner work.
-
-        Governance assessments are advisory history, but selecting light or
-        full makes the planner predecessor an admission invariant for owner
-        assignments. Planner/review/documentation assignments remain available
-        to build the evidence needed by that invariant.
-        """
-        if profile_name == "planner" or assignment_policy != "owner":
-            return
-        assessment = connection.execute(
-            "SELECT mode FROM governance_assessments WHERE task_id=? "
-            "ORDER BY created_sequence DESC LIMIT 1", (task_id,),
-        ).fetchone()
-        mode = str(assessment["mode"]) if assessment is not None else "minimal"
-        if mode not in {"light", "full"}:
-            return
-        if not input_report_ids:
-            raise V12StoreError(
-                "light/full owner assignment requires an approved planner predecessor",
-                code="planning_predecessor_required",
-                details={"field": "input_report_refs", "mode": mode},
-            )
-        placeholders = ",".join("?" for _ in input_report_ids)
-        approved = connection.execute(
-            "SELECT 1 FROM reports r JOIN user_decisions u "
-            "ON u.task_id=r.task_id AND u.subject_type='plan' "
-            "AND u.subject_id=r.report_id AND u.decision_type='approve' "
-            "WHERE r.task_id=? AND r.report_type='plan' "
-            "AND r.assembly_state='finalized' AND r.status='completed' "
-            "AND r.semantic_status='semantic_valid' AND r.report_id IN (" + placeholders + ") "
-            "ORDER BY u.created_sequence DESC LIMIT 1",
-            (task_id, *input_report_ids),
-        ).fetchone()
-        if approved is None:
-            raise V12StoreError(
-                "light/full owner assignment requires an approved planner predecessor",
-                code="planning_predecessor_required",
-                details={"field": "input_report_refs", "mode": mode},
-            )
-
     @staticmethod
     def _worker_capability_ref(value: Any, *, label: str) -> str:
         candidate = _required_text(value, label=label, maximum=64)
@@ -4895,18 +4849,6 @@ class V12Store:
             return {"continuation": str(row["continuation_ref"]), "assignment_id": assignment_key, "task_id": task_key, "state": "consumed", "replayed": True}
         if str(row["state"]) != "minted":
             raise V12StoreError("worker capability is not consumable", code="capability_conflict")
-        if self._lease_expired(row["lease_expires_at"]):
-            self._timeline(
-                connection, event_type="dispatch_lease_expired", entity_type="delegation",
-                entity_id=assignment_key, task_id=task_key, delegation_id=assignment_key,
-                payload={"assignment_id": assignment_key, "capability_ref": capability_key},
-            )
-            connection.execute(
-                "UPDATE worker_capabilities SET state='stale',updated_at=? "
-                "WHERE capability_ref=? AND state='minted'",
-                (_now(), capability_key),
-            )
-            raise V12StoreError("worker dispatch lease expired", code="dispatch_lease_expired")
         continuation = "wc_" + uuid.uuid4().hex
         sequence = self._timeline(connection, event_type="worker_bootstrap_consumed", entity_type="delegation", entity_id=assignment_key, task_id=task_key, delegation_id=assignment_key, payload={"assignment_id": assignment_key, "capability_digest": str(row["capability_digest"])})
         now = _now()
@@ -5065,21 +5007,6 @@ class V12Store:
             # ownership exists.  Its stable tokens are not outcome assignments
             # and must therefore be available independently of that empty set.
             effective_brief["planning_items"] = full_contract["items"]
-        publication_kind = (
-            "plan" if delegation["profile_name"] == "planner"
-            else "documentation" if delegation["profile_name"] == "technical_writer"
-            else "result"
-        )
-        # This is a server-issued semantic next action, not a host command or
-        # a renderer instruction.  The tool catalogue remains the authority
-        # for the complete evidence shape; the brief only binds the worker to
-        # the correct publication family and its exact typed anchors.
-        publication_next_action = {
-            "operation": f"publish_{publication_kind}",
-            "assignment_ref": record_ref(str(delegation["delegation_id"])),
-            "task_ref": task_ref(str(task["task_id"])),
-            "coverage_source": "planning_items" if publication_kind == "plan" else "assigned_items",
-        }
         report_refs = [
             {key: item[key] for key in ("report_id", "delegation_id", "report_type", "status", "assembly_state", "total_chunks", "content_digest")}
             for item in input_reports
@@ -5116,7 +5043,6 @@ class V12Store:
             dispatch_correlation_marker=delegation.get("dispatch_correlation_marker"),
             dispatch_correlation_digest=delegation.get("dispatch_correlation_digest"),
         )
-        dispatch_brief["publication_next_action"] = publication_next_action
         return {
             "delegation_id": delegation["delegation_id"], "task_id": delegation["task_id"],
             "project_root": str(self.project_root), "objective": delegation["objective"],
@@ -5611,21 +5537,6 @@ class V12Store:
                         "source_sequence": relation["view_source_sequence"],
                     }
                 return replayed
-            # Assignment evidence is an admission precondition, never a
-            # post-terminal review.  A no-input assignment needs no receipt;
-            # every declared predecessor needs one complete body-read receipt.
-            inputs = owner["input_report_ids"]
-            if inputs:
-                placeholders = ",".join("?" for _ in inputs)
-                observed = {
-                    str(row[0]) for row in connection.execute(
-                        "SELECT DISTINCT report_id FROM report_consumption_receipts "
-                        f"WHERE consumer_delegation_id=? AND has_more=0 AND report_id IN ({placeholders})",
-                        [owner["delegation_id"], *inputs],
-                    ).fetchall()
-                }
-                if any(item not in observed for item in inputs):
-                    raise V12StoreError("declared input evidence must be consumed before publication", code="input_evidence_unread")
             # The domain API is deliberately stricter than the historical
             # assembled-report transport: only the exact current envelope for
             # this publication kind may consume a terminal logical slot.
@@ -5646,7 +5557,7 @@ class V12Store:
                         if not isinstance(fact, Mapping):
                             diagnostics.append("evidence_invalid")
                             break
-                        if fact.get("state") not in {"executed", "not_run"}:
+                        if fact.get("state") not in {"executed", "not_run", "failed"}:
                             diagnostics.append("evidence_state_invalid")
                             break
                         if isinstance(fact.get("summary"), str) and fact["summary"].strip():
@@ -5680,7 +5591,7 @@ class V12Store:
             if not isinstance(claims, list):
                 raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "contract_coverage_missing"})
             dispositions: dict[str, tuple[str, list[Any]]] = {}
-            allowed_statuses = {"planned"} if report_kind == "plan" else {"complete", "partial", "unverified", "not_applicable"}
+            allowed_statuses = {"planned"} if report_kind == "plan" else {"complete", "partial", "unverified", "blocked", "not_applicable"}
             for claim in claims:
                 if not isinstance(claim, Mapping) or not isinstance(claim.get("item_ref"), str):
                     raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "contract_coverage_invalid"})
@@ -5701,10 +5612,6 @@ class V12Store:
                 dispositions[item_id] = (str(claim_status), list(verification))
             if set(dispositions) != expected_items:
                 raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "contract_coverage_incomplete"})
-            owns_delivery = any(str(row["assignment_role"]) == "owned" for row in scope_rows)
-            if report_status == "completed" and owns_delivery:
-                if any(status != "complete" for status, _ in dispositions.values()) or content.get("unresolved"):
-                    raise V12StoreError("completed delivery leaves unresolved contract items", code="report_incomplete", details={"reason": "contract_coverage_incomplete"})
             report_id = new_sharded_id("report", self.project_hash)
             manifest = _sha256_prefixed(_report_manifest([{"chunk_index": 0, "section": "body", "content_digest": canonical[3], "content_bytes": canonical[2]}]), label="report manifest")
             sequence = self._timeline(connection, event_type="report_submitted", entity_type="report", entity_id=report_id, payload={"report_id": report_id, "delegation_id": owner["delegation_id"], "report_type": report_kind, "status": report_status, "total_chunks": 1, "total_bytes": canonical[2], "content_digest": manifest, "supersedes_report_id": supersedes_report_id}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=report_id)
@@ -5879,10 +5786,7 @@ class V12Store:
             raise V12StoreError(
                 "a user decision must be recorded before the task can advance",
                 code="decision_pending",
-                details={
-                    "decision_type": str(pending["decision_type"]),
-                    "next_action": "record_clarification",
-                },
+                details={"decision_type": str(pending["decision_type"])},
             )
 
     def read_decision_binding(self, *, task_id: Any, binding_ref: Any) -> dict[str, Any]:
@@ -5918,6 +5822,7 @@ class V12Store:
             existing = connection.execute("SELECT * FROM clarification_bindings WHERE task_id=? AND subject_type=? AND subject_id=? AND decision_type=? AND prompt_digest=? AND effective_contract_revision=?", (anchor, kind, subject, dtype, prompt_digest, revision)).fetchone()
             if existing is not None:
                 return {"binding": self._decision_binding_projection(existing, task_id=anchor), "replayed": True}
+            self._require_no_pending_user_decision(connection, task_id=anchor)
             relation: dict[str, Any] | None = None
             if dtype == "plan_review":
                 if kind != "plan":
@@ -5931,8 +5836,7 @@ class V12Store:
                 raise V12StoreError("plan review binding was not stored", code="ledger_corrupt")
             return {"binding": self._decision_binding_projection(inserted, task_id=anchor), "replayed": False}
         # DomainKernel supplies the ambient transaction for semantic command
-        # receipts.  The public legacy entry point retains its own transaction
-        # for historical callers.
+        # receipts; direct internal callers use the store transaction.
         return write(_connection) if _connection is not None else self._write(write)
 
     @staticmethod
@@ -6622,7 +6526,7 @@ class V12Store:
                         "closure": self._closure(connection, str(existing["closure_id"])),
                         "initiative": None,
                         "warnings": [],
-                        "next_action": {"advisory_status": "recorded", "task_ref": task_ref(anchor)},
+                        "advisory_status": "recorded",
                         "execution_outcome": self._execution_evidence(connection, anchor),
                         "conformance_review": self._conformance_review(connection, anchor),
                         "verdict_adjustment": {"requested": decision, "recorded": recorded},
@@ -6657,16 +6561,11 @@ class V12Store:
             if kind == "task":
                 connection.execute("UPDATE tasks SET updated_at=?,updated_sequence=? WHERE task_id=? AND project_hash=?", (timestamp, sequence, anchor, self.project_hash))
             links = [] if closure_initiative is None else self._initiative_links(connection, [closure_initiative])
-            next_action = (
-                {"tool": "submit_governance_closure", "suggested_subject": {"task_ref": task_ref(anchor), "subject_type": "task", "subject_ref": task_ref(anchor)}}
-                if kind == "initiative"
-                else {"advisory_status": "recorded", "task_ref": task_ref(anchor)}
-            )
             return {
                 "closure": self._closure(connection, closure_id),
                 "initiative": initiative,
                 "warnings": self._warning_values(links),
-                "next_action": next_action,
+                "advisory_status": "recorded",
                 "execution_outcome": self._execution_evidence(connection, anchor),
                 # Closure is advisory bookkeeping; expose the same immutable
                 # conformance projection in the mutation response so callers

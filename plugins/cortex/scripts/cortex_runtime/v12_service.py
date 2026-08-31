@@ -577,7 +577,7 @@ def submit_governance_closure(
             if error.code not in {"storage_busy", "storage_unavailable"}:
                 raise
             if attempt == 2:
-                return {"closure": None, "initiative": None, "warnings": [], "next_action": {"task_ref": compact_task_ref(canonical)}, "execution_outcome": execution_outcome, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "persistence_unavailable", "attempts": attempt}, "replayed": False}
+                return {"closure": None, "initiative": None, "warnings": [], "advisory_status": "persistence_unavailable", "execution_outcome": execution_outcome, "closure_confirmation": {"inspection_status": "unconfirmed", "reason": "persistence_unavailable", "attempts": attempt}, "replayed": False}
     assert persisted is not None
     execution_outcome = _normalize_execution_evidence(persisted.get("execution_outcome", execution_outcome))
     closure = persisted.get("closure")

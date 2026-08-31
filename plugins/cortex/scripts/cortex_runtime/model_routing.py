@@ -33,9 +33,11 @@ def _required_text(value: object, field: str) -> str:
 
 
 def validate_model_selection(model: object, reasoning_effort: object) -> ModelSelection:
-    """Validate bounded recommendation text without asserting host support."""
+    """Validate the exact model/effort pair advertised to the coordinator."""
     exact_model = _required_text(model, "model")
     exact_effort = _required_text(reasoning_effort, "reasoning_effort")
+    if exact_model not in NATIVE_MODELS or exact_effort not in NATIVE_REASONING_EFFORTS:
+        raise ValueError("model selection is outside the advertised catalogue")
     return ModelSelection(model=exact_model, reasoning_effort=exact_effort)
 
 
@@ -64,7 +66,7 @@ def model_effort_pair_is_allowed(
     model: object,
     effort: object,
 ) -> bool:
-    """Compatibility predicate for bounded recommendation text."""
+    """Return whether the pair belongs to the advertised catalogue."""
     try:
         validate_model_selection(model, effort)
     except ValueError:

@@ -12,17 +12,14 @@ from cortex import PUBLIC_TOOLS  # noqa: E402
 from cortex_runtime.mcp_api import catalogue_identity, _validate_schema  # noqa: E402
 
 
-def test_all_fifteen_tools_have_compact_public_and_closed_runtime_schemas() -> None:
-    assert len(PUBLIC_TOOLS) == 15
+def test_all_public_tools_have_compact_and_closed_runtime_schemas() -> None:
+    assert len(PUBLIC_TOOLS) == 14
     for name, contract in PUBLIC_TOOLS.items():
         public = contract["outputSchema"]
         runtime = contract["runtimeOutputSchema"]
         assert public is not runtime, name
-        assert public["required"] == ["handles"], name
-        assert set(public["properties"]) <= {
-            "handles", "replayed", "status", "state", "assembly_state",
-            "next_action", "has_more", "next_cursor", "next_sequence",
-        }, name
+        assert public["type"] == "object" and public["additionalProperties"] is False, name
+        assert "handles" not in public.get("properties", {}), name
         assert runtime["type"] == "object", name
         assert "properties" in runtime and len(runtime["properties"]) >= 2, name
 
@@ -34,10 +31,10 @@ def test_compact_catalogue_is_bounded_and_runtime_rejects_extra_fields() -> None
         separators=(",", ":"),
     ).encode()
     assert len(payload) < 65536
-    assert catalogue_identity(PUBLIC_TOOLS)["catalogue_count"] == 15
+    assert catalogue_identity(PUBLIC_TOOLS)["catalogue_count"] == 14
     runtime = PUBLIC_TOOLS["open_clarification"]["runtimeOutputSchema"]
     try:
-        _validate_schema(runtime, {"handles": {}, "unexpected": True})
+        _validate_schema(runtime, {"unexpected": True})
     except ValueError:
         pass
     else:

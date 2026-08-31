@@ -10,15 +10,159 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 
-from cortex_runtime import v12_service as legacy
+from cortex_runtime import v12_service as ledger
 from cortex_runtime.v12_contract import record_ref, task_ref as compact_task_ref
 from cortex_runtime.v12_service import V12ServiceError, _record_list_in_task, _task_store
 from cortex_runtime.v12_store import V12Store, V12StoreError
 from cortex_runtime.domain_kernel import DecisionAggregate
+
+
+_WORKER_TASK_REF = re.compile(r"^(t_[0-9a-f]{12})_([0-9a-f]{32})$")
+
+
+def _resolve_task_context(value: str) -> tuple[V12Store, str, str | None, str]:
+    """Resolve a coordinator or assignment-scoped task_ref without guessing."""
+    match = _WORKER_TASK_REF.fullmatch(value) if isinstance(value, str) else None
+    public_ref = match.group(1) if match else value
+    store, task_id = _task_store(public_ref)
+    if match is None:
+        return store, task_id, None, public_ref
+    suffix = match.group(2)
+    rows = store._read(lambda connection: connection.execute(
+        "SELECT delegation_id FROM delegations WHERE task_id=? AND delegation_id LIKE ? ORDER BY delegation_id",
+        (task_id, "%" + suffix),
+    ).fetchall())
+    if len(rows) != 1:
+        raise V12ServiceError("worker task context is unavailable", code="task_not_found")
+    return store, task_id, str(rows[0]["delegation_id"]), public_ref
+
+
+def _semantic_outcome(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "outcome": str(item.get("text", "")),
+        "acceptance": list(item.get("acceptance_criteria", [])) if isinstance(item.get("acceptance_criteria"), list) else [],
+        "constraints": list(item.get("constraints", [])) if isinstance(item.get("constraints"), list) else [],
+        "verification": list(item.get("verification_criteria", [])) if isinstance(item.get("verification_criteria"), list) else [],
+    }
+
+
+def _publicize(value: Any) -> Any:
+    """Remove private ledger identity and continuation metadata recursively."""
+    if isinstance(value, list):
+        return [_publicize(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    if "item_ref" in value and isinstance(value.get("text"), str):
+        return _semantic_outcome(value)
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        lowered = str(key).lower()
+        if lowered in {"recommendation", "project_hash"} or lowered.endswith("_hash"):
+            continue
+        if key != "task_ref" and (
+            lowered == "handles" or lowered.endswith("_id") or lowered.endswith("_ids")
+            or lowered.endswith("_ref") or lowered.endswith("_refs")
+            or "digest" in lowered or "cursor" in lowered or lowered in {"continuation", "continuations"}
+        ):
+            continue
+        public_key = "outcome" if key == "text" and "item_ref" in value else str(key)
+        result[public_key] = "partial" if item == "rework" else _publicize(item)
+    return result
+
+
+def _reject_private_fields(value: Any, *, path: str = "evidence") -> None:
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_private_fields(item, path=f"{path}[{index}]")
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if (lowered == "handles" or lowered.endswith("_id") or lowered.endswith("_ids")
+                    or lowered.endswith("_ref") or lowered.endswith("_refs")
+                    or "digest" in lowered or "cursor" in lowered or "continuation" in lowered):
+                raise V12ServiceError("private identifier fields are not accepted", code="invalid_argument", details={"field": f"{path}.{key}"})
+            _reject_private_fields(item, path=f"{path}.{key}")
+
+
+def _internalize_publication_evidence(store: V12Store, assignment_id: str, evidence: object) -> object:
+    _reject_private_fields(evidence)
+    if not isinstance(evidence, Mapping):
+        return evidence
+    result = dict(evidence)
+    coverage = result.get("contract_coverage")
+    if not isinstance(coverage, list):
+        return result
+    projection = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)
+    worker = projection.get("worker_brief") if isinstance(projection, Mapping) else None
+    effective = worker.get("effective_contract") if isinstance(worker, Mapping) else None
+    items = (effective.get("planning_items") or effective.get("assigned_items")) if isinstance(effective, Mapping) else None
+    typed_items = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
+    internal: list[dict[str, Any]] = []
+    for row in coverage:
+        if not isinstance(row, Mapping) or not isinstance(row.get("outcome"), Mapping):
+            raise V12ServiceError("publication coverage requires semantic outcomes", code="invalid_argument", details={"field": "evidence.contract_coverage"})
+        matches = _match_outcomes(typed_items, [row["outcome"]])
+        internal.append({"item_ref": matches[0], **{key: value for key, value in row.items() if key != "outcome"}})
+    result["contract_coverage"] = internal
+    return result
+
+
+def _match_outcomes(current_items: list[Mapping[str, Any]], requested: object) -> list[str]:
+    if not isinstance(requested, list) or not requested:
+        raise V12ServiceError("assignment outcome scope is required", code="invalid_argument", details={"field": "mission.outcomes"})
+    selected: list[str] = []
+    for candidate in requested:
+        if not isinstance(candidate, Mapping):
+            raise V12ServiceError("assignment outcome scope is invalid", code="invalid_argument", details={"field": "mission.outcomes"})
+        normalized = {
+            "outcome": candidate.get("outcome"),
+            "acceptance": list(candidate.get("acceptance", [])),
+            "constraints": list(candidate.get("constraints", [])),
+            "verification": list(candidate.get("verification", [])),
+        }
+        matches = [item for item in current_items if _semantic_outcome(item) == normalized]
+        if len(matches) != 1 or not isinstance(matches[0].get("item_ref"), str):
+            raise V12ServiceError("assignment outcome is missing or ambiguous", code="outcome_item_not_found", details={"field": "mission.outcomes"})
+        selected.append(str(matches[0]["item_ref"]))
+    if len(set(selected)) != len(selected):
+        raise V12ServiceError("assignment outcome scope is ambiguous", code="outcome_assignment_conflict", details={"field": "mission.outcomes"})
+    return selected
+
+
+def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_refs: list[str]) -> list[str]:
+    if policy == "none":
+        return []
+    def select(connection):
+        if policy == "all_finalized":
+            rows = connection.execute("SELECT report_id FROM reports WHERE task_id=? AND assembly_state='finalized' ORDER BY created_sequence", (task_id,)).fetchall()
+        elif policy == "active_plan":
+            rows = connection.execute(
+                "SELECT r.report_id FROM reports r JOIN user_decisions u ON u.task_id=r.task_id AND u.subject_id=r.report_id "
+                "WHERE r.task_id=? AND r.report_type='plan' AND r.assembly_state='finalized' AND u.decision_type='approve' "
+                "ORDER BY u.created_sequence DESC LIMIT 1", (task_id,),
+            ).fetchall()
+        elif policy == "latest_for_scope":
+            # Coverage identity stays private. Choose the latest finalized
+            # report touching any selected semantic outcome.
+            internal = [store._outcome_item_id(connection, task_id, ref_value) for ref_value in item_refs]
+            placeholders = ",".join("?" for _ in internal)
+            rows = connection.execute(
+                "SELECT DISTINCT r.report_id,r.created_sequence FROM reports r JOIN report_contract_coverage c ON c.report_id=r.report_id "
+                f"WHERE r.task_id=? AND r.assembly_state='finalized' AND c.item_id IN ({placeholders}) ORDER BY r.created_sequence DESC LIMIT 1",
+                (task_id, *internal),
+            ).fetchall()
+        else:
+            raise V12StoreError("report policy is invalid", code="invalid_argument", details={"field": "mission.report_policy"})
+        return [str(row["report_id"]) for row in rows]
+    try:
+        return store._read(select)
+    except V12StoreError as exc:
+        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
 def _worker_capability_provenance() -> dict[str, str]:
@@ -33,7 +177,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.12.2",
+        "1.12.3",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -56,21 +200,16 @@ def _worker_capability_provenance() -> dict[str, str]:
 
 
 def _operation_key(operation: str, payload: Mapping[str, object]) -> str:
-    """Private deterministic identity for the legacy durable mutation layer."""
+    """Private deterministic identity for the durable mutation layer."""
     encoded = json.dumps({"operation": operation, "payload": dict(payload)}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return "domain-" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def open_task(*, task: Mapping[str, object]) -> dict[str, Any]:
+def open_task(*, project_root: str, request_original: str, user_language: str,
+              outcomes: list[Mapping[str, object]], constraints: list[str],
+              context: object | None = None) -> dict[str, Any]:
     """Create or exactly replay one task from its coherent public outcome contract."""
-    if not isinstance(task, Mapping):
-        raise V12ServiceError("task opening contract is invalid", code="invalid_argument", details={"field": "task"})
-    project_root = task.get("project_root")
-    user_request_original = task.get("request_original")
-    user_language = task.get("user_language")
-    outcomes = task.get("outcomes")
-    constraints = task.get("constraints")
-    context = task.get("context")
+    user_request_original = request_original
     if not isinstance(outcomes, list):
         raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
     requirements: list[object] = []
@@ -79,17 +218,16 @@ def open_task(*, task: Mapping[str, object]) -> dict[str, Any]:
     for outcome in outcomes:
         if not isinstance(outcome, Mapping):
             raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
-        requirements.append(outcome.get("requirement"))
+        requirements.append(outcome.get("outcome"))
         acceptance = outcome.get("acceptance")
         if not isinstance(acceptance, list):
             raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
         acceptance_criteria.extend(acceptance)
         outcome_contracts.append({
-            "requirement": outcome.get("requirement"),
+            "requirement": outcome.get("outcome"),
             "acceptance": list(acceptance),
-            # The public task contract has no separate verification input.
-            # Acceptance remains linked evidence, never a duplicated item.
-            "verification": [],
+            "verification": list(outcome.get("verification", [])),
+            "constraints": list(outcome.get("constraints", [])),
         })
     # The exact original request is already the immutable task objective.
     # Requiring a second model-authored summary created a redundant first-call
@@ -99,91 +237,73 @@ def open_task(*, task: Mapping[str, object]) -> dict[str, Any]:
                "requirements": requirements, "constraints": constraints,
                "acceptance_criteria": acceptance_criteria,
                "outcome_contracts": outcome_contracts, "context": context}
-    return legacy.create_task(**payload)
+    result = ledger.create_task(**payload)
+    created = result.get("task") if isinstance(result, Mapping) else None
+    canonical = created.get("task_id") if isinstance(created, Mapping) else None
+    public_ref = compact_task_ref(str(canonical)) if isinstance(canonical, str) else None
+    if public_ref is None:
+        raise V12ServiceError("task reference is unavailable", code="ledger_error")
+    return {"task_ref": public_ref, "replayed": bool(result.get("replayed"))}
 
 
-def read_task(*, task_ref: str, after_sequence: int = 0,
-              report_refs: list[str] | None = None,
-              sections: list[str] | None = None,
-              cursor: str | None = None) -> dict[str, Any]:
-    """Read task state or a bounded authoritative coordinator evidence page.
-
-    A coordinator must be able to consume the canonical report body before a
-    material synthesis, revision, rework, closure, or final-answer decision.
-    Keeping that read on the task query preserves the fixed semantic catalogue
-    while producing the same immutable digest/cursor receipts as worker reads.
-    """
-    if report_refs is None:
-        if sections is not None or cursor is not None:
-            raise V12ServiceError("report evidence selection is incomplete", code="invalid_argument", details={"field": "report_refs"})
-        return legacy.inspect_task(task_ref=task_ref, after_sequence=after_sequence)
-    if after_sequence != 0:
-        raise V12ServiceError("task chronology and report evidence are separate bounded reads", code="invalid_argument", details={"field": "after_sequence"})
-    store, canonical = _task_store(task_ref)
-    canonical_reports = _record_list_in_task(store, report_refs, label="report_id")
-    evidence = store.read_reports(
-        task_id=canonical,
-        report_ids=canonical_reports,
-        sections=sections,
-        cursor=cursor,
-        max_bytes=65_536,
-        consumer_delegation_id=None,
-    )
-    return {"task_ref": task_ref, "report_evidence": evidence}
-
-
-def _issue_clarification_legacy(*, task_ref: str, prompt: str, prompt_language: str,
-                                subject_type: str = "task", subject_ref: str | None = None,
-                                assignment_ref: str | None = None) -> dict[str, Any]:
-    """Issue a server-owned opaque clarification binding."""
-    store, canonical = _task_store(task_ref)
-    result = store.issue_clarification_binding(
-        task_id=canonical, prompt=prompt, prompt_language=prompt_language,
-        subject_type=subject_type,
-        subject_id=subject_ref, assignment_id=assignment_ref,
-    )
+def read_task(*, task_ref: str, view: str, continue_: bool = False,
+              report_policy: str = "all_finalized",
+              _connection_context: dict[str, Any] | None = None, **compat: Any) -> dict[str, Any]:
+    """Read state, assignment bootstrap, or evidence with server-owned paging."""
+    if "continue" in compat:
+        continue_ = compat.pop("continue")
+    if compat:
+        raise V12ServiceError("task read shape is invalid", code="invalid_argument")
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    store, canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
+    page_key = (task_ref, view, report_policy)
+    if continue_:
+        if context.get("read_key") != page_key or not context.get("has_more"):
+            raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
+        cursor = context.get("cursor")
+    else:
+        cursor = None
+        context.pop("cursor", None)
+    if view == "state":
+        if assignment_id is not None:
+            raise V12ServiceError("worker task context permits assignment view first", code="capability_stale")
+        raw = ledger.inspect_task(task_ref=coordinator_ref, after_sequence=0)
+        data = _publicize(raw)
+        result = {"task_ref": task_ref, "view": view, "data": data, "has_more": False}
+    elif view == "assignment":
+        if assignment_id is None:
+            raise V12ServiceError("assignment view requires worker-scoped task_ref", code="capability_stale")
+        raw = _read_assignment_page(store=store, assignment_id=assignment_id, cursor=cursor)
+        context.update({"actor": "worker", "assignment_id": assignment_id,
+                        "continuation_ref": raw.get("continuation_ref"), "task_id": canonical,
+                        "worker_task_ref": task_ref})
+        has_more = bool(raw.get("has_more"))
+        context.update({"read_key": page_key, "cursor": raw.get("next_cursor"), "has_more": has_more})
+        result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
+    elif view == "evidence":
+        if assignment_id is not None:
+            if context.get("assignment_id") != assignment_id:
+                raise V12ServiceError("worker assignment must be read before evidence", code="capability_stale")
+            # Worker predecessor bodies are served by assignment pages only;
+            # this view is a coordinator evidence selection surface.
+            raise V12ServiceError("worker evidence is part of the assignment view", code="invalid_argument")
+        report_ids = _select_report_inputs(store, canonical, report_policy, [])
+        raw = store.read_reports(task_id=canonical, report_ids=report_ids, cursor=cursor, max_bytes=65_536, consumer_delegation_id=None) if report_ids else {"reports": [], "has_more": False, "next_cursor": None}
+        has_more = bool(raw.get("has_more"))
+        context.update({"read_key": page_key, "cursor": raw.get("next_cursor"), "has_more": has_more})
+        result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
+    else:
+        raise V12ServiceError("task view is invalid", code="invalid_argument", details={"field": "view"})
     return result
 
 
-def _open_decision_legacy(*, task_ref: str, prompt: str, prompt_language: str,
-                          subject_type: str = "task", subject_ref: str | None = None,
-                          assignment_ref: str | None = None,
-                          decision_type: str = "clarification") -> dict[str, Any]:
-    """Issue one public scalar binding handle and non-callable context."""
-    store, canonical = _task_store(task_ref)
-    try:
-        issued = DecisionAggregate(store).open(
-            task_id=canonical, prompt=prompt, prompt_language=prompt_language,
-            subject_type=subject_type, subject_id=subject_ref,
-            assignment_id=assignment_ref,
-            decision_type=decision_type,
-        )
-    except V12StoreError as exc:
-        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
-    binding = issued.get("binding")
-    if not isinstance(binding, Mapping) or not isinstance(binding.get("clarification_binding"), str):
-        raise V12ServiceError("decision binding is unavailable", code="ledger_error")
-    return {
-        "task_ref": task_ref,
-        "binding_ref": binding["clarification_binding"],
-        "next_action": "record_clarification",
-        "decision_context": {
-            key: binding[key]
-            for key in ("subject_type", "subject_ref", "decision_type", "prompt", "prompt_language", "effective_contract_revision", "consumed")
-            if key in binding
-        },
-        "replayed": bool(issued.get("replayed")),
-    }
-
-
-def open_assignment(*, task_ref: str, mission: Mapping[str, object],
-                    input_report_refs: list[str] | None = None,
-                    input_decision_refs: list[str] | None = None) -> dict[str, Any]:
+def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
+                    reasoning_effort: str,
+                    responsibility: str, goal: str, scope: str,
+                    instructions: str, outcomes: list[Mapping[str, object]],
+                    report_policy: str) -> dict[str, Any]:
     """Atomically bind a worker assignment to its current effective contract."""
-    from cortex_runtime.model_routing import profile_default_selection
-    if not isinstance(mission, Mapping):
-        raise V12ServiceError("assignment mission is invalid", code="invalid_argument", details={"field": "mission"})
-    responsibility = mission.get("responsibility")
+    from cortex_runtime.model_routing import validate_model_selection
     assignment_policy = {
         "delivery": "owner",
         "evidence": "review",
@@ -191,37 +311,41 @@ def open_assignment(*, task_ref: str, mission: Mapping[str, object],
     }.get(responsibility)
     if assignment_policy is None:
         raise V12ServiceError("assignment responsibility is invalid", code="invalid_argument", details={"field": "mission.responsibility"})
-    profile_name = mission.get("profile_name")
     if (responsibility == "planning") != (profile_name == "planner"):
         raise V12ServiceError("planning responsibility and planner profile must agree", code="invalid_argument", details={"field": "mission.responsibility"})
-    item_refs = mission.get("item_refs")
-    current = legacy.inspect_task(task_ref=task_ref).get("effective_contract")
+    current = ledger.inspect_task(task_ref=task_ref).get("effective_contract")
     current_items = current.get("items") if isinstance(current, Mapping) else None
-    current_refs = {item.get("item_ref") for item in current_items if isinstance(item, Mapping)} if isinstance(current_items, list) else set()
-    requirement_count = sum(1 for item in current_items if isinstance(item, Mapping) and item.get("category") in {"outcome", "requirement"}) if isinstance(current_items, list) else 0
-    if item_refs is None and (responsibility == "planning" or requirement_count == 1):
-        item_refs = sorted(current_refs)
-    if not isinstance(item_refs, list) or not item_refs or len(set(item_refs)) != len(item_refs) or any(not isinstance(item, str) for item in item_refs):
-        raise V12ServiceError("assignment item scope is required for a multi-outcome task", code="invalid_argument", details={"field": "mission.item_refs"})
-    if any(item not in current_refs for item in item_refs):
-        raise V12ServiceError("assignment item scope is stale or unavailable", code="outcome_item_not_found", details={"field": "mission.item_refs"})
+    if not isinstance(current_items, list):
+        raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
+    typed_items = [item for item in current_items if isinstance(item, Mapping)]
+    item_refs = _match_outcomes(typed_items, outcomes)
+    current_refs = {str(item.get("item_ref")) for item in typed_items if isinstance(item.get("item_ref"), str)}
     if responsibility == "planning" and set(item_refs) != current_refs:
-        raise V12ServiceError("planning must map the complete current contract", code="invalid_argument", details={"field": "mission.item_refs"})
+        raise V12ServiceError("planning must map the complete current contract", code="invalid_argument", details={"field": "mission.outcomes"})
     outcome_assignments = {
         "owned": list(item_refs) if responsibility == "delivery" else [],
         "contributing": list(item_refs) if responsibility == "evidence" else [],
         "evidence_producing": list(item_refs) if responsibility == "evidence" else [],
     }
-    selection = profile_default_selection(mission.get("profile_name"))
-    payload = {"task_ref": task_ref, "objective": mission.get("goal"), "role": mission.get("role"),
-               "profile_name": mission.get("profile_name"), "scope": mission.get("constraints"), "instructions": mission.get("instructions"),
+    try:
+        selection = validate_model_selection(model, reasoning_effort)
+    except ValueError as exc:
+        raise V12ServiceError("model selection is invalid", code="invalid_model_selection") from exc
+    store, canonical = _task_store(task_ref)
+    input_report_ids = _select_report_inputs(store, canonical, report_policy, item_refs)
+    input_report_refs = [record_ref(item) for item in input_report_ids]
+    if any(item is None for item in input_report_refs):
+        raise V12ServiceError("report policy resolution failed", code="ledger_error")
+    input_decision_refs: list[str] = []
+    payload = {"task_ref": task_ref, "objective": goal, "role": role,
+               "profile_name": profile_name, "scope": scope, "instructions": instructions,
                "model": selection.model, "reasoning_effort": selection.reasoning_effort,
                "input_report_refs": input_report_refs, "input_decision_refs": input_decision_refs}
     provenance = _worker_capability_provenance()
-    result = legacy.create_delegation(
+    result = ledger.create_delegation(
         task_ref=task_ref, objective=payload["objective"], role=payload["role"], profile_name=payload["profile_name"],
         scope=payload["scope"], instructions=payload["instructions"], model=selection.model, reasoning_effort=selection.reasoning_effort,
-        input_report_refs=input_report_refs, input_decision_refs=input_decision_refs,
+        input_report_refs=list(input_report_refs), input_decision_refs=input_decision_refs,
         outcome_assignments=outcome_assignments,
         parent_delegation_ref=None,
         bootstrap_provenance=provenance,
@@ -253,39 +377,37 @@ def open_assignment(*, task_ref: str, mission: Mapping[str, object],
             "message": native_args.get("message"),
             "task_name": native_args.get("task_name"),
         }
+        for key in ("model", "reasoning_effort"):
+            if isinstance(native_args.get(key), str):
+                native_dispatch[key] = native_args[key]
         if not all(isinstance(native_dispatch[key], str) and native_dispatch[key] for key in ("fork_turns", "message", "task_name")):
             raise V12ServiceError("worker dispatch is invalid", code="ledger_error")
+        # Keep the server-issued correlation marker available to the MCP
+        # observability boundary.  It is an internal observation aid, not a
+        # callable handle, and the transport removes it before projecting the
+        # public success envelope.  Without this bridge the open_assignment
+        # event cannot be joined to the native-dispatch hook event.
+        dispatch_marker = raw_brief.get("dispatch_correlation_marker")
+        if not isinstance(dispatch_marker, str) or not dispatch_marker:
+            raise V12ServiceError("worker dispatch correlation is invalid", code="ledger_error")
         # The coordinator owns only the opaque native dispatch. The private
         # one-time worker lease remains in the server ledger and is resolved by
         # the assignment locator when the worker consumes its evidence.
         return {
-            "assignment_ref": assignment_ref,
-            "handles": {"assignment_ref": assignment_ref},
             "native_dispatch": native_dispatch,
             # Preserve the server's durable mutation outcome.  A coordinator
             # must be able to distinguish a first mint from reconciliation of
             # an already-committed dispatch after an interrupted host call;
             # otherwise it may incorrectly treat the same assignment as new.
             "replayed": bool(result.get("replayed")),
-            "relations": {
-                "parent_assignment_ref": parent
-                for parent in [record_ref(delegation.get("parent_delegation_id"))]
-                if parent is not None
-            },
         }
     return result
 
 
-def consume_assignment_evidence(*, assignment_ref: str, cursor: str | None = None) -> dict[str, Any]:
-    """Consume only declared predecessor report evidence for one assignment.
-
-    This is the worker's sole authoritative bootstrap boundary for effective
-    scope, mission context, declared decisions, and predecessor reports. The
-    worker supplies only the assignment locator; the bootstrap capability is
-    private server state and is consumed atomically by assignment binding.
-    """
+def _read_assignment_page(*, store: V12Store, assignment_id: str,
+                          cursor: str | None = None) -> dict[str, Any]:
+    """Resolve and consume the exact server-bound worker assignment page."""
     try:
-        store, assignment_id = V12Store.for_record_ref(assignment_ref, label="delegation_id")
         assignment = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)
         # ``read_delegation`` deliberately returns a projection envelope.  Do
         # not read task/dispatch identity from the envelope itself: doing so
@@ -294,22 +416,20 @@ def consume_assignment_evidence(*, assignment_ref: str, cursor: str | None = Non
         delegation = assignment.get("delegation") if isinstance(assignment, Mapping) else None
         task_id = delegation.get("task_id") if isinstance(delegation, Mapping) else None
         dispatch_digest = delegation.get("dispatch_correlation_digest") if isinstance(delegation, Mapping) else None
-        state = legacy.inspect_task(task_ref=compact_task_ref(str(task_id))) if isinstance(task_id, str) else {}
         if not isinstance(task_id, str) or not isinstance(dispatch_digest, str):
             raise V12ServiceError("worker bootstrap capability is invalid", code="ledger_error")
         provenance = _worker_capability_provenance()
         continuation = store.consume_worker_bootstrap_for_assignment(
             task_id=task_id,
             # The store resolves the immutable assignment snapshot revision;
-            # this compatibility argument is no longer task-global authority.
+            # the revision is never supplied by the model.
             assignment_id=assignment_id, contract_revision=1,
             dispatch_digest=dispatch_digest, **provenance,
         )
         if not isinstance(continuation, Mapping):
             raise V12ServiceError("worker continuation is invalid", code="ledger_error")
-        assignment_ref = record_ref(str(continuation.get("assignment_id")))
         delegation_id = continuation.get("assignment_id")
-        if not isinstance(assignment_ref, str) or not isinstance(delegation_id, str):
+        if not isinstance(delegation_id, str):
             raise V12ServiceError("worker continuation is invalid", code="ledger_error")
         continuation_ref = continuation.get("continuation")
         if not isinstance(continuation_ref, str):
@@ -397,12 +517,12 @@ def consume_assignment_evidence(*, assignment_ref: str, cursor: str | None = Non
             raise V12ServiceError("worker task context is invalid", code="ledger_error")
         report_ids = worker.get("input_report_ids") if isinstance(worker, Mapping) else None
         if not isinstance(report_ids, list) or not report_ids:
-            return {"assignment_ref": assignment_ref, "continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "none", "reports": []}, "next_cursor": None, "has_more": False}
+            return {"continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "none", "reports": []}, "next_cursor": None, "has_more": False}
         result = store.read_reports(
             report_ids=report_ids, cursor=cursor, max_bytes=65_536,
             consumer_delegation_id=delegation_id,
         )
-        return {"assignment_ref": assignment_ref, "continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "consumed", **result}}
+        return {"continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "consumed", **result}}
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
@@ -487,217 +607,129 @@ def _publish(*, continuation_ref: str, assignment_ref: str, kind: str, evidence:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
-def publish_plan(*, continuation_ref: str, assignment_ref: str, evidence: object, status: str = "completed") -> dict[str, Any]:
-    return _publish(continuation_ref=continuation_ref, assignment_ref=assignment_ref, kind="plan", evidence=evidence, status=status)
+def _publish_from_task(*, task_ref: str, kind: str, evidence: Mapping[str, Any], status: str,
+                       _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    _store, _task_id, assignment_id, _coordinator_ref = _resolve_task_context(task_ref)
+    if (assignment_id is None or context.get("actor") != "worker"
+            or context.get("assignment_id") != assignment_id
+            or context.get("worker_task_ref") != task_ref):
+        raise V12ServiceError("publication requires this connection's consumed worker assignment", code="capability_stale")
+    continuation_ref = context.get("continuation_ref")
+    if not isinstance(continuation_ref, str):
+        raise V12ServiceError("worker assignment evidence has not been consumed", code="capability_stale")
+    store, _ = V12Store.for_record_ref(record_ref(assignment_id), label="delegation_id")
+    internal_evidence = _internalize_publication_evidence(store, assignment_id, evidence)
+    published = _publish(
+        continuation_ref=continuation_ref, assignment_ref=record_ref(assignment_id),
+        kind=kind, evidence=internal_evidence, status=status,
+    )
+    return {"task_ref": task_ref, "state": "published", "replayed": bool(published.get("replayed"))}
 
 
-def publish_result(*, continuation_ref: str, assignment_ref: str, evidence: object, status: str = "completed") -> dict[str, Any]:
-    return _publish(continuation_ref=continuation_ref, assignment_ref=assignment_ref, kind="result", evidence=evidence, status=status)
+def _publication_evidence(*, schema_kind: str, summary: str,
+                          verification_facts: list[Mapping[str, Any]],
+                          outcome_coverage: list[Mapping[str, Any]], risks: list[str],
+                          unresolved: list[str], **specific: Any) -> dict[str, Any]:
+    schema = "synthesis" if schema_kind == "documentation" else schema_kind
+    return {
+        "schema": f"cortex/report/{schema}/v3",
+        "summary": summary,
+        "verification": [str(item.get("summary")) for item in verification_facts if isinstance(item, Mapping)],
+        "risks": list(risks), "deviations": [], "unresolved": list(unresolved),
+        "verification_facts": [dict(item) for item in verification_facts],
+        "contract_coverage": [dict(item) for item in outcome_coverage],
+        **specific,
+    }
 
 
-def publish_documentation(*, continuation_ref: str, assignment_ref: str, evidence: object, status: str = "completed") -> dict[str, Any]:
-    return _publish(continuation_ref=continuation_ref, assignment_ref=assignment_ref, kind="documentation", evidence=evidence, status=status)
+def publish_plan(*, task_ref: str, summary: str, scope: str,
+                 stages: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
+                 outcome_coverage: list[Mapping[str, Any]], risks: list[str], unresolved: list[str],
+                 status: str = "completed", _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    evidence = _publication_evidence(schema_kind="plan", summary=summary, verification_facts=verification_facts,
+                                     outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
+                                     scope=scope, stages=[dict(item) for item in stages])
+    return _publish_from_task(task_ref=task_ref, kind="plan", evidence=evidence, status=status, _connection_context=_connection_context)
 
 
-def _record_decision_legacy(*, task_ref: str, binding_ref: str, response_original: str,
-                            user_language: str, subject_digest: str | None = None,
-                            approval_handle: str | None = None,
-                            approval_view_content_digest: str | None = None,
-                            approval_view_source_sequence: int | None = None,
-                            supersedes_decision_ref: str | None = None,
-                            steering_delta: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Record a decision only against a server-issued pending binding."""
-    if not isinstance(binding_ref, str) or not binding_ref:
-        raise V12ServiceError("decision binding is invalid", code="invalid_argument", details={"field": "binding_ref"})
+def publish_result(*, task_ref: str, summary: str, outcome: str,
+                   changes: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
+                   outcome_coverage: list[Mapping[str, Any]], documentation_impact: str,
+                   risks: list[str], unresolved: list[str], status: str = "completed",
+                   _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    evidence = _publication_evidence(schema_kind="result", summary=summary, verification_facts=verification_facts,
+                                     outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
+                                     outcome=outcome, changes=[dict(item) for item in changes],
+                                     documentation_impact=documentation_impact)
+    return _publish_from_task(task_ref=task_ref, kind="result", evidence=evidence, status=status, _connection_context=_connection_context)
+
+
+def publish_documentation(*, task_ref: str, summary: str,
+                          findings: list[Mapping[str, Any]], recommendations: list[str],
+                          verification_facts: list[Mapping[str, Any]], outcome_coverage: list[Mapping[str, Any]],
+                          documentation_impact: str, risks: list[str], unresolved: list[str],
+                          status: str = "completed", _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    evidence = _publication_evidence(schema_kind="documentation", summary=summary, verification_facts=verification_facts,
+                                     outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
+                                     findings=[dict(item) for item in findings], recommendations=list(recommendations),
+                                     documentation_impact=documentation_impact)
+    return _publish_from_task(task_ref=task_ref, kind="documentation", evidence=evidence, status=status, _connection_context=_connection_context)
+
+
+def _pending_binding(store: V12Store, task_id: str, *, decision_type: str) -> str:
+    rows = store._read(lambda connection: connection.execute(
+        "SELECT clarification_binding FROM clarification_bindings "
+        "WHERE task_id=? AND decision_type=? AND consumed_decision_id IS NULL ORDER BY issue_sequence",
+        (task_id, decision_type),
+    ).fetchall())
+    if len(rows) != 1:
+        raise V12ServiceError("exactly one matching user decision must be pending", code="clarification_binding_stale")
+    return str(rows[0]["clarification_binding"])
+
+
+def _decision_receipt(task_ref: str, state: str, issued: Mapping[str, Any]) -> dict[str, Any]:
+    return {"task_ref": task_ref, "state": state, "replayed": bool(issued.get("replayed"))}
+
+
+def open_clarification(*, task_ref: str, prompt: str, prompt_language: str) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
-        return DecisionAggregate(store).record(
-            task_id=canonical, binding_ref=binding_ref,
-            response_original=response_original, user_language=user_language,
-            subject_digest=subject_digest, approval_handle=approval_handle,
-            approval_view_content_digest=approval_view_content_digest,
-            approval_view_source_sequence=approval_view_source_sequence,
-            supersedes_decision_id=supersedes_decision_ref,
-            steering_delta=steering_delta,
-        )
-    except V12StoreError as exc:
-        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
-
-
-def _family_result(
-    *, task_ref: str, issued: Mapping[str, Any], response_original: str | None = None,
-) -> dict[str, Any]:
-    """Project a family command to its exact public scalar binding contract."""
-    binding = issued.get("binding")
-    if not isinstance(binding, Mapping) or not isinstance(binding.get("clarification_binding"), str):
-        raise V12ServiceError("decision binding is unavailable", code="ledger_error")
-    result: dict[str, Any] = {
-        "task_ref": task_ref,
-        "binding_ref": binding["clarification_binding"],
-        "replayed": bool(issued.get("replayed")),
-        "next_action": {"clarification": "record_clarification", "plan_review": "record_plan_review", "steer": "record_steering"}.get(str(binding.get("decision_type")), "record_clarification"),
-    }
-    hold = issued.get("clarification_hold")
-    if isinstance(hold, Mapping):
-        # The aggregate returns only compact lifecycle evidence here.  The
-        # assignment-origin host continuation is added below by the
-        # clarification facade after the renderer has built its trusted text.
-        result["clarification_hold"] = dict(hold)
-    # The scalar in ``binding_ref`` is the only next-call capability.  Retain
-    # the bound family context separately for audit/display without requiring
-    # clients to traverse it or reconstruct a durable identifier.
-    result["decision_context"] = {
-        key: binding[key]
-        for key in (
-            "task_ref", "subject_type", "subject_ref", "decision_type",
-            "prompt", "prompt_language", "effective_contract_revision", "consumed",
-            "decision_ref",
-            "plan_review_relation",
-        )
-        if key in binding
-    }
-    decision = issued.get("decision")
-    if isinstance(decision, Mapping):
-        identifier = decision.get("decision_id")
-        if isinstance(identifier, str):
-            decision_ref = record_ref(identifier)
-            if decision_ref is not None:
-                result["decision_ref"] = decision_ref
-        subject_type = decision.get("subject_type")
-        subject_id = decision.get("subject_id")
-        subject_ref: str | None = None
-        if subject_type == "task" and isinstance(decision.get("task_id"), str):
-            subject_ref = task_ref
-        elif isinstance(subject_id, str):
-            subject_ref = record_ref(subject_id)
-        # Family responses intentionally project only compact capabilities and
-        # bounded decision evidence.  Canonical IDs remain private ledger
-        # implementation details; no caller needs them to compose another
-        # public operation.
-        context = {
-            key: decision[key]
-            for key in (
-                "subject_type", "subject_digest", "decision_type", "user_language",
-                "attribution", "created_at", "created_sequence",
-            )
-            if key in decision
-        }
-        if isinstance(result.get("decision_ref"), str):
-            context["decision_ref"] = result["decision_ref"]
-        if subject_ref is not None:
-            context["subject_ref"] = subject_ref
-        supersedes = decision.get("supersedes_decision_id")
-        if isinstance(supersedes, str):
-            compact_supersedes = record_ref(supersedes)
-            if compact_supersedes is not None:
-                context["relations"] = {"supersedes_decision_ref": compact_supersedes}
-        if response_original is not None:
-            context["response_original"] = response_original
-        result["decision"] = context
-    return result
-
-
-def open_clarification(*, task_ref: str, prompt: str, prompt_language: str,
-                       assignment_ref: str | None = None) -> dict[str, Any]:
-    store, canonical = _task_store(task_ref)
-    try:
-        assignment_id = None if assignment_ref is None else store.resolve_task_reference(
-            task_id=canonical, value=assignment_ref, kinds=("assignment",)
-        )[1]
         issued = DecisionAggregate(store).open_clarification(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
-            subject_type="task", subject_id=canonical, assignment_id=assignment_id,
+            subject_type="task", subject_id=canonical, assignment_id=None,
         )
-        return _family_result(task_ref=task_ref, issued=issued)
+        return _decision_receipt(task_ref, "pending_clarification", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
-def _clarification_host_delivery(
-    *, store: V12Store, task_id: str, binding_ref: str,
-) -> dict[str, Any] | None:
-    """Render one exact-worker continuation without invoking a host action."""
-    delivery = store.clarification_host_delivery_projection(
-        task_id=task_id, binding_ref=binding_ref,
-    )
-    if delivery is None:
-        return None
-    assignment_ref = record_ref(str(delivery["assignment_id"]))
-    decision_ref = record_ref(str(delivery["decision_id"]))
-    if assignment_ref is None or decision_ref is None:
-        raise V12ServiceError("clarification delivery relation is invalid", code="ledger_error")
-    result: dict[str, Any] = {
-        "state": delivery["state"],
-        "assignment_ref": assignment_ref,
-        "native_task_name": delivery["native_task_name"],
-        "native_dispatch_digest": delivery["native_dispatch_digest"],
-        "dispatch_correlation_marker": delivery["dispatch_correlation_marker"],
-        "dispatch_correlation_fingerprint": delivery["dispatch_correlation_fingerprint"],
-        "decision_ref": decision_ref,
-    }
-    if delivery["state"] == "pending_delivery":
-        context = store.clarification_host_delivery_context(
-            task_id=task_id, binding_ref=binding_ref,
-        )
-        if not isinstance(context, Mapping):
-            raise V12ServiceError("clarification delivery renderer context is unavailable", code="ledger_error")
-        try:
-            from cortex_runtime.worker_message import render_clarification_continuation
-            rendered = render_clarification_continuation(
-                task=context["task"], delegation=context["delegation"], decision=context["decision"],
-            )
-        except (ImportError, AttributeError, KeyError, TypeError, ValueError) as exc:
-            # Do not substitute an ad hoc message: an assignment answer is not
-            # safe to deliver unless it carries the renderer's trusted boundary.
-            raise V12ServiceError("clarification continuation renderer is unavailable", code="ledger_error") from exc
-        if not isinstance(rendered, Mapping) or not isinstance(rendered.get("message"), str) or not isinstance(rendered.get("renderer"), Mapping):
-            raise V12ServiceError("clarification continuation renderer is invalid", code="ledger_error")
-        renderer = rendered["renderer"]
-        if not isinstance(renderer.get("version"), str) or not isinstance(renderer.get("common_policy_digest"), str):
-            raise V12ServiceError("clarification continuation renderer is invalid", code="ledger_error")
-        result.update({
-            "continuation_capability": delivery["continuation_capability"],
-            "message": rendered["message"],
-            "renderer": {
-                "version": renderer["version"],
-                "common_policy_digest": renderer["common_policy_digest"],
-            },
-        })
-    elif delivery["state"] == "unavailable":
-        result["unavailable_reason"] = delivery["unavailable_reason"]
-    return result
-
-
-def record_clarification(*, task_ref: str, binding_ref: str, response_original: str,
-                         user_language: str,
-                         add: list[Mapping[str, Any]] | None = None,
-                         retire_item_refs: list[str] | None = None) -> dict[str, Any]:
+def record_clarification(*, task_ref: str, response_original: str,
+                         user_language: str) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
-        delta = None if add is None and retire_item_refs is None else {"add": add or [], "retire_item_refs": retire_item_refs or []}
+        binding_ref = _pending_binding(store, canonical, decision_type="clarification")
         issued = DecisionAggregate(store).record_clarification(
             task_id=canonical, binding_ref=binding_ref,
             response_original=response_original, user_language=user_language,
-            steering_delta=delta,
+            steering_delta=None,
         )
-        result = _family_result(task_ref=task_ref, response_original=response_original, issued={
-            **issued, "binding": {"clarification_binding": binding_ref, "decision_type": "clarification"},
-        })
-        delivery = _clarification_host_delivery(
-            store=store, task_id=canonical, binding_ref=binding_ref,
-        )
-        if delivery is not None:
-            result["host_delivery"] = delivery
-        return result
+        return _decision_receipt(task_ref, "clarification_recorded", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
-def open_plan_review(*, task_ref: str, plan_ref: str, prompt: str,
+def open_plan_review(*, task_ref: str, prompt: str,
                      prompt_language: str) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
-        _, plan_id = store.resolve_task_reference(task_id=canonical, value=plan_ref, kinds=("plan",))
+        plans = store._read(lambda connection: connection.execute(
+            "SELECT report_id FROM reports WHERE task_id=? AND report_type='plan' AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+            (canonical,),
+        ).fetchall())
+        if len(plans) != 1:
+            raise V12ServiceError("an active finalized plan is required", code="approval_view_required")
+        plan_id = str(plans[0]["report_id"])
         chunks = store._read(lambda connection: store._report_chunks(connection, plan_id))
         body = chunks[0].get("content") if len(chunks) == 1 and isinstance(chunks[0], Mapping) else None
         unresolved = body.get("unresolved") if isinstance(body, Mapping) else None
@@ -705,159 +737,108 @@ def open_plan_review(*, task_ref: str, plan_ref: str, prompt: str,
             raise V12ServiceError(
                 "plan contains unresolved decisions and is not ready for generic approval",
                 code="plan_clarification_required",
-                details={"field": "plan_ref"},
+                details={"field": "task_ref"},
             )
         issued = DecisionAggregate(store).open_plan_review(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
             subject_type="plan", subject_id=plan_id,
         )
-        result = _family_result(task_ref=task_ref, issued=issued)
-        report = store._read(lambda connection: connection.execute(
-            "SELECT report_id, delegation_id, task_id, content_digest, semantic_status FROM reports WHERE report_id=? AND project_hash=?",
-            (plan_id, store.project_hash),
-        ).fetchone())
-        if report is not None:
-            result["approval_view"] = legacy._ready_approval_view(store, dict(report))
-        return result
+        return _decision_receipt(task_ref, "pending_plan_review", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
-def record_plan_review(*, task_ref: str, binding_ref: str, outcome: str,
+def record_plan_review(*, task_ref: str, outcome: str,
                        response_original: str, user_language: str) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
+        binding_ref = _pending_binding(store, canonical, decision_type="plan_review")
         issued = DecisionAggregate(store).record_plan_review(
             task_id=canonical, binding_ref=binding_ref, outcome=outcome,
             response_original=response_original, user_language=user_language,
         )
-        return _family_result(task_ref=task_ref, response_original=response_original, issued={
-            **issued, "binding": {"clarification_binding": binding_ref, "decision_type": "plan_review"},
-        })
+        return _decision_receipt(task_ref, "plan_review_recorded", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
-def open_steering(*, task_ref: str, prompt: str, prompt_language: str,
-                  assignment_ref: str | None = None) -> dict[str, Any]:
+def open_steering(*, task_ref: str, prompt: str, prompt_language: str) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
-        assignment_id = None if assignment_ref is None else store.resolve_task_reference(
-            task_id=canonical, value=assignment_ref, kinds=("assignment",)
-        )[1]
         issued = DecisionAggregate(store).open_steering(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
-            subject_type="task", subject_id=canonical, assignment_id=assignment_id,
+            subject_type="task", subject_id=canonical, assignment_id=None,
         )
-        return _family_result(task_ref=task_ref, issued=issued)
+        return _decision_receipt(task_ref, "pending_steering", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
-def record_steering(*, task_ref: str, binding_ref: str, response_original: str,
-                    user_language: str, steering_delta: Mapping[str, Any] | None = None,
-                    supersedes_decision_ref: str | None = None,
-                    add: list[Mapping[str, Any]] | None = None,
-                    retire_item_refs: list[str] | None = None) -> dict[str, Any]:
+def record_steering(*, task_ref: str, response_original: str,
+                    user_language: str, add: list[Mapping[str, Any]] | None = None,
+                    retire: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
-        if add is not None or retire_item_refs is not None:
-            steering_delta = {"add": add or [], "retire_item_refs": retire_item_refs or []}
-        if steering_delta is None:
-            raise V12ServiceError("steering delta is required", code="invalid_argument", details={"field": "response"})
-        supersedes = None if supersedes_decision_ref is None else store.resolve_task_reference(
-            task_id=canonical, value=supersedes_decision_ref, kinds=("decision",)
-        )[1]
+        binding_ref = _pending_binding(store, canonical, decision_type="steer")
+        current = ledger.inspect_task(task_ref=task_ref).get("effective_contract", {}).get("items", [])
+        retire_refs = _match_outcomes([item for item in current if isinstance(item, Mapping)], retire or []) if retire else []
+        additions: list[dict[str, Any]] = []
+        paired_replacements = bool(add and retire_refs and len(add) == len(retire_refs))
+        for index, item in enumerate(add or []):
+            target = retire_refs[index] if paired_replacements else None
+            fields = [
+                ("requirement", item.get("outcome")),
+                *(("acceptance", value) for value in item.get("acceptance", [])),
+                *(("constraint", value) for value in item.get("constraints", [])),
+                *(("verification", value) for value in item.get("verification", [])),
+            ]
+            additions.extend({"category": category, "text": text, **({"outcome_ref": target} if target else {})}
+                             for category, text in fields if isinstance(text, str) and text.strip())
+        steering_delta = {
+            "add": additions,
+            # An addition against an outcome atomically supersedes that row;
+            # an unpaired retirement removes it without replacement.
+            "retire_item_refs": [] if paired_replacements else retire_refs,
+        }
         issued = DecisionAggregate(store).record_steering(
             task_id=canonical, binding_ref=binding_ref,
             response_original=response_original, user_language=user_language,
             steering_delta=steering_delta,
-            supersedes_decision_id=supersedes,
+            supersedes_decision_id=None,
         )
-        return _family_result(task_ref=task_ref, response_original=response_original, issued={
-            **issued, "binding": {"clarification_binding": binding_ref, "decision_type": "steer"},
-        })
+        return _decision_receipt(task_ref, "steering_recorded", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
-
-
-def record_decision(*, task_ref: str, binding_ref: str, response: Mapping[str, Any]) -> dict[str, Any]:
-    """Record a decision through one binding-driven public operation."""
-    if not isinstance(response, Mapping):
-        raise V12ServiceError("decision response is invalid", code="invalid_argument", details={"field": "response"})
-    text = response.get("response_original")
-    language = response.get("user_language")
-    if not isinstance(text, str) or not isinstance(language, str):
-        raise V12ServiceError("decision response is incomplete", code="invalid_argument", details={"field": "response"})
-    store, canonical = _task_store(task_ref)
-    row = store._read(lambda connection: connection.execute(
-        "SELECT decision_type FROM clarification_bindings WHERE clarification_binding=? AND project_hash=?",
-        (binding_ref, store.project_hash),
-    ).fetchone())
-    if row is None:
-        raise V12ServiceError("decision binding was not found", code="clarification_binding_not_found")
-    family = str(row["decision_type"])
-    # The public operation is deliberately one flattened request.  Family is
-    # server-owned by the binding, so reject fields that belong to another
-    # family only after resolving that binding.  This keeps the advertised
-    # schema concrete without allowing a caller to smuggle cross-family state.
-    has_steering = "add" in response or "retire_item_refs" in response
-    has_outcome = "outcome" in response
-    has_supersession = "supersedes_decision_ref" in response
-    if family == "clarification":
-        if has_outcome or has_supersession:
-            raise V12ServiceError("clarification response contains unsupported family fields", code="clarification_binding_mismatch", details={"field": "response"})
-        delta = None
-        if has_steering:
-            delta = {"add": response.get("add", []), "retire_item_refs": response.get("retire_item_refs", [])}
-        return record_clarification(task_ref=task_ref, binding_ref=binding_ref, response_original=text, user_language=language, steering_delta=delta)
-    if family == "plan_review":
-        if has_steering or has_supersession:
-            raise V12ServiceError("plan review response contains unsupported family fields", code="clarification_binding_mismatch", details={"field": "response"})
-        outcome = response.get("outcome")
-        if not isinstance(outcome, str):
-            raise V12ServiceError("plan review outcome is required", code="invalid_argument", details={"field": "response.outcome"})
-        return record_plan_review(task_ref=task_ref, binding_ref=binding_ref, outcome=outcome, response_original=text, user_language=language)
-    if family == "steer":
-        if has_outcome:
-            raise V12ServiceError("steering response contains unsupported family fields", code="clarification_binding_mismatch", details={"field": "response.outcome"})
-        # These are the flattened public names.  The store/aggregate keeps
-        # the domain value grouped as one delta so its validation and
-        # supersession logic remain atomic.
-        delta = {"add": response.get("add", []), "retire_item_refs": response.get("retire_item_refs", [])}
-        if not any(delta.values()):
-            raise V12ServiceError("steering delta is required", code="invalid_argument", details={"field": "response"})
-        supersedes = response.get("supersedes_decision_ref")
-        return record_steering(task_ref=task_ref, binding_ref=binding_ref, response_original=text, user_language=language, steering_delta=delta, supersedes_decision_ref=supersedes if isinstance(supersedes, str) else None)
-    raise V12ServiceError("decision binding family is invalid", code="clarification_binding_mismatch")
 
 
 def assess_governance(*, task_ref: str, mode: str, rationale: str = "",
                       risk_factors: list[str] | None = None) -> dict[str, Any]:
     payload = {"task_ref": task_ref, "mode": mode, "rationale": rationale, "risk_factors": risk_factors}
-    return legacy.set_governance_mode(**payload, source="model")
+    result = ledger.set_governance_mode(**payload, source="model")
+    return {"task_ref": task_ref, "state": "governance_assessed", "replayed": bool(result.get("replayed"))}
 
 
 def close_task(*, task_ref: str, verdict: str, evidence: object | None = None,
                unresolved_risks: object | None = None, follow_ups: object | None = None,
                completion_notes: object | None = None) -> dict[str, Any]:
     if evidence is None:
-        inspected = legacy.inspect_task(task_ref=task_ref)
+        inspected = ledger.inspect_task(task_ref=task_ref)
         evidence = {
             "source": "server_derived_task_state",
             "effective_contract": inspected.get("effective_contract"),
             "aggregate_coverage": inspected.get("aggregate_coverage"),
             "conformance_review": inspected.get("conformance_review"),
         }
-    return legacy.submit_governance_closure(
+    result = ledger.submit_governance_closure(
         task_ref=task_ref, subject_type="task", subject_ref=task_ref, verdict=verdict,
         evidence=evidence, unresolved_risks=unresolved_risks, follow_ups=follow_ups,
         completion_notes=completion_notes,
     )
+    return {"task_ref": task_ref, "state": "closed", "replayed": bool(result.get("replayed"))}
 
 
 __all__ = [
-    "open_task", "read_task", "open_assignment", "consume_assignment_evidence",
+    "open_task", "read_task", "open_assignment",
     "publish_plan", "publish_result", "publish_documentation",
     "open_clarification", "record_clarification", "open_plan_review", "record_plan_review", "open_steering", "record_steering",
     "assess_governance", "close_task",

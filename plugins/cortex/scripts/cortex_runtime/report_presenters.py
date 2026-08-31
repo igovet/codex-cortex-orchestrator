@@ -537,7 +537,7 @@ class ResultPresenter:
             ("Deviations", ("deviations", "deviation", "plan_delta"), "bullets"),
             ("Known limitations", ("limitations", "known_limitations"), "bullets"),
             ("Residual risk", ("residual_risk", "risks"), "bullets"),
-            ("Next actions", ("next_actions", "next", "follow_ups"), "bullets"),
+            ("Follow-ups", ("follow_ups",), "bullets"),
         )
         known = {"schema", "presentation_kind", "kind", "title", "summary", "overview"}
         for title, names, style in fields:
@@ -580,7 +580,7 @@ class SynthesisPresenter:
         _append(sections, "Scope", _blocks(_lookup(data, "scope", "question", "objective", default=_MISSING)))
         _append(sections, "Observed baseline", _blocks(_lookup(data, "observed_baseline", "findings", "evidence", default=_MISSING)))
         _append(sections, "Dependencies", _blocks(_lookup(data, "dependencies", "related_surfaces", default=_MISSING)))
-        _append(sections, "Recommendations", _blocks(_lookup(data, "recommendations", "next", "next_actions", default=_MISSING)))
+        _append(sections, "Recommendations", _blocks(_lookup(data, "recommendations", default=_MISSING)))
         _append(sections, "Coverage", _blocks(_lookup(data, "coverage", default=_MISSING)))
         _append_contract_evidence(sections, data, set())
         return _document(_title_value(data, None, "Discovery synthesis"), report, summary=summary, sections=sections)
@@ -623,7 +623,7 @@ class SynthesisPresenter:
         _append(sections, "Outcome", _blocks(_lookup(data, "outcome", "result", "summary", default=_MISSING)))
         _append(sections, "Evidence", _blocks(_lookup(data, "evidence", "verified", default=_MISSING)))
         _append(sections, "Residual risk", _blocks(_lookup(data, "residual_risk", "risks", default=_MISSING)))
-        _append(sections, "Follow-ups", _blocks(_lookup(data, "follow_ups", "next_actions", default=_MISSING)))
+        _append(sections, "Follow-ups", _blocks(_lookup(data, "follow_ups", default=_MISSING)))
         return _document(_title_value(data, None, "Closure evidence"), report, summary=summary, sections=sections)
 
 

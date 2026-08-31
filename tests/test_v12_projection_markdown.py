@@ -279,7 +279,7 @@ class ProjectionMarkdownTests(unittest.TestCase):
             ),
             "result": (
                 "result",
-                {"outcome": "Typed views are available.", "changes": ["Added presenters"], "verified_behavior": ["Chunk labels remain invisible"], "checks": ["Unit tests"], "deviations": ["No live smoke"], "limitations": ["Old custom Markdown is rendered safely"], "residual_risk": ["Some legacy semantics are generic"], "next_actions": ["Run docs verification"]},
+                {"outcome": "Typed views are available.", "changes": ["Added presenters"], "verified_behavior": ["Chunk labels remain invisible"], "checks": ["Unit tests"], "deviations": ["No live smoke"], "limitations": ["Old custom Markdown is rendered safely"], "residual_risk": ["Some historical semantics are generic"]},
             ),
             "synthesis": (
                 "synthesis",

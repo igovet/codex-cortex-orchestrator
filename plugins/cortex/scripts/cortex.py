@@ -28,7 +28,6 @@ from cortex_runtime.semantic_registry import OPERATION_NAMES, bind_handlers
 from cortex_runtime.domain_api import (
     assess_governance,
     close_task,
-    consume_assignment_evidence,
     open_assignment,
     open_task,
     publish_documentation,
@@ -42,7 +41,7 @@ from cortex_runtime.domain_api import (
 )
 
 
-SERVER_VERSION = "1.12.2"
+SERVER_VERSION = "1.12.3"
 SERVER_INSTRUCTIONS = (
     "Cortex v12 is a durable coordination ledger. All participants receive the "
     f"same {len(OPERATION_NAMES)} semantic tools for task, assignment, evidence, publication, decision, "
@@ -62,7 +61,6 @@ _HANDLERS: Mapping[str, Callable[..., Mapping[str, Any]]] = {
     "record_plan_review": record_plan_review,
     "record_steering": record_steering,
     "open_assignment": open_assignment,
-    "consume_assignment_evidence": consume_assignment_evidence,
     "publish_plan": publish_plan,
     "publish_result": publish_result,
     "publish_documentation": publish_documentation,
