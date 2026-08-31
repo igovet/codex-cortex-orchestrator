@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,9 +120,9 @@ exit 0
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
         after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
-        assert re.fullmatch(r"1\.12\.3\+codex\.sha256\.[0-9a-f]{16}", after_version)
+        assert re.fullmatch(r"1\.13\.0\+codex\.sha256\.[0-9a-f]{16}", after_version)
         assert before_version == after_version
-        staged_versions = list((codex_home / ".cortex-candidates").glob("1.12.3+codex.sha256.*"))
+        staged_versions = list((codex_home / ".cortex-candidates").glob("1.13.0+codex.sha256.*"))
         assert len(staged_versions) == 1
         assert (codex_home / "plugins/cache/cortex/cortex" / staged_versions[0].name).is_dir()
         assert not bytecode.exists()
@@ -278,6 +279,15 @@ def test_cortex_dev_launches_only_the_stamped_receipted_candidate_and_reuses_it(
     """The launcher must consume sync's receipt, never rebuild a base cache path."""
     stable_home = tmp_path / "stable-home"
     stable_home.mkdir()
+    (stable_home / ".codex").mkdir()
+    (stable_home / ".codex/config.toml").write_text(
+        '[mcp_servers.codebase_memory]\n'
+        'enabled = true\n'
+        'command = "/usr/local/bin/codebase-memory-mcp"\n'
+        'default_tools_approval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+    stable_config_before = (stable_home / ".codex/config.toml").read_bytes()
     fake_codex = tmp_path / "codex"
     fake_codex.write_text(
         """#!/usr/bin/env bash
@@ -322,15 +332,21 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     isolated_codex = stable_home / ".cortex-dev/.codex"
     receipt = json.loads((isolated_codex / ".cortex-candidate-receipt.json").read_text(encoding="utf-8"))
     stamped = receipt["candidate_version"]
-    assert re.fullmatch(r"1\.12\.3\+codex\.sha256\.[0-9a-f]{16}", stamped)
+    assert re.fullmatch(r"1\.13\.0\+codex\.sha256\.[0-9a-f]{16}", stamped)
     assert receipt["candidate_path"] == str(isolated_codex / "plugins/cache/cortex/cortex" / stamped)
     assert f"Cortex candidate version={stamped}" in first.stdout
     assert f"Cortex candidate path={receipt['candidate_path']}" in first.stdout
     assert "Cortex candidate receipt=" in first.stdout
     assert f"fake ordinary codex candidate={receipt['candidate_path']}" in first.stdout
+    isolated_config = (isolated_codex / "config.toml").read_text(encoding="utf-8")
+    assert "[mcp_servers.codebase_memory]" in isolated_config
+    assert "/usr/local/bin/codebase-memory-mcp" in isolated_config
+    isolated_payload = tomllib.loads(isolated_config)
+    assert isolated_payload["mcp_servers"]["codebase_memory"]["env"] == {"HOME": str(stable_home.resolve())}
+    assert (stable_home / ".codex/config.toml").read_bytes() == stable_config_before
     # The base semantic version is permitted as display metadata only.  Its
     # unstamped cache directory must never be selected or printed as a path.
-    assert f"/plugins/cache/cortex/cortex/1.12.3\n" not in first.stdout
+    assert f"/plugins/cache/cortex/cortex/1.13.0\n" not in first.stdout
     first_receipt = (isolated_codex / ".cortex-candidate-receipt.json").read_bytes()
     second = subprocess.run(
         ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
@@ -339,6 +355,79 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     assert second.returncode == 0, second.stdout + second.stderr
     assert (isolated_codex / ".cortex-candidate-receipt.json").read_bytes() == first_receipt
     assert (isolated_codex / "fake-add-count").read_text(encoding="utf-8").strip() == "1"
+
+
+def test_cortex_dev_fails_closed_when_codebase_memory_is_not_configured(tmp_path: Path) -> None:
+    stable_home = tmp_path / "stable-home"
+    stable_home.mkdir()
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(stable_home),
+        "PATH": environment["PATH"],
+        "CORTEX_PYTHON": sys.executable,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    environment.pop("CODEX_HOME", None)
+    completed = subprocess.run(
+        ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "Codebase Memory MCP is not configured" in completed.stderr
+
+
+def test_cortex_dev_does_not_copy_inline_codebase_memory_environment_values(tmp_path: Path) -> None:
+    stable_home = tmp_path / "stable-home"
+    (stable_home / ".codex").mkdir(parents=True)
+    (stable_home / ".codex/config.toml").write_text(
+        '[mcp_servers.codebase_memory]\n'
+        'enabled = true\n'
+        'command = "/usr/local/bin/codebase-memory-mcp"\n'
+        '[mcp_servers.codebase_memory.env]\n'
+        'TOKEN = "secret-that-must-not-be-copied"\n',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(stable_home),
+        "PATH": environment["PATH"],
+        "CORTEX_PYTHON": sys.executable,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    environment.pop("CODEX_HOME", None)
+    completed = subprocess.run(
+        ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert completed.returncode != 0
+    combined = completed.stdout + completed.stderr
+    assert "credential-bearing configuration" in combined
+    assert "secret-that-must-not-be-copied" not in combined
+
+
+def test_cortex_dev_fails_closed_when_codebase_memory_is_disabled(tmp_path: Path) -> None:
+    stable_home = tmp_path / "stable-home"
+    (stable_home / ".codex").mkdir(parents=True)
+    (stable_home / ".codex/config.toml").write_text(
+        '[mcp_servers.codebase_memory]\n'
+        'enabled = false\n'
+        'command = "/usr/local/bin/codebase-memory-mcp"\n',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(stable_home),
+        "PATH": environment["PATH"],
+        "CORTEX_PYTHON": sys.executable,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    environment.pop("CODEX_HOME", None)
+    completed = subprocess.run(
+        ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "Codebase Memory MCP is disabled" in completed.stderr
 
 
 def test_isolated_sync_fails_when_installed_candidate_cannot_commit_its_receipt(tmp_path: Path) -> None:
@@ -378,5 +467,5 @@ exit 0
     )
     assert completed.returncode != 0
     assert "receipt was not committed" in completed.stdout + completed.stderr
-    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.12.3+codex.sha256.*"))
+    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.13.0+codex.sha256.*"))
     assert not (codex_home / ".cortex-candidate-receipt.json").exists()

@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.12.3 ships two bounded native hook components: an activation guard and
+Cortex 1.13.0 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without

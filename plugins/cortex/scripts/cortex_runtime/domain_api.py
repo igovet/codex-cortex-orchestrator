@@ -176,6 +176,58 @@ def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_re
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
+def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> None:
+    """Enforce the public admission invariant without choosing a schedule.
+
+    Governance is deliberately advisory in the ledger, but an assignment is
+    still not admissible until the coordinator has recorded its assessment.
+    For light/full governance, owner (production) work additionally requires
+    the latest finalized required-review plan and the latest decision for that
+    exact plan to be an explicit approval.  Planning/review work remains the
+    proportional path used to produce that evidence.
+    """
+    def read(connection):
+        assessment = connection.execute(
+            "SELECT mode FROM governance_assessments WHERE project_hash=? AND task_id=? "
+            "ORDER BY CASE WHEN source='user_override' THEN 0 ELSE 1 END, "
+            "created_sequence DESC LIMIT 1",
+            (store.project_hash, task_id),
+        ).fetchone()
+        if assessment is None:
+            raise V12ServiceError(
+                "governance assessment is required before opening an assignment",
+                code="governance_assessment_required",
+            )
+        mode = str(assessment["mode"])
+        if assignment_policy != "owner" or mode not in {"light", "full"}:
+            return
+        plan = connection.execute(
+            "SELECT report_id,content_digest,review_policy FROM reports "
+            "WHERE project_hash=? AND task_id=? AND report_type='plan' "
+            "AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+            (store.project_hash, task_id),
+        ).fetchone()
+        if plan is None or str(plan["review_policy"] or "") != "required":
+            raise V12ServiceError(
+                "a current finalized required-review plan is required before delivery",
+                code="plan_approval_required",
+            )
+        decision = connection.execute(
+            "SELECT decision_type,subject_id,subject_digest FROM user_decisions "
+            "WHERE project_hash=? AND task_id=? AND subject_type='plan' "
+            "ORDER BY created_sequence DESC LIMIT 1",
+            (store.project_hash, task_id),
+        ).fetchone()
+        if (decision is None or str(decision["decision_type"]) != "approve"
+                or str(decision["subject_id"]) != str(plan["report_id"])
+                or str(decision["subject_digest"]) != str(plan["content_digest"])):
+            raise V12ServiceError(
+                "the current required-review plan has not been explicitly approved",
+                code="plan_approval_required",
+            )
+    store._read(read)
+
+
 def _worker_capability_provenance() -> dict[str, str]:
     """Return the running package identity used to bind worker bootstrap.
 
@@ -188,7 +240,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.12.3",
+        "1.13.0",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -329,6 +381,8 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
     }.get(responsibility)
     if assignment_policy is None:
         raise V12ServiceError("assignment responsibility is invalid", code="invalid_argument", details={"field": "mission.responsibility"})
+    store, canonical = _task_store(task_ref)
+    _admit_assignment(store, canonical, assignment_policy)
     current = ledger.inspect_task(task_ref=task_ref).get("effective_contract")
     current_items = current.get("items") if isinstance(current, Mapping) else None
     if not isinstance(current_items, list):
@@ -344,7 +398,6 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
         selection = validate_model_selection(model, reasoning_effort)
     except ValueError as exc:
         raise V12ServiceError("model selection is invalid", code="invalid_model_selection") from exc
-    store, canonical = _task_store(task_ref)
     input_report_ids = _select_report_inputs(store, canonical, report_policy, item_refs)
     input_report_refs = [record_ref(item) for item in input_report_ids]
     if any(item is None for item in input_report_refs):
@@ -459,6 +512,9 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
                 value = delegation_view.get(key)
                 if isinstance(value, str):
                     assignment_context[key] = value
+        if store.project_root is None:
+            raise V12ServiceError("assignment project root is unavailable", code="ledger_error")
+        assignment_context["project_root"] = str(store.project_root)
         assigned_items = effective_contract.get("assigned_items")
         assigned_roles = {
             item.get("assignment_role")
@@ -567,6 +623,9 @@ def _public_plan_publication(published: Mapping[str, Any]) -> dict[str, Any]:
     if (not isinstance(view_digest, str) or not isinstance(handle, str)
             or not isinstance(sequence, int) or isinstance(sequence, bool)):
         raise V12ServiceError("plan publication relation is unavailable", code="ledger_error")
+    review_policy = report.get("review_policy")
+    if review_policy not in {"informational", "required"}:
+        raise V12ServiceError("plan publication relation is unavailable", code="ledger_error")
     compact_supersedes = record_ref(report.get("supersedes_report_id"))
     return {
         "report": {
@@ -574,6 +633,7 @@ def _public_plan_publication(published: Mapping[str, Any]) -> dict[str, Any]:
             "report_type": "plan",
             "status": str(report.get("status")),
             "semantic_status": str(report.get("semantic_status")),
+            "review_policy": review_policy,
             "content_digest": report_digest,
             **({"supersedes_report_ref": compact_supersedes} if compact_supersedes is not None else {}),
         },
@@ -591,7 +651,7 @@ def _public_plan_publication(published: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _publish(*, continuation_ref: str, assignment_ref: str, kind: str, evidence: object,
-             status: str = "completed") -> dict[str, Any]:
+             status: str = "completed", review_policy: str | None = None) -> dict[str, Any]:
     """Publish one complete immutable assignment outcome through the v14 store."""
     try:
         if not isinstance(continuation_ref, str) or not continuation_ref:
@@ -609,7 +669,8 @@ def _publish(*, continuation_ref: str, assignment_ref: str, kind: str, evidence:
         published = store.publish_domain_report(
             delegation_id=delegation_id, continuation_ref=continuation_ref,
             contract_revision=revision,
-            publication_kind="synthesis" if kind == "documentation" else kind, content=evidence, status=status,
+            publication_kind="synthesis" if kind == "documentation" else kind,
+            content=evidence, status=status, review_policy=review_policy,
         )
         # ``publish_domain_report`` commits a plan's immutable rendered view
         # and approval relation in the same ledger transaction as its terminal
@@ -622,6 +683,7 @@ def _publish(*, continuation_ref: str, assignment_ref: str, kind: str, evidence:
 
 
 def _publish_from_task(*, task_ref: str, kind: str, evidence: Mapping[str, Any], status: str,
+                       review_policy: str | None = None,
                        _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     context = _connection_context if isinstance(_connection_context, dict) else {}
     _store, _task_id, assignment_id, _coordinator_ref = _resolve_task_context(task_ref)
@@ -637,6 +699,7 @@ def _publish_from_task(*, task_ref: str, kind: str, evidence: Mapping[str, Any],
     published = _publish(
         continuation_ref=continuation_ref, assignment_ref=record_ref(assignment_id),
         kind=kind, evidence=internal_evidence, status=status,
+        review_policy=review_policy,
     )
     return {"task_ref": task_ref, "state": "published", "replayed": bool(published.get("replayed"))}
 
@@ -657,14 +720,17 @@ def _publication_evidence(*, schema_kind: str, summary: str,
     }
 
 
-def publish_plan(*, task_ref: str, summary: str, scope: str,
+def publish_plan(*, task_ref: str, summary: str, scope: str, review_policy: str,
                  stages: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
                  outcome_coverage: list[Mapping[str, Any]], risks: list[str], unresolved: list[str],
                  status: str = "completed", _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     evidence = _publication_evidence(schema_kind="plan", summary=summary, verification_facts=verification_facts,
                                      outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
                                      scope=scope, stages=[dict(item) for item in stages])
-    return _publish_from_task(task_ref=task_ref, kind="plan", evidence=evidence, status=status, _connection_context=_connection_context)
+    return _publish_from_task(
+        task_ref=task_ref, kind="plan", evidence=evidence, status=status,
+        review_policy=review_policy, _connection_context=_connection_context,
+    )
 
 
 def publish_result(*, task_ref: str, summary: str, outcome: str,

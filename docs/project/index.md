@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.12.3 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.13.0 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -29,8 +29,9 @@ The coordinator owns only a model-owned dynamic orchestration DAG. It persists
 the current projection and evidence-backed revisions through the existing
 task-linked initiative revision and delegation/report/decision graph, without
 adding a tool or creating a backend workflow engine. It does not write a project
-solution plan. Planning is an optional `planner` worker stage; its finalized
-immutable `plan` report is the predecessor for every plan-dependent worker.
+solution plan. Planning is optional for genuinely minimal work. Light/full
+delivery requires a `planner` worker stage whose finalized required-review
+`plan` report and exact approval are predecessors for every delivery worker.
 Evidence may add, remove, reorder, retry, or parent-link rework stages without
 rewriting completed reports. The model uses retained
 advisory C1/C2/C3 baselines—bounded low-risk / multi-step or cross-surface /
@@ -125,19 +126,19 @@ V12 ships no lifecycle hooks and requires no hook-trust flow.
 
 ## Public contract
 
-The same fifteen tools are visible to every participant: `open_task`,
+The same fourteen tools are visible to every participant: `open_task`,
 `read_task`, `open_clarification`, `record_clarification`,
 `open_plan_review`, `record_plan_review`, `open_steering`, `record_steering`,
-`open_assignment`, `consume_assignment_evidence`, `publish_plan`,
+`open_assignment`, `publish_plan`,
 `publish_result`, `publish_documentation`, `assess_governance`, and
 `close_task`.
 
-The active MCP registry owns exact shapes. `create_task` alone accepts the
+The active MCP registry owns exact shapes. `open_task` alone accepts the
 resolved `project_root` and returns preferred compact `task_ref`; its canonical
 `task_id` is durable evidence only. The seven task-anchored tools use `task_ref`
-to locate and validate the project ledger. `read_delegation` uses
-`delegation_ref`, `submit_report` uses `delegation_ref`/`report_ref`, and
-`read_reports` uses `report_refs`; no public call accepts a durable `*_id`.
+to locate and validate the project ledger. `open_assignment` returns the
+server-rendered worker bootstrap, and publication calls use the task anchor with
+server-bound worker context; no public call accepts a durable `*_id`.
 No host
 metadata, hook, thread identity, or plugin working directory supplies the root.
 The task persists the exact `user_request_original` and `user_language` beside
@@ -150,35 +151,31 @@ acceptance criteria before task creation; acceptance is not copied into a
 standalone verification obligation, and optional context cannot replace an
 outcome. Every delegation carries
 the exact six-part knowledge block once, in order, with non-empty values before
-native spawn. A successful `create_delegation` returns a host-neutral
+native spawn. A successful `open_assignment` returns a host-neutral
 `dispatch_brief` and renderer/profile proof. Codex maps the brief to the active
 host spawn operation; Cortex does not prescribe native argument names, model
-availability, or lifecycle. `read_delegation` is the verbose recovery surface
-and is not required on the healthy path.
+availability, or lifecycle. The `read_task` assignment view is the server-owned
+recovery/bootstrap surface and is required as the worker's first task read.
 
-`submit_report` records immutable `progress`, `result`, `synthesis`, or `plan`
-evidence through one semantic publication operation. The server owns storage,
+`publish_plan`, `publish_result`, and `publish_documentation` record immutable
+worker-owned evidence through semantic publication operations. The server owns storage,
 completion, and replay identity; each delegation/report-kind slot has one
 terminal outcome, and changed payloads require recovery/rework. Plans
 declare `informational` or `required` review policy.
-Only the native worker that owns the delegation calls `submit_report`; its
+Only the native worker that owns the delegation calls the applicable `publish_*` operation; its
 completion handoff returns a concise `Summary` and exact `Report ref`. The
 coordinator dispatches, waits, and consumes that handoff without rereading the
 body merely to summarize it. A downstream worker reads finalized evidence only
 when its declared work requires the body. Compact refs, durable IDs, digests,
 and cursors are opaque byte-for-byte return data; only compact refs are
 callable public locators, while durable IDs are non-callable evidence.
-`read_reports` is the only report body/chunk reader: it accepts 1–20 unique
-known report refs in request order and resumes bounded section reads using its
-returned cursor. A coordinator call returns report metadata/manifests only;
-body/chunk content requires a consuming worker's exact
-`consumer_delegation_ref`, and that delegation must declare each input report.
-Large reports are never returned as one unbounded body. Worker body reads
-produce structural consumption receipts; coordinator metadata reads do not.
-The service preflights aggregate report request/response budgets before
-materializing bodies. Derived Markdown rendering similarly preflights its
-aggregate output limits (512 files, 32 MiB total, 10 MiB per file) to avoid
-partial output.
+`read_task` is the bounded public task view: it returns server-produced state,
+assignment, or evidence data with private ledger identity removed. A fresh
+worker starts with the exact assignment view and continues only through the
+server-owned continuation. Large evidence is bounded by the advertised read
+contract; callers do not supply report-reference or consumer-delegation
+locators. Derived Markdown rendering similarly preflights its aggregate output
+limits (512 files, 32 MiB total, 10 MiB per file) to avoid partial output.
 Canonical product-facing report bodies support the fixed
 `cortex/report/{progress,result,synthesis,plan}/v1` schemas and the additive
 `cortex/report/{result,synthesis,plan}/v2` schemas. V2 adds structured
@@ -189,19 +186,15 @@ tag or a translated/original duplicate. Only a finalized completed
 semantic-valid canonical plan receives a ready approval relation. Planner-authored
 implementation microtasks are evidence for the model-owned DAG only, never
 backend jobs, scheduling gates, or worker-subtask To-Do entries.
-Inspection reads use `after_sequence` with fixed 50-event server pages, expose compact references,
-and return `next_sequence` with `has_more`; these inspections create no
-receipts. A worker handoff `read_reports` read may create an immutable page
-receipt for the exact consuming delegation.
+Inspection reads use the advertised `read_task` continuation and expose
+semantic data; these reads create no public receipt.
 
-For continuation calls, `handles.after_sequence` and
-`handles.idempotency_key` are copied byte-for-byte only to their literal named
-inputs. `handles.cursor` is the separate opaque `read_reports` continuation
-value. Root receipt fields `next_sequence` and `next_chunk_index` are
-informational and are not `handles` aliases; neither is `retry_handle` a
-substitute for a callable handle.
+For continuation calls, the server-owned continuation returned by `read_task`
+is copied byte-for-byte only to that operation's continuation input. Durable
+IDs, digests, and continuation values are evidence or resumption data, never
+capabilities or substitutes for a callable task reference.
 
-`inspect_task` also projects the current effective outcome contract. Each stable
+`read_task` also projects the current effective outcome contract. Each stable
 `o_` item reference represents one independent user outcome. Acceptance and
 verification criteria, task constraints, steer extensions, and exact source
 fragments remain linked metadata and never become extra coverage items. A
@@ -251,13 +244,14 @@ workspace. Physical concurrent-writer isolation is therefore an unconfirmed
 host capability outside the ledger; Cortex does not implement or claim
 collision prevention until a supported host mechanism and lifecycle owner are
 supplied.
-Delegation `scope` is required non-empty text defining the
-concise worker-ownership boundary, while execution detail belongs in
-`instructions`; object-shaped scope is invalid. Closure requires `subject_type`
-plus the existing compact `subject_ref`; durable `subject_id` is evidence only.
+Delegation `scope` is required non-empty text defining the concise
+worker-ownership boundary, while execution detail belongs in `instructions`;
+object-shaped scope is invalid. `close_task` is task-anchored and accepts the
+exact `task_ref`, one advisory `verdict`, and bounded evidence; durable
+`task_id` is evidence only.
 
 The task-facing result separates neutral finalized-report evidence from advisory
-bookkeeping. `inspect_task` returns `execution_outcome` with
+bookkeeping. `read_task` returns `execution_outcome` with
 `evidence_status`, `finalized_report_count`, `completed_report_count`,
 `effective_revision`, `coverage_status`, and `outcome`. The finalized count
 includes every finalized report, while the outcome is derived deterministically

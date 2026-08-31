@@ -111,8 +111,12 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
     plan_publication = _closed({
         **publication_common,
         "scope": _string(minimum=1, description="Bounded plan scope."),
+        "review_policy": _string(
+            enum=("informational", "required"), maximum=16,
+            description="Explicit coordinator review policy for this immutable plan.",
+        ),
         "stages": {"type": "array", "description": "Ordered implementation stages.", "minItems": 1, "maxItems": TASK_CONTRACT_MAX_ITEMS, "items": stage},
-    }, ("task_ref", "summary", "scope", "stages", "verification_facts", "outcome_coverage", "risks", "unresolved", "status"), description="Flat closed plan publication derived from this connection's assignment.")
+    }, ("task_ref", "summary", "scope", "review_policy", "stages", "verification_facts", "outcome_coverage", "risks", "unresolved", "status"), description="Flat closed plan publication derived from this connection's assignment.")
     result_publication = _closed({
         **publication_common,
         "outcome": _string(minimum=1, description="Observed execution outcome."),

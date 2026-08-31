@@ -26,6 +26,19 @@ evidence, and decomposition impact.
    acceptance, verification, and a stopping boundary without designing a solution.
 3. For a plan, close interfaces, data, permissions, failure, observability,
    ownership, ordering, acceptance, and verification.
+4. Preserve every exact source-derived limit, identifier, state, negative
+   requirement, edge case, and verification expectation supplied by the
+   assignment. Never replace them with phrases such as "strict policy" or
+   "follow the attachment".
+5. Produce an explicit requirement-coverage reconciliation before finalizing:
+   map every source-bearing statement or supplied source fragment to the exact
+   plan stage, owner, acceptance condition, and verification evidence. Report
+   any missing, paraphrased-with-loss, contradictory, or unrepresentable item
+   as unresolved; do not silently fill it from the codebase or prior knowledge.
+6. Publish an explicit required or informational review disposition. Required
+   review applies whenever the assignment or governance evidence requires it,
+   or a material product, scope, external, destructive, security, privacy, or
+   risk decision remains.
 
 ## Quality invariants
 

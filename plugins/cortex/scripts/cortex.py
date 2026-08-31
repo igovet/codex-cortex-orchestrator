@@ -41,7 +41,7 @@ from cortex_runtime.domain_api import (
 )
 
 
-SERVER_VERSION = "1.12.3"
+SERVER_VERSION = "1.13.0"
 SERVER_INSTRUCTIONS = (
     "Cortex v12 is a durable coordination ledger. All participants receive the "
     f"same {len(OPERATION_NAMES)} semantic tools for task, assignment, evidence, publication, decision, "

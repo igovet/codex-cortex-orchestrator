@@ -40,6 +40,7 @@ CANONICAL_NATIVE_FIELDS = frozenset(("fork_turns", "message", "task_name"))
 HOST_NATIVE_METADATA_FIELDS = frozenset(("model", "reasoning_effort"))
 SUPPORTED_NATIVE_MODELS = frozenset(("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
 SUPPORTED_REASONING_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max"))
+CODEBASE_MEMORY_TOOL_PREFIXES = ("mcp__codebase_memory__", "mcp__codebase-memory__")
 
 
 def _event() -> dict[str, Any]:
@@ -347,7 +348,7 @@ def _deny(reason: str, event: dict[str, Any] | None = None, *, reason_code: str 
             try:
                 target = Path(root) / "activation" / "denials.jsonl"
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                prior = target.read_text(encoding="utf-8").splitlines()[-63:]
+                prior = target.read_text(encoding="utf-8").splitlines()[-63:] if target.exists() else []
                 target.write_text("\n".join(prior + [_json(record)]) + "\n", encoding="utf-8")
                 os.chmod(target, 0o600)
             except OSError:
@@ -472,6 +473,20 @@ def _is_assignment_open(tool_name: object) -> bool:
 
 def _is_native_spawn(tool_name: object) -> bool:
     return isinstance(tool_name, str) and tool_name.strip().lower() in NATIVE_SPAWN_TOOLS
+
+
+def _is_codebase_memory_tool(tool_name: object) -> bool:
+    """Recognize the shared Codebase Memory MCP namespace.
+
+    Codex currently exposes one MCP catalogue to the whole native session, so
+    visibility cannot be audience-filtered between the root and child
+    sessions.  The root coordinator is nevertheless prohibited from using
+    this namespace; project-facing workers remain allowed to call it.
+    """
+    if not isinstance(tool_name, str):
+        return False
+    normalized = tool_name.strip().lower()
+    return normalized.startswith(CODEBASE_MEMORY_TOOL_PREFIXES)
 
 
 def _dispatch_state_root() -> Path | None:
@@ -1221,6 +1236,17 @@ def main() -> int:
         _deny("Native dispatch does not match the pending server-issued assignment boundary.", event, reason_code="dispatch_mismatch")
         return 0
     if not state["selected"]:
+        return 0
+
+    # The catalogue is session-wide, but Codebase Memory is a project-facing
+    # worker capability.  Enforce the audience boundary at the root hook while
+    # allowing a real SubagentStart-bound child to use the same MCP server.
+    if event_name == "PreToolUse" and not child and _is_codebase_memory_tool(event.get("tool_name")):
+        _deny(
+            "Codebase Memory is reserved for project-facing native workers; the Cortex coordinator must not use it.",
+            event,
+            reason_code="coordinator_worker_operation",
+        )
         return 0
 
     if event_name == "PreToolUse" and not child and _is_native_spawn(event.get("tool_name")):

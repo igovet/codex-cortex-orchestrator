@@ -10,12 +10,13 @@
   repository state.
 - Treat activated bundled skill text as host-supplied context. Never call
   `read_mcp_resource`, `resources/read`, or a Cortex tool to fetch a `skill://`
-  URI; the fifteen-tool registry has no skill-resource reader.
+  URI; the fourteen-tool registry has no skill-resource reader.
 - Treat Cortex as a durable coordination ledger. The coordinator owns only a
   model-held dynamic orchestration DAG and governance; the backend owns storage
   integrity, immutable evidence, bounded reads, and derived host-private
   projections. The coordinator never authors a project solution plan.
-- When planning is needed, delegate it to `planner`; the planner worker submits
+- For light/full delivery, and whenever minimal work otherwise needs planning,
+  delegate it to `planner`; the planner worker submits
   the durable immutable `plan` report, and every plan-dependent worker names it
   as a predecessor. Evidence may add, remove, reorder, retry, or parent-link
   rework unstarted DAG nodes without changing completed reports. Persist each
@@ -62,16 +63,16 @@
   further-discovery boundary into each delegation's `instructions` and native
   brief. Profiles consume this supplied contract and never redo routing,
   reconstruct the template, or repeat the index-path list.
-- Before `create_delegation` or native spawn, require those six labels exactly
+- Before `open_assignment` or native spawn, require those six labels exactly
   once, in order, with non-empty delegation-specific content. Empty, omitted,
   TODO/TBD/unknown, or generic placeholder sections are invalid.
-- Keep the public facade at exactly the fifteen canonical action-specific tools in
+- Keep the public facade at exactly the fourteen canonical action-specific tools in
   `public_contracts.py`. Coordinator and worker catalogs are identical.
 - Let the active MCP schema own exact fields, types, sizes, enumerations, and
   response shapes. Documentation mirrors semantics and the exact tool names but
   is not validator input.
 - Supply the exact resolved repository/worktree as `project_root` only to
-  `create_task`; retain `handles.task_ref` for the seven task-anchored calls.
+  `open_task`; retain `handles.task_ref` for the task-anchored calls.
   The returned canonical `task_id` is non-callable durable evidence. Never copy
   a UI-rendered task ID into a public task call or infer a root from MCP metadata, thread identity, the
   plugin process `cwd`, hooks, or project/database directory scanning.
@@ -79,9 +80,9 @@
   preserve `user_request_original` and `user_language`; store an English
   `objective`; and state independent outcomes, their linked acceptance
   criteria, and constraints. Do not silently improve, discard, or overwrite the
-  original request. Treat optional `create_task.context` as arbitrary task JSON,
+  original request. Treat optional `open_task.context` as bounded task metadata,
   never as a root binding.
-- Before `create_task`, require every independent outcome to have a meaningful
+- Before `open_task`, require every independent outcome to have a meaningful
   requirement and linked acceptance criteria. Keep constraints as linked task
   metadata and keep the independent verification plan empty at creation rather
   than deriving it from acceptance. Optional context cannot replace an outcome;
@@ -89,20 +90,16 @@
   unknown or placeholder contract entry.
 - Keep delegation `scope` a required non-empty text boundary of worker ownership;
   put detailed execution in `instructions` and reject object scope.
-- Call `submit_governance_closure` with required `subject_type`, the exact
-  existing compact `subject_ref`, one `verdict`, and bounded opaque JSON
-  `evidence`. A task subject uses the exact anchored `task_ref` as
-  `subject_ref` and omits initiative-only `initiative_status`; opaque
-  `completion_notes` are valid for either subject. An initiative subject uses
-  the exact returned `initiative_ref` as `subject_ref`.
-  Durable `subject_id` values are evidence only. Never invent a closure digest
-  field.
+- Call `close_task` with the exact task reference, one `verdict`, and bounded
+  closure `evidence`; optional risk, follow-up, and completion-note fields are
+  task-scoped. The public request has no subject, initiative, or closure-digest
+  field. Durable `task_id` values are evidence only.
 - After sufficient finalized worker evidence, select `ready`,
   `ready_with_risks`, or `not_ready`, then let the closure call automatically
   attempt the advisory write and inspect the intended record. `ready_with_risks`
   never requires user confirmation. Keep the independent `execution_outcome`
   projection separate from `advisory_closure` bookkeeping.
-- `inspect_task` exposes the exact four-field `execution_outcome`:
+- `read_task` exposes the exact four-field `execution_outcome`:
   `evidence_status`, `finalized_report_count`, `completed_report_count`, and
   `outcome`. The finalized count covers every finalized report; the completed
   count covers semantically valid canonical finalized results with status
@@ -110,7 +107,7 @@
   finalized result and then reflects the latest such result as `completed` or
   `incomplete`, without claiming native lifecycle. It exposes
   `advisory_closure` with `record_status` and `latest_record`. A closure cannot
-  change execution evidence. `submit_governance_closure` returns
+  change execution evidence. `close_task` returns
   `closure_confirmation` with `inspection_status`, `reason`, and `attempts`;
   only one same-idempotency retry is allowed for a verified transient
   persistence or inspection failure. If the result is `unconfirmed`, disclose
@@ -127,10 +124,11 @@
   and conflicting content returns a non-mutating `idempotency_conflict`.
 - Treat reports as immutable evidence. Pass only finalized relevant report refs
   and their exact manifest digests to later delegations. Worker consumption is
-  evidenced by a `read_reports` call with the consuming worker's own exact
+  evidenced by the worker's bounded `read_task` evidence read with its own exact
   `consumer_delegation_ref` (the delegation must declare the input), plus its receipt;
   coordinator reads never substitute for that evidence.
-- The owning native worker alone calls `submit_report` for its plan, result,
+- The owning native worker alone calls the applicable `publish_plan`,
+  `publish_result`, or `publish_documentation` operation for its plan, result,
   verification, synthesis, or documentation-impact evidence. Its completion
   handoff returns a concise `Summary` and exact `Report ref`; the coordinator
   consumes that handoff and does not reread the body merely to summarize it. A
@@ -147,7 +145,7 @@
   changed payloads conflict and require an explicit recovery/rework delegation.
   Never restart, overwrite, or publish after terminal completion. Use an explicit
   superseding report for replacement.
-- Preserve `read_reports` request order and its 20-report maximum; select only
+- Preserve the bounded `read_task` evidence view and select only
   needed sections, use compact `report_refs`, and continue through its fixed 65,536-byte server pages
   with the returned cursor until complete. Omitting a consuming delegation is metadata-only
   recovery. A worker must name its
@@ -216,11 +214,12 @@
   model-owned orchestration DAG only. They are not backend jobs, scheduling
   instructions, worker-subtask checklists, or report-body copies.
 - Do not add a server-owned model fallback, worker recovery route, wave/gate
-  state machine, plan-approval gate, receipt-gated lifecycle, host binding, or
-  lifecycle authorization. Coordinator-owned plan review and worker handoff
-  delivery receipts remain valid advisory/evidence practices.
-- V12 ships no lifecycle hooks. Native spawn/wait/stop state is outside
-  the ledger and never a prerequisite for report access or completion.
+  state machine, receipt-gated lifecycle, or lifecycle authorization. Preserve
+  only the narrow pre-dispatch assessment and exact light/full plan-approval
+  admission invariants; they do not schedule work or block an already bound worker.
+- The activation/lifecycle hooks bind native dispatch and enforce the
+  coordinator/worker capability boundary. Native wait/stop state remains outside
+  the ledger and is never a prerequisite for report access or completion.
 - Keep every native worker commentary/update, inter-worker message, final
   response, tool-authored durable string, report, decision normalization,
   ledger prose, and durable view source content in English. Acceptance scans
@@ -240,7 +239,7 @@
   a bounded evidence-synthesis/documentation-impact worker when existing
   reports do not already contain that section. The coordinator may use the
   bounded routing exception to identify affected knowledge paths, but it neither
-  edits nor verifies the documents, never calls `submit_report`, and bases
+  edits nor verifies the documents, never calls a worker-only `publish_*` operation, and bases
   impact on worker reports. Missing documentation evidence leads to model-owned
   rework, replacement, or risk disclosure, never a backend gate.
 - For that no-impact close, create/update an initiative with the exact task

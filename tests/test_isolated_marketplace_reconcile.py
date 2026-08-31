@@ -125,7 +125,7 @@ def test_stale_cortex_source_is_replaced_without_touching_unrelated_marketplaces
             {"name": "cortex", "root": str(tmp_path / "stale-candidate")},
             {"name": "unrelated", "root": str(tmp_path / "unrelated")},
         ],
-        "installed_version": "1.12.3+codex.sha256.stale0000000000",
+        "installed_version": "1.13.0+codex.sha256.stale0000000000",
     }
     completed, after = _run_sync(tmp_path, state)
     assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -141,7 +141,7 @@ def test_stale_cortex_source_is_replaced_without_touching_unrelated_marketplaces
     cortex = [row for row in after["marketplaces"] if row["name"] == "cortex"]
     assert len(cortex) == 1
     assert Path(cortex[0]["root"]).is_relative_to(tmp_path / "owner/.cortex-dev/.codex/.cortex-candidates")
-    assert after["installed_version"].startswith("1.12.3+codex.sha256.")
+    assert after["installed_version"].startswith("1.13.0+codex.sha256.")
 
 
 def test_install_rebuilds_when_checkout_manifest_suffix_is_stale(tmp_path: Path) -> None:
@@ -149,7 +149,7 @@ def test_install_rebuilds_when_checkout_manifest_suffix_is_stale(tmp_path: Path)
     manifest = ROOT / "plugins/cortex/.codex-plugin/plugin.json"
     original = manifest.read_text(encoding="utf-8")
     payload = json.loads(original)
-    payload["version"] = "1.12.3+codex.sha256.0000000000000000"
+    payload["version"] = "1.13.0+codex.sha256.0000000000000000"
     manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     try:
         completed, state = _run_sync(
@@ -158,7 +158,7 @@ def test_install_rebuilds_when_checkout_manifest_suffix_is_stale(tmp_path: Path)
         )
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "staged Cortex candidate:" in completed.stdout
-        staged = list((tmp_path / "owner/.cortex-dev/.codex/.cortex-candidates").glob("1.12.3+codex.sha256.*"))
+        staged = list((tmp_path / "owner/.cortex-dev/.codex/.cortex-candidates").glob("1.13.0+codex.sha256.*"))
         assert len(staged) == 1
         assert not staged[0].name.endswith("0000000000000000")
         assert state["installed_version"] == staged[0].name

@@ -175,6 +175,10 @@ class EffectiveContractCoverageTests(unittest.TestCase):
             item["item_ref"]
             for item in self.store.inspect_task(task_id=task, after_sequence=0)["effective_contract"]["items"]
         }
+        self.store.set_governance_mode(
+            task_id=task, mode="minimal", rationale="Bounded direct fixture.", risk_factors=[],
+            source="model", initiative_id=None, idempotency_key="direct-owner-governance",
+        )
         opened = self.store.create_delegation(
             task_id=task, objective="Create the artifact.", role="worker", profile_name="general",
             scope="Bounded direct implementation.", instructions="Create and verify it.",

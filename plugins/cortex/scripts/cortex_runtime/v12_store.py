@@ -4452,6 +4452,43 @@ class V12Store:
         payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "outcome_assignments": assignments, "model": selection.model, "reasoning_effort": selection.reasoning_effort, "derive_assignment_scope": derive_assignment_scope, "assignment_policy": resolved_policy}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
+            # Public/domain assignments carry ``derive_assignment_scope``.
+            # Re-check the admission invariant inside this write transaction
+            # so a plan revision cannot race the preflight check in the
+            # facade and slip an unapproved owner into the ledger.
+            if payload["derive_assignment_scope"]:
+                assessment = connection.execute(
+                    "SELECT mode FROM governance_assessments WHERE project_hash=? AND task_id=? "
+                    "ORDER BY CASE WHEN source='user_override' THEN 0 ELSE 1 END, "
+                    "created_sequence DESC LIMIT 1",
+                    (self.project_hash, task["task_id"]),
+                ).fetchone()
+                if assessment is None:
+                    raise V12StoreError(
+                        "governance assessment is required before opening an assignment",
+                        code="governance_assessment_required",
+                    )
+                if str(payload["assignment_policy"]) == "owner" and str(assessment["mode"]) in {"light", "full"}:
+                    plan = connection.execute(
+                        "SELECT report_id,content_digest,review_policy FROM reports "
+                        "WHERE project_hash=? AND task_id=? AND report_type='plan' "
+                        "AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+                        (self.project_hash, task["task_id"]),
+                    ).fetchone()
+                    decision = None if plan is None else connection.execute(
+                        "SELECT decision_type,subject_id,subject_digest FROM user_decisions "
+                        "WHERE project_hash=? AND task_id=? AND subject_type='plan' "
+                        "ORDER BY created_sequence DESC LIMIT 1",
+                        (self.project_hash, task["task_id"]),
+                    ).fetchone()
+                    if (plan is None or str(plan["review_policy"] or "") != "required"
+                            or decision is None or str(decision["decision_type"]) != "approve"
+                            or str(decision["subject_id"]) != str(plan["report_id"])
+                            or str(decision["subject_digest"]) != str(plan["content_digest"])):
+                        raise V12StoreError(
+                            "the current required-review plan has not been explicitly approved",
+                            code="plan_approval_required",
+                        )
             input_reports: list[dict[str, Any]] = []
             for report_id in payload["input_report_ids"]:
                 report = self._report(connection, report_id, task_id=task["task_id"])
@@ -5440,7 +5477,8 @@ class V12Store:
 
     def publish_domain_report(self, *, delegation_id: Any, continuation_ref: Any,
                               contract_revision: Any, publication_kind: Any,
-                              content: Any, status: Any) -> dict[str, Any]:
+                              content: Any, status: Any,
+                              review_policy: Any = None) -> dict[str, Any]:
         """Atomically publish one terminal semantic report for an assignment.
 
         ``report_operations`` is deliberately separate from caller-facing
@@ -5455,6 +5493,14 @@ class V12Store:
         report_status = _required_text(status, label="status", maximum=16).lower()
         if report_status not in REPORT_STATUSES:
             raise V12StoreError("report status is invalid", code="invalid_report")
+        policy = None if review_policy is None else _required_text(
+            review_policy, label="review_policy", maximum=16,
+        ).lower()
+        if report_kind == "plan":
+            if policy not in {"informational", "required"}:
+                raise V12StoreError("review policy is invalid", code="invalid_report")
+        elif policy is not None:
+            raise V12StoreError("review policy is invalid", code="invalid_report")
         continuation_key = self._worker_capability_ref(continuation_ref, label="continuation")
         try:
             revision = int(contract_revision)
@@ -5489,7 +5535,11 @@ class V12Store:
         canonical = _canonical_json_bytes(content, label="content")
         if canonical[2] > REPORT_MAX_BYTES:
             raise V12StoreError("report is too large", code="report_too_large")
-        operation_payload = {"task_id": anchor, "delegation_id": delegation, "kind": report_kind, "status": report_status, "content": canonical[0]}
+        operation_payload = {
+            "task_id": anchor, "delegation_id": delegation, "kind": report_kind,
+            "status": report_status, "content": canonical[0],
+            "review_policy": policy,
+        }
         payload_digest = hashlib.sha256(_canonical_json(operation_payload, label="report operation").encode("utf-8")).hexdigest()
 
         def write(connection: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
@@ -5630,9 +5680,9 @@ class V12Store:
             timestamp = _now()
             arguments = (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", manifest, timestamp, sequence)
             if "content_json" in self._column_names(connection, "reports"):
-                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,content_json,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", "null", canonical[2], manifest, supersedes_report_id, timestamp, sequence, timestamp, sequence))
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,content_json,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", "null", canonical[2], manifest, supersedes_report_id, policy, timestamp, sequence, timestamp, sequence))
             else:
-                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", canonical[2], manifest, supersedes_report_id, timestamp, sequence, timestamp, sequence))
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", canonical[2], manifest, supersedes_report_id, policy, timestamp, sequence, timestamp, sequence))
             connection.execute("INSERT INTO report_chunks(report_id,chunk_index,section,content_json,content_digest,content_bytes,created_at) VALUES (?, 0, 'body', ?, ?, ?, ?)", (report_id, canonical[1], canonical[3], canonical[2], timestamp))
             # Persist the exact validated dispositions. Server scope controls
             # which rows may exist; worker evidence controls their semantic

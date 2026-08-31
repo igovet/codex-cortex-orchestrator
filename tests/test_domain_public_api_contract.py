@@ -4,6 +4,7 @@ import re
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 from cortex import PUBLIC_TOOLS, SERVER_VERSION
@@ -13,6 +14,7 @@ from cortex_runtime.domain_api import (
     publish_plan, publish_result, read_task, record_clarification,
     record_plan_review, record_steering,
 )
+from cortex_runtime.v12_service import V12ServiceError
 
 
 PROVENANCE = {name: "sha256:" + "a" * 64 for name in ("build_digest", "candidate_digest", "source_digest", "catalogue_digest")}
@@ -22,6 +24,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
     def _task(self, root: str, outcomes: list[dict] | None = None) -> tuple[dict, list[dict]]:
         outcomes = outcomes or [{"outcome": "Build the artifact.", "acceptance": ["The artifact works."], "constraints": [], "verification": []}]
         task = open_task(project_root=root, request_original="Build it.", user_language="en", outcomes=outcomes, constraints=["Keep public identity minimal."])
+        assess_governance(task_ref=task["task_ref"], mode="minimal", rationale="Bounded test fixture.")
         return task, outcomes
 
     def _assignment(self, task_ref: str, outcome: dict, role: str) -> dict:
@@ -38,6 +41,77 @@ class DomainPublicApiContractTests(unittest.TestCase):
             rendered = repr(state)
             for name in ("item_ref", "report_ref", "decision_ref", "digest", "cursor", "handles"):
                 self.assertNotIn(name, rendered)
+
+    def test_assignment_requires_governance_assessment(self) -> None:
+        outcome = {"outcome": "Inspect the artifact.", "acceptance": ["Evidence is returned."], "constraints": [], "verification": []}
+        with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
+            task = open_task(
+                project_root=root, request_original="Inspect it.", user_language="en",
+                outcomes=[outcome], constraints=["Read-only inspection."],
+            )
+            with self.assertRaisesRegex(V12ServiceError, "governance assessment is required"):
+                self._assignment(task["task_ref"], outcome, "pre-governance")
+
+    def test_full_governance_delivery_requires_exact_current_plan_approval(self) -> None:
+        outcome = {"outcome": "Deliver the secured change.", "acceptance": ["The secured flow works."], "constraints": [], "verification": []}
+        with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
+            task, _ = self._task(root, [outcome])
+            assess_governance(task_ref=task["task_ref"], mode="full", rationale="Authentication-sensitive delivery.")
+
+            with self.assertRaisesRegex(V12ServiceError, "required-review plan"):
+                open_assignment(
+                    task_ref=task["task_ref"], role="implementer", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                    goal="Implement.", scope="Secured flow.", instructions="Deliver only after approval.",
+                    outcomes=[outcome["outcome"]], report_policy="none",
+                )
+
+            def publish_required_plan(label: str) -> None:
+                planner = open_assignment(
+                    task_ref=task["task_ref"], role=f"planner {label}", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
+                    goal=f"Plan {label}.", scope="Secured flow.", instructions="Publish an exact plan.",
+                    outcomes=[outcome["outcome"]], report_policy="none",
+                )
+                planner_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', planner["native_dispatch"]["message"]).group(1)
+                context: dict = {}
+                read_task(task_ref=planner_ref, view="assignment", _connection_context=context)
+                publish_plan(
+                    task_ref=planner_ref, summary=f"Required plan {label}.", scope="Secured flow.",
+                    review_policy="required",
+                    stages=[{"owner": "implementer", "work": [f"Implement {label}."], "verification": ["Run security checks."]}],
+                    verification_facts=[{"state": "not_run", "summary": "Delivery awaits approval."}],
+                    outcome_coverage=[{"outcome": outcome["outcome"], "status": "blocked", "verification": ["Approval pending."]}],
+                    risks=["Authentication risk."], unresolved=[], status="blocked",
+                    _connection_context=context,
+                )
+
+            publish_required_plan("v1")
+            with self.assertRaisesRegex(V12ServiceError, "not been explicitly approved"):
+                open_assignment(
+                    task_ref=task["task_ref"], role="implementer", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                    goal="Implement.", scope="Secured flow.", instructions="Deliver only after approval.",
+                    outcomes=[outcome["outcome"]], report_policy="active_plan",
+                )
+            open_plan_review(task_ref=task["task_ref"], prompt="Approve v1?", prompt_language="en")
+            record_plan_review(task_ref=task["task_ref"], outcome="approve", response_original="Approve v1.", user_language="en")
+            approved = open_assignment(
+                task_ref=task["task_ref"], role="implementer", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                goal="Implement.", scope="Secured flow.", instructions="Use the approved plan.",
+                outcomes=[outcome["outcome"]], report_policy="active_plan",
+            )
+            self.assertIn("native_dispatch", approved)
+
+            publish_required_plan("v2")
+            with self.assertRaisesRegex(V12ServiceError, "not been explicitly approved"):
+                open_assignment(
+                    task_ref=task["task_ref"], role="second implementer", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                    goal="Implement v2.", scope="Secured flow.", instructions="Do not reuse v1 approval.",
+                    outcomes=[outcome["outcome"]], report_policy="active_plan",
+                )
 
     def test_open_assignment_returns_only_native_dispatch_and_replay_state(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
@@ -82,6 +156,34 @@ class DomainPublicApiContractTests(unittest.TestCase):
             restarted = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
             self.assertEqual(first["data"]["effective_contract"], restarted["data"]["effective_contract"])
             self.assertNotIn("cursor", repr(restarted))
+
+    def test_assignment_read_preserves_exact_source_limits_and_negative_requirements(self) -> None:
+        """A worker must receive the normalized contract, not an attachment shorthand."""
+        outcome = {
+            "outcome": "Implement OTP verification for handler VerifyCode.",
+            "acceptance": [
+                "OTP is exactly 6 digits and expires after 10 minutes.",
+                "Reject the request after 5 incorrect attempts.",
+            ],
+            "constraints": [
+                "Resend cooldown is exactly 60 seconds.",
+                "Never reveal whether an email address is registered.",
+            ],
+            "verification": [
+                "Test expiry at 10:00 and rejection on attempt 6.",
+                "Verify the unregistered-email response is indistinguishable.",
+            ],
+        }
+        with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
+            task, _ = self._task(root, [outcome])
+            assignment = self._assignment(task["task_ref"], outcome, "audit")
+            worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', assignment["native_dispatch"]["message"]).group(1)
+            read = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            item = read["data"]["effective_contract"]["assigned_items"][0]
+            self.assertEqual(item["outcome"], outcome["outcome"])
+            self.assertEqual(item["acceptance"], outcome["acceptance"])
+            self.assertEqual(item["constraints"], outcome["constraints"])
+            self.assertEqual(item["verification"], outcome["verification"])
 
     def test_parallel_workers_publish_to_their_exact_assignments_in_reverse_order(self) -> None:
         outcomes = [
@@ -134,10 +236,21 @@ class DomainPublicApiContractTests(unittest.TestCase):
             context: dict = {}
             bootstrap = read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
             self.assertEqual(bootstrap["data"]["assignment_context"]["responsibility"], "planning")
+            self.assertEqual(bootstrap["data"]["assignment_context"]["project_root"], str(Path(root).resolve()))
             self.assertEqual(len(bootstrap["data"]["effective_contract"]["planning_items"]), 1)
+
+            with self.assertRaisesRegex(V12ServiceError, "review policy is invalid"):
+                publish_plan(
+                    task_ref=worker_ref, summary="Invalid policy.", scope="First outcome only.",
+                    review_policy="optional", stages=[{"owner": "implementation", "work": ["Implement."], "verification": ["Check."]}],
+                    verification_facts=[{"state": "not_run", "summary": "Not started."}],
+                    outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Planned."]}],
+                    risks=[], unresolved=[], status="partial", _connection_context=context,
+                )
 
             published = publish_plan(
                 task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="First outcome only.",
+                review_policy="informational",
                 stages=[{"owner": "implementation", "work": ["Implement the bounded change."], "verification": ["Run the focused check."]}],
                 verification_facts=[{"state": "not_run", "summary": "Execution belongs to the implementation worker."}],
                 outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]}],
@@ -147,6 +260,31 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(published["state"], "published")
             self.assertFalse(published["replayed"])
 
+            replayed = publish_plan(
+                task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="First outcome only.",
+                review_policy="informational",
+                stages=[{"owner": "implementation", "work": ["Implement the bounded change."], "verification": ["Run the focused check."]}],
+                verification_facts=[{"state": "not_run", "summary": "Execution belongs to the implementation worker."}],
+                outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]}],
+                risks=["Implementation remains."], unresolved=["Runtime result is not available yet."], status="partial",
+                _connection_context=context,
+            )
+            self.assertTrue(replayed["replayed"])
+
+            # Review disposition is part of the immutable publication payload:
+            # changing only that value must conflict instead of silently
+            # reusing an informational plan as a required one (or vice versa).
+            with self.assertRaisesRegex(V12ServiceError, "different terminal report"):
+                publish_plan(
+                    task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="First outcome only.",
+                    review_policy="required",
+                    stages=[{"owner": "implementation", "work": ["Implement the bounded change."], "verification": ["Run the focused check."]}],
+                    verification_facts=[{"state": "not_run", "summary": "Execution belongs to the implementation worker."}],
+                    outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]}],
+                    risks=["Implementation remains."], unresolved=["Runtime result is not available yet."], status="partial",
+                    _connection_context=context,
+                )
+
             # A worker may inspect neutral state after its mandatory bootstrap;
             # this advertised view must not trip a hidden capability gate.
             worker_state = read_task(task_ref=worker_ref, view="state", _connection_context=context)
@@ -155,6 +293,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             handoff = read_task(task_ref=task["task_ref"], view="evidence", report_policy="active_plan", _connection_context={})
             self.assertEqual(len(handoff["data"]["reports"]), 1)
             self.assertIn("A bounded plan", repr(handoff["data"]))
+            self.assertEqual(handoff["data"]["reports"][0]["review_policy"], "informational")
             self.assertEqual(handoff["data"]["consumption_receipts"][0]["reader_kind"], "coordinator")
 
     def test_unique_outcome_name_resolves_current_user_refined_revision(self) -> None:
@@ -206,6 +345,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             read_task(task_ref=planner_ref, view="assignment", _connection_context=planner_context)
             publish_plan(
                 task_ref=planner_ref, summary="Plan with visible uncertainty.", scope="Bounded.",
+                review_policy="required",
                 stages=[{"owner": "worker", "work": ["Implement."], "verification": ["Check."]}],
                 verification_facts=[{"state": "not_run", "summary": "Implementation has not run."}],
                 outcome_coverage=[{"outcome": outcome["outcome"], "status": "blocked", "verification": ["User review is requested."]}],
@@ -246,7 +386,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.12.3")
+        self.assertEqual(SERVER_VERSION, "1.13.0")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

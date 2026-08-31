@@ -220,6 +220,7 @@ Markdown link and explicit localized approval. Record `approve` against its
 exact digest plus the ready-view binding and pass that decision evidence to
 every plan-dependent assignment; do not
 dispatch implementation or research beyond discovery/planning first. Cancellation
-stops later dispatch by coordinator policy, not backend gate. If persistence is
+prevents the exact approval relation and therefore keeps light/full delivery
+closed at both coordinator policy and backend admission. If persistence is
 unavailable, never infer approval; proceed only from an unambiguous safe user
 message and disclose the non-durable decision.

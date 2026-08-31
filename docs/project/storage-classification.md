@@ -13,10 +13,12 @@ The V12 project database is the only authoritative mutable Cortex store:
 ```
 
 The database is a durable coordination ledger. It does not store native host
-authority and cannot decide whether the model may delegate, read evidence,
-rework, close, or answer the user.
+authority or schedule work. It admits an assignment only after governance is
+assessed and admits light/full delivery only after exact current-plan approval;
+it never decides whether the model may read evidence, rework, close, or answer
+the user.
 
-Only `create_task` carries the exact resolved `project_root` and stores the
+Only `open_task` carries the exact resolved `project_root` and stores the
 canonical association on the task. The seven task-anchored public calls carry
 the compact `task_ref`; the three entity-derived public calls resolve their
 owner from delegation or report refs. A `task_ref` is `t_` plus a 12-hex task
@@ -36,19 +38,19 @@ empty rather than duplicating acceptance.
 | Data | Location | Writers/readers | Classification and retention |
 | --- | --- | --- | --- |
 | Schema and project metadata | `schema_migrations`, `v12_metadata`, SQLite pragmas | Store bootstrap/validation | Canonical database-family, schema-v1, and project-hash integrity metadata |
-| Task/result contract | `tasks` | `create_task`; `inspect_task` | Canonical project-scoped exact original request/language plus English outcomes, requirements, constraints, linked acceptance criteria, a non-derived independent verification plan, and bounded context |
-| Effective outcome contract | `effective_contract_revisions`, `effective_contract_items`, `effective_contract_item_details` | Bootstrap, user `steer` decision; `inspect_task` | One revisioned coverage item per independent user outcome; linked criteria, constraints, steer additions, source fragments, and replacement relations remain details rather than duplicate obligations |
-| Delegation assignments and projected briefs | `delegations` plus its saved task association | Coordinator `create_delegation`; delegation/task reads | Canonical bounded assignment with required textual ownership scope, exact model/effort, and compiled knowledge contract in `instructions`; the projected native brief adds the task's saved root for context, never host authority |
-| Outcome assignments and coverage | `delegation_outcome_assignments`, `report_contract_coverage` | Delegation/report writes; `inspect_task` aggregate/conformance projections | Per-revision owned/contributing/evidence-producing responsibility and immutable finalized-report coverage claims with verification details; used to identify missing, partial, unverified, stale, and contradictory active evidence, never a backend gate |
-| Worker evidence | `reports`, `report_chunks`, `report_usage` | `submit_report`; compact task/delegation references; bounded `read_reports` body/chunk reads | Immutable progress/result/synthesis/plan content, manifest/digest, review policy, assembly state, chunks, and quotas; private and potentially sensitive |
-| Execution-outcome projection | Derived from finalized rows in `reports` | `inspect_task`; `submit_governance_closure` result | Exact `execution_outcome` fields are `evidence_status`, `finalized_report_count`, `completed_report_count`, and `outcome`: every finalized report contributes to the first count, while only semantically valid canonical finalized results determine the completed count and nullable `completed`/`incomplete` outcome, independently of advisory closure bookkeeping and without claiming native lifecycle |
+| Task/result contract | `tasks` | `open_task`; `read_task` | Canonical project-scoped exact original request/language plus English outcomes, requirements, constraints, linked acceptance criteria, a non-derived independent verification plan, and bounded context |
+| Effective outcome contract | `effective_contract_revisions`, `effective_contract_items`, `effective_contract_item_details` | Bootstrap, user steering decision; `read_task` | One revisioned coverage item per independent user outcome; linked criteria, constraints, steer additions, source fragments, and replacement relations remain details rather than duplicate obligations |
+| Delegation assignments and projected briefs | `delegations` plus its saved task association | Coordinator `open_assignment`; task reads | Canonical bounded assignment with required textual ownership scope, exact model/effort, and compiled knowledge contract in `instructions`; the projected native brief adds the task's saved root for context, never host authority |
+| Outcome assignments and coverage | `delegation_outcome_assignments`, `report_contract_coverage` | Assignment/publication writes; `read_task` aggregate/conformance projections | Per-revision owned/contributing/evidence-producing responsibility and immutable finalized-publication coverage claims with verification details; used to identify missing, partial, unverified, stale, and contradictory active evidence, never a backend gate |
+| Worker evidence | `reports`, `report_chunks`, `report_usage` | applicable `publish_*`; assignment references; bounded task evidence reads | Immutable progress/result/synthesis/plan content, manifest/digest, persisted `review_policy` (`informational` or `required`), assembly state, chunks, and quotas; private and potentially sensitive |
+| Execution-outcome projection | Derived from finalized rows in `reports` | `read_task`; `close_task` result | Exact `execution_outcome` fields are `evidence_status`, `finalized_report_count`, `completed_report_count`, and `outcome`: every finalized publication contributes to the first count, while only semantically valid canonical finalized results determine the completed count and nullable `completed`/`incomplete` outcome, independently of advisory closure bookkeeping and without claiming native lifecycle |
 | User decision evidence | `user_decisions` | narrow decision record operations; task/governance references and decision views | Append-only coordinator-asserted ordinary-chat response, neutral prompt, exact original-language response, language, subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
-| Mode history | `governance_assessments` | `set_governance_mode`; governance/task reads | Append-only advisory model/user-override assessments |
-| Initiative projection | `initiatives` | `record_initiative` and initiative closure | Current project-level goal/risk/status/notes projection |
+| Mode history | `governance_assessments` | `assess_governance`; task reads | Append-only advisory model/user-override assessments; one initial assessment is required after task creation and before the first assignment |
+| Initiative projection | `initiatives` | private/internal `record_initiative` and initiative closure | Current project-level goal/risk/status/notes projection |
 | Initiative history | `initiative_revisions` | Initiative writes/closure; governance reads | Append-only revisions including link state |
-| Initiative relationships | `initiative_links` | `record_initiative`; governance reads | Current parent/dependency/task/report links and unresolved/cyclic warnings |
-| Closure statements | `governance_closures` | `submit_governance_closure`; inspection | Immutable advisory task/initiative verdict and evidence; does not establish or rewrite user-work execution outcome |
-| Closure confirmation | Derived from closure persistence plus intended inspection | `submit_governance_closure` result | `closure_confirmation` with `inspection_status`, `reason`, and bounded `attempts`; transient uncertainty is disclosed and never becomes execution state |
+| Initiative relationships | `initiative_links` | private/internal `record_initiative`; governance reads | Current parent/dependency/task/report links and unresolved/cyclic warnings |
+| Closure statements | `governance_closures` | `close_task`; `read_task` evidence view | Immutable advisory task verdict and evidence; does not establish or rewrite user-work execution outcome |
+| Closure confirmation | Derived from closure persistence plus intended inspection | `close_task` result | `closure_confirmation` with `inspection_status`, `reason`, and bounded `attempts`; transient uncertainty is disclosed and never becomes execution state |
 | Ordered chronology | `timeline` | Every semantic mutation; scoped reads | Canonical sequence ordering for incremental inspection |
 | Retry records | `idempotency` | Mutations | Operation/key payload digest and original result; private retry integrity state |
 | Projection queue and metadata | `projection_jobs` and projection metadata | Semantic mutations enqueue; best-effort host materializer and returned `human_view` status | Canonical scheduling/freshness metadata for derived views; no filesystem failure can roll back a valid ledger mutation |
@@ -69,7 +71,7 @@ reports, user decisions, assessments, initiative revisions, and projection-job
 enqueue operations remain atomic and ordered.
 
 The one additive pre-release V12 migration runs automatically on the first
-normal, path-bearing `create_task` open of the exact released pre-human-view
+normal, path-bearing `open_task` open of the exact released pre-human-view
 V12 layout. In one transaction it verifies the legacy shard/root metadata,
 adds the missing task-root binding, preserves every existing row, and wraps
 each legacy report body as one finalized canonical chunk. The retained legacy
@@ -174,8 +176,9 @@ lead to rework, replacement, or disclosed risk, but never backend prohibition.
 
 Plan review, clarification, pause, revision, cancellation, and user-decision
 interpretation are coordinator-owned ordinary-chat policy. Storage preserves
-evidence and exact bindings; it does not create an approval gate, a pause state,
-or user authorization.
+evidence and exact bindings and admits light/full delivery only after the exact
+current required-review plan approval. That narrow relation is neither a pause
+state nor user authorization for external or destructive action.
 
 ## Derived human-readable task views
 

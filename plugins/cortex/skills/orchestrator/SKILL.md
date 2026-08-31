@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.12.3 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
+description: Explicit opt-in Cortex v1.13.0 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
 ---
 
-# Cortex Orchestrator v1.12.3
+# Cortex Orchestrator v1.13.0
 
 ## Activation and language
 
@@ -14,6 +14,10 @@ Worker communication, commentary, reports, and durable ledger prose are English.
 ## First boundary
 
 For project work, the first execution operation is `open_task`. Before it, compose the complete semantic outcomes, acceptance conditions, constraints, language, and bounded context without project inspection or task-specific user commentary. Success establishes the sole coordinator identifier, `task_ref`; retain exactly that value. After an ambiguous transport, retry the identical call so the server can reconcile it. Never create a replacement task. If no task can be opened, stop the Cortex route honestly.
+
+User-supplied attachments, pasted specifications, and referenced source material are part of the request boundary, not project inspection. Read every available user-supplied source needed to understand the request before opening the task. Normalize every decision-bearing detail into the semantic contract: exact numeric limits, identifiers, named handlers and fields, states, negative requirements, external-provider boundaries, edge cases, and verification expectations. A phrase such as "strict policy", "as specified", or "from the attachment" never substitutes for those details. Preserve the user's exact request as original text, but do not duplicate an entire source artifact into generic context when its requirements can be represented safely and completely as outcomes, acceptance, constraints, and verification evidence.
+
+Before opening the task, build a source-to-contract coverage check: for every requirement-bearing sentence, table row, identifier, limit, state, exception, prohibition, and requested check, record an exact semantic statement and its destination in the contract. An item is covered only when a fresh worker can recover its exact value and meaning from the server-owned assignment view; a vague attachment reference, shorthand such as "strict", or an implementation detail without its source requirement is not coverage. If a source detail cannot be represented safely, surface that limitation as a clarification before assigning work; never silently omit it. Keep source fragments and assumptions distinguishable, and include negative requirements and boundary/edge cases explicitly even when they do not produce a separate outcome.
 
 No user question may be rendered before the matching decision-opening operation succeeds. A clarification is opened after the task exists, then shown to the user; record the exact answer before using it.
 
@@ -31,6 +35,8 @@ The root coordinator orchestrates and synthesizes; workers perform every project
 
 For routing only, the coordinator may directly read exact known paths `docs/project/index.md`, `docs/features/index.md`, and task-relevant pages linked by them. This is a closed exact-path allowlist, not search authority. Delegate discovery when a path is unknown or a nested instruction boundary may apply.
 
+Codebase Memory is the mandatory first evidence route for worker-owned structural project-code discovery in every Cortex route, not only knowledge harvest. The universal worker contract owns the exact fallback discipline. The coordinator neither performs the graph query nor silently authorizes ordinary search; it gives each worker enough bounded semantic scope to bind the graph to the task's canonical project root.
+
 ## Semantic contract and public identity
 
 Represent every independently actionable requested result as a semantic outcome with its own acceptance conditions and material constraints. Do not collapse numbered findings, duplicate acceptance as another obligation, invent placeholders, or turn implementation steps into backend permissions. Keep facts, assumptions, verification needs, and constraints distinguishable.
@@ -43,7 +49,13 @@ The coordinator stores only `task_ref`. It never stores, copies, reconstructs, o
 
 ## Delegation
 
-The coordinator chooses the packaged profile, model, reasoning effort, responsibility, semantic outcomes, report policy, goal, scope, and instructions from current evidence. Planning is an ordinary LLM choice, not a governance requirement. Parallel assignments are valid whenever ownership and mutation scopes are safe.
+The coordinator chooses the packaged profile, model, reasoning effort, responsibility, semantic outcomes, report policy, goal, scope, and instructions from current evidence. Planning remains optional for genuinely minimal work. Light or full governance requires a planner-owned immutable plan and explicit approval of that exact current plan before any delivery assignment; planning and evidence assignments remain available to build and verify that relation. Parallel assignments are valid whenever ownership and mutation scopes are safe.
+
+Every assignment must be scoped from the complete effective contract. Assignment instructions may explain ownership and stopping boundaries, but may not be the sole carrier of a source-derived requirement and may not replace exact outcome acceptance, constraints, verification, or context with "see the attachment" or equivalent shorthand. Before native spawn, confirm that each assigned outcome's exact contract details are present in the server-owned assignment evidence that `read_task` will return.
+
+After task creation and before the first assignment, record one evidence-backed advisory governance assessment from the user request and complete semantic contract. Bounded low-risk work is normally minimal; multi-step or cross-surface user-visible work is normally light; authentication, authorization, security, privacy, credentials, money or stored value, destructive action, production-critical behavior, or comparable cross-domain risk is full. Reassess when material evidence changes the risk. The assessment remains advisory and never expands coordinator project access.
+
+For light or full work, create a planning assignment and tell the planner that its immutable plan requires user review. The backend rejects a delivery assignment until that current finalized required-review plan has an explicit approval bound to its exact report identity and digest. Minimal work may use an informational plan only when no material product, scope, external, destructive, security, privacy, or risk decision remains. Never describe a plan as informational merely to bypass a review hold or downgrade governance after planning begins.
 
 The available model routes are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`; the live schema advertises valid effort values. The coordinator makes the task-specific choice, including `high` effort when evidence warrants it.
 
@@ -61,6 +73,8 @@ Coverage accounts for every assigned outcome. `not_run`, `failed`, `partial`, `b
 
 At most one user decision is pending per task. Use distinct clarification, plan-review, and steering operations. Open the decision, render its neutral question in the user's language, record the exact response, then read current state before choosing more work. The server resolves pending binding, active plan relation, revision, and supersession atomically; the model never sees or supplies those identities.
 
+For a required plan, open the plan review immediately after reading the finalized current plan, present the verified plan view and a localized summary, and wait for an explicit approve, revise, or cancel response. Record that response before creating plan-dependent delivery assignments. Never infer approval from the original implementation request, prior conversation, an informational acknowledgement, or the absence of objections. A revised plan requires a fresh review.
+
 Approval never causes backend scheduling. Approval, revision request, cancellation, and steering become ledger evidence; the LLM chooses any next assignment. Steering uses complete semantic outcome objects from current task state because it intentionally creates a new versioned outcome revision. Existing worker snapshots remain immutable; later assignments resolve the current revision by its unique semantic name.
 
 ## Verification, governance, documentation, and closure
@@ -69,7 +83,7 @@ Verification depth is proportional to risk. Independent verification is an LLM c
 
 When verified behavior changes project documentation, create a bounded documentation worker and publish a documentation assessment. Do not make documentation automatic and never treat an unavailable report as proof of no impact.
 
-Governance is advisory evidence. It never authorizes privileged action, schedules workers, mandates a planner/verifier, or blocks an already bound worker. Ordinary Codex/user approval governs external, destructive, or scope-expanding actions.
+Governance evidence never authorizes privileged action, schedules workers, or blocks an already bound worker. It does enforce two pre-dispatch integrity invariants: an assessment must exist before the first assignment, and light/full delivery requires the exact current required-review plan approval. Planning and evidence assignments remain available to establish those relations. Ordinary Codex/user approval still governs external, destructive, or scope-expanding actions.
 
 The coordinator chooses the closure verdict. `close_task` derives evidence and coverage from the ledger; the model supplies no report links or private identity. Closure records an advisory conclusion and never chooses future work. A closure storage failure is disclosed rather than erasing verified results.
 

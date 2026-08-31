@@ -75,6 +75,18 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   authority for continuing this assignment.
 - Work from the scoped, sanitized English context below. The durable task keeps
   original user text; it is deliberately not copied into this generic brief.
+- before any structural project-code discovery or local repository search, use
+  Codebase Memory as the mandatory first evidence route and bind it to the exact
+  canonical `project_root` returned in the server-owned assignment context. The
+  MCP must be available to every native worker; if it is missing, disabled, or
+  unusable, stop and report an environment blocker rather than substituting
+  ordinary search. Only after an actual graph call returns evidence that the
+  indexed graph excludes the assigned surface or is insufficient may the worker
+  record that concrete limitation and use exactly one bounded repository-native
+  enumeration or text-search fallback. Never silently skip the graph, begin with
+  `rg`/`find`/directory enumeration, or chain fallback searches. Direct access to
+  an exact already-known path is not a structural-discovery substitute and does
+  not establish repository coverage.
 - Report verified evidence, uncertainty, residual risks, and the next owner.
   Do not disclose secrets, private diagnostic data, or host-private paths.
 - Emit concise English progress checkpoints: at most five bullets and 150 words.
@@ -105,6 +117,12 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   consumed. A provisional outcome followed by a replacement is not the normal
   flow: use the active recovery/rework assignment semantics when correction is
   genuinely required.
+
+- A plan publication always declares one explicit review disposition. Use
+  required review when the assignment or governance evidence requires it, or
+  when material product, scope, external, destructive, security, privacy, or
+  risk decisions remain; otherwise use informational review. Never omit the
+  disposition or downgrade it to bypass coordinator review.
 
 - Reconcile every exact item in the server-issued assignment scope once in the
   publication evidence. Use the semantic outcome objects returned by the
@@ -167,6 +185,28 @@ _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
   revision, decisions, and predecessor evidence.
 - Work only inside that assignment and publish its evidence yourself.
 - Use only the advertised Cortex tool contracts and the supplied task_ref.
+"""
+
+# The full common policy is retained for continuation/contract documentation,
+# but fresh dispatches must stay below the transport's compact-message budget.
+# These two invariants are the worker-facing admission-critical subset.
+_MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
+
+- before any structural project-code discovery or local repository search, use
+  Codebase Memory as the mandatory first evidence route and bind it to the exact
+  canonical `project_root` returned in the server-owned assignment context. The
+  MCP must be available to every native worker; if it is missing, disabled, or
+  unusable, stop and report an environment blocker rather than substituting
+  ordinary search. Only after an actual graph call returns evidence that the
+  indexed graph excludes the assigned surface or is insufficient may the worker
+  record that concrete limitation and use exactly one bounded repository-native
+  enumeration or text-search fallback. Never silently skip the graph, begin with
+  `rg`/`find`/directory enumeration, or chain fallback searches.
+- A plan publication always declares one explicit review disposition. Use
+  required review when the assignment or governance evidence requires it, or
+  when material product, scope, external, destructive, security, privacy, or
+  risk decisions remain; otherwise use informational review. Never omit the
+  disposition or downgrade it to bypass coordinator review.
 """
 
 
@@ -279,6 +319,7 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
         },
     }
     message = "\n\n".join((
+        _MANDATORY_PROJECT_POLICY.strip(),
         _MINIMAL_WORKER_BOOTSTRAP.strip(),
         "## Trusted advisory profile\n\n" + trusted_profile.strip(),
         "## Server-bound worker context\n\n```json\n" + _canonical(bootstrap).replace("```", "\\u0060\\u0060\\u0060") + "\n```",
@@ -292,7 +333,7 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
             "profile_name": profile_name,
             "profile_state": profile_state,
             "profile_digest": profile_digest,
-            "common_policy_digest": "sha256:" + hashlib.sha256(_MINIMAL_WORKER_BOOTSTRAP.encode("utf-8")).hexdigest(),
+            "common_policy_digest": "sha256:" + hashlib.sha256(_MANDATORY_PROJECT_POLICY.encode("utf-8")).hexdigest(),
         },
     }
 

@@ -15,11 +15,11 @@ orchestrator-owned knowledge route used to compile delegation requirements.
 
 ## Key files
 
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the governance and decision tools, including the three narrow decision operations, in the uniform fifteen-tool semantic catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the governance and decision tools, including the three narrow decision operations, in the uniform fourteen-tool semantic catalog.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) exposes action-specific governance operations.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns append-only assessments, initiative revisions/links, warnings, and closures.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines outcome-first model behavior.
-- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) summarizes the eleven public operations and nonblocking invariant.
+- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) summarizes the fourteen public operations and nonblocking invariant.
 
 ## Mode assessments and revisions
 
@@ -31,7 +31,8 @@ The coordinator records one of three modes after creating a task:
 | `light` | Multi-step/cross-component work, user-visible behavior, ambiguous acceptance, or substantial code change | Decisions, assumptions, risks, delegated verification plan, closure reflection |
 | `full` | Security, privacy, authentication, financial, destructive, production-critical, multi-repository, multi-task, long-lived initiative, or explicitly requested work | Risk register, delegated falsification and independent-review evidence, detailed closure |
 
-`set_governance_mode` appends an assessment with source `model` or
+After `open_task` and before the first assignment, the coordinator must record
+one evidence-backed initial assessment. `assess_governance` appends an assessment with source `model` or
 `user_override`. An explicit user override has priority and is stored unchanged;
 the backend does not classify, promote, downgrade, or reject it. The model may
 record a concise risk warning.
@@ -58,12 +59,14 @@ and normally `full`. Evidence and direct user preference can revise either
 classification or mode. Neither label creates a backend wave, mandatory stage,
 model escalation, or user-approval gate.
 
-Light/full create advisory assessments only. They may guide the coordinator to
-seek planning, review, or additional verification, but never create a backend
-admission, profile, approval, stage, or closure gate. Finalized plan reports
-and user decisions can still be linked to a downstream delegation as immutable
-evidence when its declared work needs them; normal compact-reference, digest,
-and project-isolation validation remains strict.
+Light/full mode selection remains model-owned, but every delivery assignment in
+those modes requires a current finalized plan with `review_policy=required` and
+an explicit approval bound to that exact report and digest. The backend enforces
+this narrow pre-dispatch integrity relation while leaving planning/evidence
+assignments available; it does not choose a schedule. A minimal plan may use
+`review_policy=informational` only when
+no material product, scope, external, destructive, security, privacy, or risk
+decision remains. The selected policy is persisted on the immutable plan report.
 
 ## Project-level initiatives
 
@@ -78,7 +81,7 @@ assessment. It may:
 - retain model-authored goal, risk, notes, and informational status;
 - receive its own closure after the broader program can be assessed.
 
-`record_initiative` creates a stable initiative or appends a revision. Status
+The private/internal ledger helper `record_initiative` creates a stable initiative or appends a revision. Status
 is limited to `proposed`, `active`, `paused`, `completed`, `closed`, and
 `cancelled`, but the backend accepts every transition among these values. It
 does not assign an owner, select a milestone, compute completion, or enforce a
@@ -108,7 +111,7 @@ cycle is retained with `cyclic_dependency`. Warnings are model-visible evidence,
 not rejection reasons. A later status update or initiative closure remains
 allowed.
 
-`inspect_governance(task_ref=...)` uses the task only to anchor the project and
+The `read_task` evidence view uses the task only to anchor the project and
 returns initiatives/links related to that task, the effective mode projection,
 immutable initiative revision payloads, and a bounded timeline page. An
 optional compact `initiative_ref` narrows the view; the durable `initiative_id`
@@ -165,25 +168,20 @@ when the user did not request one and an explicit rationale is recorded.
 
 ## Advisory closure
 
-`submit_governance_closure` appends a model-authored task or initiative
-statement. The one closure shape requires `subject_type` (`task` or
-`initiative`), the exact corresponding compact `subject_ref`, one `verdict`, and
-bounded opaque JSON `evidence`; Cortex validates evidence only as finite JSON
-within its size bound. The verdict is one of:
+`close_task` appends a model-authored task statement. Its public shape is
+task-anchored: it accepts the exact `task_ref`, one `verdict`, and bounded
+opaque JSON `evidence` plus optional risk/follow-up/completion notes; Cortex
+validates evidence only as finite JSON within its size bound. The verdict is one of:
 
 - `ready`;
 - `ready_with_risks`;
 - `not_ready`.
 
-The subjects are not interchangeable. A supported task closure uses the exact
-anchored `task_ref` as `subject_ref` and omits initiative-only
-`initiative_status`; it may include opaque `completion_notes`. An initiative
-closure uses the exact returned compact `initiative_ref` as `subject_ref` and
-may include its supported initiative fields. Durable `task_id`/`initiative_id`
-values are evidence only and are not callable closure inputs. `unresolved_risks`
-and `follow_ups` are optional and default to empty lists. The closure call has
-no subject digest argument. Required reports must be finalized and read before
-a ready closure is attempted.
+The exact anchored `task_ref` is the only public closure locator. Durable
+`task_id` values are evidence only and are not callable closure inputs.
+`unresolved_risks` and `follow_ups` are optional and default to empty lists.
+The closure call has no subject or digest argument. Required reports must be
+finalized and read before a ready closure is attempted.
 
 The verdict is a recommendation. A task closure can cite acceptance and
 verification evidence, unresolved risks, and follow-ups. A long-lived
@@ -201,7 +199,7 @@ answer, or make a closure a lifecycle gate. In particular,
 confirmation. User confirmation belongs only to an applicable ordinary-chat
 product or plan-review decision.
 
-The public result keeps execution and bookkeeping separate. `inspect_task`
+The public result keeps execution and bookkeeping separate. `read_task`
 returns:
 
 - `execution_outcome`, with fields `evidence_status`,
@@ -213,7 +211,7 @@ returns:
 - `advisory_closure`, with `record_status` (`recorded` or `not_recorded`) and
   `latest_record` (the latest advisory closure object or `null`).
 
-`submit_governance_closure` automatically follows its write with bounded
+`close_task` automatically follows its write with bounded
 inspection and returns `closure_confirmation`. Its `inspection_status` is
 `confirmed` when the intended record is observed, or `unconfirmed` with one of
 `record_inspected`, `persistence_unavailable`, `inspection_unavailable`, or
@@ -239,18 +237,18 @@ report with an explicit English documentation-impact section and
 material/no-impact rationale and creates no empty edit. When existing finalized
 reports do not already contain that section, a bounded English
 evidence-synthesis/documentation-impact worker submits a finalized synthesis;
-the coordinator never calls `submit_report` or self-asserts
+  the coordinator never calls a worker-only `publish_*` operation or self-asserts
 `documentation_not_required`.
 
 The no-impact close has a deterministic evidence sequence. After every required
-report is finalized, `record_initiative` creates or updates an initiative with
+publication is finalized, the coordinator creates or updates an initiative with
 the `linked_task_refs` and `linked_report_refs` arrays, containing compact
 `task_ref` and `report_ref` values, respectively, plus every other implementation
 and verification report link. Closure evidence cites those
 exact report references and returned digests. A report-only final initiative or
 self-asserted no-impact value is invalid. The coordinator closes that exact
-initiative, then calls `inspect_governance`
-first in task scope and then in initiative scope. Both views must surface the
+initiative, then uses the bounded `read_task` evidence view
+first in task scope and then in initiative scope. Both `read_task` evidence views must surface the
 task relationship, required report links, and closure before the coordinator
 claims a durable `ready` verdict. A failed write or inspection is disclosed as
 an advisory limitation and does not block an honest final answer. Missing
@@ -263,9 +261,9 @@ No governance record, mode, initiative status, dependency warning, linked-task
 state, report/plan status, user decision, review state, closure verdict, missing
 decision, missing closure, or human-view state may:
 
-- prohibit `create_delegation`;
-- prohibit `read_delegation` or `read_reports`;
-- prohibit `submit_report`;
+- prohibit `open_assignment`;
+- prohibit `read_task`;
+- prohibit any worker-only `publish_*` operation;
 - require a wave, gate, worker receipt, host stop, or server recovery route;
 - prevent evidence synthesis, model-owned rework, or a replacement worker;
 - prevent a safe user-facing final answer.
@@ -283,8 +281,8 @@ user override, free initiative status transitions, unresolved/cyclic warning
 retention, initiative closure with residual dependency risk, rework after
 `not_ready`, plan/report digest binding, decision append-only behavior, and
 final-answer availability without closure or a current view. It must also prove
-that finalized worker-report evidence yields the same independent
-`execution_outcome` even without an advisory record, that `inspect_task` exposes the separate
+that finalized worker-publication evidence yields the same independent
+`execution_outcome` even without an advisory record, that `read_task` exposes the separate
 `advisory_closure` projection, that closure automatically performs intended
 inspection, and that one transient persistence/inspection retry yields a
 bounded `closure_confirmation` without changing execution evidence. The

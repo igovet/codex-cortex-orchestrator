@@ -1,15 +1,15 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.12.3.
+Status: content-addressed production and development release contract for Cortex 1.13.0.
 
 ## Current release identity
 
-- semantic release label: 1.12.3
-- installable identity: `1.12.3+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.13.0
+- installable identity: `1.13.0+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
-- public facade: exactly fifteen action-specific MCP tools
+- public facade: exactly fourteen action-specific MCP tools
 - public audience: identical for coordinators and workers
 - runtime model contract: bundled `orchestrator` and `cortex-control` skills
 - profiles: advisory role templates
@@ -37,12 +37,11 @@ record may prohibit the model from taking the next safe meaningful step.
 7. `open_steering`
 8. `record_steering`
 9. `open_assignment`
-10. `consume_assignment_evidence`
-11. `publish_plan`
-12. `publish_result`
-13. `publish_documentation`
-14. `assess_governance`
-15. `close_task`
+10. `publish_plan`
+11. `publish_result`
+12. `publish_documentation`
+13. `assess_governance`
+14. `close_task`
 
 The catalog is identical for every participant. There is no audience filter,
 capability matrix, host-bound authority, tool-name alias, or action selector. Each input
@@ -59,7 +58,7 @@ sanitized JSON-RPC internal errors.
 The complete catalogue must fit in one `tools/list` JSON-RPC response below
 65,536 bytes. This bounded discovery contract is substantially below the 256
 KiB physical JSONL frame bound and does not use continuation pages, so every
-participant receives all fifteen operation definitions together. When a host
+participant receives all fourteen operation definitions together. When a host
 defers discovery for a mutation, it must retrieve the exact intact declaration
 needed for that operation. Missing or truncated declarations fail closed; no
 mutation contract may be guessed from names, descriptions, or partial output.
@@ -68,7 +67,7 @@ Only `open_task` accepts the exact resolved `project_root` and stores the
 canonical project association; it is the sole public project-root boundary. It
 returns compact `task_ref` for task-anchored tools. The durable `task_id` in
 results is non-callable evidence. `open_assignment` emits the assignment handle
-consumed by `consume_assignment_evidence`; consumption emits the server-owned
+consumed from the server-rendered assignment bootstrap; consumption emits the server-owned
 continuation used by exactly one publication, and each publication emits only
 its compact report handle. Initiative and decision calls use their advertised
 compact handles only,
@@ -76,7 +75,7 @@ never as permission. The native worker brief carries the saved root only for
 working-directory context. No root is inferred from MCP metadata, thread
 identity, the plugin process `cwd`, or a lifecycle hook.
 
-`create_task` is an exact, versioned task/result contract. It keeps the exact
+`open_task` is an exact, versioned task/result contract. It keeps the exact
 arbitrary-Unicode `user_request_original` and `user_language` beside the
 English-normalized internal `objective`, English bounded independent outcome
 requirements, `constraints`, and linked `acceptance_criteria`; the independent
@@ -84,14 +83,14 @@ verification plan starts empty and is not derived from acceptance, plus
 `task_contract_version` and optional bounded JSON `context`. The English
 normalization does not replace the original request, and the result contract is
 not a backend execution or permission gate. `context` never supplies or
-overrides the root. `create_delegation.scope` is required non-empty text
+overrides the root. `open_assignment.scope` is required non-empty text
 (maximum 65,536 characters) describing the concise worker-ownership boundary;
 detailed execution belongs in `instructions`, and object-shaped scope is
-invalid. `create_delegation` also separates exact packaged `profile_name` from
+invalid. `open_assignment` also separates exact packaged `profile_name` from
 the human-readable `role`, requires loaded renderer proof, and returns a
 host-neutral `dispatch_brief`. Codex maps that semantic brief to one matching
 active host spawn; Cortex does not prescribe static host arguments or lifecycle
-behavior. `read_delegation` retains the verbose brief and bounded chronology for
+behavior. `read_task` assignment view retains the server-rendered brief and bounded chronology for
 recovery and is not required on the healthy path.
 The three narrow decision record operations use their matching server-issued
 binding and closed advertised contract; the server owns the task and
@@ -101,7 +100,7 @@ for plan/report subjects. Plan approval additionally
 requires the matching ready-view handle, view digest, and source sequence from
 one returned relation; missing, renamed, extra, or cross-mixed fields fail
 before mutation.
-`submit_governance_closure` requires `subject_type` and the existing compact
+`close_task` requires the task reference and the existing evidence context
 task or initiative `subject_ref`; durable `subject_id` is evidence only.
 
 The root coordinator may use the ledger, user interaction, native worker
@@ -306,7 +305,7 @@ shared worker, missing spawn, or duplicate spawn is acceptable.
 ## Operator maintenance contract
 
 The packaged `cortex_runtime.v12_maintenance` module remains outside
-`tools/list`; it cannot change the fifteen-tool semantic catalog. Every command in this
+`tools/list`; it cannot change the fourteen-tool semantic catalog. Every command in this
 separately invoked non-MCP operator module starts from one exact V12 durable
 `task_id`, derives its shard and host-private targets from that ID, accepts no
 root/arbitrary path/V11 target, validates the owner-only
@@ -333,13 +332,13 @@ failure/recovery outcomes.
 ## Package boundary
 
 The installable package must include the manifest, MCP configuration,
-fifteen-tool semantic facade and runtime, schema-v1 store, host-private operator
+fourteen-tool semantic facade and runtime, schema-v1 store, host-private operator
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 and assets. It must not ship lifecycle hooks or lifecycle hook code.
 
-The package and repository metadata must consistently identify Cortex 1.12.3,
+The package and repository metadata must consistently identify Cortex 1.13.0,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
-and the exact fifteen-tool semantic catalog. Stale claims about waves, gates, capabilities,
+and the exact fourteen-tool semantic catalog. Stale claims about waves, gates, capabilities,
 plan authority, host epochs, receipt-gated lifecycle, required wait/read order,
 lifecycle HMAC, repair escrow, closure breakers, resource locks, required
 governance workers, or server-owned recovery are release defects. Worker
@@ -389,7 +388,7 @@ coordinator-only, textual-scope, and conditional-documentation invariants. It
 must semantically reject coordinator shell/search/graph routing and
 project-local artifact/state authority. It must also mutation-test empty
 task/result contracts, incomplete six-part delegation blocks, constructed
-IDs/digests, coordinator `submit_report`, MCP reads of `skill://` resources,
+IDs/digests, coordinator `publish_result`, MCP reads of `skill://` resources,
 premature/task-subject no-doc closure, report-only final initiatives, ad-hoc or
 cardinality-mismatched native dispatch, localized worker transcripts,
 self-asserted no-impact closure, and free-form role text treated as loaded
@@ -548,7 +547,7 @@ Before release, re-read [README.md](../README.md),
 manifest, profiles, authoritative skills, schemas, and executable package
 configuration. Verify links, Mermaid syntax, version strings, tool names,
 storage paths, model/effort rules, commands, and the V11 compatibility boundary.
-Also verify explicit root only on `create_task`, compact `task_ref` on the seven
+Also verify explicit root only on `open_task`, compact `task_ref` on the task-anchored
 task-anchored tools, compact `delegation_ref`/`report_ref`/`report_refs` on
 entity-derived tools, `subject_ref`/`initiative_ref` where applicable, the exact
 task/result language fields, canonical report schemas and one optional

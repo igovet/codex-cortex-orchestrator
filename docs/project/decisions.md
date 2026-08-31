@@ -13,10 +13,11 @@ backend owns durable IDs, strict schemas,
 transactions, idempotency, reference integrity, ordered history, bounded report
 assembly/read recovery, and project isolation.
 
-No server-owned waves, gates, mandatory ordering, plan authority, lifecycle
-capabilities, receipt-gated lifecycle, repair routes, closure breakers, or
-recovery escalation remain in the active V12 contract. Worker handoff reads may
-emit immutable delivery receipts, but they are evidence rather than authority.
+No server-owned waves, scheduler, lifecycle authority, receipt-gated lifecycle,
+repair routes, closure breakers, or recovery escalation remain in the active
+V12 contract. Assignment admission alone requires an assessment and, for
+light/full delivery, the exact current required-plan approval. Worker handoff
+reads may emit immutable delivery receipts, but they are evidence rather than authority.
 
 The coordinator maintains and persists only a model-owned DAG of optional
 worker-owned stages through existing task-linked initiative revisions and the
@@ -65,9 +66,9 @@ worktrees, existence/absence or unchanged-state, and `.codex`—are also
 worker-owned, regardless of read-only, plan, report-recovery, or direct user
 framing.
 
-## Uniform fifteen-tool facade
+## Uniform fourteen-tool facade
 
-The facade exposes exactly fifteen action-specific tools and one input schema for
+The facade exposes exactly fourteen action-specific tools and one input schema for
 every participant. There is no coordinator/worker projection or audience-based
 field filtering. `tools/list` is the authoritative registry, and runtime
 validation consumes the same schema objects.
@@ -93,7 +94,7 @@ creates no host authority. Its `instructions` contain the coordinator-compiled
 six-part knowledge contract. The orchestrator alone owns compilation; profiles
 consume it and may not rebuild routing.
 
-Only `create_task` accepts explicit resolved `project_root` and binds its stable
+Only `open_task` accepts explicit resolved `project_root` and binds its stable
 `task_id` to that canonical project ledger. Every other public operation
 requires the task anchor and derives or validates the project from the saved
 task. Initiative operations use it only as a project locator, never as
@@ -113,7 +114,9 @@ Reports are immutable `progress`, `result`, or `synthesis` evidence with
 report type. A plan's review policy is `informational` or `required`.
 `required` means the coordinator presents the exact finalized plan/digest,
 explains the review, requests an unambiguous approve/revise/cancel response,
-and ends the turn. It is ordinary-chat model policy, not a backend gate.
+and ends the turn. For light/full delivery the backend then admits only an
+explicit approval bound to that exact current plan; it does not authenticate
+the chat participant or authorize external action.
 
 New reports use the semantic publication operation, which owns storage
 representation and completion atomically and records one terminal outcome per
@@ -127,13 +130,13 @@ evidence only. Ordinary inspection creates no receipt; worker handoff reads
 create immutable delivery receipts. Report status and
 receipt presence are not backend acceptance or native lifecycle evidence.
 
-`read_reports` preserves the requested order for at most 20 unique known
-`report_refs` and is the only report body/chunk reader. It accepts an optional named-section
-selection, returns no more than 65,536 content bytes per call, and supplies a
-scope-bound cursor for exact resumption; omitting a consuming delegation returns metadata only.
-Task, delegation, and governance inspection use `after_sequence` with fixed 50-event pages,
-return compact report references, and expose `timeline`, `next_sequence`, and
-`has_more` rather than opaque capability cursors.
+The bounded `read_task` evidence view is the public inspection surface for the
+task's server-produced state, assignment, or evidence. A worker starts with
+the exact assignment view and continues the same bounded read only through
+the server-owned continuation; callers do not supply report references,
+consumer-delegation locators, or reconstructed cursors. The view returns
+semantic data with private ledger identity removed, so durable IDs and any
+continuation values remain evidence rather than capabilities.
 
 The matching narrow decision record operation appends a coordinator-asserted ordinary-chat decision
 against an existing task, delegation, plan, report, or same-project initiative.
@@ -158,7 +161,8 @@ production-critical, and long-lived work are C3 signals. Evidence and an
 explicit user preference may revise either label or depth. Neither produces a
 backend wave, mandatory stage, automatic model escalation, or user gate.
 
-`minimal`, `light`, and `full` describe proportional reasoning depth. The model
+After task creation and before the first assignment, the coordinator must
+append one evidence-backed initial governance assessment. `minimal`, `light`, and `full` describe proportional reasoning depth. The model
 selects and revises the mode; an explicit user override is stored with priority.
 The backend never infers complexity or automatically promotes a task.
 

@@ -24,13 +24,19 @@ class CallerContractGuardTests(unittest.TestCase):
         schema = PUBLIC_TOOLS["publish_plan"]["inputSchema"]
         valid = {
             "task_ref": "t_0123456789ab_" + "a" * 32,
-            "summary": "Plan.", "scope": "Bounded.",
+            "summary": "Plan.", "scope": "Bounded.", "review_policy": "required",
             "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Test."]}],
             "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
             "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped."]}],
             "risks": [], "unresolved": [], "status": "completed",
         }
         _validate_schema(schema, valid)
+        self.assertIn("review_policy", schema["required"])
+        self.assertEqual(schema["properties"]["review_policy"]["enum"], ["informational", "required"])
+        with self.assertRaisesRegex(ValueError, "missing required property"):
+            _validate_schema(schema, {key: value for key, value in valid.items() if key != "review_policy"})
+        with self.assertRaisesRegex(ValueError, "permitted values"):
+            _validate_schema(schema, {**valid, "review_policy": "optional"})
         for field in ("assignment_ref", "continuation_ref", "report_ref", "item_ref", "digest", "cursor", "handles"):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, "unsupported property"):
                 _validate_schema(schema, {**valid, field: "forbidden"})
