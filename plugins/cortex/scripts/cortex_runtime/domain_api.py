@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 
 from cortex_runtime import v12_service as legacy
 from cortex_runtime.v12_contract import record_ref, task_ref as compact_task_ref
-from cortex_runtime.v12_service import V12ServiceError, _task_store
+from cortex_runtime.v12_service import V12ServiceError, _record_list_in_task, _task_store
 from cortex_runtime.v12_store import V12Store, V12StoreError
 from cortex_runtime.domain_kernel import DecisionAggregate
 
@@ -30,7 +31,11 @@ def _worker_capability_provenance() -> dict[str, str]:
     from cortex_runtime.provenance import verify_runtime
     from cortex_runtime.public_contracts import build_public_contracts
     package_root = Path(__file__).resolve().parents[2]
-    identity = verify_runtime(package_root, "1.12.2", allow_source_mode=True)
+    identity = verify_runtime(
+        package_root,
+        "1.12.2",
+        allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
+    )
     catalogue = tuple(
         {
             "name": name,
@@ -70,6 +75,7 @@ def open_task(*, task: Mapping[str, object]) -> dict[str, Any]:
         raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
     requirements: list[object] = []
     acceptance_criteria: list[object] = []
+    outcome_contracts: list[dict[str, object]] = []
     for outcome in outcomes:
         if not isinstance(outcome, Mapping):
             raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
@@ -78,19 +84,52 @@ def open_task(*, task: Mapping[str, object]) -> dict[str, Any]:
         if not isinstance(acceptance, list):
             raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
         acceptance_criteria.extend(acceptance)
+        outcome_contracts.append({
+            "requirement": outcome.get("requirement"),
+            "acceptance": list(acceptance),
+            # The public task contract has no separate verification input.
+            # Acceptance remains linked evidence, never a duplicated item.
+            "verification": [],
+        })
     # The exact original request is already the immutable task objective.
     # Requiring a second model-authored summary created a redundant first-call
     # failure mode and allowed the two values to drift.
     payload = {"project_root": project_root, "objective": user_request_original,
                "user_request_original": user_request_original, "user_language": user_language,
                "requirements": requirements, "constraints": constraints,
-               "acceptance_criteria": acceptance_criteria, "context": context}
+               "acceptance_criteria": acceptance_criteria,
+               "outcome_contracts": outcome_contracts, "context": context}
     return legacy.create_task(**payload)
 
 
-def read_task(*, task_ref: str, after_sequence: int = 0) -> dict[str, Any]:
-    """Read bounded task state and aggregate evidence."""
-    return legacy.inspect_task(task_ref=task_ref, after_sequence=after_sequence)
+def read_task(*, task_ref: str, after_sequence: int = 0,
+              report_refs: list[str] | None = None,
+              sections: list[str] | None = None,
+              cursor: str | None = None) -> dict[str, Any]:
+    """Read task state or a bounded authoritative coordinator evidence page.
+
+    A coordinator must be able to consume the canonical report body before a
+    material synthesis, revision, rework, closure, or final-answer decision.
+    Keeping that read on the task query preserves the fixed semantic catalogue
+    while producing the same immutable digest/cursor receipts as worker reads.
+    """
+    if report_refs is None:
+        if sections is not None or cursor is not None:
+            raise V12ServiceError("report evidence selection is incomplete", code="invalid_argument", details={"field": "report_refs"})
+        return legacy.inspect_task(task_ref=task_ref, after_sequence=after_sequence)
+    if after_sequence != 0:
+        raise V12ServiceError("task chronology and report evidence are separate bounded reads", code="invalid_argument", details={"field": "after_sequence"})
+    store, canonical = _task_store(task_ref)
+    canonical_reports = _record_list_in_task(store, report_refs, label="report_id")
+    evidence = store.read_reports(
+        task_id=canonical,
+        report_ids=canonical_reports,
+        sections=sections,
+        cursor=cursor,
+        max_bytes=65_536,
+        consumer_delegation_id=None,
+    )
+    return {"task_ref": task_ref, "report_evidence": evidence}
 
 
 def _issue_clarification_legacy(*, task_ref: str, prompt: str, prompt_language: str,
@@ -144,6 +183,35 @@ def open_assignment(*, task_ref: str, mission: Mapping[str, object],
     from cortex_runtime.model_routing import profile_default_selection
     if not isinstance(mission, Mapping):
         raise V12ServiceError("assignment mission is invalid", code="invalid_argument", details={"field": "mission"})
+    responsibility = mission.get("responsibility")
+    assignment_policy = {
+        "delivery": "owner",
+        "evidence": "review",
+        "planning": "planning",
+    }.get(responsibility)
+    if assignment_policy is None:
+        raise V12ServiceError("assignment responsibility is invalid", code="invalid_argument", details={"field": "mission.responsibility"})
+    profile_name = mission.get("profile_name")
+    if (responsibility == "planning") != (profile_name == "planner"):
+        raise V12ServiceError("planning responsibility and planner profile must agree", code="invalid_argument", details={"field": "mission.responsibility"})
+    item_refs = mission.get("item_refs")
+    current = legacy.inspect_task(task_ref=task_ref).get("effective_contract")
+    current_items = current.get("items") if isinstance(current, Mapping) else None
+    current_refs = {item.get("item_ref") for item in current_items if isinstance(item, Mapping)} if isinstance(current_items, list) else set()
+    requirement_count = sum(1 for item in current_items if isinstance(item, Mapping) and item.get("category") in {"outcome", "requirement"}) if isinstance(current_items, list) else 0
+    if item_refs is None and (responsibility == "planning" or requirement_count == 1):
+        item_refs = sorted(current_refs)
+    if not isinstance(item_refs, list) or not item_refs or len(set(item_refs)) != len(item_refs) or any(not isinstance(item, str) for item in item_refs):
+        raise V12ServiceError("assignment item scope is required for a multi-outcome task", code="invalid_argument", details={"field": "mission.item_refs"})
+    if any(item not in current_refs for item in item_refs):
+        raise V12ServiceError("assignment item scope is stale or unavailable", code="outcome_item_not_found", details={"field": "mission.item_refs"})
+    if responsibility == "planning" and set(item_refs) != current_refs:
+        raise V12ServiceError("planning must map the complete current contract", code="invalid_argument", details={"field": "mission.item_refs"})
+    outcome_assignments = {
+        "owned": list(item_refs) if responsibility == "delivery" else [],
+        "contributing": list(item_refs) if responsibility == "evidence" else [],
+        "evidence_producing": list(item_refs) if responsibility == "evidence" else [],
+    }
     selection = profile_default_selection(mission.get("profile_name"))
     payload = {"task_ref": task_ref, "objective": mission.get("goal"), "role": mission.get("role"),
                "profile_name": mission.get("profile_name"), "scope": mission.get("constraints"), "instructions": mission.get("instructions"),
@@ -154,9 +222,11 @@ def open_assignment(*, task_ref: str, mission: Mapping[str, object],
         task_ref=task_ref, objective=payload["objective"], role=payload["role"], profile_name=payload["profile_name"],
         scope=payload["scope"], instructions=payload["instructions"], model=selection.model, reasoning_effort=selection.reasoning_effort,
         input_report_refs=input_report_refs, input_decision_refs=input_decision_refs,
+        outcome_assignments=outcome_assignments,
         parent_delegation_ref=None,
         bootstrap_provenance=provenance,
         derive_assignment_scope=True,
+        assignment_policy=assignment_policy,
     )
     delegation = result.get("delegation")
     if isinstance(delegation, Mapping) and isinstance(delegation.get("delegation_id"), str):
@@ -256,6 +326,42 @@ def consume_assignment_evidence(*, assignment_ref: str, cursor: str | None = Non
                 value = delegation_view.get(key)
                 if isinstance(value, str):
                     assignment_context[key] = value
+        assigned_items = effective_contract.get("assigned_items")
+        assigned_roles = {
+            item.get("assignment_role")
+            for item in assigned_items
+            if isinstance(item, Mapping)
+        } if isinstance(assigned_items, list) else set()
+        assignment_context["responsibility"] = (
+            "planning"
+            if assignment_context.get("profile_name") == "planner"
+            else "delivery"
+            if "owned" in assigned_roles
+            else "evidence"
+        )
+        coverage_source = (
+            "planning_items"
+            if assignment_context["responsibility"] == "planning"
+            else "assigned_items"
+        )
+        coverage_items = effective_contract.get(coverage_source)
+        if not isinstance(coverage_items, list) or not coverage_items:
+            raise V12ServiceError("assignment publication scope is unavailable", code="ledger_error")
+        required_item_refs = [
+            item.get("item_ref")
+            for item in coverage_items
+            if isinstance(item, Mapping) and isinstance(item.get("item_ref"), str)
+        ]
+        if len(required_item_refs) != len(coverage_items) or len(set(required_item_refs)) != len(required_item_refs):
+            raise V12ServiceError("assignment publication scope is invalid", code="ledger_error")
+        publication_reconciliation = {
+            "coverage_source": coverage_source,
+            "required_item_count": len(required_item_refs),
+            "required_item_refs": required_item_refs,
+            "contract_coverage_template": [
+                {"item_ref": item_ref} for item_ref in required_item_refs
+            ],
+        }
         predecessor_evidence = []
         for item in (worker.get("input_report_refs", []) if isinstance(worker, Mapping) else []):
             if not isinstance(item, Mapping):
@@ -277,6 +383,7 @@ def consume_assignment_evidence(*, assignment_ref: str, cursor: str | None = Non
                 })
         authority = {
             "effective_contract": dict(effective_contract),
+            "publication_reconciliation": publication_reconciliation,
             "assignment_context": assignment_context,
             "predecessor_evidence": predecessor_evidence if isinstance(predecessor_evidence, list) else [],
             "decision_evidence": decision_evidence if isinstance(decision_evidence, list) else [],
@@ -591,6 +698,15 @@ def open_plan_review(*, task_ref: str, plan_ref: str, prompt: str,
     store, canonical = _task_store(task_ref)
     try:
         _, plan_id = store.resolve_task_reference(task_id=canonical, value=plan_ref, kinds=("plan",))
+        chunks = store._read(lambda connection: store._report_chunks(connection, plan_id))
+        body = chunks[0].get("content") if len(chunks) == 1 and isinstance(chunks[0], Mapping) else None
+        unresolved = body.get("unresolved") if isinstance(body, Mapping) else None
+        if isinstance(unresolved, list) and unresolved:
+            raise V12ServiceError(
+                "plan contains unresolved decisions and is not ready for generic approval",
+                code="plan_clarification_required",
+                details={"field": "plan_ref"},
+            )
         issued = DecisionAggregate(store).open_plan_review(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
             subject_type="plan", subject_id=plan_id,

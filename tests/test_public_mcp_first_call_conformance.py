@@ -96,6 +96,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             "stages": [{"owner": "planner", "work": ["Plan."], "verification": ["Review."]}],
             "verification_facts": [{"state": "not_run", "summary": "No command."}],
             "documentation_impact": "No documentation impact.",
+            "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "planned", "verification": ["Mapped the exact item."]}],
         }
         # Run3n regression: planner's first publication must not require a
         # post-implementation documentation verdict.
@@ -109,11 +110,11 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             "record_plan_review": {"task_ref": refs["task_ref"], "binding_ref": refs["binding_ref"], "response_original": "Approved.", "user_language": "en", "outcome": "approve"},
             "open_steering": {"task_ref": refs["task_ref"], "prompt": "Change?", "prompt_language": "en"},
             "record_steering": {"task_ref": refs["task_ref"], "binding_ref": refs["binding_ref"], "response_original": "Changed.", "user_language": "en", "add": [], "retire_item_refs": ["o_0123456789ab"]},
-            "open_assignment": {"task_ref": refs["task_ref"], "mission": {"role": "Planner", "profile_name": "planner", "goal": "Plan.", "constraints": "Bounded.", "instructions": "Plan."}},
+            "open_assignment": {"task_ref": refs["task_ref"], "mission": {"role": "Planner", "profile_name": "planner", "responsibility": "planning", "goal": "Plan.", "constraints": "Bounded.", "instructions": "Plan.", "item_refs": ["o_0123456789ab"]}},
             "consume_assignment_evidence": {"assignment_ref": refs["assignment_ref"]},
             "publish_plan": {"continuation_ref": "c_" + "a" * 32, "assignment_ref": refs["assignment_ref"], "evidence": plan_first_call},
-            "publish_result": {"continuation_ref": "c_" + "a" * 32, "assignment_ref": refs["assignment_ref"], "evidence": {"schema": "cortex/report/result/v3", "summary": "Done.", "verification": [], "risks": [], "deviations": [], "unresolved": [], "source_text": "", "outcome": "Done.", "changes": [], "verification_facts": [{"state": "not_run", "summary": "No command."}], "documentation_impact": "No documentation impact."}},
-            "publish_documentation": {"continuation_ref": "c_" + "a" * 32, "assignment_ref": refs["assignment_ref"], "evidence": {"schema": "cortex/report/synthesis/v3", "summary": "No impact.", "verification": [], "risks": [], "deviations": [], "unresolved": [], "source_text": "", "findings": [], "recommendations": [], "documentation_impact": "No documentation impact."}},
+            "publish_result": {"continuation_ref": "c_" + "a" * 32, "assignment_ref": refs["assignment_ref"], "evidence": {"schema": "cortex/report/result/v3", "summary": "Done.", "verification": [], "risks": [], "deviations": [], "unresolved": [], "source_text": "", "outcome": "Done.", "changes": [], "verification_facts": [{"state": "not_run", "summary": "No command."}], "documentation_impact": "No documentation impact.", "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "complete", "verification": ["Verified the item."]}]}},
+            "publish_documentation": {"continuation_ref": "c_" + "a" * 32, "assignment_ref": refs["assignment_ref"], "evidence": {"schema": "cortex/report/synthesis/v3", "summary": "No impact.", "verification": [], "risks": [], "deviations": [], "unresolved": [], "source_text": "", "findings": [], "recommendations": [], "documentation_impact": "No documentation impact.", "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "complete", "verification": ["Verified documentation impact."]}]}},
             "assess_governance": {"task_ref": refs["task_ref"], "mode": "minimal"},
             "close_task": {"task_ref": refs["task_ref"], "verdict": "ready"},
         }
@@ -164,6 +165,13 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertIn("observable facts", evidence["properties"]["verification_facts"]["description"].lower())
         self.assertNotIn("closure evidence", evidence["properties"]["verification_facts"]["description"].lower())
 
+    def test_result_publication_schema_requires_observable_verification_facts(self) -> None:
+        contract = PUBLIC_TOOLS["publish_result"]["inputSchema"]
+        evidence = contract["properties"]["evidence"]
+        self.assertIn("verification_facts", evidence["required"])
+        self.assertIn("verification_facts", contract["description"])
+        self.assertIn("at least one", contract["description"])
+
         invalid = {
             "continuation_ref": "c_" + "a" * 32,
             "assignment_ref": "d_0123456789ab",
@@ -172,6 +180,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 "verification": [], "risks": [], "deviations": [], "unresolved": [], "scope": "Bounded.",
                 "stages": [{"owner": "planner", "work": ["Plan."], "verification": ["Review."]}],
                 "verification_facts": [{"state": "not_run", "summary": "No command."}],
+                "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "planned", "verification": ["Mapped this item."]}],
                 "acceptance_checks": ["Invented sibling."],
             },
         }
@@ -180,6 +189,61 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         failure = _validation_failure(raised.exception, tool_name="publish_plan", arguments=invalid)
         self.assertEqual(failure["details"]["path"], "$.evidence")
         self.assertEqual(failure["details"]["field"], "acceptance_checks")
+
+    def test_explorer_first_result_call_uses_the_closed_read_only_result_contract(self) -> None:
+        contract = PUBLIC_TOOLS["publish_result"]["inputSchema"]
+        evidence = contract["properties"]["evidence"]
+        outcome_description = evidence["properties"]["outcome"]["description"].lower()
+        verification_description = evidence["properties"]["verification_facts"]["description"].lower()
+
+        self.assertIn("read-only codebase investigation", outcome_description)
+        self.assertIn("execution map", outcome_description)
+        self.assertIn("specialized explorer report property", outcome_description)
+        self.assertIn("read-only investigator", verification_description)
+        self.assertIn("read-only specialist investigations", evidence["description"].lower())
+        self.assertIn("read-only explorer investigations", contract["description"].lower())
+        self.assertNotIn("findings", evidence["properties"])
+
+        explorer_call = {
+            "continuation_ref": "c_" + "a" * 32,
+            "assignment_ref": "d_0123456789ab",
+            "evidence": {
+                "schema": "cortex/report/result/v3",
+                "summary": "Mapped the bounded execution path and ownership.",
+                "verification": ["Cross-checked the entry point against its focused tests."],
+                "risks": ["The external integration was not available for inspection."],
+                "deviations": [],
+                "unresolved": ["Runtime behavior beyond the repository boundary remains unverified."],
+                "outcome": "Execution enters at the public facade, crosses the domain API, and is owned by the store contract; no alternate in-repository path was found.",
+                "changes": [],
+                "verification_facts": [{"state": "executed", "summary": "Targeted repository searches completed successfully from the project root."}],
+                "documentation_impact": "No documentation change was made by this read-only investigation.",
+                "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "unverified", "verification": ["External integration remains unavailable."]}],
+            },
+        }
+        _validate_schema(contract, explorer_call)
+
+    def test_result_publication_keeps_status_at_request_top_level(self) -> None:
+        contract = PUBLIC_TOOLS["publish_result"]["inputSchema"]
+        evidence = {
+            "schema": "cortex/report/result/v3", "summary": "Done.",
+            "verification": [], "risks": [], "deviations": [], "unresolved": [],
+            "outcome": "Partial remediation.", "changes": [],
+            "verification_facts": [{"state": "not_run", "summary": "No command."}],
+            "documentation_impact": "No documentation impact.",
+            "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "partial", "verification": ["Partial remediation observed."]}],
+        }
+        valid = {
+            "continuation_ref": "c_" + "a" * 32,
+            "assignment_ref": "d_0123456789ab",
+            "evidence": evidence,
+            "status": "partial",
+        }
+        _validate_schema(contract, valid)
+        with self.assertRaisesRegex(ValueError, "unsupported property"):
+            _validate_schema(contract, {**valid, "evidence": {**evidence, "status": "partial"}})
+        self.assertIn("only at the publication request top level", contract["properties"]["status"]["description"])
+        self.assertIn("never inside evidence", contract["description"])
 
     def test_task_read_advertises_server_formatted_plan_link_as_the_user_surface(self) -> None:
         contract = PUBLIC_TOOLS["read_task"]
@@ -224,19 +288,14 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
 
     def test_assignment_profile_schema_advertises_first_attempt_admission_classes(self) -> None:
         contract = PUBLIC_TOOLS["open_assignment"]
-        profile = contract["inputSchema"]["properties"]["mission"]["properties"]["profile_name"]
-        classes = profile["oneOf"]
-        self.assertEqual(len(classes), 3)
-        names = [name for item in classes for name in item["enum"]]
-        self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(set(names), set(packaged_profile_names()))
-        descriptions = " ".join(item["description"] for item in classes)
-        self.assertIn("light/full governance", descriptions)
-        self.assertIn("approved planner evidence", descriptions)
-        self.assertIn("Non-owning review", descriptions)
-        self.assertIn("Planning profile", descriptions)
-        self.assertIn("Before the first attempt", contract["description"])
-        self.assertIn("governance must remain minimal from the outset", contract["description"])
+        mission = contract["inputSchema"]["properties"]["mission"]
+        profile = mission["properties"]["profile_name"]
+        responsibility = mission["properties"]["responsibility"]
+        self.assertEqual(set(profile["enum"]), set(packaged_profile_names()))
+        self.assertEqual(responsibility["enum"], ["delivery", "evidence", "planning"])
+        self.assertIn("responsibility", mission["required"])
+        self.assertIn("not profile_name", contract["description"])
+        self.assertIn("explorer may own a final audit", contract["description"])
 
     def test_initialize_negotiates_current_and_legacy_core_versions(self) -> None:
         self.assertEqual(MCP_SUPPORTED_PROTOCOL_VERSIONS, ("2025-11-25", "2025-06-18"))
@@ -505,14 +564,15 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             ref = opened["handles"]["task_ref"]
             reread = call({"jsonrpc": "2.0", "id": 21, "method": "tools/call", "params": {"name": "read_task", "arguments": {"task_ref": ref}}})["result"]["structuredContent"]
             self.assertEqual(reread["handles"]["task_ref"], ref)
-            assignment_response = call({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "open_assignment", "arguments": {"task_ref": ref, "mission": {"role": "planner", "profile_name": "planner", "goal": "Read no predecessor reports.", "constraints": "One bounded test.", "instructions": "Inspect only assigned context."}}}})
+            planning_refs = [item["item_ref"] for item in reread["effective_contract"]["items"]]
+            assignment_response = call({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "open_assignment", "arguments": {"task_ref": ref, "mission": {"role": "planner", "profile_name": "planner", "responsibility": "planning", "goal": "Read no predecessor reports.", "constraints": "One bounded test.", "instructions": "Inspect only assigned context.", "item_refs": planning_refs}}}})
             self.assertNotIn("error", assignment_response, assignment_response)
             self.assertFalse(assignment_response["result"].get("isError"), assignment_response)
             assignment = assignment_response["result"]["structuredContent"]
             self.assertEqual(set(assignment), {"assignment_ref", "handles", "native_dispatch", "replayed", "relations"})
             self.assertFalse(assignment["replayed"])
             self.assertEqual(assignment["relations"], {})
-            replay_response = call({"jsonrpc": "2.0", "id": 23, "method": "tools/call", "params": {"name": "open_assignment", "arguments": {"task_ref": ref, "mission": {"role": "planner", "profile_name": "planner", "goal": "Prepare the same bounded plan.", "constraints": "One bounded test.", "instructions": "Inspect the same assigned context."}}}})
+            replay_response = call({"jsonrpc": "2.0", "id": 23, "method": "tools/call", "params": {"name": "open_assignment", "arguments": {"task_ref": ref, "mission": {"role": "planner", "profile_name": "planner", "responsibility": "planning", "goal": "Prepare the same bounded plan.", "constraints": "One bounded test.", "instructions": "Inspect the same assigned context.", "item_refs": planning_refs}}}})
             self.assertNotIn("error", replay_response, replay_response)
             replay_assignment = replay_response["result"]["structuredContent"]
             self.assertTrue(replay_assignment["replayed"])
@@ -564,6 +624,14 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             self.assertGreaterEqual(consumed["effective_contract"]["revision"], 1)
             consumed_refs = [item["item_ref"] for item in consumed["effective_contract"]["planning_items"]]
             self.assertTrue(consumed_refs)
+            reconciliation = consumed["publication_reconciliation"]
+            self.assertEqual(reconciliation["coverage_source"], "planning_items")
+            self.assertEqual(reconciliation["required_item_count"], len(consumed_refs))
+            self.assertEqual(reconciliation["required_item_refs"], consumed_refs)
+            self.assertEqual(
+                reconciliation["contract_coverage_template"],
+                [{"item_ref": item_ref} for item_ref in consumed_refs],
+            )
             self.assertEqual(consumed["assignment_context"]["profile_name"], "planner")
             continuation = consumed["continuation_ref"]
             self.assertEqual(consumed["predecessor_evidence"], [])
@@ -576,7 +644,11 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             self.assertGreaterEqual(documentation_impact_schema["minLength"], 1)
             self.assertNotIn("properties", documentation_impact_schema)
             for publication_name in ("publish_plan", "publish_result", "publish_documentation"):
-                self.assertNotIn("contract_coverage", PUBLIC_TOOLS[publication_name]["inputSchema"]["properties"]["evidence"]["properties"])
+                evidence_schema = PUBLIC_TOOLS[publication_name]["inputSchema"]["properties"]["evidence"]
+                self.assertIn("contract_coverage", evidence_schema["required"])
+                self.assertIn("exact one-to-one reconciliation", evidence_schema["properties"]["contract_coverage"]["description"].lower())
+                self.assertIn("losslessly coalesces", evidence_schema["properties"]["contract_coverage"]["description"].lower())
+                self.assertNotIn("uniqueItems", evidence_schema["properties"]["contract_coverage"])
             stage_schema = PUBLIC_TOOLS["publish_plan"]["inputSchema"]["properties"]["evidence"]["properties"]["stages"]["items"]
             _validate_schema(stage_schema, {"order": 1, "dependencies": [], "owner": "planner", "work": ["Plan."], "verification": ["Review."]})
             _validate_schema(stage_schema, {"order": 0, "dependencies": [0], "owner": "planner", "work": ["Plan."], "verification": ["Review."]})
@@ -610,6 +682,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 "verification": ["Inspect every criterion."], "risks": [], "deviations": [], "unresolved": [],
                 "verification_facts": [{"state": "not_run", "summary": "Planning does not execute project commands."}],
                 "documentation_impact": "No documentation changed; no affected paths.",
+                "contract_coverage": [{"item_ref": item_ref, "status": "planned", "verification": ["Mapped this exact contract item."]} for item_ref in consumed_refs],
             }})
             published_relation = plan["approval_view"]
             self.assertEqual(published_relation["status"], "ready")
@@ -662,18 +735,22 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             steering_opened = invoke(32, "open_steering", {"task_ref": ref, "assignment_ref": assignment_ref, "prompt": "Add verification?", "prompt_language": "en"})
             self.assertEqual(steering_opened["next_action"], "record_steering")
             steering_binding = steering_opened["handles"]["binding_ref"]
-            steering_record = invoke(33, "record_steering", {"task_ref": ref, "binding_ref": steering_binding, "response_original": "Yes", "user_language": "en", "add": [{"category": "verification", "text": "Run public handle test."}], "retire_item_refs": []})
+            steer_add = [{"outcome_ref": consumed_refs[0], "category": "verification", "text": "Run public handle test."}]
+            steering_record = invoke(33, "record_steering", {"task_ref": ref, "binding_ref": steering_binding, "response_original": "Yes", "user_language": "en", "add": steer_add, "retire_item_refs": []})
             self.assertEqual(steering_record["handles"]["binding_ref"], steering_binding)
-            replay = invoke(34, "record_steering", {"task_ref": ref, "binding_ref": steering_binding, "response_original": "Yes", "user_language": "en", "add": [{"category": "verification", "text": "Run public handle test."}], "retire_item_refs": []})
+            replay = invoke(34, "record_steering", {"task_ref": ref, "binding_ref": steering_binding, "response_original": "Yes", "user_language": "en", "add": steer_add, "retire_item_refs": []})
             self.assertTrue(replay["replayed"])
+            current_after_steer = invoke(341, "read_task", {"task_ref": ref})
+            current_steered_ref = current_after_steer["effective_contract"]["items"][0]["item_ref"]
 
             documentation_assignment = invoke(35, "open_assignment", {
                 "task_ref": ref,
                 "input_decision_refs": [subject_record["handles"]["decision_ref"]],
                 "mission": {
-                    "role": "Documentation reviewer", "profile_name": "technical_writer",
+                    "role": "Documentation reviewer", "profile_name": "technical_writer", "responsibility": "evidence",
                     "goal": "Assess documentation impact.", "constraints": "Read-only assessment.",
                     "instructions": "Publish one complete documentation synthesis.",
+                    "item_refs": [current_steered_ref],
                 },
             })
             documentation_consumed = invoke(36, "consume_assignment_evidence", {
@@ -697,6 +774,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                     "recommendations": [], "verification": ["Reviewed the declared documentation scope."],
                     "risks": [], "deviations": [], "unresolved": [],
                     "documentation_impact": "No documentation change is required.",
+                    "contract_coverage": [{"item_ref": item["item_ref"], "status": "complete", "verification": ["Reviewed this exact documentation-impact item."]} for item in documentation_consumed["effective_contract"]["assigned_items"]],
                 },
             })
             self.assertFalse(documentation["replayed"])
@@ -746,7 +824,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             serve_stdio(public_tools=PUBLIC_TOOLS, server_version=SERVER_VERSION, instructions=SERVER_INSTRUCTIONS)
         task = next(json.loads(line) for line in output.getvalue().splitlines() if json.loads(line).get("id") == 2)["result"]["structuredContent"]
         task_ref = task["handles"]["task_ref"]
-        request = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "open_assignment", "arguments": {"task_ref": task_ref, "mission": {"role": "planner", "profile_name": "planner", "goal": "Plan.", "constraints": "Bounded.", "instructions": "Inspect."}, "recommended_model": "gpt-5.6-luna"}}}
+        request = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "open_assignment", "arguments": {"task_ref": task_ref, "mission": {"role": "planner", "profile_name": "planner", "responsibility": "planning", "goal": "Plan.", "constraints": "Bounded.", "instructions": "Inspect."}, "recommended_model": "gpt-5.6-luna"}}}
         wire = [requests[0], requests[1], request]
         output = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO("\n".join(json.dumps(item) for item in wire) + "\n")), mock.patch("sys.stdout", output):
@@ -770,9 +848,11 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             "mission": {
                 "role": "planner",
                 "profile_name": "planner",
+                "responsibility": "planning",
                 "goal": "Prepare a bounded plan.",
                 "constraints": "Stay within the assigned project scope.",
                 "instructions": "Return one complete plan report.",
+                "item_refs": ["o_0123456789ab"],
             },
         }
         _validate_schema(schema, valid)

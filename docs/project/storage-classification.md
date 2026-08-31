@@ -28,15 +28,16 @@ carries the saved root for working-directory context.
 Optional task `context` is arbitrary JSON rather than a root binding. The task
 also stores its complete versioned result contract: exact original user request,
 user language, English objective, requirements, constraints, acceptance
-criteria, and verification plan.
+criteria, outcome linkage, and an independent verification plan that starts
+empty rather than duplicating acceptance.
 
 ## Classification matrix
 
 | Data | Location | Writers/readers | Classification and retention |
 | --- | --- | --- | --- |
 | Schema and project metadata | `schema_migrations`, `v12_metadata`, SQLite pragmas | Store bootstrap/validation | Canonical database-family, schema-v1, and project-hash integrity metadata |
-| Task/result contract | `tasks` | `create_task`; `inspect_task` | Canonical project-scoped exact original request/language plus English outcome, requirements, constraints, acceptance criteria, verification plan, and bounded context |
-| Effective outcome contract | `effective_contract_revisions`, `effective_contract_items` | Bootstrap, user `steer` decision; `inspect_task` | Revisioned active view of task-contract items with stable `o_` references; retired items remain historical while unaffected active references stay stable |
+| Task/result contract | `tasks` | `create_task`; `inspect_task` | Canonical project-scoped exact original request/language plus English outcomes, requirements, constraints, linked acceptance criteria, a non-derived independent verification plan, and bounded context |
+| Effective outcome contract | `effective_contract_revisions`, `effective_contract_items`, `effective_contract_item_details` | Bootstrap, user `steer` decision; `inspect_task` | One revisioned coverage item per independent user outcome; linked criteria, constraints, steer additions, source fragments, and replacement relations remain details rather than duplicate obligations |
 | Delegation assignments and projected briefs | `delegations` plus its saved task association | Coordinator `create_delegation`; delegation/task reads | Canonical bounded assignment with required textual ownership scope, exact model/effort, and compiled knowledge contract in `instructions`; the projected native brief adds the task's saved root for context, never host authority |
 | Outcome assignments and coverage | `delegation_outcome_assignments`, `report_contract_coverage` | Delegation/report writes; `inspect_task` aggregate/conformance projections | Per-revision owned/contributing/evidence-producing responsibility and immutable finalized-report coverage claims with verification details; used to identify missing, partial, unverified, stale, and contradictory active evidence, never a backend gate |
 | Worker evidence | `reports`, `report_chunks`, `report_usage` | `submit_report`; compact task/delegation references; bounded `read_reports` body/chunk reads | Immutable progress/result/synthesis/plan content, manifest/digest, review policy, assembly state, chunks, and quotas; private and potentially sensitive |

@@ -78,9 +78,9 @@ identity, the plugin process `cwd`, or a lifecycle hook.
 
 `create_task` is an exact, versioned task/result contract. It keeps the exact
 arbitrary-Unicode `user_request_original` and `user_language` beside the
-English-normalized internal `objective`, English bounded `requirements`,
-`constraints`, and `acceptance_criteria`; a verification plan is deterministically
-derived and persisted from acceptance criteria, plus
+English-normalized internal `objective`, English bounded independent outcome
+requirements, `constraints`, and linked `acceptance_criteria`; the independent
+verification plan starts empty and is not derived from acceptance, plus
 `task_contract_version` and optional bounded JSON `context`. The English
 normalization does not replace the original request, and the result contract is
 not a backend execution or permission gate. `context` never supplies or
@@ -487,8 +487,10 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     workers own all project grounding before the plan-review hold.
 11. A reportless/rework task whose user asks about project-local `.codex`; the
     coordinator delegates the project-state check instead of searching it.
-12. A task where all four task/result arrays are non-empty and every delegation
-    has the exact six non-empty knowledge sections before native spawn.
+12. A task with exactly two independent outcomes and one linked acceptance
+    criterion per outcome, where the effective contract and worker
+    reconciliation contain exactly two outcome items and every delegation has
+    the exact six non-empty knowledge sections before native spawn.
 13. A no-doc task where the owning worker submits a finalized report with an
     explicit English documentation-impact section and material/no-impact
     rationale, the final initiative links the exact task and that exact report

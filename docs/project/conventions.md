@@ -77,14 +77,16 @@
   plugin process `cwd`, hooks, or project/database directory scanning.
 - Create a versioned task/result contract before the first project delegation:
   preserve `user_request_original` and `user_language`; store an English
-  `objective`; and state requirements, constraints, acceptance criteria, and a
-  verification plan. Do not silently improve, discard, or overwrite the
+  `objective`; and state independent outcomes, their linked acceptance
+  criteria, and constraints. Do not silently improve, discard, or overwrite the
   original request. Treat optional `create_task.context` as arbitrary task JSON,
   never as a root binding.
-- Before `create_task`, require non-empty meaningful `requirements`,
-  `constraints`, and `acceptance_criteria` arrays; the persisted verification plan is derived deterministically. Optional
-  context cannot replace them; record a bounded assumption and verification
-  item instead of an unknown/placeholder array.
+- Before `create_task`, require every independent outcome to have a meaningful
+  requirement and linked acceptance criteria. Keep constraints as linked task
+  metadata and keep the independent verification plan empty at creation rather
+  than deriving it from acceptance. Optional context cannot replace an outcome;
+  record a bounded assumption against the affected outcome instead of an
+  unknown or placeholder contract entry.
 - Keep delegation `scope` a required non-empty text boundary of worker ownership;
   put detailed execution in `instructions` and reject object scope.
 - Call `submit_governance_closure` with required `subject_type`, the exact

@@ -51,8 +51,9 @@ The V12 protocol evidence must prove:
   references. No public tool accepts a durable `task_id` or another direct-ID
   alternate; the task/result contract separately preserves exact
   `user_request_original`, `user_language`, English `objective`, contract
-  version, requirements, constraints, acceptance criteria, verification plan,
-  and optional arbitrary-JSON `context`; no host metadata, plugin `cwd`, or hook
+  version, independent outcomes, their linked acceptance criteria, constraints,
+  the non-derived verification plan, and optional arbitrary-JSON `context`; no
+  host metadata, plugin `cwd`, or hook
   supplies the root;
 - returned `task_ref` values match the compact locator format and resolve the
   ledger without directory scanning; durable task IDs remain non-callable
@@ -106,11 +107,17 @@ The V12 protocol evidence must prove:
   work/verification, and an incomplete mapping stays assembling for a
   corrective immutable append rather than producing a terminal semantic-invalid
   plan or requiring a second planner delegation;
+- worker bootstrap returns an ordered pre-publication reconciliation template
+  for the exact immutable assignment scope; verify its count, ordered refs, and
+  disposition-free rows agree with the planner or assigned item collection and
+  are preserved through a clean first publication call;
 - `inspect_task` exposes the revisioned effective contract and aggregate
-  coverage. Verify stable active item references, one current owner per item,
+  coverage. Verify one stable active item per independent user outcome, linked
+  acceptance/verification without duplicates, exact source fragments, one current owner per item,
   allowed contributing/evidence-producing roles, completed/partial/unverified/
   stale/contradictory coverage classification, and a user-steer revision that
-  retires only affected items while preserving unaffected coverage;
+  replaces only its named outcome with merged source-grounded metadata while
+  preserving unaffected coverage and never adding a parallel item;
 - advisory conformance evidence links the current contract revision, decisions,
   finalized report manifest digests, completed coordinator-report consumption,
   and aggregate coverage without becoming a dispatch, reporting, or closure
@@ -483,9 +490,11 @@ Exercise several explicit `$cortex:orchestrator` tasks:
 15. A reportless/rework case where a user asks about project-local `.codex`;
     the coordinator delegates the existence/absence/unchanged check and never
     searches the project itself.
-16. A live task whose four task/result arrays are all non-empty and whose every
-    delegation carries the six knowledge sections exactly once, in order, with
-    non-empty delegation-specific content before native spawn.
+16. A live task with exactly two independent outcomes and one linked acceptance
+    criterion per outcome; the effective contract and worker reconciliation
+    must contain exactly two outcome items, while every delegation carries the
+    six knowledge sections exactly once, in order, with non-empty
+    delegation-specific content before native spawn.
 17. The no-impact route creates/updates a final initiative with both the exact
     task relationship and every required finalized report link, closes the
     exact returned initiative, and verifies the closure and links through both

@@ -74,7 +74,7 @@ class V12TimelineRepairTests(unittest.TestCase):
             objective=objective,
             user_request_original=objective,
             user_language="en",
-            task_contract_version="cortex/task-contract/v2-criteria-derived",
+            task_contract_version="cortex/task-contract/v3-outcome-linked",
             requirements=["Preserve the canonical timeline."],
             constraints=["No additional constraints."],
             acceptance_criteria=["The task timeline is ordered and complete."],

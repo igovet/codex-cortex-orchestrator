@@ -159,12 +159,25 @@ language; reject translated or duplicate language-specific values, and carry its
 compact decision evidence in the affected assignments' declared predecessor
 evidence.
 
-Before `open_task`, verify that the requirements, constraints,
-acceptance conditions and verification steps are each non-empty collections of
-meaningful English entries. Never submit absent, empty, `TODO`, `TBD`, `unknown`,
-or equivalent placeholder arrays. Express uncertainty as a bounded explicit
-assumption plus a verification item, not an empty contract. Optional contextual
-may be null; it never replaces any required contract dimension.
+Before `open_task`, verify that every independent outcome has a meaningful
+English requirement and its own linked acceptance conditions. Keep material
+constraints as linked task or outcome metadata. Acceptance must not be copied
+into a standalone verification obligation, and service/orchestration
+instructions must not become outcomes. Never submit absent, empty, `TODO`,
+`TBD`, `unknown`, or equivalent placeholder entries. Express uncertainty as a
+bounded explicit assumption plus a verification need linked to the affected
+outcome, not an empty contract. Optional context may be null; it never replaces
+an outcome.
+
+Preserve a lossless source-claim register at this boundary. Every independently
+actionable user defect, requested change, constraint, and acceptance claim gets
+its own task outcome; never compress a numbered list, attachment, audit, or
+prior-thread finding pool into an umbrella outcome such as “fix all verified
+issues.” Keep stable source keys in the outcome text when the source already
+provides them. Later discovery may verify, reject, defer, supersede, or request a
+decision for a claim, but no stage may silently omit it. An attachment summary
+is context, not a replacement for enumerating its material claims in the task
+contract.
 
 The task-creation operation is the only operation that receives the canonical
 absolute project root. Keep its contract dimensions non-empty and meaningful;
@@ -272,6 +285,14 @@ exceptions, preferences, policies, learnings, and follow-ups. These are
 durable advisory equivalents, never backend gates, waivers, automatic
 promotion, or permission to complete.
 
+Assignment ownership is selected from the concrete mission, independently of
+the advisory profile. A read-only final audit can be delivery ownership even
+when `explorer` supplies the expertise; an explorer used only for discovery is
+non-owning evidence. Select only the exact independent outcomes that the bounded
+worker can reconcile. Never assign the whole contract to a narrow specialist
+merely because the server exposes it, and never infer ownership from the
+profile name.
+
 ## Model-owned dynamic pipeline
 
 The coordinator constructs, follows, and adapts an **orchestration pipeline
@@ -355,8 +376,9 @@ new scope, a passing focused subset, or a later report must never silently
 supersede unresolved QA evidence.
 
 Before every new or rework delegation, perform an admission preflight against
-the current governance depth, the chosen profile's packaged ownership class,
-and the exact available predecessor evidence. In light/full governance,
+the current governance depth, the mission's explicit responsibility and exact
+item scope, and the available predecessor evidence. The chosen profile supplies
+expertise and never selects ownership. In light/full governance,
 production-owner work requires finalized approved planner evidence; build that
 planning and approval chain first. When bounded C1 production work genuinely
 needs no plan, governance stays minimal from the outset—it is never downgraded
@@ -556,6 +578,13 @@ no planning need; it records an explicit rationale. It must not relabel a failed
 or absent report as a C1/minimal path, and it must never treat native prose as a
 durable plan substitute.
 
+A plan containing an unresolved product, requirement, scope, acceptance, or
+policy choice is not ready for generic approval. Open the matching clarification
+hold and obtain that explicit answer before presenting approval, or have the
+planner publish a revision that removes the unresolved choice. “Approve this
+plan” approves only the exact plan artifact; it never selects one of several
+alternatives embedded in unresolved items, assumptions, risks, or stage prose.
+
 For any user-question hold or worker recovery, preserve the exact live handle
 when it is known and use the server-returned parent-assignment relation for a
 replacement when it is
@@ -590,6 +619,14 @@ in particular, `ready_with_risks` never asks the user to confirm, approve, or
 reclassify the result. A storage or inspection outage is nonblocking for a
 truthful answer; preserve the outcome and disclose `closure_unconfirmed` when
 the automatic attempt or inspection cannot be confirmed.
+
+Do not choose or communicate `ready` or `ready_with_risks` until the current
+conformance projection agrees, every supporting report body used in synthesis
+has a complete coordinator consumption receipt for its immutable digest, and
+no active non-superseded evidence report retains a failed, partial, blocked, or
+unverified contract disposition. The closure service may normalize an
+overstated requested verdict downward; report the recorded verdict, never the
+requested one, as the task result.
 Ending a turn
 before the outcome is reached is permitted after one genuine user question
 whose answer materially changes requirements, scope, acceptance, or grants
@@ -713,6 +750,25 @@ never prove worker consumption. Never paste a huge report into a delegation;
 pass its compact evidence reference and require the worker to read only needed
 sections. Preserve contradictions, partial results, exact commands, and
 limitations.
+
+Every worker publication reconciles every exact independent outcome in its
+server-issued assignment scope once, with an evidence-backed disposition. The
+outcome retains its acceptance, verification, task constraints, steer
+extensions, and exact user-source fragments as linked context; none of those
+becomes a second coverage row. A steer addition revises its named outcome and
+never creates a parallel obligation. The worker starts from the server-owned
+pre-publication reconciliation receipt,
+preserves its complete ordered row set, and checks the finished row count and
+references against that same receipt before the first publication attempt. The
+worker keeps multiple checks for one item under that item's single disposition
+instead of emitting another row; compatible mechanical repetition is
+losslessly coalesced by the server, while conflicting dispositions remain a
+report defect. The coordinator compares that reconciliation against the original source-claim
+register before adapting the pipeline, requesting approval, closing, or writing
+the final answer. A missing claim is rework, not an implicit rejection or a
+successful summary. A plan revision and every downstream assignment must retain
+the complete still-effective claim set; structural revision linkage alone does
+not prove semantic preservation.
 
 The worker may consume only the exact finalized predecessor evidence declared on
 its own delegation. The coordinator must put those exact server-returned report

@@ -58,6 +58,7 @@ _MIGRATIONS = (
     (21, "v21-worker-bootstrap-capabilities"),
     (22, "v22-dispatch-lease-expiry"),
     (23, "v23-immutable-assignment-scope"),
+    (24, "v24-outcome-linked-contract"),
 )
 _BACKUP_FORMAT = "cortex/v12-maintenance-backup/v1"
 _BACKUP_ID_PREFIX = "backup-"
@@ -88,6 +89,7 @@ _REQUIRED_TABLES = frozenset(
         "user_decisions",
         "projection_jobs",
         "projection_files",
+        "effective_contract_item_details",
         "idempotency",
         "approval_handles",
         "clarification_bindings",
@@ -140,6 +142,7 @@ _REQUIRED_COLUMNS = {
     "user_decisions": frozenset({"decision_id", "task_id", "subject_type", "subject_id", "decision_type", "prompt_en", "response_original", "response_en", "steering_delta_json"}),
     "effective_contract_revisions": frozenset({"task_id", "revision", "decision_id", "created_sequence"}),
     "effective_contract_items": frozenset({"item_id", "project_hash", "task_id", "category", "ordinal", "text", "created_revision", "retired_revision"}),
+    "effective_contract_item_details": frozenset({"item_id", "details_json", "source_decision_id"}),
     "delegation_outcome_assignments": frozenset({"delegation_id", "item_id", "assignment_role", "revision", "superseded_by_delegation_id", "superseded_sequence"}),
     "assignment_scope_snapshots": frozenset({"assignment_id", "task_id", "item_id", "assignment_role", "contract_revision", "created_sequence"}),
     "report_contract_coverage": frozenset({"report_id", "item_id", "status", "verification_json"}),

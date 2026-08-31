@@ -27,6 +27,17 @@ itself.
    later documentation-impact decision, covering behavior, architecture,
    interfaces, commands, verification, conventions, and feature ownership.
 
+Build the validation matrix from the original task contract, not from the
+latest implementation summary. Every independent effective-contract outcome must appear
+exactly once with its current disposition and canonical report digest. Keep
+its linked acceptance and verification facts in that single matrix row rather than
+creating a second row. Before the first publication attempt, preserve the
+complete ordered server-owned reconciliation row set and compare the finished
+row count and references against its receipt. Compare
+the matrix across discovery, every plan revision, implementation assignments,
+rework, and final verification. An omitted item, a merged finding, or an item
+present only in an earlier report is a failed handoff and requires rework.
+
 Artifact verification includes existence, absence, unchanged-state, manifests,
 Git, caches, worktrees, and project-local `.codex`. A validation worker performs
 every such check; the coordinator never performs one directly.
@@ -45,6 +56,11 @@ the expected failure and itself exits 0. Never omit or relabel a nonzero result.
 Missing evidence is not a pass. It may justify more verification, bounded
 rework, `ready_with_risks`, or `not_ready`; it never becomes a backend
 permission barrier or prevents an honest final answer.
+
+Before a material classification, consume the complete canonical report body
+through the coordinator evidence-read path and finish its continuation chain.
+A native handoff summary, report reference, projection link, or manifest alone
+does not establish that findings and unresolved items were transferred.
 
 Record decisive check evidence in the immutable report, including selected
 large-report sections when chunking is required. A status or final handoff may

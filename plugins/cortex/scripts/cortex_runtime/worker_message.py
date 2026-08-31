@@ -105,6 +105,17 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   flow: use the active recovery/rework assignment semantics when correction is
   genuinely required.
 
+- Reconcile every exact item in the server-issued assignment scope once in the
+  publication evidence. Copy emitted item references byte-for-byte, attach an
+  evidence-backed disposition to each, and never omit, merge, invent, or infer
+  an item. Start from the server-issued pre-publication reconciliation receipt,
+  preserve its complete ordered row set, and compare the finished row count and
+  ordered references with that same receipt before the first publication call.
+  Walk the assigned items once in their emitted order; when one item has several
+  checks, keep all of those checks under that same item instead of emitting a
+  second disposition for it. If any assigned item cannot be resolved, publish a
+  partial or blocked outcome instead of consuming a completed delivery slot.
+
 - Every implementation or verification outcome includes a complete
   `Documentation impact` assessment. Name affected paths when impact exists;
   otherwise explain why there is no impact and do not create an empty edit.
@@ -197,7 +208,7 @@ def packaged_profile_assignment_policy(profile_name: object) -> str | None:
     """
     if profile_name not in _packaged_profiles():
         return None
-    review = {"accessibility_auditor", "build_verification", "code_reviewer", "database_architect", "debugger", "explorer", "performance_engineer", "qa_engineer", "security_auditor", "technical_writer"}
+    review = {"accessibility_auditor", "build_verification", "code_reviewer", "database_architect", "explorer", "performance_engineer", "qa_engineer", "security_auditor", "technical_writer"}
     if profile_name == "planner":
         return "planning"
     return "review" if profile_name in review else "owner"

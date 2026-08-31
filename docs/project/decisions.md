@@ -82,8 +82,9 @@ external actions remain outside the ledger.
 A task is the project-scoped root of delegations, reports, and decisions. Before
 the first project delegation, it records the versioned task/result contract:
 the exact arbitrary-Unicode `user_request_original`, `user_language`, English
-normalized `objective`, `requirements`, `constraints`, `acceptance_criteria`,
-and a verification plan derived deterministically from acceptance criteria. This contract preserves intent and acceptance context;
+normalized `objective`, independent outcome requirements, constraints, linked
+`acceptance_criteria`, and a non-derived verification plan that starts empty.
+This contract preserves intent and acceptance context;
 it is neither an implementation plan nor a backend permission boundary.
 
 A delegation captures bounded objective, advisory role, scope, instructions,

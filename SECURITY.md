@@ -130,8 +130,10 @@ worker brief carries the saved root only for working-directory context.
 `create_task` records one versioned task/result contract: English-normalized
 `objective` for internal coordination; exact arbitrary-Unicode
 `user_request_original`; `user_language`; `task_contract_version`; bounded
-English `requirements`, `constraints`, and `acceptance_criteria`; the service
-deterministically persists its verification plan from the acceptance criteria; and optional bounded JSON `context`. Original user wording
+English `requirements`, `constraints`, and `acceptance_criteria`; an outcome
+contract that links each acceptance criterion to its requirement; an empty
+independent verification plan that is never derived by copying acceptance; and
+optional bounded JSON `context`. Original user wording
 is preserved and never replaced by the normalization. The result contract is
 not a backend execution plan or permission boundary. Optional `context` never
 supplies or overrides the root. `create_delegation.scope` is a required
@@ -139,8 +141,10 @@ non-empty text string of at most 65,536 characters: it is the concise boundary
 of worker ownership, detailed execution belongs in `instructions`, and an
 object-shaped scope is invalid. Delegation `model` and `reasoning_effort` are
 required together and retained exactly. `profile_name` is an exact packaged
-enum distinct from the bounded human-readable `role`, and its renderer proof
-must be loaded. The returned `dispatch_brief` preserves the exact rendered
+enum distinct from the bounded human-readable `role`; it selects expertise, not
+ownership. The public mission's explicit `responsibility` selects planning,
+delivery ownership, or non-owning evidence, while exact `item_refs` bind the
+scope that must be reconciled. Renderer proof must be loaded. The returned `dispatch_brief` preserves the exact rendered
 message and selection for one matching host spawn. This semantic delegation
 receipt proves packaged profile and semantic dispatch data, not host lifecycle.
 Host-side one-shot dispatch correlation is isolated below a digest-named
@@ -262,24 +266,40 @@ the linked conformance projection guide model reasoning but never become a
 backend authorization or lifecycle gate.
 
 The current V3 specialist envelope is admitted before terminal finalization.
-It requires observable evidence, residual risks/deviations/unresolved items,
-and a documentation-impact decision. A planner receives the exact full current
-effective-contract token catalogue in its semantic brief and maps each current
-requirement, constraint, acceptance criterion, and derived verification item
-exactly once. Ordered plan stages also identify an owner, earlier dependencies,
+It requires an exact one-to-one disposition for every independent outcome in
+the immutable assignment scope, observable evidence, and residual
+risks/deviations/unresolved items. Acceptance, verification, constraints,
+steer additions, and source fragments remain linked metadata instead of
+separate coverage obligations.
+worker bootstrap provides a server-owned ordered reconciliation template and
+count/reference receipt, but deliberately supplies no status or verification
+claim. The worker must preserve and complete that row set before its first
+publication attempt, so completeness enforcement cannot fabricate evidence.
+Each steer addition targets an active outcome and produces a source-grounded
+replacement revision; it cannot create an unlinked parallel item. Compatible
+repeated rows for one item are losslessly coalesced only when their
+status agrees, preserving all unique verification facts. Conflicting repeated
+statuses, missing items, and foreign items are rejected before the terminal
+publication slot is consumed.
+Result and synthesis evidence also require a documentation-impact decision. A
+planner receives the exact full current independent-outcome catalogue in its
+semantic brief and maps each outcome exactly once with its linked criteria and
+provenance. Ordered plan stages also identify an owner, earlier dependencies,
 work, and verification. Predictable structural or mapping failures leave the
 same report assembling and consume no terminal result slot; V1/V2 history stays
 immutable and readable.
 
-Ordinary delegation/task inspection creates no receipt or lifecycle fact.
-`read_reports` returns at most 20 unique known reports in the exact requested
-order and is the only report body/chunk reader. Coordinator calls return
-metadata/manifests only. A worker body read made with an exact consuming
+Ordinary delegation/task state inspection creates no receipt or lifecycle fact.
+The report reader returns at most 20 unique known reports in the exact requested
+order. A coordinator may read bodies only through an exact task anchor; public
+`read_task` evidence mode exposes that bounded route. A worker body read made with an exact consuming
 delegation (which declares every input) creates an immutable
 page receipt (digest, chunk indexes, byte count, and cursor chain); a
-coordinator-classified read does not substitute for that evidence. A
-coordinator does not call it merely to summarize a completed worker report: the
-worker must return a concise `Summary` and exact `Report ref`. Downstream
+coordinator-classified receipt never substitutes for a downstream worker's own
+consumption. Native `Summary` and `Report ref` handoffs are routing context, not
+semantic evidence. Before synthesis, revision, rework, closure, or a final
+answer, the coordinator consumes every relevant canonical body through its full
+all-section cursor chain; selected-section or metadata reads are insufficient. Downstream
 workers use `read_reports` when their declared work genuinely requires the
 report body. It returns only complete JSON
 chunks that fit its fixed server-side page (at most 65,536 bytes), with a
@@ -438,7 +458,9 @@ links remain project-scoped. Missing or cyclic dependencies are returned as
 warnings; they do not block a later material revision or closure.
 
 Closure verdicts are `ready`, `ready_with_risks`, and `not_ready`. They are
-model-authored recommendations. A `not_ready` task can receive another
+model-requested recommendations. The ledger never upgrades a request and
+normalizes an overstated verdict downward to current conformance, returning both
+requested and recorded values without selecting the next stage. A `not_ready` task can receive another
 delegation and another report immediately. An initiative can close while a
 dependency remains unresolved if the residual risk is recorded. Missing
 closure never prevents a user-facing answer.
@@ -536,8 +558,10 @@ Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
 `1.12.2+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
 normalized plugin-tree digest before answering `initialize`. Plain `1.12.2` is
-accepted only when source mode is explicitly enabled and is never a publishable
-Marketplace artifact. Release validation also enforces Desktop metadata limits,
+accepted only when source mode is explicitly enabled; an explicitly source-mode
+checkout may also retain its last stamped suffix while edited, but reports
+`parityVerified=false`. Installed and candidate runtimes remain strict, and a
+plain or stale stamp is never a publishable Marketplace artifact. Release validation also enforces Desktop metadata limits,
 including a 128-byte `defaultPrompt` and a maximum three-second `SessionEnd` hook
 timeout, so host clamping or ignored metadata cannot conceal package drift.
 
@@ -578,7 +602,9 @@ A useful report includes:
    redundant anchor, the versioned task/result language fields preserve the
    original request beside English durable coordination fields, delegation
    `scope` is required non-empty text, object scope is rejected, exact packaged
-   `profile_name` stays distinct from human `role`, model/effort are required
+   `profile_name` stays distinct from human `role` and mission
+   `responsibility`, every assignment requires an explicit non-empty exact item
+   scope that is reconciled one-to-one, model/effort are required
    together, closure requires `subject_type` plus matching `subject_ref`,
    and user decisions bind the correct subject and digest. For a plan approval,
    verify the complete canonical decision payload: neutral `prompt`, exact
@@ -588,7 +614,8 @@ A useful report includes:
 4. Run the self-contained skill/profile lint and isolated V12 release/protocol
    test.
 5. Verify schema-v1 bootstrap, concurrent mutations, idempotency conflicts,
-   chunk ordering/finalization/abort and bounded report reads, cross-project
+   chunk ordering/finalization/abort, bounded worker reads, complete
+   coordinator body-consumption receipts, cross-project
    rejection, governance and decision history, dependency warnings,
    host-private verified projection behavior, and V11 byte-for-byte
    preservation.
@@ -611,7 +638,8 @@ A useful report includes:
    bounded knowledge route and it used no source/edit/command/test tool, never
    substitute `codex exec`, scan every child message for English-only content,
    verify worker-owned documentation-impact evidence plus exact initiative and
-   closure links, and never claim an unrun smoke.
+   closure links, exercise lossless multi-finding handoff and truthful verdict
+   normalization, and never claim an unrun smoke.
 11. State every unavailable release, host, or live-model check explicitly.
 
 See [verification.md](docs/project/verification.md) and

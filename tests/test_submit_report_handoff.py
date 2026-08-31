@@ -30,7 +30,7 @@ class SubmitReportHandoffTests(unittest.TestCase):
                     objective="Receipt handoff",
                     user_request_original="Receipt handoff",
                     user_language="en",
-                    task_contract_version="cortex/task-contract/v2-criteria-derived",
+                    task_contract_version="cortex/task-contract/v3-outcome-linked",
                     requirements=["Return a receipt"],
                     constraints=["Do not mutate production"],
                     acceptance_criteria=["Approval metadata is ready"],

@@ -313,15 +313,15 @@ def create_task(
     requirements: Any,
     constraints: Any,
     acceptance_criteria: Any,
+    outcome_contracts: Any = None,
     context: Any = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Record one task in the caller's isolated V12 project ledger."""
-    # The public V13 task contract has one source of truth for verification:
-    # the required acceptance criteria.  Copy the list before storage so the
-    # derived entries participate byte-for-byte in the mutation payload and
-    # idempotency receipt without retaining a second caller-controlled input.
-    verification_plan = list(acceptance_criteria) if isinstance(acceptance_criteria, list) else acceptance_criteria
+    # The public task contract has no separate verification input. Acceptance
+    # remains linked to its outcome and must not be copied into a second task
+    # dimension or coverage obligation.
+    verification_plan: list[Any] = []
     return _mutation_store(
         _create_store(project_root),
         "create_task",
@@ -332,6 +332,7 @@ def create_task(
         constraints=constraints,
         acceptance_criteria=acceptance_criteria,
         verification_plan=verification_plan,
+        outcome_contracts=outcome_contracts,
         context=context,
         idempotency_key=idempotency_key,
     )
@@ -360,6 +361,7 @@ def create_delegation(
     outcome_assignments: dict[str, list[str]] | None = None,
     bootstrap_provenance: dict[str, str] | None = None,
     derive_assignment_scope: bool = False,
+    assignment_policy: str | None = None,
 ) -> dict[str, Any]:
     """Persist a coordinator-supplied delegation without selecting a route."""
     store, canonical = _task_store(task_ref)
@@ -383,6 +385,7 @@ def create_delegation(
         idempotency_key=idempotency_key,
         bootstrap_provenance=bootstrap_provenance,
         derive_assignment_scope=derive_assignment_scope,
+        assignment_policy=assignment_policy,
     )
 
 

@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cortex_runtime.model_routing import NATIVE_MODELS, NATIVE_REASONING_EFFORTS
-from cortex_runtime.worker_message import packaged_profile_assignment_policy, packaged_profile_names
+from cortex_runtime.worker_message import packaged_profile_names
 from cortex_runtime.semantic_registry import OPERATION_NAMES
 from cortex_runtime.v12_contract import (
     CLOSURE_SUBJECTS, DECISION_SUBJECTS, DECISION_TYPES, DIGEST_PATTERN,
@@ -450,7 +450,7 @@ _WORKER_BRIEF_SCHEMA = _result_object("Coordinator-owned recovery brief and rend
         "assembly_state": _string(enum=("finalized",), maximum=16),
     })),
     "renderer": _RENDERER_SCHEMA,
-    "effective_contract": _result_object("Bounded effective-contract projection. assigned_items are this delegation's delivery assignments; a planner additionally receives planning_items, the exact full current contract token catalogue it must map once in a v3 plan before finalization.", {"revision": {"type": "integer", "minimum": 1}, "assigned_items": {"type": "array"}, "planning_items": {"type": "array", "description": "Planner-only full current requirement, constraint, acceptance, and derived-verification token catalogue for exact plan mapping."}, "decisions": {"type": "array"}}),
+    "effective_contract": _result_object("Bounded outcome-oriented contract projection. assigned_items are this delegation's independent outcomes with linked criteria and provenance; a planner additionally receives the exact full current outcome catalogue it must map once in a v3 plan before finalization.", {"revision": {"type": "integer", "minimum": 1}, "assigned_items": {"type": "array"}, "planning_items": {"type": "array", "description": "Planner-only full independent-outcome catalogue. Acceptance, verification, constraints, and steer additions remain linked metadata, never extra coverage items."}, "decisions": {"type": "array"}}),
     "dispatch_brief": _DISPATCH_BRIEF_SCHEMA,
 })
 
@@ -465,8 +465,15 @@ _RESULT_SLOT_SCHEMA = _result_object("Terminal normal-result slot receipt for on
 })
 
 
+_SOURCE_FRAGMENT_SCHEMA = _result_object("Exact source fragment retained from the user task or steer input.", {
+    "source_type": _string(enum=("user_request", "user_steer", "legacy_task_contract"), maximum=32),
+    "path": _string(maximum=256), "text": _string(),
+    "decision_ref": _entity_ref("decision"),
+})
+
+
 _RESULT_PROPERTY_SCHEMAS: dict[str, dict[str, Any]] = {
-    "effective_contract": _result_object("Current revisioned effective task outcome contract. Its emitted item_ref values are the only permissible tokens for optional create_delegation.outcome_assignments; copy them byte-for-byte, and otherwise omit that property.", {"revision": {"type": "integer", "minimum": 1}, "items": _result_array("Current stable outcome items.", _result_object("Outcome item.", {"item_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14), "category": _string(enum=("requirement", "constraint", "acceptance", "verification"), maximum=16), "ordinal": {"type": "integer", "minimum": 0}, "text": _string(), "created_revision": {"type": "integer", "minimum": 1}}))}),
+    "effective_contract": _result_object("Current revisioned outcome-oriented contract. Each item is one independent user outcome; acceptance, verification, constraints, steer additions, and exact source fragments remain linked metadata rather than extra coverage obligations.", {"revision": {"type": "integer", "minimum": 1}, "items": _result_array("Current stable independent outcome items.", _result_object("One independent outcome with linked criteria and provenance.", {"item_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14), "category": _string(enum=("outcome", "requirement", "constraint", "acceptance", "verification"), maximum=16), "ordinal": {"type": "integer", "minimum": 0}, "text": _string(), "acceptance_criteria": _text_array(minimum=0), "verification_criteria": _text_array(minimum=0), "constraints": _text_array(minimum=0), "requirement_extensions": _text_array(minimum=0), "source_fragments": _result_array("Exact task and steer fragments grounding this outcome.", _SOURCE_FRAGMENT_SCHEMA), "source_decision_ref": _entity_ref("decision"), "supersedes_item_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14), "created_revision": {"type": "integer", "minimum": 1}})), "task_constraints": _result_array("Task-level user constraints retained as linked context, never independent coverage items.", _result_object("One source-grounded task constraint.", {"text": _string(), "source_fragment": _SOURCE_FRAGMENT_SCHEMA}))}),
     "aggregate_coverage": _result_object("Advisory aggregate effective-contract coverage; it never gates safe work.", {"status": _string(enum=("ready", "ready_with_risks", "rework"), maximum=24), "items": _result_array("Per-item aggregate evidence.", _result_object("Coverage item.", {"item_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14), "status": _string(enum=("complete", "missing", "partial", "unverified", "stale", "contradictory"), maximum=16), "reason": _string(maximum=64), "report_refs": _result_array("Current-owner report refs.", _string(pattern=r"^r_[0-9a-f]{12}$", maximum=14)), "superseded_report_refs": _result_array("Historical or superseded report refs that do not affect current coverage.", _string(pattern=r"^r_[0-9a-f]{12}$", maximum=14))}))}),
     "conformance_review": _result_object("Advisory effective-contract conformance evidence for rework and closure reasoning; it is not a backend gate.", {"effective_revision": {"type": "integer", "minimum": 1}, "status": _string(enum=("ready", "ready_with_risks", "not_ready"), maximum=24), "recommendation": _string(enum=("ready", "ready_with_risks", "rework"), maximum=24), "decision_refs": _result_array("Relevant steering and approval decisions.", _string(pattern=r"^u_[0-9a-f]{12}$", maximum=14)), "aggregate_coverage": {"type": "object"}, "report_manifests": _result_array("Finalized report manifest bindings.", _result_object("Report manifest.", {"report_ref": _string(pattern=r"^r_[0-9a-f]{12}$", maximum=14), "content_digest": _opaque_digest("Immutable finalized report manifest digest.")})), "consumed_report_digests": _result_array("Coordinator-consumed immutable report digests.", _opaque_digest("Consumed report manifest digest."))}),
     "task": _result_object("Durable task header, including canonical V12 project anchor and immutable task contract.", {
@@ -749,26 +756,11 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         or tuple(sorted(profile_names)) != profile_names
     ):
         raise RuntimeError("Cortex v12 packaged profile catalogue is unavailable")
-    profile_groups = {
-        policy: tuple(name for name in profile_names if packaged_profile_assignment_policy(name) == policy)
-        for policy in ("owner", "review", "planning")
-    }
-    if set().union(*map(set, profile_groups.values())) != set(profile_names):
-        raise RuntimeError("Cortex v12 packaged profile assignment policy is unavailable")
-    assignment_profile = {
-        "description": (
-            "Explicit packaged worker-profile intent. Select its advertised assignment class before the first "
-            "call: under light/full governance an owner profile is admissible only when the declared predecessor "
-            "evidence includes a finalized approved planner report. Review profiles remain non-owning and a planner "
-            "profile creates that prerequisite. A failed QA report does not by itself make correction owner work: "
-            "use review ownership for test-only correction and owner work only for production mutation."
-        ),
-        "oneOf": [
-            {"type": "string", "enum": list(profile_groups["owner"]), "description": "Owner profile for production or assigned implementation/remediation. Under light/full governance it requires finalized approved planner evidence on the first attempt."},
-            {"type": "string", "enum": list(profile_groups["review"]), "description": "Non-owning review, QA, discovery, diagnostic, verification, or documentation profile. It may consume failed evidence without claiming production-source remediation."},
-            {"type": "string", "enum": list(profile_groups["planning"]), "description": "Planning profile that publishes the planner evidence required before later light/full owner work."},
-        ],
-    }
+    assignment_profile = _string(
+        enum=profile_names,
+        maximum=ROLE_MAX_LENGTH,
+        description="Exact packaged specialist profile. Profile selects advisory expertise only; mission.responsibility independently selects delivery ownership, evidence contribution, or planning.",
+    )
 
     contracts: dict[str, dict[str, Any]] = {
         "create_task": {
@@ -921,7 +913,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                     "approval_view_content_digest": _string(minimum=0, maximum=71, pattern=DIGEST_PATTERN, description="Exact ready approval_view.content_digest. Required only for decision_type=approve."),
                     "approval_view_source_sequence": {"type": "integer", "minimum": 0, "description": "Exact ready approval_view.source_sequence. Required only for decision_type=approve."},
                     "supersedes_decision_ref": decision_id,
-                    "steering_delta": _closed({"retire_item_refs": {"type": "array", "uniqueItems": True, "items": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14)}, "add": {"type": "array", "items": _closed({"category": _string(enum=("requirement", "constraint", "acceptance", "verification"), maximum=16), "text": _string(minimum=1)}, ("category", "text"))}}, ()) | {"description": "Required for a steer decision; creates a new effective-contract revision and invalidates only retired item coverage."},
+                    "steering_delta": _closed({"retire_item_refs": {"type": "array", "uniqueItems": True, "items": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14)}, "add": {"type": "array", "items": _closed({"outcome_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14), "category": _string(enum=("requirement", "constraint", "acceptance", "verification"), maximum=16), "text": _string(minimum=1)}, ("outcome_ref", "category", "text"))}}, ()) | {"description": "Required for a steer decision; additions revise one named existing outcome and never become separate coverage items."},
                     "idempotency_key": idempotency_key,
                 },
                 ("task_ref", "subject_type", "subject_ref", "decision_type", "prompt", "response_original", "user_language"),
@@ -966,35 +958,47 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
     # server-issued assignment contract, rather than discover hidden admission
     # rules from a report_incomplete rejection.
     evidence_fact = _closed({
-        "state": _string(enum=("executed", "not_run"), maximum=16, description="Whether this observable check was executed or honestly not run."),
-        "summary": _string(description="One concise complete observation. For execution, name the checked command and outcome; for non-execution, state why it was not run."),
-    }, ("state", "summary"), description="One uniform complete observable evidence fact. This deliberately avoids branch-specific field shapes so a first publication has one unambiguous evidence form.")
-    documentation_impact = _string(minimum=1, description="Complete documentation-impact assessment. Name affected paths when impact exists; otherwise explain why there is no impact.")
+        "state": _string(enum=("executed", "not_run"), maximum=16, description="Whether this check ran."),
+        "summary": _string(description="Observed outcome, or why it was not run."),
+    }, ("state", "summary"), description="One observable verification fact.")
+    documentation_impact = _string(minimum=1, description="Affected documentation paths, or why there is no impact.")
     def publication_evidence(kind: str) -> dict[str, Any]:
+        coverage_statuses = ("planned",) if kind == "plan" else ("complete", "partial", "unverified", "not_applicable")
+        contract_coverage = {
+            "type": "array",
+            "minItems": 1,
+            "description": "Exact one-to-one reconciliation of scope. Start from the bootstrap publication template; preserve every ordered row, add one status and non-empty verification array, then match its required count and refs before the first call. Keep multiple checks in one row. The server losslessly coalesces compatible repeats and rejects conflicting dispositions.",
+            "items": _closed({
+                "item_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14, description="Exact scope item_ref."),
+                "status": _string(enum=coverage_statuses, maximum=16, description="Evidence-backed disposition."),
+                "verification": _text_array(minimum=1, description="Concrete evidence, planned check, or blocker."),
+            }, ("item_ref", "status", "verification")),
+        }
         common = {
-            "schema": _string(enum=("cortex/report/plan/v3" if kind == "plan" else "cortex/report/result/v3" if kind == "result" else "cortex/report/synthesis/v3",), maximum=64, description="Exact advertised semantic publication format for this operation."),
-            "summary": _string(description="Concise complete outcome summary for this publication."),
-            "verification": _text_array(minimum=0, description="Complete overall verification and acceptance observations. For a plan, place cross-stage acceptance checks here and stage-specific checks inside each ordered stage."),
-            "risks": _text_array(minimum=0, description="Residual risks supported by this worker's evidence; use an empty array when none remain."),
-            "deviations": _text_array(minimum=0, description="Observed deviations from the assigned outcome; use an empty array when none occurred."),
-            "unresolved": _text_array(minimum=0, description="Unresolved work or decisions; use an empty array when the outcome is complete."),
-            "source_text": _string(minimum=0, description="Optional unchanged source prose when preservation is materially useful; omit it for ordinary structured evidence."),
+            "schema": _string(enum=("cortex/report/plan/v3" if kind == "plan" else "cortex/report/result/v3" if kind == "result" else "cortex/report/synthesis/v3",), maximum=64),
+            "summary": _string(description="Complete outcome summary."),
+            "verification": _text_array(minimum=0, description="Overall and cross-stage acceptance checks."),
+            "risks": _text_array(minimum=0, description="Residual risks; empty when none."),
+            "deviations": _text_array(minimum=0, description="Observed deviations; empty when none."),
+            "unresolved": _text_array(minimum=0, description="Unresolved work or decisions; empty when complete."),
+            "source_text": _string(minimum=0, description="Optional unchanged source prose."),
+            "contract_coverage": contract_coverage,
         }
         # Keep tools/list identical to the canonical semantic admission
         # boundary.  A property that is required by canonical validation must
         # never be discoverable only after a failed first call.
-        required = ["schema", "summary", "verification", "risks", "deviations", "unresolved"]
+        required = ["schema", "summary", "verification", "risks", "deviations", "unresolved", "contract_coverage"]
         if kind == "plan":
             common.update({
-                "scope": _string(description="Complete implementation boundary covered by this plan, including relevant constraints and assumptions in prose."),
+                "scope": _string(description="Complete plan boundary and assumptions."),
                 "stages": {"type": "array", "minItems": 1, "items": _closed({
-                    "order": {"type": "integer", "description": "Non-authoritative stage-order bookkeeping accepted for lossless report round trips. The server always recomputes canonical order from array position."},
-                    "owner": _string(description="Worker role that owns this stage."),
-                    "dependencies": {"type": "array", "items": {"type": "integer"}, "description": "Non-authoritative predecessor bookkeeping accepted for lossless report round trips. The server always recomputes canonical predecessors from array position."},
-                    "work": _text_array(minimum=1, description="Concrete work owned by this stage."),
-                    "verification": _text_array(minimum=1, description="Acceptance checks owned by this stage."),
-                }, ("owner", "work", "verification"), description="One ordered plan stage. Array order is the authoritative dependency order, and the server derives order and predecessor bookkeeping. The same canonical stage shape is accepted on first publication and when immutable consumed evidence is republished.")},
-                "verification_facts": {"type": "array", "minItems": 1, "description": "Observable facts supporting the plan publication itself, such as bounded discovery performed or an honest statement that no project command was run.", "items": evidence_fact},
+                    "order": {"type": "integer", "description": "Optional; server derives it from array position."},
+                    "owner": _string(description="Stage owner role."),
+                    "dependencies": {"type": "array", "items": {"type": "integer"}, "description": "Optional; server derives predecessors."},
+                    "work": _text_array(minimum=1, description="Stage work."),
+                    "verification": _text_array(minimum=1, description="Stage acceptance checks."),
+                }, ("owner", "work", "verification"), description="One stage in dependency order; array order is authoritative.")},
+                "verification_facts": {"type": "array", "minItems": 1, "description": "Observable facts from planning, or an honest not-run statement.", "items": evidence_fact},
                 "documentation_impact": documentation_impact,
             })
             # Documentation impact is assessed after implementation and
@@ -1003,12 +1007,13 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             # phase verdict from becoming a first-call planner prerequisite.
             required += ["scope", "stages", "verification_facts"]
         elif kind == "result":
-            common.update({"outcome": _string(description="Complete assignment-level result outcome."), "changes": _text_array(minimum=0, description="Concrete project changes made by this worker; use an empty array for a read-only result."), "verification_facts": {"type": "array", "minItems": 1, "description": "Observable execution or verification facts supporting this result.", "items": evidence_fact}, "documentation_impact": documentation_impact})
+            common.update({"outcome": _string(description="Complete assignment outcome. A read-only codebase investigation puts its execution map here; never invent a specialized explorer report property."), "changes": _text_array(minimum=0, description="Concrete changes; empty for read-only work."), "verification_facts": {"type": "array", "minItems": 1, "description": "Observable facts from execution, verification, or a read-only investigator.", "items": evidence_fact}, "documentation_impact": documentation_impact})
             required += ["outcome", "verification_facts", "documentation_impact"]
         else:
             common.update({"findings": _text_array(minimum=0, description="Concrete documentation-impact findings."), "recommendations": _text_array(minimum=0, description="Bounded documentation follow-up recommendations, if any."), "documentation_impact": documentation_impact})
             required += ["findings", "recommendations", "documentation_impact"]
-        return _closed(common, tuple(required), description=f"Closed current canonical {kind} publication evidence. This is the complete first-pass semantic admission contract. The immutable continuation already binds the authoritative assignment scope, so the caller never repeats server-owned coverage identities; the server persists that scope atomically with the publication.")
+        result_note = " It also covers read-only specialist investigations." if kind == "result" else ""
+        return _closed(common, tuple(required), description=f"Complete canonical {kind} evidence.{result_note} Top-level status is separate; contract_coverage reconciles every scope item exactly once.")
     compact_output = {
         "$schema": _JSON_SCHEMA_DRAFT_2020_12,
         "type": "object",
@@ -1018,8 +1023,14 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             # fallback closed prevents a future operation from accidentally
             # advertising a generic cross-operation handle union.
             "handles": _closed({}, (), description="No callable handles are implied by this output family; the operation-specific schema selects them explicitly."),
-            "effective_contract": _result_object("Authoritative server-owned scope for this worker's publication. A planner receives the full planning catalogue; other workers receive their server-derived assigned catalogue. Publication coverage is derived by the server from this bound scope.", {"revision": {"type": "integer", "minimum": 1}, "assigned_items": {"type": "array"}, "planning_items": {"type": "array"}, "decisions": {"type": "array"}}),
-            "assignment_context": _result_object("Bounded semantic context for the exact assignment; it does not replace the effective contract or server-issued evidence.", {"role": _string(), "profile_name": _string(), "objective": _string(), "scope": _string(), "instructions": _string()}),
+            "effective_contract": _result_object("Authoritative server-owned independent-outcome scope for this worker's publication. Linked acceptance, verification, constraints, steer additions, and source fragments remain metadata on each outcome and never multiply coverage rows.", {"revision": {"type": "integer", "minimum": 1}, "assigned_items": {"type": "array"}, "planning_items": {"type": "array"}, "decisions": {"type": "array"}}),
+            "publication_reconciliation": _result_object("Mandatory server-owned pre-publication reconciliation receipt. Start from contract_coverage_template without dropping or reordering a row, add one evidence-backed status and non-empty verification collection to every row, then verify the final row count and ordered item_ref sequence against required_item_count and required_item_refs before the first publication call. The template never supplies or fabricates a disposition.", {
+                "coverage_source": _string(enum=("planning_items", "assigned_items"), maximum=32, description="Exact effective-contract collection represented by this receipt."),
+                "required_item_count": {"type": "integer", "minimum": 1, "description": "Exact number of distinct coverage rows required in the first publication."},
+                "required_item_refs": _result_array("Exact ordered item_ref sequence required in the first publication.", _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14)),
+                "contract_coverage_template": _result_array("Lossless ordered publication starter. Preserve every row and item_ref; add the advertised publication disposition and verification evidence to each row before calling the publication operation.", _result_object("One server-issued coverage starter row; it intentionally contains no status or verification claim.", {"item_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14)})),
+            }),
+            "assignment_context": _result_object("Bounded semantic context for the exact assignment; it does not replace the effective contract or server-issued evidence.", {"role": _string(), "profile_name": _string(), "responsibility": {"type": "string", "enum": ["planning", "delivery", "evidence"]}, "objective": _string(), "scope": _string(), "instructions": _string()}),
             "predecessor_evidence": {"type": "array", "description": "Exact declared predecessor report manifests returned for this assignment."},
             "decision_evidence": {"type": "array", "description": "Exact declared decision evidence returned for this assignment."},
             "human_view": _HUMAN_VIEW_SCHEMA,
@@ -1188,22 +1199,23 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
                 "type": "array", "minItems": 0,
                 "items": _closed(
                     {
+                        "outcome_ref": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14, description="Exact active outcome receiving this user steer addition."),
                         "category": _string(enum=("requirement", "constraint", "acceptance", "verification"), maximum=16),
                         "text": _string(minimum=1),
                     },
-                    ("category", "text"),
-                    description="One closed effective-contract addition.",
+                    ("outcome_ref", "category", "text"),
+                    description="One source-grounded addition merged into a named existing outcome revision, never a separate coverage item.",
                 ),
                 },
-                "description": "Optional operation named exactly add: append one or more contract items stated by the user.",
+                "description": "Optional operation named exactly add: merge user-stated criteria or extensions into named existing outcomes.",
             },
         (),
-        description="Required closed steering delta for this response. Include at least one advertised operation: use add for new contract items and/or retire_item_refs for exact outcome references. These are the only operation names.",
+        description="Required closed steering delta. Include at least one operation: merge add entries into named active outcomes and/or retire exact outcomes. Additions never form parallel coverage items.",
     )
     continuation_ref = _string(maximum=160, description="Exact server-issued worker continuation returned by assignment evidence consumption. Copy byte-for-byte; assignment and task locators alone are not publication authority.")
     publication = lambda kind: {
-        "description": f"Atomically publish one immutable {kind} outcome for an assignment. The worker-owned status is the assignment-level semantic outcome: completed is the only complete outcome; partial or blocked remain non-complete. The server derives the exact active assignment scope and stores its coverage in the same transaction; any optional coverage annotation is non-authoritative. The server consumes declared evidence, chunks internally, and records its manifest before the terminal slot is consumed. An exact retry replays; changed evidence conflicts; corrections require a recovery assignment.",
-        "inputSchema": _closed({"continuation_ref": continuation_ref, "assignment_ref": assignment_ref, "evidence": publication_evidence(kind), "status": _string(enum=("completed", "partial", "blocked"), maximum=16, description="Optional assignment-level semantic outcome; omission means completed.")}, ("continuation_ref", "assignment_ref", "evidence")),
+        "description": f"Atomically publish one immutable {kind} outcome for an assignment. The worker-owned status is the assignment-level semantic outcome and belongs only at the request top level, never inside evidence: completed is the only complete outcome; partial or blocked remain non-complete. The server derives the exact active assignment scope and stores its coverage in the same transaction; any optional coverage annotation is non-authoritative. The server consumes declared evidence, chunks internally, and records its manifest before the terminal slot is consumed. An exact retry replays; changed evidence conflicts; corrections require a recovery assignment. Result publications, including read-only explorer investigations, use this one closed result contract and require evidence.verification_facts with at least one complete observable fact; include it on the first call rather than inferring a profile-specific property or waiting for a validation response.",
+        "inputSchema": _closed({"continuation_ref": continuation_ref, "assignment_ref": assignment_ref, "evidence": publication_evidence(kind), "status": _string(enum=("completed", "partial", "blocked"), maximum=16, description="Optional assignment-level semantic outcome. This property is valid only at the publication request top level, never inside evidence; omission means completed.")}, ("continuation_ref", "assignment_ref", "evidence")),
         "outputSchema": compact_with_handles("report_ref", required=("report_ref",)),
     }
     plan_publication_output = {
@@ -1275,25 +1287,27 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             }, ("project_root", "request_original", "user_language", "outcomes", "constraints"), description="The sole task object. Place every advertised child property directly here; do not add another task wrapper. The exact original request is also the durable objective, and outcomes pair each requirement with its acceptance statements." )}, ("task",)),
             "outputSchema": compact_with_handles("task_ref", required=("task_ref",)),
         },
-        "read_task": {"description": "Read bounded task state, effective contract, aggregate evidence, and chronology. When presenting a ready plan view, use only the exact returned Markdown link; never render or reconstruct its host-private path.", "inputSchema": _closed({"task_ref": task_ref, "after_sequence": {"type": "integer", "minimum": 0}}, ("task_ref",)), "outputSchema": read_task_output},
+        "read_task": {"description": "Read bounded task state and chronology, or consume one bounded authoritative coordinator report-evidence page. For evidence mode, supply report_refs and continue only with the returned cursor until has_more is false; this records the canonical body digest used for synthesis, revision, rework, closure, or the final answer. Do not combine after_sequence with report evidence. When presenting a ready plan view, use only the exact returned Markdown link and never render or reconstruct its host-private path.", "inputSchema": _closed({"task_ref": task_ref, "after_sequence": {"type": "integer", "minimum": 0}, "report_refs": _entity_ref_array("report", minimum=1, maximum=MAX_REPORT_IDS), "sections": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True, "items": _string(maximum=REPORT_SECTION_MAX_LENGTH, pattern=REPORT_SECTION_PATTERN)}, "cursor": _string(maximum=2048, description="Opaque report-evidence cursor returned by the immediately preceding read_task evidence page.")}, ("task_ref",)), "outputSchema": read_task_output},
         "open_clarification": {"description": "Create or replay one task-scoped clarification hold and its server-owned binding before rendering the corresponding product question. The server derives the task subject; an optional exact assignment relation may be supplied only when the question originates from that assignment. After the next user answer, perform the result's advertised next action before any governance, planning, assignment, or closure mutation; the server will not advance the task while this binding is pending. The result states the hold lifecycle and, for an assignment-origin question, the exact assignment relation that must later receive the recorded answer. Render no question when this command fails.", "inputSchema": _closed({"task_ref": task_ref, "prompt": _string(minimum=1), "prompt_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN), "assignment_ref": assignment_ref}, ("task_ref", "prompt", "prompt_language")), "outputSchema": decision_output("clarification")},
-        "open_plan_review": {"description": "Issue or replay one server-owned plan-review binding for the selected plan. When decision_context.consumed is false, copy the returned binding_ref byte-for-byte into record_decision. When consumed is true, the same logical review was already recorded: use decision_context.decision_ref and do not record the binding again.", "inputSchema": _closed({"task_ref": task_ref, "plan_ref": _string(maximum=14, pattern=r'^r_[0-9a-f]{12}$'), "prompt": _string(minimum=1), "prompt_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN)}, ("task_ref", "plan_ref", "prompt", "prompt_language")), "outputSchema": decision_output("plan-review")},
+        "open_plan_review": {"description": "Issue or replay one server-owned plan-review binding only for a plan whose unresolved collection is empty. A plan with an unresolved product, policy, scope, requirement, or acceptance choice requires a separate clarification and revised plan; generic approval never selects an embedded alternative. When decision_context.consumed is false, copy the returned binding_ref byte-for-byte into record_plan_review. When consumed is true, the same logical review was already recorded: use decision_context.decision_ref and do not record the binding again.", "inputSchema": _closed({"task_ref": task_ref, "plan_ref": _string(maximum=14, pattern=r'^r_[0-9a-f]{12}$'), "prompt": _string(minimum=1), "prompt_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN)}, ("task_ref", "plan_ref", "prompt", "prompt_language")), "outputSchema": decision_output("plan-review")},
         "open_steering": {"description": "Issue or replay one server-owned steering binding for the anchored task. Copy the returned binding_ref byte-for-byte into record_decision; the server derives the steering family from that binding.", "inputSchema": _closed({"task_ref": task_ref, "prompt": _string(minimum=1), "prompt_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN), "assignment_ref": assignment_ref}, ("task_ref", "prompt", "prompt_language")), "outputSchema": decision_output("steering")},
         "record_clarification": {"description": "Record one exact clarification response against its server-issued clarification binding. The operation accepts only the clarification answer and common language information; contract changes use the dedicated steering flow.", "inputSchema": _closed({"task_ref": task_ref, "binding_ref": _string(minimum=35, maximum=35, pattern=r"^cb_[0-9a-f]{32}$"), "response_original": _string(maximum=65536), "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 language tag for the exact response, for example en or ru.")}, ("task_ref", "binding_ref", "response_original", "user_language")), "outputSchema": decision_output("clarification", recorded=True)},
         "record_plan_review": {"description": "Record one exact plan-review response against its server-issued plan-review binding. The response outcome is restricted to the plan-review choices and is validated against the immutable approval relation.", "inputSchema": _closed({"task_ref": task_ref, "binding_ref": _string(minimum=35, maximum=35, pattern=r"^cb_[0-9a-f]{32}$"), "response_original": _string(maximum=65536), "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 language tag for the exact response, for example en or ru."), "outcome": _string(enum=("approve", "request_revision", "cancel"), maximum=32)}, ("task_ref", "binding_ref", "response_original", "user_language", "outcome")), "outputSchema": decision_output("plan-review", recorded=True)},
         "record_steering": {"description": "Record one exact steering response against its server-issued steering binding. The closed contract delta and optional supersession are applied atomically to the effective contract.", "inputSchema": _closed({"task_ref": task_ref, "binding_ref": _string(minimum=35, maximum=35, pattern=r"^cb_[0-9a-f]{32}$"), "response_original": _string(maximum=65536), "user_language": _string(maximum=LANGUAGE_TAG_MAX_LENGTH, pattern=LANGUAGE_TAG_PATTERN, description="BCP-47 language tag for the exact response, for example en or ru."), "add": steering_delta["properties"]["add"], "retire_item_refs": steering_delta["properties"]["retire_item_refs"], "supersedes_decision_ref": _entity_ref("decision")}, ("task_ref", "binding_ref", "response_original", "user_language", "add", "retire_item_refs")), "outputSchema": decision_output("steering", recorded=True)},
         "open_assignment": {
-            "description": "Open one worker assignment from one coherent mission contract and atomically bind its effective contract plus declared typed report and decision evidence. This task-phase mutation is available only when no server-issued user decision remains pending; first perform the pending decision result's advertised next action. Before the first attempt, reconcile the chosen profile's advertised assignment class with the latest governance assessment and exact predecessor evidence. Under light/full governance, owner work requires finalized approved planner evidence; if planning is unnecessary for a bounded C1 owner change, governance must remain minimal from the outset rather than being downgraded after a failed call. Immutable input reports and current server-owned outcome ownership determine any replacement/rework predecessor; callers never restate assignment lineage. Owner-profile rework must declare the relevant finalized predecessor evidence, and an ambiguous set of current owners is rejected before mutation. Review and documentation profiles consume evidence without taking ownership. The explicit profile expresses worker intent; Cortex selects the packaged model and reasoning recommendation from its server-owned routing table. Routing recommendations are output-only and never caller input. Decision evidence is resolved in the assignment; report evidence is consumed only through the assignment evidence operation.",
+            "description": "Open one worker assignment from one coherent mission contract and atomically bind its effective contract plus declared typed report evidence and decision evidence. mission.responsibility, not profile_name, selects ownership: delivery owns assigned outcomes, evidence contributes without taking ownership, and planning maps the full task contract. This task-phase mutation is available only when no server-issued user decision remains pending. Under light/full governance, delivery work requires finalized approved planner evidence. Immutable input reports and current ownership determine any replacement/rework predecessor; callers never restate assignment lineage. The profile selects specialist guidance only, so an explorer may own a final audit deliverable or contribute discovery evidence depending on the explicit mission responsibility.",
             "inputSchema": _closed({"task_ref": task_ref, "mission": _closed({
                 "role": _string(maximum=ROLE_MAX_LENGTH),
                 "profile_name": assignment_profile,
+                "responsibility": _string(enum=("delivery", "evidence", "planning"), maximum=16, description="Explicit assignment-level outcome responsibility. Use delivery when this worker owns completion of its assigned contract items, evidence for non-owning discovery/review/verification, and planning only with the planner profile."),
+                "item_refs": {"type": "array", "minItems": 1, "uniqueItems": True, "items": _string(pattern=r"^o_[0-9a-f]{12}$", maximum=14), "description": "Required exact bounded outcome-item scope copied byte-for-byte from the current read_task effective contract. Select only the items this worker can actually reconcile; planning must include the complete current catalogue. Never substitute prose item names or omit this selection."},
                 "goal": _string(description="One concrete worker mission outcome."),
                 "constraints": _string(description="Execution boundary and scope constraints for this mission."),
                 "instructions": _string(description="Concrete task-specific worker instructions within the declared mission boundary."),
-            }, ("role", "profile_name", "goal", "constraints", "instructions"), description="Closed assignment mission. It combines role, intended outcome, execution boundary, and instructions without duplicated objective/scope fields."), "input_report_refs": _entity_ref_array("report", maximum=MAX_REPORT_IDS), "input_decision_refs": _entity_ref_array("decision", maximum=MAX_DECISION_IDS)}, ("task_ref", "mission")),
+            }, ("role", "profile_name", "responsibility", "goal", "constraints", "instructions", "item_refs"), description="Closed assignment mission. Responsibility is explicit and independent of specialist profile. Every assignment requires an exact bounded item selection; planning includes the complete current catalogue."), "input_report_refs": _entity_ref_array("report", maximum=MAX_REPORT_IDS), "input_decision_refs": _entity_ref_array("decision", maximum=MAX_DECISION_IDS)}, ("task_ref", "mission")),
             "outputSchema": assignment_output,
         },
-        "consume_assignment_evidence": {"description": "Worker-only bootstrap operation. The spawned native worker consumes the one-time server-owned assignment evidence for the exact assignment locator delivered inside its server-rendered dispatch; a coordinator never calls this operation for a worker. The server resolves the private bootstrap lease atomically; no caller-supplied bootstrap capability is accepted. On success, return the worker-scoped continuation plus the authoritative server-owned effective scope, assignment context, declared predecessor report evidence/manifests, and decision evidence required for that worker's publication. A planner receives the full planning catalogue; other workers receive their server-derived assigned catalogue. The server derives publication coverage from this scope and the worker's explicit assignment-level outcome.", "inputSchema": _closed({"assignment_ref": assignment_ref, "cursor": _string(maximum=2048, description="Optional opaque continuation cursor previously emitted by this operation; copy it byte-for-byte only when continuing the same assignment evidence read.")}, ("assignment_ref",)), "outputSchema": compact_with_handles("assignment_ref", "continuation_ref", required=("assignment_ref", "continuation_ref"))},
+        "consume_assignment_evidence": {"description": "Worker-only atomic bootstrap for the exact server-rendered assignment locator; a coordinator never calls it and no caller supplies bootstrap authority. It returns the continuation, effective scope, assignment context, declared report evidence and decision evidence, plus a mandatory ordered publication-reconciliation template. Before the first publication, preserve every template row, add honest evidence, and match its required count and refs. Planners receive the full catalogue; other workers receive their assigned catalogue.", "inputSchema": _closed({"assignment_ref": assignment_ref, "cursor": _string(maximum=2048, description="Optional opaque continuation cursor previously emitted by this operation; copy it byte-for-byte only when continuing the same assignment evidence read.")}, ("assignment_ref",)), "outputSchema": {**compact_with_handles("assignment_ref", "continuation_ref", required=("assignment_ref", "continuation_ref")), "required": ["handles", "publication_reconciliation"]}},
         "publish_plan": {**publication("plan"), "outputSchema": plan_publication_output},
         "publish_result": publication("result"),
         "publish_documentation": publication("documentation"),
@@ -1322,9 +1336,8 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         ):
             schema["required"] = [field for field in required if field != "task_ref"]
             contract["description"] += (
-                " The exact task_ref may establish or replace this MCP connection's task context; "
-                "after one successful exact task binding on the same connection, omit it to use that "
-                "server-owned context. A fresh or restarted connection never guesses a task from ledger recency."
+                " task_ref binds or switches the server-owned context; after success it may be omitted. "
+                "Fresh or restarted connections never infer it."
             )
     for name, contract in contracts.items():
         _assert_no_callable_durable_properties(contract["inputSchema"], path=f"{name}.inputSchema")
