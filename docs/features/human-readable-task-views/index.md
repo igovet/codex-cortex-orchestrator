@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 1.12.2 projects selected host-private plan and finalized-report evidence
+Cortex 1.13.2 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read
@@ -150,8 +150,8 @@ or completion.
 ## Task inspection and closure bookkeeping
 
 Task, delegation, governance, closure, decision, and timeline records are not
-rendered as Markdown views. Use `inspect_task` and `inspect_governance` for
-bounded human-readable inspection of those records. `inspect_task` exposes two
+rendered as Markdown views. Use the bounded `read_task` view for
+human-readable inspection of those records. `read_task` exposes two
 separate projections: `execution_outcome`, which is neutral finalized-report
 evidence, and `advisory_closure`, which describes whether an advisory record is
 present. The execution projection contains `evidence_status`,
@@ -222,24 +222,20 @@ approval, and a revised plan's new report ID/digest needs a new decision.
 
 ## Chunked reports
 
-Every new report is stored and projected through an explicit lifecycle:
+Private/internal publication storage may use an explicit assembly lifecycle:
 
 ```text
-begin → append* → finalize
-begin → abort
+private begin → append* → finalize
+private begin → abort
 ```
 
-Large reports use `begin` to open a stable report ID, `append` to add sequential
-labeled complete-JSON chunks up to 32 KiB,
-and `finalize` computes the canonical chunk count and manifest digest. `abort`
-retains an incomplete stream without pretending that it is complete. A report
-is limited to 256 chunks and 8 MiB; assembling and retained task totals are
-also bounded. `read_reports` applies optional section selection, an opaque
-cursor, and a fixed 65,536-byte server page. It
-returns only whole chunks;
-it does not expose a partial chunk stream as completed evidence. The matching
-human-readable report view is likewise derived from the canonical complete
-evidence and source sequence.
+Large evidence publication is immutable and bounded by the active semantic
+publication contract. The three worker-only publication operations emit the
+appropriate plan, result, or documentation evidence; `read_task` exposes the
+server-produced task evidence view with private ledger identity removed and
+supports only its server-owned bounded continuation. It never exposes partial
+evidence as completed evidence. The matching human-readable view is likewise
+derived from canonical complete evidence.
 
 ## Verification expectations
 

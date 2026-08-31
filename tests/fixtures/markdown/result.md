@@ -28,8 +28,4 @@ Typed views are available.
 
 ## Residual risk
 
-- Some legacy semantics are generic
-
-## Next actions
-
-- Run docs verification
+- Some historical semantics are generic

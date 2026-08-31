@@ -37,9 +37,10 @@ NATIVE_SPAWN_TOOLS = {"agent", "collaboration.spawn_agent", "collaborationspawn_
 DISPATCH_STATE_PREFIX = "dispatch-"
 COMPLETED_DISPATCH_HISTORY_LIMIT = 64
 CANONICAL_NATIVE_FIELDS = frozenset(("fork_turns", "message", "task_name"))
-HOST_NATIVE_METADATA_FIELDS = frozenset(("role", "model", "reasoning_effort"))
+HOST_NATIVE_METADATA_FIELDS = frozenset(("model", "reasoning_effort"))
 SUPPORTED_NATIVE_MODELS = frozenset(("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
 SUPPORTED_REASONING_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max"))
+CODEBASE_MEMORY_TOOL_PREFIXES = ("mcp__codebase_memory__", "mcp__codebase-memory__")
 
 
 def _event() -> dict[str, Any]:
@@ -268,6 +269,8 @@ def _read_state(path: Path | None) -> dict[str, Any]:
         "child_auth": value.get("child_auth") if isinstance(value.get("child_auth"), str) else None,
         "agent_fingerprint": value.get("agent_fingerprint") if isinstance(value.get("agent_fingerprint"), str) else None,
         "assignment_ref_digest": value.get("assignment_ref_digest") if isinstance(value.get("assignment_ref_digest"), str) else None,
+        "worker_task_ref": value.get("worker_task_ref") if isinstance(value.get("worker_task_ref"), str) else None,
+        "worker_task_ref_digest": value.get("worker_task_ref_digest") if isinstance(value.get("worker_task_ref_digest"), str) else None,
     }
 
 
@@ -345,7 +348,7 @@ def _deny(reason: str, event: dict[str, Any] | None = None, *, reason_code: str 
             try:
                 target = Path(root) / "activation" / "denials.jsonl"
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                prior = target.read_text(encoding="utf-8").splitlines()[-63:]
+                prior = target.read_text(encoding="utf-8").splitlines()[-63:] if target.exists() else []
                 target.write_text("\n".join(prior + [_json(record)]) + "\n", encoding="utf-8")
                 os.chmod(target, 0o600)
             except OSError:
@@ -376,14 +379,13 @@ def _is_successful_open(response: object) -> bool:
     structured = response.get("structuredContent")
     if not isinstance(structured, dict):
         return False
-    handles = structured.get("handles")
-    return isinstance(handles, dict) and isinstance(handles.get("task_ref"), str) and bool(handles["task_ref"])
+    return isinstance(structured.get("task_ref"), str) and bool(structured["task_ref"])
 
 
 def _is_consume(tool_name: object) -> bool:
     if not isinstance(tool_name, str):
         return False
-    return tool_name.strip().lower() == "mcp__cortex__consume_assignment_evidence"
+    return tool_name.strip().lower() == "mcp__cortex__read_task"
 
 
 def _is_verified_skill_read(event: dict[str, Any]) -> bool:
@@ -471,6 +473,20 @@ def _is_assignment_open(tool_name: object) -> bool:
 
 def _is_native_spawn(tool_name: object) -> bool:
     return isinstance(tool_name, str) and tool_name.strip().lower() in NATIVE_SPAWN_TOOLS
+
+
+def _is_codebase_memory_tool(tool_name: object) -> bool:
+    """Recognize the shared Codebase Memory MCP namespace.
+
+    Codex currently exposes one MCP catalogue to the whole native session, so
+    visibility cannot be audience-filtered between the root and child
+    sessions.  The root coordinator is nevertheless prohibited from using
+    this namespace; project-facing workers remain allowed to call it.
+    """
+    if not isinstance(tool_name, str):
+        return False
+    normalized = tool_name.strip().lower()
+    return normalized.startswith(CODEBASE_MEMORY_TOOL_PREFIXES)
 
 
 def _dispatch_state_root() -> Path | None:
@@ -599,6 +615,10 @@ def _native_arguments(value: object) -> dict[str, Any] | None:
     # The native adapter accepts exactly the server's closed projection. Do
     # not silently discard host-supplied routing fields while validating.
     supplied_metadata = set(candidate) - CANONICAL_NATIVE_FIELDS
+    # Codex 0.151.0 exposes model and reasoning_effort as one optional atomic
+    # routing pair on collaboration.spawn_agent.  It does not expose the old
+    # host-level role field.  Requiring that retired three-field envelope made
+    # every correctly formed current-host spawn fail as dispatch_mismatch.
     if supplied_metadata not in (set(), set(HOST_NATIVE_METADATA_FIELDS)):
         return None
     if (candidate.get("fork_turns") != "none"
@@ -607,10 +627,6 @@ def _native_arguments(value: object) -> dict[str, Any] | None:
             or len(candidate["message"].encode("utf-8")) > 65_536
             or not isinstance(candidate.get("task_name"), str)
             or not candidate.get("task_name")
-            or ("role" in candidate and (
-                not isinstance(candidate.get("role"), str)
-                or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", candidate["role"]) is None
-            ))
             or ("model" in candidate and candidate.get("model") not in SUPPORTED_NATIVE_MODELS)
             or ("reasoning_effort" in candidate and candidate.get("reasoning_effort") not in SUPPORTED_REASONING_EFFORTS)):
         return None
@@ -637,9 +653,13 @@ def _record_pending_dispatch(event: dict[str, Any]) -> None:
     if not isinstance(native, dict):
         return
     args = _native_arguments(native)
-    assignment_ref = structured.get("assignment_ref")
-    if not isinstance(assignment_ref, str) or args is None:
+    supplied = event.get("tool_input")
+    coordinator_task_ref = supplied.get("task_ref") if isinstance(supplied, dict) else None
+    match = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', str(args.get("message")) if args is not None else "")
+    worker_task_ref = match.group(1) if match is not None else None
+    if not isinstance(coordinator_task_ref, str) or not isinstance(worker_task_ref, str) or args is None:
         return
+    assignment_ref = "d_" + worker_task_ref[-12:]
     # Assignment identity remains in the public result envelope while the
     # host projection is literal-callable. Compute the private binding digest
     # here from the exact server projection; it never enters the host call.
@@ -659,6 +679,9 @@ def _record_pending_dispatch(event: dict[str, Any]) -> None:
         # returning the saved projection to the host.
         "assignment_ref_digest": _value_fingerprint(assignment_ref),
         "assignment_ref": assignment_ref,
+        "task_ref": coordinator_task_ref,
+        "worker_task_ref": worker_task_ref,
+        "worker_task_ref_digest": _value_fingerprint(worker_task_ref),
         # PreToolUse runs in a separate hook process from PostToolUse. Keep
         # the exact server-issued host projection in this owner-only receipt
         # so the later spawn boundary can deliver it byte-for-byte even when
@@ -875,7 +898,7 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         claimed.update({
             "state": "delivery_pending",
             "delivery_pending_at": time.time_ns(),
-            "spawn_claim_digest": tool_digest or _value_fingerprint("legacy-claim:" + path.name),
+            "spawn_claim_digest": tool_digest or _value_fingerprint("unobserved-claim:" + path.name),
             "claim_order": claim_order,
             "host_input_digest": _value_fingerprint(_json(args)),
             "context_digest": _value_fingerprint(authoritative["message"]),
@@ -939,7 +962,12 @@ def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: 
             if not _write_dispatch_record(path, bound):
                 return False, None
             correlated = dict(child_state)
-            correlated.update({"anchored": False, "assignment_ref_digest": current["assignment_ref_digest"]})
+            correlated.update({
+                "anchored": False,
+                "assignment_ref_digest": current["assignment_ref_digest"],
+                "worker_task_ref": current.get("worker_task_ref"),
+                "worker_task_ref_digest": current.get("worker_task_ref_digest"),
+            })
             _write_state(child_path, correlated)
             if _read_state(child_path).get("assignment_ref_digest") != current["assignment_ref_digest"]:
                 return False, None
@@ -984,9 +1012,9 @@ def _validate_native_dispatch(event: dict[str, Any], state_path: Path | None) ->
 def _mark_dispatch_consumed(event: dict[str, Any]) -> None:
     """Settle the host receipt only after the worker proves MCP consumption."""
     supplied = event.get("tool_input")
-    if not isinstance(supplied, dict) or not isinstance(supplied.get("assignment_ref"), str):
+    if not isinstance(supplied, dict) or not isinstance(supplied.get("task_ref"), str):
         return
-    assignment_digest = _value_fingerprint(supplied["assignment_ref"])
+    worker_task_digest = _value_fingerprint(supplied["task_ref"])
     session_id, turn_id = event.get("session_id"), event.get("turn_id")
     identity = session_id if isinstance(session_id, str) and session_id else turn_id
     session_digest = _value_fingerprint(identity)
@@ -1000,7 +1028,7 @@ def _mark_dispatch_consumed(event: dict[str, Any]) -> None:
         records = _dispatch_records(session_id=session_id, turn_id=None, states={"delivery_pending", "worker_bound"})
         if records is None:
             return
-        matched = [(path, record) for path, record in records if record.get("assignment_ref_digest") == assignment_digest]
+        matched = [(path, record) for path, record in records if record.get("worker_task_ref_digest") == worker_task_digest]
         if len(matched) != 1:
             return
         path, record = matched[0]
@@ -1031,10 +1059,10 @@ def _is_successful_consume(event: dict[str, Any]) -> bool:
     if not isinstance(response, dict) or response.get("isError") is not False or not isinstance(supplied, dict):
         return False
     structured = response.get("structuredContent")
-    evidence = structured.get("evidence") if isinstance(structured, dict) else None
-    return (isinstance(structured, dict) and isinstance(structured.get("assignment_ref"), str)
-            and structured.get("assignment_ref") == supplied.get("assignment_ref")
-            and isinstance(evidence, dict) and evidence.get("state") in {"none", "consumed"})
+    return (isinstance(structured, dict)
+            and structured.get("task_ref") == supplied.get("task_ref")
+            and structured.get("view") == "assignment"
+            and isinstance(structured.get("data"), (dict, list)))
 
 
 def _is_successful_publication(event: dict[str, Any]) -> bool:
@@ -1043,8 +1071,8 @@ def _is_successful_publication(event: dict[str, Any]) -> bool:
         return False
     structured = response.get("structuredContent")
     return (isinstance(structured, dict)
-            and structured.get("publication_status") == "completed"
-            and isinstance(structured.get("report_ref"), str))
+            and structured.get("state") == "published"
+            and isinstance(structured.get("task_ref"), str))
 
 
 def main() -> int:
@@ -1150,33 +1178,9 @@ def main() -> int:
                 pass
         return 0
 
-    if event_name == "PreToolUse" and isinstance(event.get("agent_id"), str) and not child:
-        _deny("Native worker lifecycle evidence is unavailable; bootstrap is denied.", event)
-        return 0
-
-    # A native worker is a new Codex session and cannot inherit the
-    # coordinator's activation turn. Its sole pre-bootstrap permission is the
-    # server-enforced assignment-evidence operation. The MCP handler validates
-    # the opaque assignment anchor and candidate context; this hook only
-    # prevents every other semantic or project action before that result.
+    # The hook observes worker bootstrap but never gates semantic or project
+    # actions. The MCP connection and ledger own exact actor/task validation.
     if child and not state["anchored"]:
-        if event_name == "PreToolUse":
-            if _is_consume(event.get("tool_name")):
-                supplied = event.get("tool_input")
-                expected = state.get("assignment_ref_digest")
-                actual = _value_fingerprint(supplied.get("assignment_ref")) if isinstance(supplied, dict) else None
-                if not expected or actual != expected:
-                    _deny("Native worker assignment evidence does not match its server-issued dispatch.", event)
-                    return 0
-                return 0
-            if _is_verified_skill_read(event):
-                _emit_guard_observation(event, outcome="allowed", reason_code="verified_skill_read", category_override="local_tool")
-                return 0
-            if _is_readonly_project_inspection(event):
-                _emit_guard_observation(event, outcome="allowed", reason_code="readonly_inspection", category_override="project_local")
-                return 0
-            _deny("Native worker bootstrap requires assignment evidence before other work.", event)
-            return 0
         if event_name == "PostToolUse" and _is_consume(event.get("tool_name")):
             response = event.get("tool_response")
             if _is_successful_consume(event):
@@ -1234,6 +1238,17 @@ def main() -> int:
     if not state["selected"]:
         return 0
 
+    # The catalogue is session-wide, but Codebase Memory is a project-facing
+    # worker capability.  Enforce the audience boundary at the root hook while
+    # allowing a real SubagentStart-bound child to use the same MCP server.
+    if event_name == "PreToolUse" and not child and _is_codebase_memory_tool(event.get("tool_name")):
+        _deny(
+            "Codebase Memory is reserved for project-facing native workers; the Cortex coordinator must not use it.",
+            event,
+            reason_code="coordinator_worker_operation",
+        )
+        return 0
+
     if event_name == "PreToolUse" and not child and _is_native_spawn(event.get("tool_name")):
         if not state.get("anchored"):
             _deny("Native dispatch is not permitted before Cortex task anchoring.", event)
@@ -1247,7 +1262,7 @@ def main() -> int:
                 "additionalContext": "This native dispatch is correlated to the selected server-issued assignment. Codex owns the spawn input and Cortex did not rewrite it. The authoritative worker context will be attached at SubagentStart. The spawned worker alone performs its assignment bootstrap and publication; the coordinator must wait for that worker's native handoff. Do not interrupt or replace the worker unless explicit terminal, ambiguous, or stale evidence is observed.",
             }}))
         else:
-            _deny("Native dispatch does not match the pending server-issued assignment boundary.", event, reason_code="dispatch_mismatch")
+            _deny("Native dispatch does not match the pending server-issued assignment boundary. The assignment is already committed; do not call the assignment-opening operation again or create a replacement. Preserve the pending receipt and stop this route until the host mismatch is corrected.", event, reason_code="dispatch_mismatch")
         return 0
 
     lifecycle_events = {"SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"}
@@ -1278,9 +1293,6 @@ def main() -> int:
         return 0
 
     if state["anchored"]:
-        if not child and event_name == "PreToolUse" and (_is_consume(event.get("tool_name")) or _is_publication(event.get("tool_name"))):
-            _deny("Coordinator cannot perform worker-owned evidence or publication actions.", event)
-            return 0
         return 0
 
     if event_name == "PostToolUse" and _is_open_task(event.get("tool_name")):

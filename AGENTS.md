@@ -41,6 +41,22 @@ runtime guarantees from those bundled sources without depending on this file.
   `plugins/cortex/.codex-plugin/plugin.json`: patch for fixes, minor for
   backward-compatible features, and major for large or breaking changes. Do
   not change unrelated version components.
+- After any edit to the installable payload below `plugins/cortex/`, update the
+  release semantic version when required and regenerate the content-addressed
+  `+codex.sha256.<digest-prefix>` cache stamp from the complete current plugin
+  payload before running tests, source/package validators, sync checks, or
+  live-dev. Never run or report a release-sensitive check against a manifest
+  whose cache suffix is known to be stale. If any plugin payload file changes
+  after stamping, the prior stamp and every later release-sensitive test result
+  are invalid: regenerate the cache stamp first, then rerun the affected checks.
+  Updating this repository stamp never authorizes installing or modifying the
+  user's stable Cortex plugin.
+- Do not run release-sensitive test suites concurrently in the same checkout.
+  Some sync regressions deliberately create and clean temporary bytecode or
+  candidate state below the source plugin tree; a concurrent validator can
+  observe that bounded fixture and falsely report cache-stamp drift. Parallelize
+  independent read-only work or use isolated worktrees, but run the authoritative
+  package/sync/marketplace suite sequentially per checkout.
 - Source-mode validation may point the MCP server at this checkout in an
   isolated temporary project. This is source evidence, not installed-plugin
   verification. Never install, reinstall, or update the user's Cortex plugin

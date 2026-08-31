@@ -2,12 +2,17 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.12.2 ships two bounded native hook components: an activation guard and
+Cortex 1.13.2 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without
 rewriting the native spawn call. At `SubagentStart`, it supplies the
 server-owned worker context as host additional context.
+The Codex 0.151.0 spawn adapter may add the current atomic `model` and
+`reasoning_effort` routing pair to the three-field server projection. The hook
+accepts that pair together, rejects either field alone, and rejects the retired
+host-level `role` field. This keeps routing validation aligned with the live
+host schema while leaving the server-rendered worker context authoritative.
 Each coordinator session owns a private receipt directory and an atomic active
 index containing only `pending`, `delivery_pending`, and `worker_bound`
 entries. Add, claim, bind, and consume transitions share that session's lock;
@@ -28,6 +33,10 @@ evidence. The MCP backend still owns task state, assignment evidence,
 idempotency, publication, reconciliation, and closure. A spawn result or a
 `SubagentStart` marker alone never substitutes for the worker's successful
 server-side evidence consumption and terminal publication.
+After an explicit successful assignment result, a host dispatch denial is not
+an ambiguous MCP outcome and never authorizes reopening or replacing that
+assignment. The pending receipt is retained for diagnosis and the route stops
+until the host boundary is corrected.
 
 The active feature registry is [features/index.md](../index.md). See the
 [orchestration ledger](../orchestration-ledger/index.md) and

@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.12.2 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.13.2 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -14,7 +14,7 @@ and release-facing documentation must describe the same V12 contract.
 - [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) carries V12 version and UI metadata.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) defines the GitHub Marketplace entry.
-- [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the fifteen-tool semantic facade.
+- [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the fourteen-tool semantic facade.
 - [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the uniform catalog.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) defines bounded task/report constants and report-digest semantics.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 storage.
@@ -23,7 +23,7 @@ and release-facing documentation must describe the same V12 contract.
 - [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the attested native worker message.
 - [profiles.json](../../../plugins/cortex/profiles.json) defines advisory roles and model recommendations.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines the authoritative outcome-first coordinator contract.
-- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative fifteen-tool semantic and nonblocking contract.
+- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative fourteen-tool semantic and nonblocking contract.
 - [coordinator-communication/SKILL.md](../../../plugins/cortex/skills/coordinator-communication/SKILL.md) defines the mandatory coordinator-to-user policy.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates repository package structure.
 - [cortex_release_candidate.py](../../../scripts/cortex_release_candidate.py) builds the explicit source candidate and docs closure.
@@ -34,7 +34,7 @@ and release-facing documentation must describe the same V12 contract.
 
 ## Current package contract
 
-The package exposes exactly fifteen semantic tools with identical coordinator and worker
+The package exposes exactly fourteen semantic tools with identical coordinator and worker
 schemas. `tools/list` advertises the canonical registry's closed input schemas and
 compact public result projections in one response below 65,536 bytes. The compact
 projections contain only the essential result-navigation handles, lifecycle states,
@@ -48,34 +48,36 @@ errors. The server is a storage/integrity sidecar and contains no V11
 control-plane route.
 
 The standard MCP `tools/list` response returns the complete unchanged
-fifteen-tool catalogue in one page. A release fails validation if the final
+fourteen-tool catalogue in one page. A release fails validation if the final
 JSON-RPC envelope exceeds 65,536 bytes, well below the 256 KiB physical JSONL
 frame bound. If a host uses deferred discovery for a mutation, it must obtain
 the specific intact live declaration required for that operation; an unavailable
 or truncated declaration is a fail-closed condition, and the host must not infer
 or guess a mutation contract.
 
-Only `create_task` accepts explicit `project_root`; it stores the canonical
+Only `open_task` accepts explicit `project_root`; it stores the canonical
 project association and returns a compact `task_ref` for later task-anchored
 calls. The durable `task_id` in results and ledger evidence is non-callable.
-The seven task-anchored tools use `task_ref`: `inspect_task`,
-`create_delegation`, `set_governance_mode`, `record_initiative`,
-`inspect_governance`, `submit_governance_closure`, and
-the narrow decision operations. The entity-derived tools use their compact emitted
-refs: `read_delegation` uses `delegation_ref`, `submit_report` uses
-`delegation_ref` (and continuation `report_ref`), and `read_reports` uses
-`report_refs`; these tools do not accept `task_ref` or durable `*_id` values.
-No host metadata, plugin `cwd`, or hook binds a project. `create_task` records
+The task-anchored tools use `task_ref`: `read_task`, `open_assignment`,
+`assess_governance`, `close_task`, the six narrow decision operations, and the
+three worker-owned publication operations. Publications accept the worker-scoped
+`task_ref`; private assignment and continuation identity is derived from the
+connection after the worker has consumed its server-rendered assignment view;
+there are no separate delegation/report-read or initiative inspection tools, and
+no public call accepts durable `*_id` values, assignment refs, report refs,
+initiative refs, cursors, or caller idempotency keys.
+No host metadata, plugin `cwd`, or hook binds a project. `open_task` records
 the exact original request and a concrete language tag beside the English
 objective and four non-empty, meaningful result-contract lists; `context`
 remains optional arbitrary JSON. Delegation `scope` is required non-empty text
 defining the concise worker-ownership boundary, not an object, and detailed
 execution belongs in `instructions`. Exact model and effort are required
-together. Closure selects the existing subject with `subject_type` plus the
-compact `subject_ref`; durable `subject_id` is evidence only.
+together. `close_task` is task-scoped and accepts the exact task reference,
+advisory verdict, and bounded evidence; private/internal subject and initiative
+ledger identity is never a public argument.
 
 The package keeps finalized-report evidence separate from advisory bookkeeping.
-`inspect_task` exposes `execution_outcome` with `evidence_status`,
+`read_task` exposes `execution_outcome` with `evidence_status`,
 `finalized_report_count`, `completed_report_count`, `effective_revision`,
 `coverage_status`, and `outcome`. The outcome derives deterministically from
 current effective-contract coverage, not report arrival order or historical
@@ -89,9 +91,9 @@ At most one same-idempotency retry is made for a verified transient persistence
 or inspection failure. An `unconfirmed` advisory result is disclosed without
 changing `execution_outcome` evidence.
 
-New reports use `begin`, sequential `append`, `finalize`, and `abort` under
-bounded chunk, assembling,
-retained-content, and response limits. Plan reports
+The public publication operations accept one complete immutable plan, result,
+or documentation evidence payload. Private/internal report assembly state,
+chunking, and retained-content limits remain behind the facade. Plan reports
 carry informational/required review policy and immutable digest identity.
 Product-facing reports support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
 schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas. V2
@@ -158,11 +160,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.12.2+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.13.2+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.12.2` manifest is source-mode only and the
+in provenance strength. A plain `1.13.2` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -170,7 +172,10 @@ Marketplace validator rejects it. The same gate enforces the host's 128-byte
 entry point. It creates/reuses the exact persistent `$HOME/.cortex-dev`
 candidate, isolates both `HOME` and `CODEX_HOME` (including plugin cache,
 configuration, and V12 state), synchronizes this checkout there, and starts
-ordinary Codex. Its paired `./scripts/cortex-dev-reset --confirm` helper is
+ordinary Codex. It projects only the safe enabled production Codebase Memory
+server definition into the candidate and runs that external MCP child with its
+owning production HOME; production config and credentials remain unchanged.
+Its paired `./scripts/cortex-dev-reset --confirm` helper is
 explicit and path-guarded; it refuses stable, repository, broad, symlinked,
 and non-regular targets. `./scripts/sync-cortex.sh` remains the explicitly
 authorized local-source synchronization operation and must not replace the
@@ -189,8 +194,8 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.12.2 and a suffix matching the complete normalized plugin payload;
-- exact fifteen-tool registry/runtime parity;
+  1.13.2 and a suffix matching the complete normalized plugin payload;
+- exact fourteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private
   successful-result schema validation, a complete catalogue below 65,536
@@ -228,7 +233,7 @@ The release candidate must prove:
 - exact model/effort support, Luna override omission, and no server fallback;
 - advisory profile parity across registry and TOML files;
 - absence of lifecycle hooks and lifecycle hook code;
-- packaged maintenance-module parity without changing the fifteen-tool registry,
+- packaged maintenance-module parity without changing the fourteen-tool registry,
   including task/shard anchoring, confirmation strings, backup validation,
   offline restore, projection safety, canonical-data retention, and zero
   project/V11 writes;

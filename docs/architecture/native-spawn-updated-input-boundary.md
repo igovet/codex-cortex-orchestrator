@@ -1,7 +1,9 @@
 # Native spawn `updatedInput` boundary
 
 Status: causal boundary proven on Codex `0.151.0`; source fix implemented and
-source suites passed. This document is development evidence only.
+source suites passed. A later 0.151.0 live run also exposed and corrected a
+separate spawn-envelope compatibility defect described below. This document is
+development evidence only.
 
 ## Controlled host probes
 
@@ -41,6 +43,22 @@ open_assignment
 
 PreToolUse remains a correlation and replay guard, not a native transport
 adapter. SubagentStart is the supported pre-model context-delivery boundary.
+
+## Codex 0.151.0 routing-envelope correction
+
+The current `collaboration.spawn_agent` host input may carry an optional atomic
+`model` and `reasoning_effort` pair beside the server projection. It does not
+carry the older host-level `role` field. The activation hook previously
+required all three older metadata fields whenever any metadata was present, so
+the real current-host pair was rejected as `dispatch_mismatch` before a worker
+could start. The coordinator then incorrectly reconciled the already-successful
+assignment mutation, producing an unexplained replay.
+
+The hook now accepts either no host routing metadata or the complete current
+model/effort pair, rejects either value alone and rejects the retired role
+field. A dispatch mismatch response explicitly states that the assignment is
+already committed and must not be reopened or replaced. The advertised
+assignment contract carries the same no-replay rule for every explicit success.
 The MCP server remains the only authority for assignment evidence and terminal
 publication.
 
@@ -55,4 +73,3 @@ publication.
   reconciliation, and successful closure are all observed;
 - no hook failure, tool validation error, decrypt/decode error, mutation
   replay, coordinator replacement, or worker follow-up is accepted.
-

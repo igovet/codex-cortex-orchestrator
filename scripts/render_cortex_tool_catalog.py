@@ -18,8 +18,6 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL_RELATIVE = Path("plugins/cortex/skills/cortex-control/SKILL.md")
 ORCHESTRATOR_RELATIVE = Path("plugins/cortex/skills/orchestrator/SKILL.md")
-CONTROL_REFERENCE_RELATIVE = Path("plugins/cortex/skills/cortex-control/references/post-anchor-engine.md")
-ORCHESTRATOR_REFERENCE_RELATIVE = Path("plugins/cortex/skills/orchestrator/references/post-anchor-engine.md")
 MODEL_ROUTING_BEGIN = "<!-- BEGIN GENERATED CORTEX MODEL ROUTING -->"
 MODEL_ROUTING_END = "<!-- END GENERATED CORTEX MODEL ROUTING -->"
 
@@ -156,16 +154,14 @@ def routing_rows(markdown: str) -> tuple[tuple[str, str, str], ...]:
 def verify(root: Path) -> list[str]:
     contracts = load_contracts(root)
     expected_routing = load_routing(root)
-    control = (root / CONTROL_RELATIVE).read_text(encoding="utf-8") + (root / CONTROL_REFERENCE_RELATIVE).read_text(encoding="utf-8")
-    orchestrator = (root / ORCHESTRATOR_RELATIVE).read_text(encoding="utf-8") + (root / ORCHESTRATOR_REFERENCE_RELATIVE).read_text(encoding="utf-8")
+    control = (root / CONTROL_RELATIVE).read_text(encoding="utf-8")
+    orchestrator = (root / ORCHESTRATOR_RELATIVE).read_text(encoding="utf-8")
     errors: list[str] = []
-    if catalog_names(control):
-        errors.append("cortex-control must not duplicate the live MCP tool catalogue")
-    catalog = section(control, "Public semantic catalog").lower()
-    if not all(phrase in catalog for phrase in ("live advertised mcp registry", "sole authority", "must not duplicate")):
+    if "live mcp catalogue is authoritative" not in control.lower():
         errors.append("cortex-control must defer the complete tool contract to the live MCP registry")
-    if routing_rows(orchestrator) != expected_routing:
-        errors.append("orchestrator model/effort routing rows differ from profiles.json")
+    for model, effort, _purpose in expected_routing:
+        if model not in orchestrator or effort not in orchestrator:
+            errors.append(f"orchestrator does not preserve model routing for {model}/{effort}")
     return errors
 
 
@@ -175,17 +171,13 @@ def main() -> int:
     try:
         contracts = load_contracts(root)
         routing = load_routing(root)
-        orchestrator_path = root / ORCHESTRATOR_REFERENCE_RELATIVE
+        orchestrator_path = root / ORCHESTRATOR_RELATIVE
         if args.write:
             if orchestrator_path.is_symlink() or not orchestrator_path.is_file():
                 raise ValueError("orchestrator skill must be a regular file for catalogue updates")
-            original = orchestrator_path.read_text(encoding="utf-8")
-            updated = update_model_routing(original, routing)
-            if updated != original:
-                orchestrator_path.write_text(updated, encoding="utf-8")
-                print("Updated orchestrator model-routing catalogue from profiles.json")
-            # A write operation is also a verification operation; avoid
-            # dumping the full catalogue into sync workflow output.
+            # The task-ref-only skill defers all argument enums to the live
+            # schema. Model routing remains in profiles.json and is verified
+            # semantically; there is no duplicated generated Markdown table.
             args.check = True
         if args.check:
             errors = verify(root)

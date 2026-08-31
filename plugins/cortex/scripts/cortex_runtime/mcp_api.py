@@ -654,7 +654,7 @@ def _project_public_views(value: Mapping[str, Any]) -> dict[str, Any]:
     """
     result = {
         key: item for key, item in value.items()
-        if key not in {"idempotency_key", "retry_handle"}
+        if key not in {"idempotency_key", "retry_handle", "dispatch_correlation_marker"}
     }
     for field, approval in (("human_view", False), ("approval_view", True)):
         projected = _public_view(result.get(field), approval=approval, owner=result)
@@ -725,11 +725,6 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     brief = value.get("worker_brief")
     task_id = task_id or entity_id(brief, "task_id")
     delegation_id = delegation_id or entity_id(brief, "delegation_id")
-    action = value.get("next_action")
-    action_task_ref = action.get("task_ref") if isinstance(action, Mapping) else None
-    if not isinstance(action_task_ref, str) and isinstance(action, Mapping):
-        suggested_subject = action.get("suggested_subject")
-        action_task_ref = suggested_subject.get("task_ref") if isinstance(suggested_subject, Mapping) else None
     reports = value.get("reports")
     if isinstance(reports, list):
         if task_id is None:
@@ -754,8 +749,6 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     compact = task_ref(task_id)
     if compact is None and task_ref_parts(value.get("task_ref")) is not None:
         compact = value["task_ref"]
-    if compact is None and task_ref_parts(action_task_ref) is not None:
-        compact = action_task_ref
     if compact is not None:
         result["task_ref"] = compact
     for canonical, compact_name in ((delegation_id, "delegation_ref"), (report_id, "report_ref"), (decision_id, "decision_ref"), (initiative_id, "initiative_ref")):
@@ -796,7 +789,6 @@ def _handles_for_output_schema(
 
 def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
     structured = _project_public_views(value)
-    compact_handles = json.dumps({"handles": structured["handles"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     serialized = json.dumps(structured, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     leading_view = None
     for view_name in ("approval_view", "human_view"):
@@ -807,10 +799,7 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
     content = []
     if leading_view is not None:
         content.append({"type": "text", "text": leading_view})
-    content.extend([
-            {"type": "text", "text": serialized},
-            {"type": "text", "text": compact_handles + "\nThese are the exact server-issued callable values from this success. Use a value only where the next live advertised input schema accepts it, and do not infer additional request properties."},
-        ])
+    content.append({"type": "text", "text": serialized})
     return {
         # MCP recommends serialized structured content in TextContent for
         # clients that predate structuredContent.  Both blocks are derived
@@ -1108,6 +1097,9 @@ def serve_stdio(
     # exact task_ref. A restarted server begins unbound and must receive an
     # exact selector again; the transport never guesses from ledger recency.
     active_task_ref: str | None = None
+    # Private per-connection actor and bounded-read state. It is never merged
+    # into advertised schemas or returned structured content.
+    connection_context: dict[str, Any] = {}
     while True:
         line, frame_rejected = _read_physical_jsonl_frame(sys.stdin)
         if frame_rejected:
@@ -1302,7 +1294,10 @@ def serve_stdio(
                 finish_tool_call(request_id, name, arguments, _tool_error_result(failure, mutation=name), success=False, fault=str(failure["code"]), failure=failure)
                 continue
             try:
-                result = contract["handler"](**resolved_arguments)
+                handler_arguments = dict(resolved_arguments)
+                if name in {"read_task", "publish_plan", "publish_result", "publish_documentation"}:
+                    handler_arguments["_connection_context"] = connection_context
+                result = contract["handler"](**handler_arguments)
             except V12ServiceError as error:
                 failure = _service_failure(error)
                 finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault=str(failure["code"]), failure=failure)
@@ -1333,15 +1328,19 @@ def serve_stdio(
                 if not isinstance(result, Mapping) or not _is_json_value(result):
                     finish_internal_tool_error(request_id, name, resolved_arguments)
                     continue
-                discovered_task_ref = _handles(result).get("task_ref")
+                discovered_task_ref = result.get("task_ref")
+                # Keep one private, observation-only snapshot before public
+                # projection removes internal correlation metadata.  The
+                # snapshot is consumed synchronously by observe_call after
+                # the wire reply; it never participates in schema validation
+                # or the public MCP envelope.
+                observation_result = dict(result)
                 result = _project_public_views(result)
                 # Validate against the complete closed private schema.  The
                 # compact outputSchema is discovery-only and intentionally
                 # permits additional observational receipt fields.
                 public_output_schema = contract["outputSchema"]
                 output_schema = contract["runtimeOutputSchema"]
-                if isinstance(public_output_schema, Mapping):
-                    result["handles"] = _handles_for_output_schema(result, public_output_schema)
                 try:
                     if isinstance(output_schema, Mapping):
                         _validate_schema(output_schema, result)
@@ -1364,7 +1363,11 @@ def serve_stdio(
                     and task_ref_parts(resolved_arguments["task_ref"]) is not None
                 ):
                     active_task_ref = resolved_arguments["task_ref"]
-                finish_tool_call(request_id, name, resolved_arguments, _success_tool_result(dict(result)), success=True, public_result=result)
+                finish_tool_call(
+                    request_id, name, resolved_arguments,
+                    _success_tool_result(dict(result)), success=True,
+                    public_result=observation_result,
+                )
         except _RpcError as error:
             if has_request_id:
                 rpc_error(request_id, error.code, error.message)

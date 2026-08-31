@@ -29,8 +29,8 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_BASE_VERSION = "1.12.2"
-VERSION_PATTERN = re.compile(r"^1\.12\.2\+codex\.sha256\.[0-9a-f]{16}$")
+EXPECTED_BASE_VERSION = "1.13.2"
+VERSION_PATTERN = re.compile(r"^1\.13\.2\+codex\.sha256\.[0-9a-f]{16}$")
 EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
@@ -53,8 +53,6 @@ TASK_ANCHORED_TOOLS = {
 EXPECTED_SKILL_RESOURCES = {
     Path("cortex-control/agents/openai.yaml"),
     Path("knowledge-harvest/references/feature-census.md"),
-    Path("orchestrator/references/post-anchor-engine.md"),
-    Path("cortex-control/references/post-anchor-engine.md"),
 }
 RETIRED_PLUGIN_PATHS = {
     Path("scripts/cortex_hook.py"),
@@ -228,9 +226,9 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
     version = manifest.get("version")
     valid_version = VERSION_PATTERN.fullmatch(version) if isinstance(version, str) else None
     if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not valid_version:
-        fail("installable plugin manifest must use a content-addressed 1.12.2 version")
+        fail("installable plugin manifest must use a content-addressed 1.13.2 version")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
-        fail("plugin manifest semantic version must be 1.12.2")
+        fail("plugin manifest semantic version must be 1.13.2")
     provenance_path = plugin / "scripts/cortex_runtime/provenance.py"
     spec = importlib.util.spec_from_file_location("cortex_marketplace_provenance", provenance_path)
     if spec is None or spec.loader is None:
@@ -365,21 +363,21 @@ def validate_skills(plugin: Path) -> None:
     # schema. The package retains a semantic brief only.
     orchestrator_semantics = " ".join(orchestrator.split()).lower()
     lifecycle_markers = (
-        "host-neutral dispatch brief",
-        "active host schema is authoritative for mapping that brief",
-        "do not copy an assumed operation name, argument shape, lifecycle",
-        "a host result that is absent or ambiguous is an external limitation",
-        "never create an ad-hoc spawn",
+        "the live mcp catalogue is authoritative",
+        "forward it exactly to native spawn",
+        "pretooluse/subagentstart correlates the actual child session",
+        "never choose a “latest assignment”",
+        "no workflow or governance admission rule may block that worker",
     )
     if any(marker not in orchestrator_semantics for marker in lifecycle_markers):
         fail("orchestrator guidance must describe host-schema-owned native lifecycle semantics")
     required_safety_markers = (
-        "deterministically matches the actual user message",
-        "must not inject a contradictory target language",
-        "`open_task` is the terminal task-anchoring boundary",
-        "Do not start degraded project work, use a fallback",
+        "coordinator communication follows the latest meaningful user-message language",
+        "the first execution operation is `open_task`",
+        "the coordinator stores only `task_ref`",
+        "never an imperative workflow command",
     )
-    missing_safety_markers = [marker for marker in required_safety_markers if marker not in orchestrator]
+    missing_safety_markers = [marker for marker in required_safety_markers if marker.lower() not in orchestrator.lower()]
     if missing_safety_markers:
         fail("orchestrator guidance lacks terminal task-opening/language safeguards: " + ", ".join(missing_safety_markers))
     communication = (plugin / "skills/coordinator-communication/SKILL.md").read_text(encoding="utf-8")
@@ -475,60 +473,15 @@ def validate_runtime(plugin: Path) -> None:
             fail(f"V12 public contract fields drifted: {name}")
         if expected_required is not None and required != expected_required:
             fail(f"V12 public contract required fields drifted: {name}")
-        if name == "open_task":
-            task_contract = properties.get("task")
-            task_properties = task_contract.get("properties", {}) if isinstance(task_contract, dict) else {}
-            task_required = set(task_contract.get("required") or ()) if isinstance(task_contract, dict) else set()
-            required_task_fields = {"project_root", "request_original", "user_language", "outcomes", "constraints"}
-            if (set(properties) != {"task"} or task_required != required_task_fields
-                    or "objective" in task_properties):
-                fail("open_task must expose one complete coherent task contract")
-            outcomes = task_properties.get("outcomes") if isinstance(task_properties, dict) else None
-            outcome_items = outcomes.get("items", {}) if isinstance(outcomes, dict) else {}
-            if not isinstance(outcome_items, dict) or set(outcome_items.get("required") or ()) != {"requirement", "acceptance"}:
-                fail("open_task must pair every requirement with measurable acceptance")
-            if "verification_plan" in properties:
-                fail("create_task must derive verification entries without a public duplicate input")
-            if not str(contract.get("description", "")).strip():
-                fail("open_task description must lead with the complete required task contract")
-            project_root = task_properties.get("project_root") if isinstance(task_properties, dict) else None
-            if not isinstance(project_root, dict) or project_root.get("type") != "string":
-                fail("create_task.project_root must remain the explicit V12 shard anchor")
-        elif name == "consume_assignment_evidence":
-            derived_required = {
-                "consume_assignment_evidence": {"assignment_ref"},
-            }[name]
-            if (
-                "project_root" in properties
-                or "task_id" in properties
-                or "task_ref" in properties
-                or not derived_required.issubset(required)
-            ):
-                fail(f"{name} must resolve through its required opaque record references without a public task anchor")
-        elif name in TASK_ANCHORED_TOOLS:
-            task_ref = properties.get("task_ref")
-            if (
-                "project_root" in properties
-                or "task_id" in properties
-                or not isinstance(task_ref, dict)
-                or task_ref.get("type") != "string"
-                or task_ref.get("maxLength") != 14
-                or "server-owned context" not in str(contract.get("description", ""))
-            ):
-                fail(f"{name} must accept compact task_ref or the exact server-owned connection context without a public task_id alternative")
-        if name == "open_assignment":
-            mission = properties.get("mission")
-            mission_properties = mission.get("properties", {}) if isinstance(mission, dict) else {}
-            if set(properties) - {"task_ref", "mission", "input_report_refs", "input_decision_refs", "parent_assignment_ref"} or not isinstance(mission, dict) or set(mission.get("required") or ()) != {"role", "profile_name", "responsibility", "goal", "constraints", "instructions", "item_refs"}:
-                fail("open_assignment must expose one complete mission contract")
-            if (
-                "model" in properties
-                or "reasoning_effort" in properties
-                or not isinstance(mission_properties.get("profile_name"), dict)
-                or set((mission_properties.get("responsibility") or {}).get("enum", ())) != {"planning", "delivery", "evidence"}
-                or not isinstance(mission_properties.get("item_refs"), dict)
-            ):
-                fail("open_assignment routing must be server-owned while profile intent remains explicit")
+        forbidden = {"assignment_ref", "continuation_ref", "binding_ref", "report_ref", "plan_ref", "decision_ref", "item_ref", "cursor", "digest", "handles"}
+        if set(properties) & forbidden:
+            fail(f"{name} exposes private identifier or continuation fields")
+        if name != "open_task" and "task_ref" not in properties:
+            fail(f"{name} must use task_ref as its public task identity")
+        if name == "open_task" and not {"project_root", "request_original", "user_language", "outcomes", "constraints"}.issubset(required):
+            fail("open_task must expose one flat coherent task contract")
+        if name == "open_assignment" and not {"profile_name", "model", "reasoning_effort", "responsibility", "outcomes", "report_policy"}.issubset(required):
+            fail("open_assignment must expose one flat LLM-owned mission contract")
     if hasattr(__import__("cortex_runtime.mcp_api", fromlist=["public_tools_for_audience"]), "public_tools_for_audience"):
         fail("V12 MCP transport must not project tools by audience")
 
@@ -545,8 +498,10 @@ def validate_runtime(plugin: Path) -> None:
                 fail(f"model/effort recommendation rewrote {model}/{effort}")
     try:
         model_routing.validate_model_selection("host-selected-model", "host-selected-effort")
-    except ValueError as exc:
-        fail(f"host-neutral recommendation validation rejected non-empty host values: {exc}")
+    except ValueError:
+        pass
+    else:
+        fail("model routing must reject values outside the advertised catalogue")
 
 
 def main() -> int:

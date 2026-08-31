@@ -25,6 +25,11 @@ TASK_ID_RE = re.compile(TASK_ID_PATTERN)
 TASK_REF_SUFFIX_LENGTH = 12
 TASK_REF_PATTERN = rf"^t_([0-9a-f]{{{TASK_REF_SUFFIX_LENGTH}}})$"
 TASK_REF_RE = re.compile(TASK_REF_PATTERN)
+# A worker receives an assignment-scoped task locator in the same sole public
+# field.  The suffix is an opaque server value; it is resolved only inside the
+# ledger and is never exposed as an assignment/report/continuation handle.
+WORKER_TASK_REF_PATTERN = rf"^t_([0-9a-f]{{{TASK_REF_SUFFIX_LENGTH}}})_([0-9a-f]{{{TASK_RANDOM_LENGTH}}})$"
+WORKER_TASK_REF_RE = re.compile(WORKER_TASK_REF_PATTERN)
 SHARDED_RECORD_PATTERN = rf"^(delegation|report|initiative|decision)-([0-9a-f]{{{PROJECT_HASH_LENGTH}}})-([0-9a-f]{{{TASK_RANDOM_LENGTH}}})$"
 SHARDED_RECORD_RE = re.compile(SHARDED_RECORD_PATTERN)
 # Public entity references deliberately carry only a type discriminator and
@@ -177,8 +182,7 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
             # authority; these claims preserve semantic completeness across
             # worker handoffs and plan revisions.
             required.add("contract_coverage")
-            if report_type in {"plan", "result"}:
-                required.add("verification_facts")
+            required.add("verification_facts")
             if report_type in {"result", "synthesis"}:
                 required.add("documentation_impact")
         elif not current_v3:

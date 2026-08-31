@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.12.2 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.13.2 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -13,7 +13,7 @@ derived, host-private human view rather than another source of authority.
 
 Cortex treats the following as authoritative:
 
-- the exact resolved `project_root` supplied only to `create_task`, with its
+- the exact resolved `project_root` supplied only to `open_task`, with its
   saved canonical `task_id` retained as evidence and compact `task_ref`
   anchoring later task-anchored public calls;
 - project isolation derived from the SHA-256 digest of that resolved root;
@@ -23,7 +23,7 @@ Cortex treats the following as authoritative:
 - strict public input schemas, enumerations, size limits, and reference checks;
 - server-derived operation identities and normalized-payload digests for
   semantic report publication replay;
-- immutable report chunks and finalized/aborted report assemblies, append-only
+- private/internal immutable report chunks and finalized/aborted report assemblies, append-only
   governance assessments, user decisions, and closures, and append-only
   initiative revisions;
 - ordinary Codex/user approval for destructive, external, privileged, or
@@ -36,7 +36,7 @@ backend gates. Required plan review and a genuine user decision are owned by
 the coordinator in ordinary chat: a stored decision records the evidence but
 does not authenticate the user, grant authority, or authorize a later action.
 
-Coordinators and workers receive the same exact fifteen-tool semantic catalog. There is no
+Coordinators and workers receive the same exact fourteen-tool semantic catalog. There is no
 audience filtering, opaque coordinator or worker capability, host epoch, native
 child binding or lifecycle attestation, profile capability matrix, or session
 or environment identity. The worker brief does carry renderer/profile proof and
@@ -84,6 +84,15 @@ unchanged-state, and project-local `.codex`. The boundary does not change for a
 read-only check, plan preparation, report recovery, or a user request addressed
 to the coordinator.
 
+For structural project-code discovery, every worker starts with the enabled
+Codebase Memory MCP bound to the canonical project root. Missing, disabled, or
+unusable Codebase Memory is an environment blocker, not a fallback condition.
+One bounded ordinary-search fallback is permitted only after an actual graph
+call proves that the indexed graph excludes the requested surface or is
+insufficient; the worker records that rationale and scope. Silent or chained
+fallback is a contract violation. The coordinator is denied operational access
+to the shared Codebase Memory namespace.
+
 ## Public API boundary
 
 The complete public catalog is defined in
@@ -99,27 +108,26 @@ and contains exactly:
 7. `open_steering`
 8. `record_steering`
 9. `open_assignment`
-10. `consume_assignment_evidence`
-11. `publish_plan`
-12. `publish_result`
-13. `publish_documentation`
-14. `assess_governance`
-15. `close_task`
+10. `publish_plan`
+11. `publish_result`
+12. `publish_documentation`
+13. `assess_governance`
+14. `close_task`
 
 Every tool has a closed input object. Runtime validation consumes the same
 schema object advertised by `tools/list`. Unexpected properties, invalid
 types, unsupported enumeration values, oversized fields or arrays, invalid
-identifiers, and invalid cursors are rejected before a service operation.
+identifiers, and invalid continuation values are rejected before a service operation.
 
-Only `create_task` accepts the exact resolved `project_root`; it is the sole
+Only `open_task` accepts the exact resolved `project_root`; it is the sole
 public project-root boundary, stores the canonical project association, and
 returns preferred `task_ref` plus canonical `task_id`. The seven
 task-anchored public tools require `task_ref` and resolve it fail-closed to the
 saved canonical task. The 14-character reference contains only a 12-hex task
 suffix; resolution scans private V12 shards and rejects zero or ambiguous
 matches. Full `task_id` remains durable database evidence, not a public request
-locator; entity-derived public calls resolve only from their exact emitted
-delegation or report refs instead.
+locator; every public operation is task-ref-only and private assignment/report
+references never become caller-supplied locators.
 Initiative operations use the resolved task only as a project locator, never
 as authority. Current MCP call
 metadata does not provide a guaranteed project-root binding, the plugin stdio
@@ -127,7 +135,13 @@ process `cwd="."` names the installed plugin directory rather than the target
 project, and V12 has no lifecycle hook that binds a session root. The native
 worker brief carries the saved root only for working-directory context.
 
-`create_task` records one versioned task/result contract: English-normalized
+Before `open_task`, the coordinator must read every available user-supplied
+attachment or pasted specification and normalize all decision-bearing details
+into the semantic outcomes, acceptance criteria, constraints, and verification
+contract. Exact limits, identifiers, named handlers/fields, states, negative
+requirements, external boundaries, edge cases, and verification expectations
+must not be replaced by a summary such as “strict” or “as specified”.
+`open_task` records one versioned task/result contract: English-normalized
 `objective` for internal coordination; exact arbitrary-Unicode
 `user_request_original`; `user_language`; `task_contract_version`; bounded
 English `requirements`, `constraints`, and `acceptance_criteria`; an outcome
@@ -136,7 +150,7 @@ independent verification plan that is never derived by copying acceptance; and
 optional bounded JSON `context`. Original user wording
 is preserved and never replaced by the normalization. The result contract is
 not a backend execution plan or permission boundary. Optional `context` never
-supplies or overrides the root. `create_delegation.scope` is a required
+supplies or overrides the root. `open_assignment.scope` is a required
 non-empty text string of at most 65,536 characters: it is the concise boundary
 of worker ownership, detailed execution belongs in `instructions`, and an
 object-shaped scope is invalid. Delegation `model` and `reasoning_effort` are
@@ -156,26 +170,23 @@ authority; malformed or ambiguous active state fails closed for that session.
 Settled diagnostic history is independently capped at 64 receipts per session
 and cleanup is never a precondition for routing correctness.
 Normal spawning consumes
-that receipt directly; recovery uses `inspect_task` continuation data only
+that receipt directly; recovery uses `read_task` continuation data only
 after host reconciliation. Continuations never attest lifecycle, and native
 commentary alone is never durable progression: a recovered child needs a
 finalized report, explicit blocked/partial handoff, or parent-linked
-replacement. `submit_governance_closure` requires both `subject_type` and the
-matching compact task or initiative `subject_ref`; it records advisory evidence
-and does not gate safe work or a truthful user-facing answer.
+replacement. `close_task` records a task-scoped advisory closure from durable
+evidence and does not gate safe work or a truthful user-facing answer.
 
 The narrow decision operations are the durable record of ordinary-chat
 decisions. `record_clarification`, `record_plan_review`, and
-`record_steering` each consume only the matching server-issued binding. They
-requires one canonical field set: `task_ref`, subject type/ref/digest, decision
-type, neutral `prompt`, exact arbitrary-Unicode `response_original`, and
-`user_language`. A plan decision binds only that completed, finalized plan
-revision. An `approve` decision additionally requires the complete exact ready
-approval-view relation returned together by Cortex: the report ref/digest,
-approval handle, view digest, and view source sequence. Missing, legacy, or
-mixed fields are rejected before the service mutation. The record may supersede
-a prior decision on the same subject, but it never replaces original wording or
-acts as a bearer approval token.
+`record_steering` each consume only the matching server-issued binding and
+accept their operation-specific task-scoped fields. Binding, subject, digest,
+and decision identity are derived privately from the open operation; callers do
+not supply subject refs, report refs, delegation refs, or digests. The exact
+original-language response and `user_language` are retained. Missing, legacy,
+or mixed fields are rejected before the service mutation. The record may
+supersede a prior decision on the same subject, but it never replaces original
+wording or acts as a bearer approval token.
 The mutation response is compact and never repeats the private
 `response_original` value.
 
@@ -185,17 +196,14 @@ content, governance notes, personal data, credentials, raw exception state,
 database rows, or private filesystem content. Unknown runtime failures collapse
 to a sanitized ledger or validation error.
 
-For example, an unsupported `submit_report.report_type` returns structural
-diagnostics such as `Field: report_type. Expected:
-progress|result|synthesis|plan. Reason: enum.` An invalid fifth
-`read_reports.report_refs` entry returns `Field: report_refs. Expected:
-r_[0-9a-f]{12}. Reason: pattern.` These messages never echo the supplied
-value, and either validation failure leaves the ledger unchanged.
+For example, an unsupported publication field returns bounded structural
+diagnostics naming the field and expected advertised value without echoing the
+supplied value. Any schema validation failure leaves the ledger unchanged.
 
 The stdio transport bounds one JSON frame at 256 KiB. An oversized frame is
 fully drained and returns a sanitized parse error so the next valid
 `ping`/`tools/list` request can succeed; it must not desynchronize the server.
-The complete fifteen-tool catalogue is additionally constrained to 65,536
+The complete fourteen-tool catalogue is additionally constrained to 65,536
 bytes. It advertises the authoritative closed input contracts while keeping
 optional successful-result schemas inside the runtime validation boundary, so
 bounded host discovery receives every complete operation without pagination or
@@ -243,17 +251,17 @@ decision contracts preserve exact arbitrary-Unicode user wording in their
 designated `user_request_original` or `response_original` fields with
 `user_language`; never overwrite or silently translate that source text.
 
-Reports may contain material engineering evidence, so exact emitted report refs should be
-passed to later workers instead of copying full reports into prompts. The semantic publication
-operation owns storage representation and completion atomically; callers publish one complete
-terminal outcome for each delegation/report-kind slot. The server derives replay identity from
-the delegation, phase, assembly state, and canonical payload. An exact ambiguous retry replays
-its receipt, while a changed payload conflicts and must use active recovery/rework assignment
-semantics. Chunks remain immutable and ordered; finalized or aborted reports cannot be appended.
-The types are `progress`, `result`, `synthesis`, and `plan`; a `plan` report can declare
-`informational` or coordinator-owned `required` review policy without creating a backend gate.
+Reports may contain material engineering evidence, so private ledger references
+must never be copied into public requests or treated as capabilities. The three
+worker-owned publication operations accept one complete terminal plan, result,
+or documentation outcome for the worker's task-scoped assignment. Their public
+receipt contains only `task_ref`, `state`, and `replayed`; private report IDs,
+digests, and assembly state remain server-owned. A plan must declare
+`informational` or coordinator-owned `required` review policy without creating a
+backend gate.
 
-Canonical reports support the v1 schemas for all four report types and the
+Private/internal canonical report storage supports historical v1 schemas for
+all four report types and the
 additive v2 result, synthesis, and plan schemas. V2 adds structured coverage
 for assigned effective-contract items plus deviations, unresolved items, risks,
 and verification. The immutable original task contract is represented as a
@@ -289,29 +297,14 @@ work, and verification. Predictable structural or mapping failures leave the
 same report assembling and consume no terminal result slot; V1/V2 history stays
 immutable and readable.
 
-Ordinary delegation/task state inspection creates no receipt or lifecycle fact.
-The report reader returns at most 20 unique known reports in the exact requested
-order. A coordinator may read bodies only through an exact task anchor; public
-`read_task` evidence mode exposes that bounded route. A worker body read made with an exact consuming
-delegation (which declares every input) creates an immutable
-page receipt (digest, chunk indexes, byte count, and cursor chain); a
-coordinator-classified receipt never substitutes for a downstream worker's own
-consumption. Native `Summary` and `Report ref` handoffs are routing context, not
-semantic evidence. Before synthesis, revision, rework, closure, or a final
-answer, the coordinator consumes every relevant canonical body through its full
-all-section cursor chain; selected-section or metadata reads are insufficient. Downstream
-workers use `read_reports` when their declared work genuinely requires the
-report body. It returns only complete JSON
-chunks that fit its fixed server-side page (at most 65,536 bytes), with a
-selection-scoped cursor for resume. Omitting the consuming delegation requests
-metadata only and no bodies. Inspection tools use
-`after_sequence` with a fixed server-side page of 50 events, return compact
-references and bounded timeline pages, and expose `next_sequence`/`has_more`.
-`handles.after_sequence` and `handles.idempotency_key` are copied unchanged into their matching literal
-inputs. `handles.cursor` is the separate opaque `read_reports` continuation
-value. Root-level `next_sequence` and `next_chunk_index` are informational
-receipt fields, not aliases inside `handles`; neither they nor `retry_handle`
-may be substituted for a callable handle.
+Ordinary task reads create no receipt or lifecycle fact. `read_task` accepts
+only its advertised task-scoped view (`state`, `assignment`, or `evidence`),
+with `continue=true` for the immediately preceding bounded read. The server
+retains the continuation privately; callers do not supply report refs,
+private assignment/publication references, private cursors, or caller replay keys. Native
+handoffs are routing context, not semantic authority. Private/internal report
+assembly and ledger continuation state remain inaccessible through the public
+facade.
 
 Private tool-error logs are same-user sensitive data. Inspect only a bounded
 tail when necessary, extract sanitized correlation metadata, and never paste
@@ -331,7 +324,7 @@ Before every SQLite open, the runtime rejects symlinks and non-regular database
 paths. The database and adjacent WAL/SHM files are reconciled to `0600`. SQLite
 identifies the database family with an application ID, verifies schema version
 1, and checks the project metadata against the derived project hash. A normal,
-path-bearing `create_task` open automatically upgrades only the exact released
+path-bearing `open_task` open automatically upgrades only the exact released
 pre-human-view V12 shape through the complete ordered additive history ending
 at `v12-effective-outcome-coverage` in one transaction; it preserves legacy
 rows and fails closed for an unknown or future layout. No V11 database is ever
@@ -436,7 +429,8 @@ or touches V11.
 
 ## Advisory governance boundary
 
-The model owns mode selection, reassessment, initiative state, dependency
+After task creation and before the first assignment, the coordinator must
+append one evidence-backed governance assessment. The model owns mode selection, reassessment, initiative state, dependency
 interpretation, verification depth, rework, risk acceptance, and closure. The
 coordinator decides those orchestration questions from reports, while workers
 perform every underlying project inspection and verification action. The
@@ -448,6 +442,16 @@ backend does not promote, downgrade, or reject it. The latest user override
 remains effective across later model assessments; those statements are new rows
 that may preserve an evidence-backed warning or recommendation without
 silently replacing the user's choice.
+
+Every light or full delivery assignment requires a current finalized plan with
+`review_policy=required`; the coordinator opens the matching review, presents
+the verified plan, and records an explicit approval bound to that exact report
+and digest before dispatching delivery work. The backend enforces this narrow
+pre-dispatch relation while leaving planning/evidence assignments available.
+Minimal informational plans are permitted only when no
+material product, scope, external, destructive, security, privacy, or risk
+decision remains. This admission invariant never schedules work or authorizes
+external, destructive, or scope-expanding action.
 
 Initiative status is limited to `proposed`, `active`, `paused`, `completed`,
 `closed`, and `cancelled`. The status is informational. An existing initiative
@@ -529,9 +533,10 @@ require a delegated documentation-sync update under `docs/project/` and
 `docs/features/`, followed by a separate documentation-verifier worker. If
 there is no material impact, the coordinator obtains a finalized worker-owned
 report with an explicit English documentation-impact section and
-material/no-impact rationale, links its exact `report_ref` in the final initiative,
-and cites that compact ref plus its returned digest in closure evidence. A durable
-`report_id` may remain in evidence, but is not a callable public locator. A self-asserted
+material/no-impact rationale. The coordinator confirms that finalized evidence
+through the bounded `read_task` evidence view before task closure. Private
+report identity may remain in ledger evidence but is not a callable public
+locator. A self-asserted
 `documentation_not_required` value is invalid. The coordinator does not
 manufacture an edit and may use the bounded routing exception
 to identify affected knowledge paths, but never edits or verifies those files;
@@ -547,7 +552,11 @@ GitHub Marketplace flow. Repository developers use `./scripts/cortex-dev` for
 interactive development: it creates the exact persistent `$HOME/.cortex-dev`
 candidate directory, sets `HOME` and `CODEX_HOME` inside that candidate, runs
 the checkout synchronization there, and starts ordinary Codex. This keeps the
-stable runtime and its V12 state outside the candidate boundary. The paired
+stable Cortex runtime and its V12 state outside the candidate boundary. To make
+the required worker MCP real in live-dev, the launcher projects only the safe
+production Codebase Memory server settings and gives that external child its
+owning production HOME; it rejects arbitrary env/header/URL credential forms
+and never changes the production config. The paired
 `./scripts/cortex-dev-reset --confirm` helper removes only that exact dedicated
 candidate and refuses the active HOME, repository, broad paths, symlinks, and
 non-regular entries. Direct `./scripts/sync-cortex.sh` use remains an explicitly
@@ -556,8 +565,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.12.2+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.12.2` is
+`1.13.2+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.13.2` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a
@@ -591,43 +600,39 @@ A useful report includes:
 
 ## Release safety checklist
 
-1. Verify the manifest is V12, the public registry has exactly fifteen tools, and
+1. Verify the manifest is V12, the public registry has exactly fourteen tools, and
    coordinator and worker catalogs are identical.
 2. Verify the bundled skills make the root coordinator orchestration-only and
    delegate every source/code/config read, analysis, edit, command, test,
    verification, and conditional documentation update to workers, while
    keeping only the narrowly bounded orchestrator-owned knowledge route.
-3. Verify only `create_task` accepts explicit `project_root`, the seven
-   task-anchored tools require `task_ref` while entity-derived calls omit a
-   redundant anchor, the versioned task/result language fields preserve the
+3. Verify only `open_task` accepts explicit `project_root`, every public
+   operation is task-ref-only, the versioned task/result language fields preserve the
    original request beside English durable coordination fields, delegation
    `scope` is required non-empty text, object scope is rejected, exact packaged
    `profile_name` stays distinct from human `role` and mission
    `responsibility`, every assignment requires an explicit non-empty exact item
    scope that is reconciled one-to-one, model/effort are required
-   together, closure requires `subject_type` plus matching `subject_ref`,
-   and user decisions bind the correct subject and digest. For a plan approval,
-   verify the complete canonical decision payload: neutral `prompt`, exact
-   `response_original`, `user_language`, the finalized
-   plan ref/digest, and the matching ready-view handle, view digest, and source
-   sequence; malformed or mixed fields must fail without a mutation.
+   together, closure accepts only its task-scoped verdict/evidence fields, and
+   user decisions consume their matching server-issued bindings. For a plan
+   approval, verify the exact `response_original` and `user_language` through
+   that binding; malformed or mixed fields must fail without a mutation.
 4. Run the self-contained skill/profile lint and isolated V12 release/protocol
    test.
-5. Verify schema-v1 bootstrap, concurrent mutations, idempotency conflicts,
-   chunk ordering/finalization/abort, bounded worker reads, complete
-   coordinator body-consumption receipts, cross-project
+5. Verify schema-v1 bootstrap, concurrent mutations, server-owned replay
+   reconciliation, bounded task reads, cross-project
    rejection, governance and decision history, dependency warnings,
    host-private verified projection behavior, and V11 byte-for-byte
    preservation.
 6. Confirm lifecycle hook code and enabled hook declarations are absent.
-7. Verify the packaged maintenance CLI remains outside the fifteen-tool semantic catalog,
+7. Verify the packaged maintenance CLI remains outside the fourteen-tool semantic catalog,
    uses task/shard-derived host-private targets and exact confirmations,
    validates backups before retention/restore, requires offline `MCP_STOPPED`
    restore acknowledgement, preserves canonical data during projection/backup
    cleanup, and writes neither project nor V11 state.
 8. Confirm one durable delegation maps to one exact returned host spawn; the
-   healthy `create_delegation` response carries a host-neutral `dispatch_brief`
-   and renderer/profile proof; `read_delegation` is recovery only. Confirm that
+   healthy `open_assignment` response carries a host-neutral `dispatch_brief`
+   and renderer/profile proof. Confirm that
    Codex maps the semantic brief to its active spawn operation without treating
    host argument names, lifecycle, model availability, or sandbox state as
    Cortex authority.

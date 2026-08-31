@@ -26,11 +26,12 @@ The user must explicitly select `$cortex:orchestrator harvest` or
 The coordinator defines the knowledge outcome, identifies useful independent
 domains, delegates exploration and synthesis, and passes relevant report IDs.
 Workers—not the coordinator—inspect source and executable configuration. For
-project-code discovery, Codebase Memory is the mandatory first route: workers
-bind it to the exact canonical root and collect graph evidence before local
-search. Only demonstrated unavailable, excluded, or insufficient graph
-evidence permits one bounded ordinary-repository fallback, whose rationale and
-scope must be recorded; silent or repeated fallback is not permitted. Workers
+project-code discovery, Codebase Memory is a required, enabled worker MCP:
+workers bind it to the exact canonical root and collect graph evidence before
+local search. Missing or unusable MCP access is an environment blocker. Only an
+actual graph call demonstrating excluded or insufficient indexed evidence
+permits one bounded ordinary-repository fallback, whose rationale and scope
+must be recorded; silent or repeated fallback is not permitted. Workers
 then edit documentation and verify the resulting document tree. Each
 delegation uses a required concise textual ownership `scope`; its
 detailed procedure belongs in `instructions`.
@@ -91,10 +92,10 @@ bounded worker instructions from unquoted user-authored content without
 rejecting non-English paths, proper nouns, code, or task-required product text.
 
 Knowledge work follows the same V12 ledger contract as every other task. It has
-no required wave ordering, planner gate, receipt-gated lifecycle, lifecycle
-hook, profile capability, or backend completion rule. Worker handoff receipts
-are delivery evidence only. Missing baseline documentation cannot block a
-feature task or final answer.
+no fixed wave ordering, receipt-gated lifecycle, profile capability, or backend
+completion rule; the general assessment and light/full delivery-plan admission
+invariants still apply. Worker handoff receipts are delivery evidence only.
+Missing baseline documentation cannot block a feature task or final answer.
 
 Documentation must preserve user-authored content outside generated sections
 when the route contract requires it, keep facts grounded in current source, and

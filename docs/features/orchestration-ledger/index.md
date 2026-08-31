@@ -16,18 +16,24 @@ The coordinator maintains an evidence-driven, model-owned orchestration DAG;
 it never writes a project solution plan. The current DAG and every revision are
 persisted through task-linked initiative revisions and the existing
 delegation/report/decision graph, while the backend never executes it. Planning
-is an optional `planner` delegation that publishes the immutable `plan` report
-named as predecessor by plan-dependent workers. C1/C2/C3 remain advisory
+is optional for genuinely minimal work; light/full delivery requires a `planner`
+delegation that publishes the immutable required-review `plan` report and its
+exact approval relation. C1/C2/C3 classification remains model-owned
 baseline labels—bounded low-risk / multi-step or cross-surface / high-risk or
 cross-domain—normally selecting `minimal` / `light` / `full` governance. They
 are not server waves, gates, model escalation, or user approval. Report evidence
 can add, remove, reorder, retry, or parent-link rework stages without mutating
 completed reports.
 
+Every worker performing structural project discovery starts with Codebase
+Memory bound to the canonical project root. Exactly one bounded ordinary-search
+fallback is allowed only after concrete unavailable, excluded, or insufficient
+graph evidence is recorded; silent or chained fallback is invalid.
+
 ## Key files
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) builds and serves the V12 facade.
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact fifteen-tool semantic catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact fourteen-tool semantic catalog.
 - [mcp_api.py](../../../plugins/cortex/scripts/cortex_runtime/mcp_api.py) validates requests and serves MCP over stdio.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) maps public calls to the store.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) owns bounded V12 task/report constants and canonical report digests.
@@ -40,44 +46,43 @@ completed reports.
 ## Data flow
 
 ```text
-create_task
+open_task
     │
-    ├── set_governance_mode (append advisory assessment)
+    ├── assess_governance (append advisory assessment)
     │
     ├── coordinator-held dynamic DAG (not backend workflow state)
     │       ├── optional planner ──► immutable plan report ──► dependent workers
     │       ├── discovery / implementation / review / verification / security
     │       └── evidence may add/remove/reorder/retry/rework later nodes
     │
-    ├── create_delegation ──► dispatch_brief + renderer proof ──► native worker
+    ├── open_assignment ──► dispatch_brief + renderer proof ──► native worker
     │                                                │
     │                                                ▼
-    │                                          submit_report
+    │                                          publish_*
     │                                                │
-    ├────────────── inspect_task / bounded read_reports ◄────┘
+    ├────────────── read_task / bounded worker evidence ◄────┘
     │
     ├── plan report ──► verified review links ──► open_plan_review → record_plan_review
     │
-    ├── record_initiative / inspect_governance
+    ├── assess_governance
     │
     ├── worker verification report
     │       └── documentation impact
     │               ├── material ──► docs worker ──► docs verifier
     │               └── none ─────► report-grounded no-docs rationale
     │
-    └── submit_governance_closure ──► localized final remains model-owned
+    └── close_task ──► localized final remains model-owned
 
 canonical mutation + timeline + projection job
     └── best-effort host-private Markdown view (never project_root)
 ```
 
-Each semantic mutation also appends an ordered timeline event. Inspection uses
-`after_sequence=0` and `limit=50` by default (limit 1–200), and returns
-`next_sequence` plus `has_more` for bounded incremental context recovery.
-Task/delegation inspection returns
-compact report references; `read_reports` is the only report body/chunk reader,
-and large reports stay section- and byte-bounded.
-Only `create_task` carries the exact resolved `project_root` and stores the
+Each semantic mutation appends an ordered private timeline event. Public
+`read_task` accepts `view=state|assignment|evidence` and optionally
+`continue=true` for the immediately preceding bounded read. It returns
+server-produced semantic data with private ledger identity removed; worker
+assignment bootstrap is the evidence route.
+Only `open_task` carries the exact resolved `project_root` and stores the
 canonical project association. Every task-anchored public arrow carries the
 14-character `task_ref` (`t_` plus a 12-hex task suffix), which scans only
 private V12 shards and fails closed unless it resolves exactly one saved task.
@@ -88,16 +93,12 @@ metadata, plugin `cwd`, thread identity, or a hook.
 
 | Tool | Semantic contract |
 | --- | --- |
-| `create_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful `cortex/task-contract/v1` result fields; return preferred `task_ref` and canonical `task_id`. |
-| `inspect_task` | Use `task_ref` to return compact task history after `after_sequence`, bounded by `limit`, plus exact persisted continuation dispatches for host reconciliation. The result includes independent `execution_outcome` and task-relevant `advisory_closure` projections. Continuations are lifecycle-unknown and require a finalized report, explicit blocked/partial handoff, or parent-linked replacement before a durable successor relies on them. |
-| `create_delegation` | Use `task_ref` to store objective, separate human `role`, exact packaged `profile_name`, required textual `scope`, instructions, report/decision inputs, and exact model/effort; return a host-neutral `dispatch_brief` and renderer/profile proof. Codex maps the brief to its active spawn operation; `read_delegation` is recovery-only, and the receipt is not host authority. |
-| `read_delegation` | Use the exact emitted `delegation_ref` plus `after_sequence` to resolve its owner task and return compact local history without a receipt. Do not supply `task_ref` or `task_id`; no legacy or direct-ID public shape is accepted. |
-| `submit_report` | Use the exact emitted `delegation_ref` for an assembled `begin`/sequential `append`/`finalize`/`abort` progress, result, synthesis, or plan report. It resolves the owner task; do not supply `task_ref` or `task_id`. |
-| `read_reports` | Use exact `report_refs` to resolve their owner task and read metadata for coordinators or whole JSON chunks for a consuming worker (with its exact `consumer_delegation_ref` and declared inputs), for 1–20 known reports in requested order, with section/cursor/integer-byte bounds. Do not supply `task_ref` or `task_id`. |
-| `set_governance_mode` | Use `task_ref` to append a model or user-override assessment. |
-| `record_initiative` | Use `task_ref` only as the project anchor to create or revise an initiative and its links. |
-| `inspect_governance` | Use `task_ref` to read bounded project/task/initiative assessments, revisions, links, warnings, and closures. |
-| `submit_governance_closure` | After sufficient finalized worker evidence, use `task_ref` to append an advisory verdict and evidence for required `subject_type` plus matching compact task/initiative `subject_ref`; the service automatically inspects the intended record and returns `closure_confirmation` separately from `execution_outcome` and the current `conformance_review` projection. |
+| `open_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful result fields; return preferred `task_ref`. |
+| `read_task` | Use `task_ref` with `view=state|assignment|evidence`; use `continue=true` only to resume the immediately preceding bounded read. |
+| `open_assignment` | Use `task_ref` to store objective, role, packaged profile, scope, instructions, evidence inputs, and model/effort; return the host-neutral worker bootstrap. |
+| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref`; Cortex derives the consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. |
+| `assess_governance` | Use `task_ref` to append a model or user-override assessment. |
+| `close_task` | Record the final advisory closure aggregate from durable evidence. |
 | `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
 | `open_plan_review` → `record_plan_review` | Present and record one immutable plan review through a matching server-owned binding. |
 | `open_steering` → `record_steering` | Ask and record one steering change through a matching server-owned binding. |
@@ -112,21 +113,17 @@ Returned task IDs use `task-<64-lowercase-hex-project-shard>-<32-lowercase-hex-r
 so the runtime can resolve a ledger without scanning project directories. Callers
 must still treat the ID as opaque and preserve it exactly.
 
-For public continuation calls, `handles.after_sequence` and
-`handles.idempotency_key` are copied unchanged to
-their identically named literal inputs. `handles.cursor` is the separate opaque
-`read_reports` continuation value. Root-level `next_sequence` and
-`next_chunk_index` describe the returned receipt; they are informational, not
-`handles` aliases, and `retry_handle` is not a callable handle replacement.
+For public continuation calls, the server-owned continuation returned by
+`read_task` is copied unchanged to that operation's continuation input. Durable
+IDs, digests, and continuation values are opaque evidence/resumption data, not
+callable handles or capability replacements.
 
 Canonical compact decision references match `u_[0-9a-f]{12}`. They remain
 opaque evidence values and are copied exactly from successful tool receipts.
 
 Schema failures are sanitized before any mutation. For example, an unsupported
-`submit_report.report_type` reports `Field: report_type. Expected:
-progress|result|synthesis|plan. Reason: enum.` An invalid fifth
-`read_reports.report_refs` value reports `Field: report_refs. Expected:
-r_[0-9a-f]{12}. Reason: pattern.` Neither diagnostic echoes the rejected value,
+publication field reports the field and expected advertised enum without
+echoing the rejected value. Neither diagnostic echoes the rejected value,
 and either failure leaves the durable ledger unchanged.
 
 ## Finalized-report evidence and advisory closure
@@ -135,11 +132,11 @@ and either failure leaves the durable ledger unchanged.
 advisory governance. It contains `evidence_status`
 (`finalized_reports_present` or `no_finalized_reports`),
 `finalized_report_count`, `completed_report_count`, and `outcome`. The finalized
-count covers every finalized report. The completed count covers semantically
+count covers every finalized publication. The completed count covers semantically
 valid canonical finalized result reports with status `completed`; `outcome` is
 `null` until the first semantically valid canonical result is finalized, then
 reflects the latest such result as `completed` or `incomplete`. The projection
-makes no native-lifecycle claim, and `inspect_task` always exposes it
+makes no native-lifecycle claim, and `read_task` always exposes it
 independently of closure records.
 
 The coordinator requests `ready`, `ready_with_risks`, or `not_ready` from
@@ -153,9 +150,9 @@ The closure mutation never upgrades a request. It normalizes an overstated
 verdict downward to the current conformance projection and returns the requested
 and recorded values without choosing the next orchestration stage.
 
-`inspect_task` also returns `advisory_closure`, whose `record_status` is
+`read_task` also returns `advisory_closure`, whose `record_status` is
 `recorded` or `not_recorded` and whose `latest_record` is the latest closure
-object or `null`. The `submit_governance_closure` result adds
+object or `null`. The `close_task` result adds
 `closure_confirmation`: `inspection_status` is `confirmed` or `unconfirmed`,
 `reason` is one of `record_inspected`, `persistence_unavailable`,
 `inspection_unavailable`, or `record_not_observed`, and `attempts` is 1 or 2.
@@ -189,21 +186,20 @@ Every assignment also selects a non-empty exact set of current outcome-item
 references. The selection is required even for planning and single-outcome
 work, so prose labels cannot silently widen or replace durable scope.
 
-Workers publish immutable `progress`, `result`, `synthesis`, or `plan` reports
+Workers publish immutable plan, result, or documentation evidence
 and return a concise native `Summary` plus exact `Report ref` in the completion
 handoff. That summary is routing context, not semantic evidence: before
 synthesis, revision, rework, closure, or a final answer, the coordinator reads
-each relevant canonical report body through the task evidence-read mode to
-completion and retains its immutable digest receipt. Later delegations receive only relevant finalized report refs, their exact
-manifest digests, and user-decision refs. A successor must call `read_reports`
-with its own exact `consumer_delegation_ref` before
-using a predecessor report. The server rejects a report outside that delegation's
-declared inputs and appends a structural receipt for every returned page:
-consumer delegation ref, report ref, observed manifest digest, selected sections,
-input/output cursors, returned chunk indexes, byte count, and chronology
-sequence. Coordinator reads are explicitly classified and cannot be mistaken
-for downstream consumption. Receipts prove ledger delivery, not semantic use of
-opaque report prose or native-worker lifecycle.
+each relevant canonical report body through the bounded `read_task` evidence
+view to completion and retains its immutable digest receipt. Later delegations
+receive only relevant finalized evidence and user-decision refs. A successor
+reads predecessor evidence through the bounded `read_task` evidence view when
+its declared work requires it. The server rejects evidence outside that
+assignment's declared inputs and preserves the bounded evidence contract;
+coordinator reads are explicitly classified and cannot be mistaken
+for downstream consumption. The server-owned assignment and evidence data
+remains authoritative; coordinator prose and native-worker handoffs are routing
+context, not semantic evidence.
 
 Canonical product-facing reports support the fixed
 `cortex/report/{progress,result,synthesis,plan}/v1` schemas and additive
@@ -253,7 +249,7 @@ does not block replacement or synthesis. Status is `partial`, `completed`,
 ## Effective outcome coverage
 
 The immutable task/result contract remains the original record of intent.
-`inspect_task` projects its active, revisioned effective contract as one stable
+`read_task` projects its active, revisioned effective contract as one stable
 `o_` item reference per independent user outcome. Acceptance and verification
 criteria, task constraints, steer additions, and exact source fragments are
 linked to that outcome rather than materialized as more items. Delegations
@@ -267,65 +263,51 @@ only active items and labels each one `complete`, `missing`, `partial`,
 `unverified`, `stale`, or `contradictory`. A user `steer` decision creates a
 new revision, replaces only each named outcome with its merged linked data, and
 unaffected references and evidence remain valid. The advisory conformance
-projection relates the active revision, decision refs, active non-superseded
-report manifests, complete all-section coordinator-read receipts, unresolved
+projection relates the active revision, private decision/report evidence,
+complete server-owned reads, unresolved
 specialist dispositions, and aggregate coverage. It
 guides model-owned rework, verification, and closure review; it cannot alter
 report/delegation lifecycle or block safe coordination.
 
-Every new report uses one stable ID across `begin`, sequential labeled `append` chunks up to
-32 KiB, exact-manifest `finalize`, or `abort`. The limits
-are 256 chunks and 8 MiB per report, eight assembling reports and 16 MiB of
-assembling content per task, and 128 MiB retained report content per task.
-Report timeline events record start, each accepted `report_chunk_appended`,
-final submission, or abort. A duplicate identical chunk is safe; a conflicting
-or out-of-order chunk is rejected.
+Private/internal report storage may retain immutable assembly metadata and
+chunking limits, but the public facade has no `begin`/`append`/`finalize`/`abort`
+operations. Public workers submit one complete plan, result, or documentation
+payload through the corresponding publication operation.
 
-`read_reports` supports up to 32 section labels, an opaque scoped cursor, and a
-fixed 65,536-byte server page; metadata-only reads omit a consuming delegation.
-It returns only
-whole JSON chunks under a 224 KiB response ceiling. A small finalized one-chunk
-report may additionally expose compatibility `content`; incomplete/aborted
-content is never presented as completed evidence. Recovery resumes from
-canonical report metadata and cursor state, never from a generated Markdown
-view. The host-private task projection also contains the bounded receipt list,
-so database, timeline, and projection evidence agree without adding a twelfth
-public tool.
+Worker evidence reads are exposed through the bounded `read_task` evidence
+view. The public caller supplies no publication/assignment reference or cursor;
+continuation is retained by the server. Private/internal
+assembly state is never a public capability or recovery input.
 
-The read service preflights the complete report/chunk request and encoded
-response before materializing bodies, including the 224 KiB response ceiling.
+The read service preflights the bounded task/evidence response before
+materializing it.
 Projection rendering likewise preflights its aggregate output (512 files,
 32 MiB total, and 10 MiB per file) so an over-limit request produces no
 partial artifact set.
 
-`inspect_task`, `read_delegation`, and `inspect_governance` return only the
-task-scoped timeline page selected by `after_sequence` and `limit`; they do not
-infer unlinked initiative history. On a normal V12 store open, the one-time
-conservative backfill appends only missing derived task events (including report
-chunk appends and unambiguous initiative/closure lineage), marks their payloads
-as `backfill` data, and queues derived-view refreshes. It never rewrites an
-existing timeline row or guesses ambiguous report-only lineage.
+`read_task` returns only the selected semantic view and its server-owned
+continuation; it does not infer unlinked private/internal initiative history.
+Private/internal storage repair may append only missing derived events and
+must never rewrite existing timeline rows or guess ambiguous lineage.
 
 Plan reports add `review_policy=informational|required` and may name a
-finalized predecessor. A required review is a coordinator-owned pause for
-plan-dependent work, not a backend gate. The matching narrow decision record operation preserves an
+finalized predecessor. A required review is a coordinator-owned interaction;
+for light/full delivery the backend admits only an explicit approval bound to
+the exact current plan. The matching narrow decision record operation preserves an
 exact original response and attribution `user_via_coordinator` through one
-closed canonical request containing task and subject refs, decision type,
-neutral `prompt`, exact `response_original`, and user language; retired English
-duplicate fields are rejected. Plan/report decisions additionally require the
-canonical
-digest; only plan `approve` also requires the current ready approval-view
-digest/source sequence and opaque handle copied from one returned relation. Plan
-`request_revision` and `cancel`
-preserve the exact plan digest/response without volatile view binding, so
-unrelated timeline events do not block feedback. Approval does not transfer to
-a revised report ID/digest, and clarification is not approval.
+closed operation-specific request containing the task reference, neutral prompt
+or response, and user language as advertised; retired English duplicate fields
+are rejected. Decision subject and digest binding are derived privately from
+the matching open operation, never supplied as report/delegation locators.
+Approval does not transfer to a revised private plan identity, and clarification
+is not approval.
 
 ## Coordinator-only execution boundary
 
 The coordinator may define outcome/acceptance, select or revise governance,
-create and inspect tasks/delegations, choose exact worker model/effort,
-coordinate native workers, read reports, decide rework/replacement, record
+open and read tasks, open assignments, choose exact worker model/effort,
+coordinate native workers, read server-produced evidence, decide
+rework/replacement, record
 advisory closure, and synthesize the final answer. Before project delegation,
 the host-injected `AGENTS.md` context governs the task; it then reads the project and feature indexes, and
 task-relevant pages
@@ -431,19 +413,20 @@ summarizes canonical evidence inline; view failure is never a lifecycle gate.
 
 Core tools validate public shape/size, strict JSON, identifier/reference
 existence, project isolation, transaction/foreign-key integrity, and
-idempotency. They never inspect mode, initiative status, dependency warnings,
-report completion, closure verdict, or closure presence to admit an operation.
+idempotency. Assignment admission also requires one governance assessment;
+light/full delivery additionally requires the exact current finalized
+required-review plan approval. Initiative status, dependency warnings, closure
+verdict, and closure presence never admit an operation.
 
-No V12 lifecycle hook, host epoch, child binding, stop marker, mandatory wait,
-backend plan-approval gate, receipt, repair escrow, resource lock, closure
-breaker, or server recovery route exists. A coordinator may pause
-plan-dependent work for a genuine required user review; public ledger tools
-remain available throughout. Native execution remains model/host behavior
+No host epoch, stop marker, mandatory wait, repair escrow, resource lock,
+closure breaker, or server recovery route exists. The narrow assessment and
+plan-approval checks do not schedule work, prevent planning/evidence assignments,
+or block an already bound worker. Native execution remains model/host behavior
 outside the ledger.
 
 ## MCP result transport
 
-Every one of the fifteen registry entries advertises its closed input schema.
+Every one of the fourteen registry entries advertises its closed input schema.
 The runtime separately retains the family-specific successful-result schema
 and uses those definitions to validate inputs and successful results. A
 successful call returns canonical JSON as text content and `structuredContent`,

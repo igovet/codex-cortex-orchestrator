@@ -25,7 +25,7 @@ MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-EXPECTED_BASE_VERSION = "1.12.2"
+EXPECTED_BASE_VERSION = "1.13.2"
 EXPECTED_MCP = {"mcpServers": {"cortex": {"command": "python3", "args": ["./scripts/cortex.py"], "cwd": "."}}}
 RETIRED_PLUGIN_PATHS = {
     Path("hooks"),
@@ -603,6 +603,54 @@ def inspect_registration(codex_path: Path | None, version: str | None) -> dict[s
     return check("cortex_registration", True, f"same-user cortex@cortex registration is enabled at version {version}")
 
 
+def inspect_codebase_memory_config(payload: dict[str, Any]) -> dict[str, Any]:
+    """Require a usable, enabled, non-secret stdio Codebase Memory server.
+
+    This deliberately validates only safe availability metadata.  It never
+    reads or reports environment values, headers, URLs, or other credentials.
+    """
+    servers = payload.get("mcp_servers")
+    server = servers.get("codebase_memory") if isinstance(servers, dict) else None
+    if not isinstance(server, dict):
+        return check(
+            "codebase_memory_mcp",
+            False,
+            "top-level mcp_servers.codebase_memory is missing",
+            "Configure an enabled local Codebase Memory MCP server for this Codex user, then rerun the preflight.",
+        )
+    if server.get("enabled", True) is not True:
+        return check(
+            "codebase_memory_mcp",
+            False,
+            "top-level mcp_servers.codebase_memory is disabled",
+            "Enable mcp_servers.codebase_memory for this Codex user, then rerun the preflight.",
+        )
+    command = server.get("command")
+    if not isinstance(command, str) or not command.strip() or "\n" in command or "\r" in command:
+        return check(
+            "codebase_memory_mcp",
+            False,
+            "mcp_servers.codebase_memory has no usable local command",
+            "Configure a non-empty single-line command for the Codebase Memory MCP server, then rerun the preflight.",
+        )
+    args = server.get("args", [])
+    if not isinstance(args, list) or any(not isinstance(item, str) or "\n" in item or "\r" in item for item in args):
+        return check(
+            "codebase_memory_mcp",
+            False,
+            "mcp_servers.codebase_memory has malformed command arguments",
+            "Repair the Codebase Memory MCP command arguments, then rerun the preflight.",
+        )
+    if any(key in server for key in ("url", "http_url", "headers", "authorization", "env", "environment")):
+        return check(
+            "codebase_memory_mcp",
+            False,
+            "mcp_servers.codebase_memory uses an unsupported credential-bearing or remote form",
+            "Configure Codebase Memory as a local stdio MCP server without inline credentials, then rerun the preflight.",
+        )
+    return check("codebase_memory_mcp", True, "enabled local Codebase Memory MCP command is configured")
+
+
 def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, Any]:
     """Require the same user's Codex config to permit Cortex and native V2."""
     symlink = symlink_ancestor(codex_home)
@@ -629,6 +677,9 @@ def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, 
             f"same-user Codex configuration is unreadable: {failure or 'unknown parser failure'}",
             "Repair the same-user Codex configuration, then rerun the preflight.",
         )
+    memory_result = inspect_codebase_memory_config(payload)
+    if memory_result["status"] != "PASS":
+        return memory_result
     plugins = payload.get("plugins")
     registration = plugins.get(CORTEX_PLUGIN_ID) if isinstance(plugins, dict) else None
     if not isinstance(registration, dict):

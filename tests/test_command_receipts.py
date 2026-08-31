@@ -124,6 +124,74 @@ def _source_stdio_tool_call(home: str, tool_name: str, arguments: dict) -> dict:
     return reply
 
 
+class PublicPublicationFirstCallTests(unittest.TestCase):
+    def test_open_assignment_first_stdio_call_uses_one_complete_instruction_field(self) -> None:
+        """A complete advertised assignment crosses validation without invented fields."""
+        with tempfile.TemporaryDirectory(prefix="cortex-assignment-first-call-") as home:
+            arguments = {
+                "task_ref": "t_0123456789ab",
+                "role": "Planner.",
+                "profile_name": "planner",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "responsibility": "planning",
+                "goal": "Produce one plan.",
+                "scope": "Read-only planning.",
+                "instructions": "Consume the assignment, plan once, and stop.",
+                "outcomes": ["Produce one plan."],
+                "report_policy": "none",
+            }
+            accepted = _source_stdio_tool_call(home, "open_assignment", arguments)
+            self.assertTrue(accepted["result"].get("isError"), accepted)
+            self.assertEqual(
+                accepted["result"]["structuredContent"]["error"]["code"],
+                "task_not_found",
+                accepted,
+            )
+
+            rejected = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {**arguments, "instructions_extra": "Invented supplementary instructions."},
+            )
+            self.assertTrue(rejected["result"].get("isError"), rejected)
+            error = rejected["result"]["structuredContent"]["error"]
+            self.assertEqual(error["code"], "validation_error", rejected)
+            self.assertEqual(error["details"]["path"], "$", rejected)
+            self.assertEqual(error["details"]["field"], "instructions_extra", rejected)
+
+    def test_publish_plan_first_stdio_call_accepts_explicit_empty_unresolved(self) -> None:
+        """The advertised complete shape must cross real MCP validation on its first call."""
+        with tempfile.TemporaryDirectory(prefix="cortex-plan-first-call-") as home:
+            arguments = {
+                "task_ref": "t_0123456789ab_" + "a" * 32,
+                "summary": "Plan.",
+                "scope": "Bounded scope.",
+                "review_policy": "required",
+                "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Run focused tests."]}],
+                "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
+                "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped to implementation."]}],
+                "risks": [],
+                "unresolved": [],
+                "status": "completed",
+            }
+            accepted = _source_stdio_tool_call(home, "publish_plan", arguments)
+            self.assertTrue(accepted["result"].get("isError"), accepted)
+            self.assertEqual(
+                accepted["result"]["structuredContent"]["error"]["code"],
+                "task_not_found",
+                accepted,
+            )
+
+            rejected = _source_stdio_tool_call(
+                home, "publish_plan", {key: value for key, value in arguments.items() if key != "unresolved"},
+            )
+            self.assertTrue(rejected["result"].get("isError"), rejected)
+            error = rejected["result"]["structuredContent"]["error"]
+            self.assertEqual(error["code"], "validation_error", rejected)
+            self.assertEqual(error["details"]["path"], "$.unresolved", rejected)
+
+
 def _cross_process_identical_receipt(
     root: str, home: str, ready: object, start: object, results: object,
 ) -> None:
@@ -622,18 +690,17 @@ class CommandReceiptTests(unittest.TestCase):
                 else: os.environ["CODEX_HOME"] = prior
             self.assertEqual(binding_count, 1)
             self.assertEqual(receipt_count, 1)
-            self.assertEqual({item["binding_ref"] for item in values}, {values[0]["binding_ref"]}, observed)
+            self.assertEqual({item["task_ref"] for item in values}, {task["task_ref"]}, observed)
+            self.assertEqual({item["state"] for item in values}, {"pending_clarification"}, observed)
             recorded = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "binding_ref": values[0]["binding_ref"],
-                "response_original": "Continue.", "user_language": "en",
+                "task_ref": task["task_ref"], "response_original": "Continue.", "user_language": "en",
             })
             self.assertFalse(recorded["result"].get("isError"))
             changed = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "binding_ref": values[0]["binding_ref"],
-                "response_original": "Change the answer.", "user_language": "en",
+                "task_ref": task["task_ref"], "response_original": "Change the answer.", "user_language": "en",
             })
             self.assertTrue(changed["result"].get("isError"))
-            self.assertEqual(changed["result"]["structuredContent"]["error"]["code"], "command_conflict")
+            self.assertEqual(changed["result"]["structuredContent"]["error"]["code"], "clarification_binding_stale")
             prior = os.environ.get("CODEX_HOME"); os.environ["CODEX_HOME"] = home
             try:
                 store, canonical = V12Store.for_task_ref(task["task_ref"])
@@ -767,7 +834,7 @@ os.close = _observed_close
                         self.assertTrue(all(item.get("_test_stdio", {}).get("exit_code") == 0 for item in observed), observed)
                         self.assertTrue(all(not item.get("_test_stdio", {}).get("forced_termination") for item in observed), observed)
                         self.assertTrue(all(not item["result"].get("isError") for item in observed), observed)
-                        bindings = [item["result"]["structuredContent"]["binding_ref"] for item in observed]
+                        receipts = [item["result"]["structuredContent"] for item in observed]
                         prior = os.environ.get("CODEX_HOME")
                         os.environ["CODEX_HOME"] = home
                         try:
@@ -782,7 +849,9 @@ os.close = _observed_close
                         finally:
                             if prior is None: os.environ.pop("CODEX_HOME", None)
                             else: os.environ["CODEX_HOME"] = prior
-                        self.assertEqual(len(set(bindings)), 1, observed)
+                        self.assertEqual({item["task_ref"] for item in receipts}, {task["task_ref"]}, observed)
+                        self.assertEqual({item["state"] for item in receipts}, {"pending_clarification"}, observed)
+                        self.assertEqual({item["replayed"] for item in receipts}, {False, True}, observed)
             finally:
                 if previous_guard is None:
                     os.environ.pop("CORTEX_TEST_SIDECAR_MUTATION_GUARD", None)

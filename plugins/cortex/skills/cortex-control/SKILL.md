@@ -1,56 +1,24 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.12.2 semantic companion supplied by the host after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.13.2 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel
 
-This companion is host-supplied only after explicit `cortex:orchestrator`
-selection. Do not select it for ordinary work or fetch it through a tool. All
-worker communication, reports, ledger prose, and durable tool-authored strings
-are English; coordinator-facing communication follows the latest meaningful
-user language.
-The active MCP registry is authoritative for the semantic call contract.
+This companion applies only after explicit `cortex:orchestrator` selection. The live MCP catalogue is authoritative for every request. Worker text and durable evidence are English; coordinator communication follows the latest meaningful user language.
 
 ## Mode boundary
 
-The coordinator kernel below applies only to coordinator mode after direct
-user route selection. A server-issued `assignment_worker` native child is a
-separate mode: it does not activate or reopen the coordinator route, and it
-cannot anchor tasks, govern, ask users, delegate, dispatch, or close. Its
-first semantic action is assignment-evidence consumption from the exact
-server-rendered dispatch brief. Only after the server confirms that evidence
-may it perform assigned work and publish its owned outcome.
+The coordinator owns LLM intent, the dynamic DAG, worker selection, parallelism, model and effort selection, verification/rework/documentation choices, user questions, closure judgment, and final synthesis. The backend owns only durable facts, identity binding, semantic selection, atomicity, replay, and integrity. It never schedules or commands the next workflow step.
 
-## Pre-anchor protocol
+A server-issued native child is worker mode, not another coordinator. It cannot open tasks, govern, ask users, delegate, dispatch, or close. Its exact first Cortex call is the assignment view of `read_task` using the worker-scoped `task_ref` embedded by the server renderer. It works and publishes only after that lifecycle-bound read succeeds.
 
-Task anchoring precedes every task-scoped semantic operation. This includes
-clarification holds and questions, plan or approval holds, steering,
-governance, knowledge routing, delegation, worker dispatch, and closure
-preparation. A clarification needed before planning is opened and presented
-after the task anchor and before planner dispatch; it is a hold on the anchored
-task, not an alternative to opening it. Before the anchor, allow only complete
-contract composition, the single task-opening attempt, and read-only
-reconciliation of that same attempt after explicitly ambiguous transport.
+After successful native spawn and lifecycle binding, no workflow or governance admission gate may block the worker. Enforce only schema, exact task/actor identity, isolation, immutable relation freshness, atomic replay/conflict, and ledger integrity.
 
-For project-facing work, the first project execution action is exactly one
-task-opening operation from the live advertised schema. Compose the complete
-outcome contract, make that opening call, and require its successful command
-receipt and task anchor before knowledge routing, project reads, adaptation,
-governance, delegation, worker dispatch, or any other project execution.
+## Anchor boundary
 
-Prose activation acknowledgement is not evidence. Shell or repository
-inspection before the anchor is a route violation. If transport is ambiguous,
-reconcile the same opening attempt read-only; never create a second task. If no
-anchor can be established, stop rather than starting degraded work.
+For project work, `open_task` is the first execution operation. Before it, compose only the semantic task contract. Do not inspect the project, dispatch, open a decision, assess governance, or emit task-specific commentary. On success retain only `task_ref`. Ambiguous transport permits only an identical retry. Failure to establish the task ends the Cortex route.
 
-Before a live workload, the host must expose a passive receipt proving the
-isolated candidate, registered server, and advertised catalogue agree. The
-coordinator/LLM verifies it; transport only exposes it.
+After task creation, make and record one explicit governance-depth decision before the first assignment. Choose the depth from the current evidence before invoking the assessment operation; a rationale or risk notes without a selected depth do not satisfy this requirement. The public assignment boundary rejects a missing assessment. It also rejects light/full delivery until the current finalized plan declares required review and an explicit approval is bound to that exact plan identity and digest. Planning and evidence assignments remain available to establish this relation, and no such pre-dispatch check blocks an already bound worker.
 
-## Post-anchor engine
-
-The activated orchestrator `SKILL.md` already contains the complete controller
-engine, including every post-anchor capability. Do not perform a second file or
-shell read for this companion or for a post-anchor reference. This companion
-adds the mode boundary above; it does not create another runtime loading step.
+All later calls follow the orchestrator skill and live schemas. Neither coordinator nor worker copies any other identifier, handle, digest, cursor, revision, slot, or idempotency value. Server-owned read continuation is requested only by its boolean flag. After `open_assignment` succeeds, native spawn follows immediately with the exact returned dispatch and no intervening model narration, read, or tool call.

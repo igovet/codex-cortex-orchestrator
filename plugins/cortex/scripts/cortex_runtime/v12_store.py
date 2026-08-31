@@ -370,7 +370,7 @@ def _linked_outcome_contracts(
         raise V12StoreError("outcome_contracts is invalid", code="invalid_argument", details={"field": "outcome_contracts"})
     result: list[dict[str, Any]] = []
     for ordinal, outcome in enumerate(value):
-        if not isinstance(outcome, Mapping) or set(outcome) - {"requirement", "acceptance", "verification"}:
+        if not isinstance(outcome, Mapping) or set(outcome) - {"requirement", "acceptance", "verification", "constraints"}:
             raise V12StoreError("outcome_contracts is invalid", code="invalid_argument", details={"field": "outcome_contracts"})
         requirement = _opaque_text(outcome.get("requirement"), label="outcome_contracts", maximum=TASK_CONTRACT_ITEM_MAX_LENGTH)
         acceptance = _contract_text_list(outcome.get("acceptance"), label="outcome_contracts.acceptance")
@@ -384,7 +384,8 @@ def _linked_outcome_contracts(
         verification = [item for item in verification if item not in acceptance]
         if requirement != requirements[ordinal]:
             raise V12StoreError("outcome_contracts disagrees with requirements", code="invalid_argument", details={"field": "outcome_contracts"})
-        result.append({"requirement": requirement, "acceptance": acceptance, "verification": verification})
+        constraints = _contract_optional_text_list(outcome.get("constraints", []), label="outcome_contracts.constraints")
+        result.append({"requirement": requirement, "acceptance": acceptance, "verification": verification, "constraints": constraints})
     return result
 
 
@@ -409,7 +410,7 @@ def _initial_outcome_details(outcome: Mapping[str, Any], ordinal: int) -> dict[s
     return {
         "acceptance_criteria": acceptance,
         "verification_criteria": verification,
-        "constraints": [],
+        "constraints": list(outcome.get("constraints", [])),
         "requirement_extensions": [],
         "source_fragments": fragments,
     }
@@ -3748,7 +3749,7 @@ class V12Store:
         task = self._task(connection, task_id)
         plan = self._report(connection, report_id, task_id=task_id)
         if (plan["report_type"] != "plan" or plan["assembly_state"] != "finalized"
-                or plan["status"] != "completed" or plan.get("semantic_status") != "semantic_valid"):
+                or plan.get("semantic_status") != "semantic_valid"):
             raise V12StoreError("approval view plan is invalid", code="approval_view_mismatch")
         digest = str(plan["content_digest"])
         if report_content_digest is not None and report_content_digest != digest:
@@ -4448,18 +4449,46 @@ class V12Store:
         resolved_policy = packaged_profile_assignment_policy(profile_name) if assignment_policy is None else assignment_policy
         if resolved_policy not in {"owner", "review", "planning"}:
             raise V12StoreError("assignment responsibility is invalid", code="invalid_argument", details={"field": "assignment_policy"})
-        if (resolved_policy == "planning") != (profile_name == "planner"):
-            raise V12StoreError("planning responsibility and planner profile must agree", code="invalid_argument", details={"field": "assignment_policy"})
         payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "outcome_assignments": assignments, "model": selection.model, "reasoning_effort": selection.reasoning_effort, "derive_assignment_scope": derive_assignment_scope, "assignment_policy": resolved_policy}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
-            self._require_no_pending_user_decision(connection, task_id=str(task["task_id"]))
-            self._enforce_planning_admission(
-                connection, task_id=str(task["task_id"]),
-                profile_name=str(payload["profile_name"]),
-                assignment_policy=str(payload["assignment_policy"]),
-                input_report_ids=list(payload["input_report_ids"]),
-            )
+            # Public/domain assignments carry ``derive_assignment_scope``.
+            # Re-check the admission invariant inside this write transaction
+            # so a plan revision cannot race the preflight check in the
+            # facade and slip an unapproved owner into the ledger.
+            if payload["derive_assignment_scope"]:
+                assessment = connection.execute(
+                    "SELECT mode FROM governance_assessments WHERE project_hash=? AND task_id=? "
+                    "ORDER BY CASE WHEN source='user_override' THEN 0 ELSE 1 END, "
+                    "created_sequence DESC LIMIT 1",
+                    (self.project_hash, task["task_id"]),
+                ).fetchone()
+                if assessment is None:
+                    raise V12StoreError(
+                        "governance assessment is required before opening an assignment",
+                        code="governance_assessment_required",
+                    )
+                if str(payload["assignment_policy"]) == "owner" and str(assessment["mode"]) in {"light", "full"}:
+                    plan = connection.execute(
+                        "SELECT report_id,content_digest,review_policy FROM reports "
+                        "WHERE project_hash=? AND task_id=? AND report_type='plan' "
+                        "AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+                        (self.project_hash, task["task_id"]),
+                    ).fetchone()
+                    decision = None if plan is None else connection.execute(
+                        "SELECT decision_type,subject_id,subject_digest FROM user_decisions "
+                        "WHERE project_hash=? AND task_id=? AND subject_type='plan' "
+                        "ORDER BY created_sequence DESC LIMIT 1",
+                        (self.project_hash, task["task_id"]),
+                    ).fetchone()
+                    if (plan is None or str(plan["review_policy"] or "") != "required"
+                            or decision is None or str(decision["decision_type"]) != "approve"
+                            or str(decision["subject_id"]) != str(plan["report_id"])
+                            or str(decision["subject_digest"]) != str(plan["content_digest"])):
+                        raise V12StoreError(
+                            "the current required-review plan has not been explicitly approved",
+                            code="plan_approval_required",
+                        )
             input_reports: list[dict[str, Any]] = []
             for report_id in payload["input_report_ids"]:
                 report = self._report(connection, report_id, task_id=task["task_id"])
@@ -4514,7 +4543,11 @@ class V12Store:
                         (str(logical_match["delegation_id"]),),
                     ).fetchall()
                 }
-                existing_policy = "owner" if "owned" in existing_roles else "review" if existing_roles & {"contributing", "evidence"} else "planning" if logical_match["profile_name"] == "planner" else None
+                has_planning_scope = connection.execute(
+                    "SELECT 1 FROM assignment_scope_snapshots WHERE assignment_id=? AND assignment_role='planning' LIMIT 1",
+                    (str(logical_match["delegation_id"]),),
+                ).fetchone() is not None
+                existing_policy = "planning" if has_planning_scope else "owner" if "owned" in existing_roles else "review" if existing_roles & {"contributing", "evidence"} else None
                 if existing_policy != payload["assignment_policy"]:
                     logical_match = None
             if logical_match is not None:
@@ -4641,15 +4674,11 @@ class V12Store:
                         connection.execute("INSERT INTO delegation_outcome_assignments(delegation_id,item_id,assignment_role,revision) VALUES (?, ?, ?, ?)", (identifier, item_id, role_name, revision))
                     except sqlite3.IntegrityError as exc:
                         raise V12StoreError("outcome item already has an owner", code="outcome_assignment_conflict") from exc
-            if payload["profile_name"] == "planner":
-                snapshot_items = connection.execute(
-                    "SELECT item_id FROM effective_contract_items WHERE task_id=? AND created_revision<=? AND (retired_revision IS NULL OR retired_revision>?) ORDER BY category,ordinal,item_id",
-                    (task["task_id"], revision, revision),
-                ).fetchall()
-                for item in snapshot_items:
+            if assignment_policy == "planning":
+                for item_id in sorted(set(assignment_ids["contributing"])):
                     connection.execute(
                         "INSERT INTO assignment_scope_snapshots(assignment_id,task_id,item_id,assignment_role,contract_revision,created_sequence) VALUES (?, ?, ?, 'planning', ?, ?)",
-                        (identifier, task["task_id"], item["item_id"], revision, sequence),
+                        (identifier, task["task_id"], item_id, revision, sequence),
                     )
             else:
                 connection.execute(
@@ -4685,47 +4714,6 @@ class V12Store:
             }
             return result
         return self._mutation("create_delegation", payload, idempotency_key, write)
-
-    def _enforce_planning_admission(self, connection: sqlite3.Connection, *, task_id: str, profile_name: str, assignment_policy: str, input_report_ids: list[str]) -> None:
-        """Require approved planner evidence before light/full owner work.
-
-        Governance assessments are advisory history, but selecting light or
-        full makes the planner predecessor an admission invariant for owner
-        assignments. Planner/review/documentation assignments remain available
-        to build the evidence needed by that invariant.
-        """
-        if profile_name == "planner" or assignment_policy != "owner":
-            return
-        assessment = connection.execute(
-            "SELECT mode FROM governance_assessments WHERE task_id=? "
-            "ORDER BY created_sequence DESC LIMIT 1", (task_id,),
-        ).fetchone()
-        mode = str(assessment["mode"]) if assessment is not None else "minimal"
-        if mode not in {"light", "full"}:
-            return
-        if not input_report_ids:
-            raise V12StoreError(
-                "light/full owner assignment requires an approved planner predecessor",
-                code="planning_predecessor_required",
-                details={"field": "input_report_refs", "mode": mode},
-            )
-        placeholders = ",".join("?" for _ in input_report_ids)
-        approved = connection.execute(
-            "SELECT 1 FROM reports r JOIN user_decisions u "
-            "ON u.task_id=r.task_id AND u.subject_type='plan' "
-            "AND u.subject_id=r.report_id AND u.decision_type='approve' "
-            "WHERE r.task_id=? AND r.report_type='plan' "
-            "AND r.assembly_state='finalized' AND r.status='completed' "
-            "AND r.semantic_status='semantic_valid' AND r.report_id IN (" + placeholders + ") "
-            "ORDER BY u.created_sequence DESC LIMIT 1",
-            (task_id, *input_report_ids),
-        ).fetchone()
-        if approved is None:
-            raise V12StoreError(
-                "light/full owner assignment requires an approved planner predecessor",
-                code="planning_predecessor_required",
-                details={"field": "input_report_refs", "mode": mode},
-            )
 
     @staticmethod
     def _worker_capability_ref(value: Any, *, label: str) -> str:
@@ -4895,18 +4883,6 @@ class V12Store:
             return {"continuation": str(row["continuation_ref"]), "assignment_id": assignment_key, "task_id": task_key, "state": "consumed", "replayed": True}
         if str(row["state"]) != "minted":
             raise V12StoreError("worker capability is not consumable", code="capability_conflict")
-        if self._lease_expired(row["lease_expires_at"]):
-            self._timeline(
-                connection, event_type="dispatch_lease_expired", entity_type="delegation",
-                entity_id=assignment_key, task_id=task_key, delegation_id=assignment_key,
-                payload={"assignment_id": assignment_key, "capability_ref": capability_key},
-            )
-            connection.execute(
-                "UPDATE worker_capabilities SET state='stale',updated_at=? "
-                "WHERE capability_ref=? AND state='minted'",
-                (_now(), capability_key),
-            )
-            raise V12StoreError("worker dispatch lease expired", code="dispatch_lease_expired")
         continuation = "wc_" + uuid.uuid4().hex
         sequence = self._timeline(connection, event_type="worker_bootstrap_consumed", entity_type="delegation", entity_id=assignment_key, task_id=task_key, delegation_id=assignment_key, payload={"assignment_id": assignment_key, "capability_digest": str(row["capability_digest"])})
         now = _now()
@@ -5060,31 +5036,23 @@ class V12Store:
             "assigned_items": sorted(canonical_assigned.values(), key=lambda item: (item["category"], item["ordinal"], item["item_ref"])),
             "decisions": relevant_decisions,
         }
-        if delegation["profile_name"] == "planner":
-            # A planner maps the whole current contract before any delivery
-            # ownership exists.  Its stable tokens are not outcome assignments
-            # and must therefore be available independently of that empty set.
-            effective_brief["planning_items"] = full_contract["items"]
-        publication_kind = (
-            "plan" if delegation["profile_name"] == "planner"
-            else "documentation" if delegation["profile_name"] == "technical_writer"
-            else "result"
-        )
-        # This is a server-issued semantic next action, not a host command or
-        # a renderer instruction.  The tool catalogue remains the authority
-        # for the complete evidence shape; the brief only binds the worker to
-        # the correct publication family and its exact typed anchors.
-        publication_next_action = {
-            "operation": f"publish_{publication_kind}",
-            "assignment_ref": record_ref(str(delegation["delegation_id"])),
-            "task_ref": task_ref(str(task["task_id"])),
-            "coverage_source": "planning_items" if publication_kind == "plan" else "assigned_items",
+        planning_ids = {
+            str(row["item_id"])
+            for row in connection.execute(
+                "SELECT item_id FROM assignment_scope_snapshots WHERE assignment_id=? AND contract_revision=? AND assignment_role='planning'",
+                (delegation["delegation_id"], revision),
+            ).fetchall()
         }
+        if planning_ids:
+            effective_brief["planning_items"] = [
+                item for item in full_contract["items"]
+                if self._outcome_item_id(connection, str(task["task_id"]), item["item_ref"]) in planning_ids
+            ]
         report_refs = [
             {key: item[key] for key in ("report_id", "delegation_id", "report_type", "status", "assembly_state", "total_chunks", "content_digest")}
             for item in input_reports
         ]
-        scope = {"planning_items": effective_brief["planning_items"]} if delegation["profile_name"] == "planner" else {"assigned_items": effective_brief["assigned_items"]}
+        scope = {"planning_items": effective_brief["planning_items"]} if planning_ids else {"assigned_items": effective_brief["assigned_items"]}
         # The capability remains a private server-side lease. It is never
         # rendered into the worker message; the worker consumes by the exact
         # assignment locator and the server resolves the one-time capability
@@ -5116,7 +5084,6 @@ class V12Store:
             dispatch_correlation_marker=delegation.get("dispatch_correlation_marker"),
             dispatch_correlation_digest=delegation.get("dispatch_correlation_digest"),
         )
-        dispatch_brief["publication_next_action"] = publication_next_action
         return {
             "delegation_id": delegation["delegation_id"], "task_id": delegation["task_id"],
             "project_root": str(self.project_root), "objective": delegation["objective"],
@@ -5510,7 +5477,8 @@ class V12Store:
 
     def publish_domain_report(self, *, delegation_id: Any, continuation_ref: Any,
                               contract_revision: Any, publication_kind: Any,
-                              content: Any, status: Any) -> dict[str, Any]:
+                              content: Any, status: Any,
+                              review_policy: Any = None) -> dict[str, Any]:
         """Atomically publish one terminal semantic report for an assignment.
 
         ``report_operations`` is deliberately separate from caller-facing
@@ -5525,6 +5493,14 @@ class V12Store:
         report_status = _required_text(status, label="status", maximum=16).lower()
         if report_status not in REPORT_STATUSES:
             raise V12StoreError("report status is invalid", code="invalid_report")
+        policy = None if review_policy is None else _required_text(
+            review_policy, label="review_policy", maximum=16,
+        ).lower()
+        if report_kind == "plan":
+            if policy not in {"informational", "required"}:
+                raise V12StoreError("review policy is invalid", code="invalid_report")
+        elif policy is not None:
+            raise V12StoreError("review policy is invalid", code="invalid_report")
         continuation_key = self._worker_capability_ref(continuation_ref, label="continuation")
         try:
             revision = int(contract_revision)
@@ -5559,7 +5535,11 @@ class V12Store:
         canonical = _canonical_json_bytes(content, label="content")
         if canonical[2] > REPORT_MAX_BYTES:
             raise V12StoreError("report is too large", code="report_too_large")
-        operation_payload = {"task_id": anchor, "delegation_id": delegation, "kind": report_kind, "status": report_status, "content": canonical[0]}
+        operation_payload = {
+            "task_id": anchor, "delegation_id": delegation, "kind": report_kind,
+            "status": report_status, "content": canonical[0],
+            "review_policy": policy,
+        }
         payload_digest = hashlib.sha256(_canonical_json(operation_payload, label="report operation").encode("utf-8")).hexdigest()
 
         def write(connection: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
@@ -5571,7 +5551,17 @@ class V12Store:
                     (owner["delegation_id"],),
                 ).fetchall()
             }
-            owner_policy = "planning" if owner.get("profile_name") == "planner" else "owner" if "owned" in assignment_roles else "review"
+            has_planning_scope = connection.execute(
+                "SELECT 1 FROM assignment_scope_snapshots WHERE assignment_id=? AND assignment_role='planning' LIMIT 1",
+                (str(owner["delegation_id"]),),
+            ).fetchone() is not None
+            owner_policy = "planning" if has_planning_scope else "owner" if "owned" in assignment_roles else "review"
+            if owner_policy == "planning" and report_kind != "plan":
+                raise V12StoreError(
+                    "planning assignments may publish only plan reports",
+                    code="publication_kind_not_permitted",
+                    details={"assignment_policy": owner_policy, "publication_kind": report_kind, "allowed_publication_kind": "plan"},
+                )
             predecessor = self._inferred_assignment_predecessor(
                 connection,
                 task_id=str(task["task_id"]),
@@ -5611,21 +5601,6 @@ class V12Store:
                         "source_sequence": relation["view_source_sequence"],
                     }
                 return replayed
-            # Assignment evidence is an admission precondition, never a
-            # post-terminal review.  A no-input assignment needs no receipt;
-            # every declared predecessor needs one complete body-read receipt.
-            inputs = owner["input_report_ids"]
-            if inputs:
-                placeholders = ",".join("?" for _ in inputs)
-                observed = {
-                    str(row[0]) for row in connection.execute(
-                        "SELECT DISTINCT report_id FROM report_consumption_receipts "
-                        f"WHERE consumer_delegation_id=? AND has_more=0 AND report_id IN ({placeholders})",
-                        [owner["delegation_id"], *inputs],
-                    ).fetchall()
-                }
-                if any(item not in observed for item in inputs):
-                    raise V12StoreError("declared input evidence must be consumed before publication", code="input_evidence_unread")
             # The domain API is deliberately stricter than the historical
             # assembled-report transport: only the exact current envelope for
             # this publication kind may consume a terminal logical slot.
@@ -5646,7 +5621,7 @@ class V12Store:
                         if not isinstance(fact, Mapping):
                             diagnostics.append("evidence_invalid")
                             break
-                        if fact.get("state") not in {"executed", "not_run"}:
+                        if fact.get("state") not in {"executed", "not_run", "failed"}:
                             diagnostics.append("evidence_state_invalid")
                             break
                         if isinstance(fact.get("summary"), str) and fact["summary"].strip():
@@ -5680,7 +5655,11 @@ class V12Store:
             if not isinstance(claims, list):
                 raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "contract_coverage_missing"})
             dispositions: dict[str, tuple[str, list[Any]]] = {}
-            allowed_statuses = {"planned"} if report_kind == "plan" else {"complete", "partial", "unverified", "not_applicable"}
+            # The public schema is the complete admission contract.  Do not
+            # add a hidden kind-specific workflow policy here: the worker may
+            # truthfully publish any advertised disposition for any report
+            # kind, and the LLM coordinator decides what that means next.
+            allowed_statuses = {"planned", "complete", "partial", "unverified", "blocked"}
             for claim in claims:
                 if not isinstance(claim, Mapping) or not isinstance(claim.get("item_ref"), str):
                     raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "contract_coverage_invalid"})
@@ -5701,19 +5680,15 @@ class V12Store:
                 dispositions[item_id] = (str(claim_status), list(verification))
             if set(dispositions) != expected_items:
                 raise V12StoreError("report evidence is incomplete", code="report_incomplete", details={"reason": "contract_coverage_incomplete"})
-            owns_delivery = any(str(row["assignment_role"]) == "owned" for row in scope_rows)
-            if report_status == "completed" and owns_delivery:
-                if any(status != "complete" for status, _ in dispositions.values()) or content.get("unresolved"):
-                    raise V12StoreError("completed delivery leaves unresolved contract items", code="report_incomplete", details={"reason": "contract_coverage_incomplete"})
             report_id = new_sharded_id("report", self.project_hash)
             manifest = _sha256_prefixed(_report_manifest([{"chunk_index": 0, "section": "body", "content_digest": canonical[3], "content_bytes": canonical[2]}]), label="report manifest")
             sequence = self._timeline(connection, event_type="report_submitted", entity_type="report", entity_id=report_id, payload={"report_id": report_id, "delegation_id": owner["delegation_id"], "report_type": report_kind, "status": report_status, "total_chunks": 1, "total_bytes": canonical[2], "content_digest": manifest, "supersedes_report_id": supersedes_report_id}, task_id=task["task_id"], delegation_id=owner["delegation_id"], report_id=report_id)
             timestamp = _now()
             arguments = (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", manifest, timestamp, sequence)
             if "content_json" in self._column_names(connection, "reports"):
-                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,content_json,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", "null", canonical[2], manifest, supersedes_report_id, timestamp, sequence, timestamp, sequence))
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,content_json,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", "null", canonical[2], manifest, supersedes_report_id, policy, timestamp, sequence, timestamp, sequence))
             else:
-                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", canonical[2], manifest, supersedes_report_id, timestamp, sequence, timestamp, sequence))
+                connection.execute("INSERT INTO reports(report_id,project_hash,task_id,delegation_id,report_type,status,semantic_status,assembly_state,next_chunk_index,total_chunks,total_bytes,content_digest,supersedes_report_id,review_policy,created_at,created_sequence,finalized_at,finalized_sequence,aborted_at,aborted_sequence,abort_reason_en) VALUES (?, ?, ?, ?, ?, ?, ?, 'finalized', 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", (report_id, self.project_hash, task["task_id"], owner["delegation_id"], report_kind, report_status, "semantic_valid", canonical[2], manifest, supersedes_report_id, policy, timestamp, sequence, timestamp, sequence))
             connection.execute("INSERT INTO report_chunks(report_id,chunk_index,section,content_json,content_digest,content_bytes,created_at) VALUES (?, 0, 'body', ?, ?, ?, ?)", (report_id, canonical[1], canonical[3], canonical[2], timestamp))
             # Persist the exact validated dispositions. Server scope controls
             # which rows may exist; worker evidence controls their semantic
@@ -5879,10 +5854,7 @@ class V12Store:
             raise V12StoreError(
                 "a user decision must be recorded before the task can advance",
                 code="decision_pending",
-                details={
-                    "decision_type": str(pending["decision_type"]),
-                    "next_action": "record_clarification",
-                },
+                details={"decision_type": str(pending["decision_type"])},
             )
 
     def read_decision_binding(self, *, task_id: Any, binding_ref: Any) -> dict[str, Any]:
@@ -5918,6 +5890,7 @@ class V12Store:
             existing = connection.execute("SELECT * FROM clarification_bindings WHERE task_id=? AND subject_type=? AND subject_id=? AND decision_type=? AND prompt_digest=? AND effective_contract_revision=?", (anchor, kind, subject, dtype, prompt_digest, revision)).fetchone()
             if existing is not None:
                 return {"binding": self._decision_binding_projection(existing, task_id=anchor), "replayed": True}
+            self._require_no_pending_user_decision(connection, task_id=anchor)
             relation: dict[str, Any] | None = None
             if dtype == "plan_review":
                 if kind != "plan":
@@ -5931,8 +5904,7 @@ class V12Store:
                 raise V12StoreError("plan review binding was not stored", code="ledger_corrupt")
             return {"binding": self._decision_binding_projection(inserted, task_id=anchor), "replayed": False}
         # DomainKernel supplies the ambient transaction for semantic command
-        # receipts.  The public legacy entry point retains its own transaction
-        # for historical callers.
+        # receipts; direct internal callers use the store transaction.
         return write(_connection) if _connection is not None else self._write(write)
 
     @staticmethod
@@ -6255,8 +6227,8 @@ class V12Store:
                 raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
             retired = delta.get("retire_item_refs", [])
             additions = delta.get("add", [])
-            if not isinstance(retired, list) or not isinstance(additions, list) or not retired and not additions:
-                raise V12StoreError("steering_delta must contain at least one operation", code="invalid_argument", details={"field": "steering_delta"})
+            if not isinstance(retired, list) or not isinstance(additions, list):
+                raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
             if any(not isinstance(value, str) for value in retired) or len({value for value in retired if isinstance(value, str)}) != len(retired):
                 raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
             for addition in additions:
@@ -6314,7 +6286,7 @@ class V12Store:
                 item = self._report(connection, subject, task_id=anchor)
                 if kind == "plan" and item["report_type"] != "plan":
                     raise V12StoreError("plan decision must name a plan report", code="invalid_decision_subject")
-                if kind == "plan" and (item["assembly_state"] != "finalized" or item["status"] != "completed"):
+                if kind == "plan" and item["assembly_state"] != "finalized":
                     raise V12StoreError("plan is not finalized evidence", code="decision_subject_not_finalized")
                 bound_digest = str(item["content_digest"])
             else:  # initiative: require a same-task relationship, not merely shard membership.
@@ -6466,7 +6438,6 @@ class V12Store:
         payload = {"task_id": self._task_identifier(task_id), "mode": mode_value, "rationale": _optional_text(rationale, label="rationale"), "risk_factors": _text_list(risk_factors, label="risk_factors"), "source": source_value, "initiative_id": None if initiative_id is None else self._record_identifier(initiative_id, label="initiative_id")}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
-            self._require_no_pending_user_decision(connection, task_id=str(task["task_id"]))
             if payload["initiative_id"] is not None:
                 self._initiative(connection, payload["initiative_id"])
             identifier = f"assessment-{uuid.uuid4().hex}"
@@ -6613,7 +6584,6 @@ class V12Store:
         payload = {"task_id": anchor, "subject_type": kind, "subject_id": subject, "verdict": decision, "evidence": _strict_json(evidence, label="evidence"), "unresolved_risks": _text_list(unresolved_risks, label="unresolved_risks"), "follow_ups": _text_list(follow_ups, label="follow_ups"), "initiative_status": status_value, "completion_notes": None if completion_notes is None else _strict_json(completion_notes, label="completion_notes")}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             self._task(connection, anchor)
-            self._require_no_pending_user_decision(connection, task_id=anchor)
             if kind == "task":
                 existing = self._task_closure(connection, anchor)
                 if existing is not None:
@@ -6622,20 +6592,17 @@ class V12Store:
                         "closure": self._closure(connection, str(existing["closure_id"])),
                         "initiative": None,
                         "warnings": [],
-                        "next_action": {"advisory_status": "recorded", "task_ref": task_ref(anchor)},
+                        "advisory_status": "recorded",
                         "execution_outcome": self._execution_evidence(connection, anchor),
                         "conformance_review": self._conformance_review(connection, anchor),
                         "verdict_adjustment": {"requested": decision, "recorded": recorded},
                     }
             initiative: dict[str, Any] | None = None
             conformance = self._conformance_review(connection, anchor)
-            conformance_verdict = {
-                "ready": "ready",
-                "ready_with_risks": "ready_with_risks",
-                "not_ready": "not_ready",
-            }[str(conformance["status"])]
-            verdict_rank = {"not_ready": 0, "ready_with_risks": 1, "ready": 2}
-            effective_decision = min((decision, conformance_verdict), key=lambda value: verdict_rank[value])
+            # Conformance is ledger evidence, not a workflow decision.  Keep
+            # it in the closure projection, but record the verdict selected by
+            # the LLM unchanged.
+            effective_decision = decision
             closure_task, closure_initiative = (anchor, None) if kind == "task" else (None, subject)
             closure_id = f"closure-{uuid.uuid4().hex}"
             if closure_initiative is not None:
@@ -6657,16 +6624,11 @@ class V12Store:
             if kind == "task":
                 connection.execute("UPDATE tasks SET updated_at=?,updated_sequence=? WHERE task_id=? AND project_hash=?", (timestamp, sequence, anchor, self.project_hash))
             links = [] if closure_initiative is None else self._initiative_links(connection, [closure_initiative])
-            next_action = (
-                {"tool": "submit_governance_closure", "suggested_subject": {"task_ref": task_ref(anchor), "subject_type": "task", "subject_ref": task_ref(anchor)}}
-                if kind == "initiative"
-                else {"advisory_status": "recorded", "task_ref": task_ref(anchor)}
-            )
             return {
                 "closure": self._closure(connection, closure_id),
                 "initiative": initiative,
                 "warnings": self._warning_values(links),
-                "next_action": next_action,
+                "advisory_status": "recorded",
                 "execution_outcome": self._execution_evidence(connection, anchor),
                 # Closure is advisory bookkeeping; expose the same immutable
                 # conformance projection in the mutation response so callers

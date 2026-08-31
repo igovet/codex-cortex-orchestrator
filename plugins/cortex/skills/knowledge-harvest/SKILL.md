@@ -154,17 +154,16 @@ worker, or closure conditions are not user questions.
 ## Evidence and preservation
 
 Source, tests, executable configuration, schemas and migrations, and deployment
-definitions outrank generated documentation. Codebase Memory is the mandatory
-first route for structural project-code discovery: bind it to the exact
-canonical project root and use its graph evidence before any local search.
-Check index coverage for every cited path and bounded scope; confirm
-consequential claims in current source. If the graph is unavailable, excludes
-the relevant surface, or returns insufficient evidence, record the concrete
-limitation and make exactly one bounded repository-native enumeration or
-file/text-search fallback. A fallback must name the failed or insufficient
-graph evidence and remain limited to the requested scope; never silently fall
-back, chain multiple fallback searches, or treat graph absence as proof of
-completeness.
+definitions outrank generated documentation. Codebase Memory is the required,
+enabled worker MCP and mandatory first route for structural project-code
+discovery: bind it to the exact canonical project root and use its graph
+evidence before any local search. Missing or unusable access is an environment
+blocker. Check index coverage for every cited path and bounded scope; confirm
+consequential claims in current source. Only an actual graph call proving that
+the indexed graph excludes the relevant surface or is insufficient permits one
+bounded repository-native enumeration or file/text-search fallback. A fallback
+must name that graph evidence and remain limited to the requested scope; never
+silently fall back or chain multiple fallback searches.
 
 Run the repository's deterministic knowledge-census validator when available.
 Its result is advisory evidence for the model and verification worker, never a

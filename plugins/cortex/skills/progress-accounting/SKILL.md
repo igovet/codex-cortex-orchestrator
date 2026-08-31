@@ -8,7 +8,7 @@ description: Keep Codex task progress reporting concise and evidence-focused wit
 Track only task-relevant evidence: outcome, scope, delegations used, reports,
 checks run, pass/fail/blocked/unverified status, material risk, and verified
 human-view artifacts. Do not record token counts, hidden reasoning,
-secret-bearing prompts, private native handles, raw diagnostics, or raw
+secret-bearing prompts, private native session data, raw diagnostics, or raw
 conversation transcripts in repository files or ledger prose.
 
 Retain the canonical project root and the server-issued task anchor when one

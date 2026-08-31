@@ -44,6 +44,176 @@ umask 077
 mkdir -p -- "${dev_home}/.codex"
 chmod 700 -- "${dev_home}" "${dev_home}/.codex"
 
+# Native workers and the root coordinator share one Codex MCP catalogue.  The
+# isolated profile therefore receives only the non-secret executable
+# definition of the user's already configured Codebase Memory server.  Inline
+# environment values, headers, URLs, and other credential-bearing forms from
+# that config are deliberately unsupported.  The helper adds only the validated
+# owning HOME needed to run this external production MCP from the dev session.
+python3 -B - "${original_home}/.codex/config.toml" "${dev_home}/.codex/config.toml" "${original_home}" <<'PY'
+import json
+import os
+import stat
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+owner_home = Path(sys.argv[3]).resolve(strict=True)
+if not source.exists():
+    raise SystemExit(
+        "error: Codebase Memory MCP is not configured in the stable Codex profile; "
+        "configure mcp_servers.codebase_memory before starting Cortex live-dev"
+    )
+if source.is_symlink() or not source.is_file():
+    raise SystemExit("error: stable Codex config must be a regular non-symlink file")
+try:
+    payload = tomllib.loads(source.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit(f"error: cannot parse stable Codex config for Codebase Memory MCP: {exc}") from None
+
+servers = payload.get("mcp_servers")
+server = servers.get("codebase_memory") if isinstance(servers, dict) else None
+if not isinstance(server, dict):
+    raise SystemExit(
+        "error: Codebase Memory MCP is not configured in the stable Codex profile; "
+        "configure mcp_servers.codebase_memory before starting Cortex live-dev"
+    )
+
+# The allow-list contains routing and executable metadata only.  In
+# particular, never copy TOML env tables or values from the stable profile.
+allowed = {
+    "enabled", "command", "args", "cwd", "startup_timeout_sec",
+    "tool_timeout_sec", "default_tools_approval_mode", "env_vars",
+}
+secret_forms = {"env", "environment", "headers", "authorization", "url", "http_url"}
+if secret_forms.intersection(server):
+    raise SystemExit(
+        "error: Codebase Memory MCP uses credential-bearing configuration; "
+        "isolated Cortex launch refuses to copy it"
+    )
+unknown = set(server) - allowed
+if unknown:
+    names = ", ".join(sorted(str(item) for item in unknown))
+    raise SystemExit(f"error: Codebase Memory MCP has unsupported configuration fields: {names}")
+
+command = server.get("command")
+if not isinstance(command, str) or not command.strip() or "\n" in command or "\r" in command:
+    raise SystemExit("error: Codebase Memory MCP command must be a non-empty single-line string")
+args = server.get("args", [])
+if not isinstance(args, list) or any(not isinstance(item, str) or "\n" in item or "\r" in item for item in args):
+    raise SystemExit("error: Codebase Memory MCP args must be a list of single-line strings")
+env_vars = server.get("env_vars", [])
+if not isinstance(env_vars, list) or any(not isinstance(item, str) or not item or "\n" in item or "\r" in item for item in env_vars):
+    raise SystemExit("error: Codebase Memory MCP env_vars must name single-line environment variables")
+for key in ("startup_timeout_sec", "tool_timeout_sec"):
+    value = server.get(key)
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+        raise SystemExit(f"error: Codebase Memory MCP {key} must be a positive integer")
+approval = server.get("default_tools_approval_mode")
+if approval is not None and approval not in {"auto", "prompt", "writes", "approve"}:
+    raise SystemExit("error: Codebase Memory MCP default_tools_approval_mode is invalid")
+enabled = server.get("enabled", True)
+if not isinstance(enabled, bool):
+    raise SystemExit("error: Codebase Memory MCP enabled must be boolean")
+if enabled is not True:
+    raise SystemExit(
+        "error: Codebase Memory MCP is disabled in the stable Codex profile; "
+        "enable mcp_servers.codebase_memory before starting Cortex live-dev"
+    )
+cwd = server.get("cwd")
+if cwd is not None and (not isinstance(cwd, str) or not cwd.strip() or "\n" in cwd or "\r" in cwd):
+    raise SystemExit("error: Codebase Memory MCP cwd must be a non-empty single-line string")
+
+def toml_value(value):
+    # JSON literals for these primitive/list values are valid TOML literals
+    # and avoid introducing a second parser or interpolating user text.
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+managed_marker = "# Isolated Cortex worker projection; copied without secret values.\n"
+lines = [managed_marker, "[mcp_servers.codebase_memory]\n"]
+for key in ("enabled", "command", "args", "cwd", "startup_timeout_sec", "tool_timeout_sec", "default_tools_approval_mode", "env_vars"):
+    if key in server:
+        lines.append(f"{key} = {toml_value(server[key])}\n")
+# Cortex itself must remain inside the isolated HOME, but this external MCP is
+# the user's already installed production service.  Give only that child
+# process its owning HOME so the copied production command can initialize its
+# existing runtime/state.  This is generated locally from the validated owner
+# directory; it is not copied from an arbitrary env table or secret value.
+lines.append(f"env = {{ HOME = {toml_value(str(owner_home))} }}\n")
+target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+if target.exists() and (target.is_symlink() or not target.is_file()):
+    raise SystemExit("error: isolated Codex config must be a regular non-symlink file")
+mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600
+if target.exists():
+    original = target.read_text(encoding="utf-8")
+else:
+    original = ""
+# The helper is idempotent across repeated cortex-dev launches.  sync-cortex
+# retains the isolated config, so do not append a second table on the next
+# launch; a changed or tampered worker definition fails closed instead.
+if original:
+    try:
+        existing_payload = tomllib.loads(original)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"error: isolated Codex config is invalid: {exc}") from None
+    existing_servers = existing_payload.get("mcp_servers")
+    existing_server = existing_servers.get("codebase_memory") if isinstance(existing_servers, dict) else None
+    if existing_server is not None:
+        expected_server = {key: server[key] for key in allowed if key in server}
+        expected_server["env"] = {"HOME": str(owner_home)}
+        if existing_server != expected_server:
+            # Upgrade only the exact block previously generated by this helper.
+            # Any independently authored isolated definition still fails closed.
+            managed_lines = original.splitlines(keepends=True)
+            try:
+                marker_index = managed_lines.index(managed_marker)
+            except ValueError:
+                raise SystemExit(
+                    "error: isolated Codebase Memory MCP definition differs from the stable non-secret definition; "
+                    "reset the dedicated .cortex-dev profile before relaunching"
+                ) from None
+            end_index = len(managed_lines)
+            for index in range(marker_index + 2, len(managed_lines)):
+                if managed_lines[index].lstrip().startswith("["):
+                    end_index = index
+                    break
+            original = "".join(managed_lines[:marker_index] + managed_lines[end_index:]).lstrip("\n")
+        else:
+            print("isolated Codebase Memory MCP definition already present")
+            raise SystemExit(0)
+text = "".join(lines)
+if original:
+    if not original.endswith("\n"):
+        original += "\n"
+    if not original.endswith("\n\n"):
+        original += "\n"
+text = original + text
+try:
+    parsed = tomllib.loads(text)
+except tomllib.TOMLDecodeError as exc:
+    raise SystemExit(f"error: isolated Codex config cannot retain Codebase Memory MCP: {exc}") from None
+if "codebase_memory" not in parsed.get("mcp_servers", {}):
+    raise SystemExit("error: isolated Codex config did not retain Codebase Memory MCP")
+fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, target)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+print("configured isolated Codebase Memory MCP from the stable non-secret server definition")
+PY
+
 export HOME="${dev_home}"
 export CODEX_HOME="${HOME}/.codex"
 # Authorize the sync helper to reconcile only this exact isolated marketplace

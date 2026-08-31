@@ -422,11 +422,10 @@ boundary and the real stdio MCP dispatch path:
    mutation; a complete first planner publication succeeds.  The envelope is
    closed and role-complete, and the same canonical evidence relation is used
    for plan, result, and documentation publications.
-3. `dispatch_brief` now returns separate typed opaque `task_ref`,
-   `delegation_ref`, and `assignment_ref` values, plus a server-derived
-   `publication_next_action`.  `read_task` accepts only the task handle; using
-   an assignment handle as `task_ref` fails with a validation error instead of
-   silently reading the wrong entity.
+3. `open_assignment` returns only the native dispatch. The lifecycle adapter
+   binds the real worker privately, and every public call uses only the exact
+   coordinator- or worker-scoped `task_ref`. The backend returns neutral state
+   and evidence; the LLM owns every subsequent workflow choice.
 
 The focused stdio/public-contract gate passed **32 tests and 18 subtests**,
 including the first-call/bootstrap, complete/incomplete publication,
