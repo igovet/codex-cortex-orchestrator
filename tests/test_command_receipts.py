@@ -125,6 +125,41 @@ def _source_stdio_tool_call(home: str, tool_name: str, arguments: dict) -> dict:
 
 
 class PublicPublicationFirstCallTests(unittest.TestCase):
+    def test_open_assignment_first_stdio_call_uses_one_complete_instruction_field(self) -> None:
+        """A complete advertised assignment crosses validation without invented fields."""
+        with tempfile.TemporaryDirectory(prefix="cortex-assignment-first-call-") as home:
+            arguments = {
+                "task_ref": "t_0123456789ab",
+                "role": "Planner.",
+                "profile_name": "planner",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "responsibility": "planning",
+                "goal": "Produce one plan.",
+                "scope": "Read-only planning.",
+                "instructions": "Consume the assignment, plan once, and stop.",
+                "outcomes": ["Produce one plan."],
+                "report_policy": "none",
+            }
+            accepted = _source_stdio_tool_call(home, "open_assignment", arguments)
+            self.assertTrue(accepted["result"].get("isError"), accepted)
+            self.assertEqual(
+                accepted["result"]["structuredContent"]["error"]["code"],
+                "task_not_found",
+                accepted,
+            )
+
+            rejected = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {**arguments, "instructions_extra": "Invented supplementary instructions."},
+            )
+            self.assertTrue(rejected["result"].get("isError"), rejected)
+            error = rejected["result"]["structuredContent"]["error"]
+            self.assertEqual(error["code"], "validation_error", rejected)
+            self.assertEqual(error["details"]["path"], "$", rejected)
+            self.assertEqual(error["details"]["field"], "instructions_extra", rejected)
+
     def test_publish_plan_first_stdio_call_accepts_explicit_empty_unresolved(self) -> None:
         """The advertised complete shape must cross real MCP validation on its first call."""
         with tempfile.TemporaryDirectory(prefix="cortex-plan-first-call-") as home:

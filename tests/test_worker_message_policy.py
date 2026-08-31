@@ -46,3 +46,19 @@ def test_fresh_worker_receives_common_memory_and_review_policy():
 def test_common_policy_is_not_only_a_dead_renderer_constant():
     rendered = worker_message.render_worker_message(task=_task(), delegation=_delegation(), decisions=[])
     assert rendered["message"].index("# Mandatory project-work invariants") < rendered["message"].index("# Cortex worker bootstrap")
+
+
+def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_authority():
+    delegation = {**_delegation(), "profile_name": "planner"}
+    message = worker_message.render_worker_message(
+        task=_task(), delegation=delegation, decisions=[]
+    )["message"]
+
+    # A native planner is still a worker: assignment evidence must be its
+    # first Cortex action, before project work or any coordinator lifecycle
+    # operation.  Keep the assertion semantic rather than prescribing a
+    # public MCP argument shape.
+    first_action = message.index("Your first Cortex action")
+    assert message.index("server-owned assignment read", first_action) > first_action
+    assert "Do not invoke coordinator-only operations" in message
+    assert "assess_governance" in message

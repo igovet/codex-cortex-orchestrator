@@ -52,6 +52,28 @@ class DomainPublicApiContractTests(unittest.TestCase):
             with self.assertRaisesRegex(V12ServiceError, "governance assessment is required"):
                 self._assignment(task["task_ref"], outcome, "pre-governance")
 
+    def test_worker_scoped_task_ref_cannot_assess_governance(self) -> None:
+        outcome = {"outcome": "Inspect the artifact.", "acceptance": ["Evidence is returned."], "constraints": [], "verification": []}
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, [outcome])
+            assignment = self._assignment(task["task_ref"], outcome, "planner boundary")
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+
+            # Even a schema-complete call cannot turn a native worker into a
+            # coordinator or append governance state through its scoped ref.
+            with self.assertRaises(V12ServiceError) as rejected:
+                assess_governance(
+                    task_ref=worker_ref,
+                    mode="full",
+                    rationale="A worker must not own this lifecycle decision.",
+                )
+            self.assertIn(rejected.exception.code, {"invalid_identifier", "invalid_task_ref", "task_not_found"})
+
     def test_full_governance_delivery_requires_exact_current_plan_approval(self) -> None:
         outcome = {"outcome": "Deliver the secured change.", "acceptance": ["The secured flow works."], "constraints": [], "verification": []}
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
@@ -444,7 +466,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.13.1")
+        self.assertEqual(SERVER_VERSION, "1.13.2")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

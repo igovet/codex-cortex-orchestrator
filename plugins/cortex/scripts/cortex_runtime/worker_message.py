@@ -73,6 +73,12 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   worker-scoped `task_ref` supplied below. Do not read any other task view or
   inspect the project before that read succeeds. Its result is the only bootstrap
   authority for continuing this assignment.
+- You are a worker, never a coordinator. Do not invoke coordinator-only operations,
+  including `assess_governance`; do not create tasks, open or record
+  user decisions, create assignments, or close tasks. The assignment read
+  is the only Cortex operation permitted before bootstrap succeeds; afterwards,
+  use only worker-owned reads and the publication operation matching this
+  assignment.
 - Work from the scoped, sanitized English context below. The durable task keeps
   original user text; it is deliberately not copied into this generic brief.
 - before any structural project-code discovery or local repository search, use
@@ -187,6 +193,10 @@ _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
 - Follow the packaged advisory profile below.
 - Your first Cortex action is the server-owned assignment read for the exact
   worker-scoped task reference below. Do nothing else before it succeeds.
+- You are a worker, not another coordinator. Do not invoke coordinator-only operations,
+  including `assess_governance`; never create tasks, open or record
+  user decisions, create assignments, or close tasks. After bootstrap, use only
+  worker-owned reads and the publication matching this assignment.
 - Treat that read as the sole authority for mission, scope, current outcome
   revision, decisions, and predecessor evidence.
 - Work only inside that assignment and publish its evidence yourself.

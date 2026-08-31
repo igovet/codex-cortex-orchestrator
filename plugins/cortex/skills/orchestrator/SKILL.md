@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.13.1 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
+description: Explicit opt-in Cortex v1.13.2 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
 ---
 
-# Cortex Orchestrator v1.13.1
+# Cortex Orchestrator v1.13.2
 
 ## Activation and language
 
@@ -53,7 +53,7 @@ The coordinator chooses the packaged profile, model, reasoning effort, responsib
 
 Every assignment must be scoped from the complete effective contract. Assignment instructions may explain ownership and stopping boundaries, but may not be the sole carrier of a source-derived requirement and may not replace exact outcome acceptance, constraints, verification, or context with "see the attachment" or equivalent shorthand. Before native spawn, confirm that each assigned outcome's exact contract details are present in the server-owned assignment evidence that `read_task` will return.
 
-After task creation and before the first assignment, record one evidence-backed advisory governance assessment from the user request and complete semantic contract. Bounded low-risk work is normally minimal; multi-step or cross-surface user-visible work is normally light; authentication, authorization, security, privacy, credentials, money or stored value, destructive action, production-critical behavior, or comparable cross-domain risk is full. Reassess when material evidence changes the risk. The assessment remains advisory and never expands coordinator project access.
+After task creation and before the first assignment, make and record one explicit, evidence-backed advisory governance assessment and governance-depth decision from the user request and complete semantic contract. Select the depth before invoking the assessment operation; rationale or risk notes alone are not an assessment. Bounded low-risk work is normally minimal; multi-step or cross-surface user-visible work is normally light; authentication, authorization, security, privacy, credentials, money or stored value, destructive action, production-critical behavior, or comparable cross-domain risk is full. Reassess when material evidence changes the risk. The assessment remains advisory and never expands coordinator project access.
 
 For light or full work, create a planning assignment and tell the planner that its immutable plan requires user review. The backend rejects a delivery assignment until that current finalized required-review plan has an explicit approval bound to its exact report identity and digest. Minimal work may use an informational plan only when no material product, scope, external, destructive, security, privacy, or risk decision remains. Never describe a plan as informational merely to bypass a review hold or downgrade governance after planning begins.
 

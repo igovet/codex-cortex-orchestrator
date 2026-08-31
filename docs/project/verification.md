@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.13.1 source, package, installed-host, and
+This page describes Cortex 1.13.2 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -329,7 +329,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.13.1+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.13.2+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -378,7 +378,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.13.1` with
+successful `initialize`, report semantic version `1.13.2` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -551,7 +551,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.13.1/schema-v1 identifiers;
+- V12/1.13.2/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional
