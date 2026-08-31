@@ -543,6 +543,9 @@ def test_runtime_rejects_spoofed_expectation_and_manifest_suffix(tmp_path: Path)
         assert "suffix" in str(exc)
     else:
         raise AssertionError("wrong build suffix must be rejected")
+    source = verify_runtime(package, "1.12.2", allow_source_mode=True)
+    assert source["runtime_mode"] == "source"
+    assert source["parity_verified"] == "false"
 
 
 def test_candidate_manifest_is_order_independent_after_in_process_imports(tmp_path: Path) -> None:

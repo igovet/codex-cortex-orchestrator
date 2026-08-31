@@ -109,11 +109,12 @@ PLAN_REVIEW_POLICIES = ("informational", "required")
 # The complete task/result contract is deliberately ordinary bounded text.  It
 # is not an execution plan or backend workflow authority: it is durable
 # context for a worker and a faithful source for the private human view.
-# V2 records that verification entries are derived deterministically from the
-# accepted criteria at the public boundary.  The durable version participates
-# in idempotency and decision-subject digests; historical V1 rows remain
-# immutable readable evidence.
-TASK_CONTRACT_VERSION = "cortex/task-contract/v2-criteria-derived"
+# V3 records one coverage identity per independent outcome and keeps criteria,
+# steer additions, and exact user-source fragments linked to it. Acceptance is
+# never copied into a duplicate verification dimension. The durable version
+# participates in idempotency and decision-subject digests; historical rows
+# remain immutable readable evidence.
+TASK_CONTRACT_VERSION = "cortex/task-contract/v3-outcome-linked"
 LANGUAGE_TAG_MAX_LENGTH = 64
 # A deliberately conservative BCP-47-shaped tag.  Require the usual ISO
 # 639 two- or three-letter primary language subtag so a language name such as
@@ -171,6 +172,11 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
         # and synthesis publication after implementation/verification.
         evidence_required = current_v3 and report_type in {"plan", "result", "synthesis"}
         if evidence_required:
+            # Current publications must disposition every server-issued scope
+            # item exactly once. The assignment snapshot remains routing
+            # authority; these claims preserve semantic completeness across
+            # worker handoffs and plan revisions.
+            required.add("contract_coverage")
             if report_type in {"plan", "result"}:
                 required.add("verification_facts")
             if report_type in {"result", "synthesis"}:
@@ -180,12 +186,9 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
             # Keep those immutable rows readable, but do not admit the field in
             # the current v3 public contract or use it as current authority.
             required.add("contract_coverage")
-        # Current v3 publication scope is owned by the immutable assignment
-        # capability.  Accepting caller-authored coverage here would make the
-        # model reconstruct server-owned item identities and would duplicate
-        # an authority relation the store already has.  Historical v2 remains
-        # readable through the branch above, but v3 deliberately has no
-        # coverage input field.
+        # Assignment scope remains server-owned. The worker copies the exact
+        # emitted item refs only to publish a disposition for each item; it
+        # cannot add routing authority or expand its immutable scope.
         allowed_keys = {"schema", "source_text", *required}
         # A planner may optionally carry an early impact hypothesis, but it
         # cannot be required to know the post-implementation verdict. The
@@ -211,10 +214,12 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
             return "semantic_invalid"
         if report_type in {"result", "synthesis"} and evidence_required and (not isinstance(content.get("documentation_impact"), str) or not content["documentation_impact"].strip()):
             return "semantic_invalid"
-        if not current_v3 and any(
+        if "contract_coverage" in required and any(
             not isinstance(item, Mapping)
             or not isinstance(item.get("item_ref"), str)
             or not isinstance(item.get("status"), str)
+            or not isinstance(item.get("verification"), list)
+            or (current_v3 and not item.get("verification"))
             for item in content["contract_coverage"]
         ):
             return "semantic_invalid"

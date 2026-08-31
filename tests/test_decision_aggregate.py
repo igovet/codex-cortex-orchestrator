@@ -14,13 +14,24 @@ sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 
 from cortex_runtime.domain_api import (  # noqa: E402
     consume_assignment_evidence,
-    open_assignment,
+    open_assignment as _open_assignment,
     open_task,
-    publish_plan,
+    publish_plan as _publish_plan,
     read_task,
 )
 from cortex_runtime.domain_kernel import DecisionAggregate  # noqa: E402
 from cortex_runtime.v12_store import V12Store, V12StoreError  # noqa: E402
+
+
+def open_assignment(*, task_ref: str, mission: dict, **kwargs: object) -> dict:
+    return _open_assignment(task_ref=task_ref, mission={**mission, "responsibility": "planning"}, **kwargs)
+
+
+def publish_plan(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    store, assignment_id = V12Store.for_record_ref(assignment_ref, label="delegation_id")
+    items = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)["worker_brief"]["effective_contract"]["planning_items"]
+    covered = {**evidence, "contract_coverage": [{"item_ref": item["item_ref"], "status": "planned", "verification": ["Fixture mapped this item."]} for item in items]}
+    return _publish_plan(assignment_ref=assignment_ref, evidence=covered, **kwargs)
 
 
 class DecisionAggregateTests(unittest.TestCase):

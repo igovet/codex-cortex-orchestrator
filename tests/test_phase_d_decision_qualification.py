@@ -295,13 +295,16 @@ def _task(client: CandidateMcp, project: Path, *, suffix: str = "") -> str:
 
 
 def _planner(client: CandidateMcp, task_ref: str) -> dict[str, Any]:
+    state = _success(client, "read_task", {"task_ref": task_ref})
+    item_refs = [item["item_ref"] for item in state["effective_contract"]["items"]]
     return _success(client, "open_assignment", {
         "task_ref": task_ref,
-        "mission": {"role": "planner", "profile_name": "planner", "goal": "Prepare one immutable plan.", "constraints": "Planning only.", "instructions": "Map every contract item and submit one complete plan."},
+        "mission": {"role": "planner", "profile_name": "planner", "responsibility": "planning", "goal": "Prepare one immutable plan.", "constraints": "Planning only.", "instructions": "Map every contract item and submit one complete plan.", "item_refs": item_refs},
     })
 
 
 def _plan_evidence(assignment: dict[str, Any]) -> dict[str, Any]:
+    items = assignment.get("effective_contract", {}).get("planning_items", [])
     return {
         "schema": "cortex/report/plan/v3", "summary": "Complete qualification plan.",
         "scope": "Complete contract.",
@@ -309,6 +312,7 @@ def _plan_evidence(assignment: dict[str, Any]) -> dict[str, Any]:
         "verification": ["Inspect every criterion."], "risks": [], "deviations": [], "unresolved": [],
         "verification_facts": [{"state": "not_run", "summary": "Planning does not execute project commands."}],
         "documentation_impact": "No documentation changed; no affected paths.",
+        "contract_coverage": [{"item_ref": item["item_ref"], "status": "planned", "verification": ["Mapped this exact qualification item."]} for item in items],
     }
 
 
@@ -419,6 +423,8 @@ def test_pending_user_decision_atomically_blocks_task_phase_advance(candidate) -
         "prompt_language": "en",
     })
     binding_ref = opened["handles"]["binding_ref"]
+    state = _success(client, "read_task", {"task_ref": task_ref})
+    item_refs = [item["item_ref"] for item in state["effective_contract"]["items"]]
 
     governance_error = _expect_error(client, "assess_governance", {
         "task_ref": task_ref,
@@ -433,9 +439,11 @@ def test_pending_user_decision_atomically_blocks_task_phase_advance(candidate) -
         "mission": {
             "role": "planner",
             "profile_name": "planner",
+            "responsibility": "planning",
             "goal": "Prepare the implementation plan.",
             "constraints": "Planning only.",
             "instructions": "Map every current requirement before implementation.",
+            "item_refs": item_refs,
         },
     }, {"decision_pending"})
     assert "previously returned pending binding" in assignment_error["action"]
@@ -580,6 +588,8 @@ def test_plan_revision_relations_are_server_derived_through_real_stdio(candidate
         task_ref, opened["handles"]["binding_ref"],
         "Add explicit print verification.", "en", outcome="request_revision",
     ))
+    state = _success(client, "read_task", {"task_ref": task_ref})
+    item_refs = [item["item_ref"] for item in state["effective_contract"]["items"]]
     replacement = _success(client, "open_assignment", {
         "task_ref": task_ref,
         "input_report_refs": [first_plan_ref],
@@ -587,9 +597,11 @@ def test_plan_revision_relations_are_server_derived_through_real_stdio(candidate
         "mission": {
             "role": "revision planner",
             "profile_name": "planner",
+            "responsibility": "planning",
             "goal": "Publish one revised immutable plan.",
             "constraints": "Planning only.",
             "instructions": "Consume the predecessor evidence and revise the plan.",
+            "item_refs": item_refs,
         },
     })
     assert replacement["relations"] == {"parent_assignment_ref": first_assignment_ref}
@@ -612,9 +624,10 @@ def test_plan_revision_relations_are_server_derived_through_real_stdio(candidate
 def test_steering_creates_one_effective_revision_and_explicit_supersession(candidate) -> None:
     client, project, _target = candidate
     task_ref = _task(client, project, suffix="steering")
+    initial_outcome_ref = _success(client, "read_task", {"task_ref": task_ref})["effective_contract"]["items"][0]["item_ref"]
     first_open = _success(client, "open_steering", {"task_ref": task_ref, "prompt": "May we add accessible colors?", "prompt_language": "en"})
     first_binding = first_open["handles"]["binding_ref"]
-    first = _success(client, "record_steering", _decision_args(task_ref, first_binding, "Yes, add accessible colors.", "en", steering_delta={"add": [{"category": "requirement", "text": "Use accessible colors."}]}))
+    first = _success(client, "record_steering", _decision_args(task_ref, first_binding, "Yes, add accessible colors.", "en", steering_delta={"add": [{"outcome_ref": initial_outcome_ref, "category": "requirement", "text": "Use accessible colors."}]}))
     first_decision = first["handles"]["decision_ref"]
     assert first["replayed"] is False
     assert first["decision"]["decision_ref"] == first_decision
@@ -622,9 +635,10 @@ def test_steering_creates_one_effective_revision_and_explicit_supersession(candi
     assert "supersedes_decision_id" not in first["decision"]
     after_first = _success(client, "read_task", {"task_ref": task_ref})
     assert after_first["effective_contract"]["revision"] == 2
+    revised_outcome_ref = after_first["effective_contract"]["items"][0]["item_ref"]
     second_open = _success(client, "open_steering", {"task_ref": task_ref, "prompt": "May we refine accessible colors?", "prompt_language": "en"})
     second_binding = second_open["handles"]["binding_ref"]
-    second_args = _decision_args(task_ref, second_binding, "Refine the accessibility requirement.", "en", steering_delta={"add": [{"category": "verification", "text": "Verify accessible contrast."}]}, supersedes_decision_ref=first_decision)
+    second_args = _decision_args(task_ref, second_binding, "Refine the accessibility requirement.", "en", steering_delta={"add": [{"outcome_ref": revised_outcome_ref, "category": "verification", "text": "Verify accessible contrast."}]}, supersedes_decision_ref=first_decision)
     second = _success(client, "record_steering", second_args)
     assert second["replayed"] is False
     assert second["decision"]["decision_ref"] == second["handles"]["decision_ref"]
@@ -644,8 +658,9 @@ def test_stale_cross_project_wrong_family_and_malformed_calls_fail_safely(candid
     task_ref = _task(client, project, suffix="safety")
     opened = _success(client, "open_clarification", {"task_ref": task_ref, "prompt": "Will this become stale?", "prompt_language": "en"})
     binding = opened["handles"]["binding_ref"]
+    outcome_ref = _success(client, "read_task", {"task_ref": task_ref})["effective_contract"]["items"][0]["item_ref"]
     steering = _success(client, "open_steering", {"task_ref": task_ref, "prompt": "Change the contract?", "prompt_language": "en"})
-    _success(client, "record_steering", _decision_args(task_ref, steering["handles"]["binding_ref"], "Add a check.", "en", steering_delta={"add": [{"category": "verification", "text": "Run the check."}]}))
+    _success(client, "record_steering", _decision_args(task_ref, steering["handles"]["binding_ref"], "Add a check.", "en", steering_delta={"add": [{"outcome_ref": outcome_ref, "category": "verification", "text": "Run the check."}]}))
     _expect_error(client, "record_clarification", _decision_args(task_ref, binding, "Too late", "en"), {"clarification_binding_stale"})
     _expect_error(client, "record_clarification", _decision_args(task_ref, binding, "Wrong family", "en"), {"clarification_binding_stale", "clarification_binding_mismatch"})
     _expect_error(client, "open_clarification", {"task_ref": task_ref, "prompt": "x", "prompt_language": "en", "unexpected": True}, {"validation_error"})

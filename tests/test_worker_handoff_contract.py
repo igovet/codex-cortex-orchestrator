@@ -64,6 +64,12 @@ class WorkerHandoffContractTests(unittest.TestCase):
             self.assertNotIn("prompt_en", text, skill)
             self.assertNotIn("response_en", text, skill)
 
+    def test_explorer_defers_publication_shape_to_the_live_contract(self) -> None:
+        profile = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "agents" / "explorer.toml"
+        text = profile.read_text(encoding="utf-8")
+        self.assertIn("live-advertised result publication", text)
+        self.assertIn("adds no explorer report shape", text)
+
     def test_native_contract_requires_summary_and_exact_publication_evidence(self) -> None:
         rendered = render_worker_message(
             task={

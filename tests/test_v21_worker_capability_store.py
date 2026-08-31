@@ -106,7 +106,7 @@ class V21WorkerCapabilityStoreTests(unittest.TestCase):
     def test_migration_is_forward_only_and_table_is_present(self) -> None:
         with self.store._connection() as connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 23)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 24)
             columns = {row[1] for row in connection.execute("PRAGMA table_info(worker_capabilities)")}
         self.assertIn("continuation_ref", columns)
         self.assertIn("dispatch_digest", columns)
@@ -120,12 +120,13 @@ class V21WorkerCapabilityStoreTests(unittest.TestCase):
             connection.execute("DROP TRIGGER assignment_scope_no_delete")
             connection.execute("DROP INDEX assignment_scope_task_revision")
             connection.execute("DROP TABLE assignment_scope_snapshots")
-            connection.execute("DELETE FROM schema_migrations WHERE version IN (22,23)")
+            connection.execute("DROP TABLE effective_contract_item_details")
+            connection.execute("DELETE FROM schema_migrations WHERE version IN (22,23,24)")
             connection.execute("ALTER TABLE worker_capabilities DROP COLUMN lease_expires_at")
 
         upgraded = V12Store(self.project)
         with upgraded._connection() as connection:
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 23)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 24)
             row = connection.execute(
                 "SELECT state,lease_expires_at FROM worker_capabilities WHERE capability_ref=?",
                 (capability["capability"],),

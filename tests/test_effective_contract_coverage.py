@@ -31,7 +31,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         self.store = V12Store(self.project)
         self.task = self.store.create_task(
             objective="Aggregate evidence.", user_request_original="Aggregate evidence.", user_language="en",
-            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["Cover the requirement."],
+            task_contract_version="cortex/task-contract/v3-outcome-linked", requirements=["Cover the requirement."],
             constraints=["Preserve compatibility."], acceptance_criteria=["Expose advisory conformance."],
             verification_plan=["Run focused tests."], context={}, idempotency_key="coverage-task",
         )[0]["task"]["task_id"]
@@ -72,7 +72,8 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         initial = self.store.inspect_task(task_id=self.task, after_sequence=0)
         self.assertEqual(initial["aggregate_coverage"]["status"], "ready_with_risks")
         self.assertEqual(initial["aggregate_coverage"]["items"][0]["status"], "unverified")
-        self.assertEqual(initial["conformance_review"]["status"], "ready_with_risks")
+        self.assertEqual(initial["conformance_review"]["status"], "not_ready")
+        self.assertTrue(initial["conformance_review"]["unconsumed_report_refs"])
         self.assertEqual(initial["conformance_review"]["effective_revision"], 1)
 
         self._submit(key="partial", coverage_status="partial", verification=["Observed failure."])
@@ -87,7 +88,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
 
         stale_task = self.store.create_task(
             objective="Detect stale coverage.", user_request_original="Detect stale coverage.", user_language="en",
-            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["Require current coverage."],
+            task_contract_version="cortex/task-contract/v3-outcome-linked", requirements=["Require current coverage."],
             constraints=["Preserve evidence."], acceptance_criteria=["Show stale evidence."],
             verification_plan=["Inspect aggregate."], context={}, idempotency_key="stale-task",
         )[0]["task"]["task_id"]
@@ -126,7 +127,14 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         replacement_id = replacement["delegation"]["delegation_id"]
         projected = self.store.read_delegation(delegation_id=replacement_id, after_sequence=0, limit=1)["worker_brief"]["effective_contract"]
         self.assertEqual(projected["revision"], 1)
-        self.assertEqual(projected["assigned_items"], [{"item_ref": self.item, "category": "acceptance", "ordinal": 0, "text": "Expose advisory conformance.", "assignment_role": "owned"}, {"item_ref": self.items[1], "category": "constraint", "ordinal": 0, "text": "Preserve compatibility.", "assignment_role": "owned"}, {"item_ref": self.items[2], "category": "requirement", "ordinal": 0, "text": "Cover the requirement.", "assignment_role": "owned"}, {"item_ref": self.items[3], "category": "verification", "ordinal": 0, "text": "Run focused tests.", "assignment_role": "owned"}])
+        self.assertEqual(len(projected["assigned_items"]), 1)
+        assigned = projected["assigned_items"][0]
+        self.assertEqual(assigned["item_ref"], self.item)
+        self.assertEqual(assigned["category"], "outcome")
+        self.assertEqual(assigned["text"], "Cover the requirement.")
+        self.assertEqual(assigned["acceptance_criteria"], ["Expose advisory conformance."])
+        self.assertEqual(assigned["verification_criteria"], ["Run focused tests."])
+        self.assertEqual(assigned["assignment_role"], "owned")
         self._submit(key="replacement-complete", coverage_status="complete", verification=["Replacement verified."], delegation=replacement_id)
         result = self.store.inspect_task(task_id=self.task, after_sequence=0)
         self.assertEqual(result["aggregate_coverage"]["status"], "ready")
@@ -137,7 +145,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         """Parent-linked rework receives the parent's active owned scope exactly."""
         task = self.store.create_task(
             objective="Parent scope.", user_request_original="Parent scope.", user_language="en",
-            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["A", "B"],
+            task_contract_version="cortex/task-contract/v3-outcome-linked", requirements=["A", "B"],
             constraints=["C"], acceptance_criteria=["D"], verification_plan=["E"], context={}, idempotency_key="parent-task",
         )[0]["task"]["task_id"]
         items = [item["item_ref"] for item in self.store.inspect_task(task_id=task, after_sequence=0)["effective_contract"]["items"]]
@@ -159,7 +167,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         """A bounded execution worker must not require a synthetic plan report."""
         task = self.store.create_task(
             objective="Direct bounded work.", user_request_original="Direct bounded work.", user_language="en",
-            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["Create one artifact."],
+            task_contract_version="cortex/task-contract/v3-outcome-linked", requirements=["Create one artifact."],
             constraints=["One worker."], acceptance_criteria=["Artifact exists."],
             verification_plan=["Verify the artifact."], context={}, idempotency_key="direct-owner-task",
         )[0]["task"]["task_id"]
@@ -183,7 +191,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         """A debugger fixes defects, so its completed result must cover owned items."""
         task = self.store.create_task(
             objective="Debug coverage attribution.", user_request_original="Debug coverage attribution.", user_language="en",
-            task_contract_version="cortex/task-contract/v2-criteria-derived", requirements=["Fix the defect."],
+            task_contract_version="cortex/task-contract/v3-outcome-linked", requirements=["Fix the defect."],
             constraints=["Keep the correction focused."], acceptance_criteria=["The aggregate is covered."],
             verification_plan=["Run the regression."], context={}, idempotency_key="debugger-task",
         )[0]["task"]["task_id"]
@@ -217,7 +225,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         self.assertEqual(aggregate["status"], "ready")
         self.assertTrue(all(item["reason"] == "current_verified_claim" for item in aggregate["items"]))
 
-    def test_active_assignment_survives_unrelated_revision_and_retired_item_is_rejected(self) -> None:
+    def test_active_assignment_snapshot_survives_linked_revision_and_old_item_is_stale(self) -> None:
         self.store.record_user_decision(
             task_id=self.task, subject_type="task", subject_id=self.task, decision_type="steer", prompt="Add a separate check.",
             response_original="Add a separate check.", user_language="en", steering_delta={"add": [{"category": "verification", "text": "Run a new independent check."}]},
@@ -226,9 +234,13 @@ class EffectiveContractCoverageTests(unittest.TestCase):
         self._submit(key="survives-revision", coverage_status="complete", verification=["Still assigned after revision."])
         current = self.store.inspect_task(task_id=self.task, after_sequence=0)
         self.assertEqual(current["effective_contract"]["revision"], 2)
+        self.assertEqual(len(current["effective_contract"]["items"]), 1)
+        current_item = current["effective_contract"]["items"][0]
+        self.assertEqual(current_item["verification_criteria"], ["Run focused tests.", "Run a new independent check."])
+        self.assertEqual(current_item["supersedes_item_ref"], self.item)
         self.store.record_user_decision(
             task_id=self.task, subject_type="task", subject_id=self.task, decision_type="steer", prompt="Retire a covered item.",
-            response_original="Retire a covered item.", user_language="en", steering_delta={"retire_item_refs": [self.item], "add": []},
+            response_original="Retire a covered item.", user_language="en", steering_delta={"retire_item_refs": [current_item["item_ref"]], "add": []},
             idempotency_key="retire-steer",
         )
         with self.assertRaises(Exception):
@@ -245,7 +257,9 @@ class EffectiveContractCoverageTests(unittest.TestCase):
             idempotency_key="race-steer",
         )
         effective_items = self.store.inspect_task(task_id=self.task, after_sequence=0)["effective_contract"]["items"]
-        raced_item = next(item["item_ref"] for item in effective_items if item["text"] == "Race active ownership.")
+        self.assertEqual(len(effective_items), 1)
+        self.assertIn("Race active ownership.", effective_items[0]["verification_criteria"])
+        raced_item = effective_items[0]["item_ref"]
         def create(number: int) -> str:
             try:
                 self.store.create_delegation(

@@ -89,11 +89,15 @@ def verify_runtime(package_root: Path, server_version: str, environment: Mapping
         raise RuntimeError("candidate plugin manifest is invalid")
     version = manifest["version"]
     match = re.fullmatch(r"(1\.12\.2)\+codex\.sha256\.([0-9a-f]{16})", version)
+    # A source checkout keeps the last content-addressed release suffix in
+    # version control. Explicit source mode must therefore tolerate that
+    # suffix becoming stale while files are edited, while an installed or
+    # candidate runtime still verifies it strictly.
     source_mode = allow_source_mode and (version == "1.12.2" or match is not None)
     if (match is None and not source_mode) or server_version != "1.12.2":
         raise RuntimeError("candidate product version or build suffix is invalid")
     digest = package_digest(root)
-    if match is not None and not digest.startswith(match.group(2)):
+    if match is not None and not source_mode and not digest.startswith(match.group(2)):
         raise RuntimeError("candidate build suffix does not match package content")
     values = {
         "build_id": f"sha256:{digest}",

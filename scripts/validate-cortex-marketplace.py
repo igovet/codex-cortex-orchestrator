@@ -519,9 +519,15 @@ def validate_runtime(plugin: Path) -> None:
         if name == "open_assignment":
             mission = properties.get("mission")
             mission_properties = mission.get("properties", {}) if isinstance(mission, dict) else {}
-            if set(properties) - {"task_ref", "mission", "input_report_refs", "input_decision_refs", "parent_assignment_ref"} or not isinstance(mission, dict) or set(mission.get("required") or ()) != {"role", "profile_name", "goal", "constraints", "instructions"}:
+            if set(properties) - {"task_ref", "mission", "input_report_refs", "input_decision_refs", "parent_assignment_ref"} or not isinstance(mission, dict) or set(mission.get("required") or ()) != {"role", "profile_name", "responsibility", "goal", "constraints", "instructions", "item_refs"}:
                 fail("open_assignment must expose one complete mission contract")
-            if "model" in properties or "reasoning_effort" in properties or not isinstance(mission_properties.get("profile_name"), dict):
+            if (
+                "model" in properties
+                or "reasoning_effort" in properties
+                or not isinstance(mission_properties.get("profile_name"), dict)
+                or set((mission_properties.get("responsibility") or {}).get("enum", ())) != {"planning", "delivery", "evidence"}
+                or not isinstance(mission_properties.get("item_refs"), dict)
+            ):
                 fail("open_assignment routing must be server-owned while profile intent remains explicit")
     if hasattr(__import__("cortex_runtime.mcp_api", fromlist=["public_tools_for_audience"]), "public_tools_for_audience"):
         fail("V12 MCP transport must not project tools by audience")

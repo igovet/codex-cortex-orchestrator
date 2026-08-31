@@ -24,7 +24,7 @@ if str(SCRIPTS) not in sys.path:
 
 from cortex import PUBLIC_TOOLS, SERVER_VERSION  # noqa: E402
 from cortex_runtime.domain_api import (  # noqa: E402
-    assess_governance, close_task, consume_assignment_evidence, open_assignment,
+    assess_governance, close_task, consume_assignment_evidence, open_assignment as _open_assignment,
     open_clarification, open_task, publish_documentation, publish_plan, publish_result,
     read_task, record_clarification, record_plan_review, record_steering,
 )
@@ -48,12 +48,23 @@ REQUIRED = {
 }
 
 
+def open_assignment(*, task_ref: str, mission: dict, **kwargs: object) -> dict:
+    responsibility = "planning" if mission.get("profile_name") == "planner" else "delivery"
+    return _open_assignment(task_ref=task_ref, mission={**mission, "responsibility": responsibility}, **kwargs)
+
+
+def _coverage(assignment: dict, *, planning: bool) -> list[dict]:
+    contract = assignment.get("effective_contract", {})
+    items = contract.get("planning_items" if planning else "assigned_items", [])
+    return [{"item_ref": item["item_ref"], "status": "planned" if planning else "complete", "verification": ["Fixture reconciled this exact item."]} for item in items]
+
+
 def plan_evidence(assignment: dict) -> dict:
-    return {"schema": "cortex/report/plan/v3", "summary": "Complete plan.", "scope": "Complete contract.", "stages": [{"owner": "planner", "work": ["Map every requirement."], "verification": ["Check every item."]}], "verification": ["Inspect every criterion."], "risks": [], "deviations": [], "unresolved": [], "verification_facts": [{"state": "not_run", "summary": "Planning does not execute project commands."}], "documentation_impact": "No documentation changed; no affected paths."}
+    return {"schema": "cortex/report/plan/v3", "summary": "Complete plan.", "scope": "Complete contract.", "stages": [{"owner": "planner", "work": ["Map every requirement."], "verification": ["Check every item."]}], "verification": ["Inspect every criterion."], "risks": [], "deviations": [], "unresolved": [], "verification_facts": [{"state": "not_run", "summary": "Planning does not execute project commands."}], "documentation_impact": "No documentation changed; no affected paths.", "contract_coverage": _coverage(assignment, planning=True)}
 
 
 def result_evidence(assignment: dict) -> dict:
-    return {"schema": "cortex/report/result/v3", "summary": "Complete result.", "outcome": "completed", "changes": [], "verification": ["Inspected result."], "risks": [], "deviations": [], "unresolved": [], "verification_facts": [{"state": "not_run", "summary": "No project command."}], "documentation_impact": "No documentation changed; no affected paths."}
+    return {"schema": "cortex/report/result/v3", "summary": "Complete result.", "outcome": "completed", "changes": [], "verification": ["Inspected result."], "risks": [], "deviations": [], "unresolved": [], "verification_facts": [{"state": "not_run", "summary": "No project command."}], "documentation_impact": "No documentation changed; no affected paths.", "contract_coverage": _coverage(assignment, planning=False)}
 
 
 def report_rows(root: str) -> tuple[int, int, int]:
@@ -190,7 +201,8 @@ class MarketplaceReleaseGate(unittest.TestCase):
             self.assertTrue(decision_view["decision_ref"])
             self.assertNotIn("decision_id", decision_view)
             closed = close_task(task_ref=tref, verdict="ready", evidence={"summary": "Approved and verified."})
-            self.assertEqual(closed["closure"]["verdict"], "ready")
+            self.assertEqual(closed["closure"]["verdict"], "not_ready")
+            self.assertEqual(closed["verdict_adjustment"], {"requested": "ready", "recorded": "not_ready"})
 
 
 if __name__ == "__main__":

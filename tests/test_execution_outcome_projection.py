@@ -31,7 +31,7 @@ class ExecutionOutcomeProjectionTests(unittest.TestCase):
                     objective="Expose neutral report evidence.",
                     user_request_original="Expose neutral report evidence.",
                     user_language="en",
-                    task_contract_version="cortex/task-contract/v2-criteria-derived",
+                    task_contract_version="cortex/task-contract/v3-outcome-linked",
                     requirements=["Preserve neutral report evidence."],
                     constraints=["Keep advisory closure independent."],
                     acceptance_criteria=["Task and closure projections expose neutral counts."],
@@ -105,6 +105,12 @@ class ExecutionOutcomeProjectionTests(unittest.TestCase):
                     idempotency_key="outcome-closure",
                 )[0]
                 self.assertEqual(closure["execution_outcome"], inspected["execution_outcome"])
+                # A recorded advisory verdict must be accompanied by the
+                # current conformance projection; the verdict alone is not a
+                # readiness gate.
+                self.assertEqual(closure["conformance_review"], inspected["conformance_review"])
+                self.assertEqual(closure["conformance_review"]["status"], "not_ready")
+                self.assertEqual(closure["conformance_review"]["recommendation"], "rework")
                 submit(key="outcome-failed-report", status="failed", content={
                         "schema": "cortex/report/result/v1",
                         "summary": "A later canonical result remained incomplete.",

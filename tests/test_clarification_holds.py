@@ -17,11 +17,23 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins" / "cortex" / "scripts"))
 
 from cortex_runtime.domain_api import (  # noqa: E402
-    consume_assignment_evidence, open_assignment, open_clarification, open_task, record_clarification, publish_plan,
+    consume_assignment_evidence, open_assignment as _open_assignment, open_clarification, open_task, record_clarification, publish_plan as _publish_plan,
 )
 from cortex_runtime.domain_kernel import DecisionAggregate  # noqa: E402
 from cortex_runtime.v12_service import V12ServiceError  # noqa: E402
 from cortex_runtime.v12_store import V12Store, V12StoreError  # noqa: E402
+
+
+def open_assignment(*, task_ref: str, mission: dict, **kwargs: object) -> dict:
+    responsibility = "planning" if mission.get("profile_name") == "planner" else "delivery"
+    return _open_assignment(task_ref=task_ref, mission={**mission, "responsibility": responsibility}, **kwargs)
+
+
+def publish_plan(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    store, assignment_id = V12Store.for_record_ref(assignment_ref, label="delegation_id")
+    items = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)["worker_brief"]["effective_contract"]["planning_items"]
+    covered = {**evidence, "contract_coverage": [{"item_ref": item["item_ref"], "status": "planned", "verification": ["Fixture mapped this item."]} for item in items]}
+    return _publish_plan(assignment_ref=assignment_ref, evidence=covered, **kwargs)
 
 
 class ClarificationHoldTests(unittest.TestCase):
@@ -87,7 +99,7 @@ class ClarificationHoldTests(unittest.TestCase):
                 connection.execute(
                     "SELECT version,name FROM schema_migrations ORDER BY version DESC LIMIT 1"
                 ).fetchone(),
-                (23, "v23-immutable-assignment-scope"),
+                (24, "v24-outcome-linked-contract"),
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(clarification_holds)")}
         self.assertTrue({

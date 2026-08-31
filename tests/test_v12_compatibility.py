@@ -14,12 +14,38 @@ if str(SCRIPTS) not in sys.path:
 
 from cortex import PUBLIC_TOOLS, SERVER_VERSION
 from cortex_runtime.domain_api import (
-    assess_governance, close_task, consume_assignment_evidence, open_assignment,
-    open_task, open_clarification, publish_documentation, publish_plan, publish_result,
+    assess_governance, close_task, consume_assignment_evidence, open_assignment as _open_assignment,
+    open_task, open_clarification, publish_documentation as _publish_documentation, publish_plan as _publish_plan, publish_result as _publish_result,
     read_task, record_clarification,
 )
 from cortex_runtime.v12_contract import task_ref
 from cortex_runtime.v12_store import V12Store
+
+
+def open_assignment(*, task_ref: str, mission: dict, **kwargs: object) -> dict:
+    profile = mission.get("profile_name")
+    responsibility = "planning" if profile == "planner" else "evidence" if profile in {"qa_engineer", "technical_writer", "explorer"} else "delivery"
+    return _open_assignment(task_ref=task_ref, mission={**mission, "responsibility": responsibility}, **kwargs)
+
+
+def _covered(assignment_ref: str, evidence: dict, kind: str) -> dict:
+    store, assignment_id = V12Store.for_record_ref(assignment_ref, label="delegation_id")
+    contract = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)["worker_brief"]["effective_contract"]
+    items = contract.get("planning_items", []) if kind == "plan" else contract.get("assigned_items", [])
+    status = "planned" if kind == "plan" else "complete"
+    return {**evidence, "contract_coverage": [{"item_ref": item["item_ref"], "status": status, "verification": ["Fixture reconciled the assigned item."]} for item in items]}
+
+
+def publish_plan(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    return _publish_plan(assignment_ref=assignment_ref, evidence=_covered(assignment_ref, evidence, "plan"), **kwargs)
+
+
+def publish_result(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    return _publish_result(assignment_ref=assignment_ref, evidence=_covered(assignment_ref, evidence, "result"), **kwargs)
+
+
+def publish_documentation(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    return _publish_documentation(assignment_ref=assignment_ref, evidence=_covered(assignment_ref, evidence, "documentation"), **kwargs)
 
 
 class V12CompatibilityTests(unittest.TestCase):
@@ -63,13 +89,13 @@ class V12CompatibilityTests(unittest.TestCase):
             store = V12Store(root)
             task, _ = store.create_task(
                 objective="Keep history.", user_request_original="Keep history.", user_language="en",
-                task_contract_version="cortex/task-contract/v2-criteria-derived",
+                task_contract_version="cortex/task-contract/v3-outcome-linked",
                 requirements=["Read history."], constraints=["No reset."],
                 acceptance_criteria=["Migration preserves rows."], verification_plan=["Migration preserves rows."],
                 context={}, idempotency_key="historical-direct-store",
             )
             with sqlite3.connect(store.database_path) as connection:
-                self.assertEqual(connection.execute("SELECT version,name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone(), (23, "v23-immutable-assignment-scope"))
+                self.assertEqual(connection.execute("SELECT version,name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone(), (24, "v24-outcome-linked-contract"))
             self.assertEqual(store.inspect_task(task_id=task["task"]["task_id"], after_sequence=0, limit=50)["task"]["objective"], "Keep history.")
 
     def test_v23_migration_backfills_and_seals_assignment_scope(self) -> None:
@@ -84,7 +110,8 @@ class V12CompatibilityTests(unittest.TestCase):
                 connection.execute("DROP TRIGGER assignment_scope_no_delete")
                 connection.execute("DROP INDEX assignment_scope_task_revision")
                 connection.execute("DROP TABLE assignment_scope_snapshots")
-                connection.execute("DELETE FROM schema_migrations WHERE version=23")
+                connection.execute("DROP TABLE effective_contract_item_details")
+                connection.execute("DELETE FROM schema_migrations WHERE version IN (23,24)")
                 connection.commit()
             upgraded = V12Store(root)
             with sqlite3.connect(upgraded.database_path) as connection:

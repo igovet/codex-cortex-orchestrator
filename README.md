@@ -253,6 +253,12 @@ sessions. Neither hook grants ledger authority, invents completion, or replaces
 successful server-side assignment-evidence consumption and worker-owned
 terminal publication.
 
+Effective coverage is outcome-oriented: one `o_` item represents one
+independent user obligation. Acceptance and verification criteria, constraints,
+steer additions, and exact user-source fragments stay linked to that outcome
+instead of inflating the report matrix. A steer revises its named outcome and
+does not create a parallel coverage item.
+
 ### 2. Install on Codex Desktop
 
 Codex Desktop and Codex CLI use the Plugins Marketplace system. The general
@@ -498,7 +504,7 @@ flowchart TB
     U(["User outcome, constraints,<br/>acceptance criteria, and language"]) --> ACT["Explicit activation<br/>user selects cortex:orchestrator<br/>ordinary complexity never activates Cortex"]
     ACT --> C0["Coordinator control plane<br/>orchestration and delegation only<br/>user communication follows user language"]
     C0 --> MODE{"Classify/revise C1 · C2 · C3<br/>then select governance depth<br/><b>minimal · light · full</b>"}
-    MODE --> START["open_task — the only root-bearing call<br/>English objective + original request/language<br/>requirements · constraints · acceptance · verification<br/>stores canonical root; returns public task_ref"]
+    MODE --> START["open_task — the only root-bearing call<br/>English objective + original request/language<br/>outcomes with linked acceptance · constraints<br/>stores canonical root; returns public task_ref"]
 
     subgraph MODEL["Coordinator lane — orchestration + bounded knowledge routing"]
         direction TB
@@ -750,9 +756,10 @@ apply.
    check, or worker dispatch before task opening is a route violation.
 2. **Durable task and mode.** `open_task` records the English-normalized
    objective, verbatim original request, user language, and bounded task
-   contract. Requirements, constraints, and acceptance criteria are non-empty;
-   an omitted verification plan is deterministically derived from acceptance
-   criteria before storage. Optional `context` never substitutes for them.
+   contract. Each independent outcome has a non-empty requirement and its own
+   linked acceptance criteria; constraints remain linked metadata, and no
+   verification obligation is synthesized by copying acceptance. Optional
+   `context` never substitutes for an outcome.
    `assess_governance` appends the model or
    user-override assessment.
 3. **Dynamic DAG and bounded routing.** The coordinator builds only the
@@ -791,13 +798,17 @@ apply.
    receives that decision ref before dispatch when the work is plan-dependent.
    The ready-view relation is validated for the specific approval request, but
    governance mode never creates a backend admission gate; a revised plan gets
-   a new digest and never inherits approval.
+   a new digest and never inherits approval. A plan with an unresolved product,
+   policy, scope, requirement, or acceptance choice cannot enter generic review;
+   it first needs an explicit clarification and a lossless revised plan.
 6. **Immutable evidence with strict ownership.** Workers alone call the
    applicable `publish_plan`, `publish_result`, or `publish_documentation`
    operation for their assignment. The coordinator creates the
    delegation, dispatches its exact rendered brief, waits, and consumes the
    worker's concise native handoff plus exact server-returned publication ref;
-   it does not reread the completed report merely to summarize it and never
+   the native handoff is routing context only. Before synthesis, revision,
+   rework, closure, or the final answer, it consumes the relevant canonical
+   report bodies through `read_task` evidence mode to completion, and it never
    submits on behalf of a worker. Every publication is complete and immutable;
    every compact ref and digest is copied byte-for-byte from a successful result or inspection,
    never parsed, reconstructed, normalized, or suffixed.
@@ -851,6 +862,10 @@ apply.
    effective-contract coverage, excluding historical/superseded claims and
    report arrival order. This evidence makes no native-lifecycle claim and
    remains unchanged by advisory bookkeeping.
+   The closure mutation response also returns the current `conformance_review`
+   projection, so a recorded advisory verdict cannot be mistaken for evidence
+   readiness. The ledger never upgrades a requested verdict and normalizes an
+   overstated request downward; callers communicate the recorded value.
    `submit_governance_closure` makes at most one same-idempotency retry for a
    verified transient persistence or inspection failure. If confirmation still
    cannot be established, it returns
@@ -867,7 +882,12 @@ apply.
 A delegation is a durable, model-authored work record. Its required `scope` is
 a non-empty text string of at most 65,536 characters containing a concise
 boundary of worker ownership; detailed execution belongs in `instructions`, and
-object-valued scopes are invalid. `open_assignment` returns a stable
+object-valued scopes are invalid. The mission's explicit `responsibility`
+selects planning, delivery ownership, or non-owning evidence independently of
+`profile_name`; `item_refs` select the exact bounded outcomes that the worker
+must reconcile one-to-one. They are required on every assignment, including a
+single-outcome or planning assignment; prose item names never substitute for
+the exact current references. `open_assignment` returns a stable
 compact assignment reference, a semantic delegation receipt consisting of a
 host-neutral `dispatch_brief` and loaded `renderer` proof. The brief carries
 the rendered message, task name, semantic objective, model/effort
@@ -896,8 +916,13 @@ of these values, even when a validation error exposes its syntax.
 worker-owned publication operations. Each records one complete publication for
 the worker's assignment and returns an opaque publication reference. The
 server validates the publication against the assignment and declared evidence;
-the coordinator never publishes on a worker's behalf. Exact retries are
-idempotent, while changed payloads conflict without a second mutation.
+the coordinator never publishes on a worker's behalf. Coverage is stored as
+one disposition per assigned item. If a worker mechanically repeats the same
+item with the same status, the server preserves every unique verification fact
+and coalesces those rows before digesting the canonical report; a conflicting
+status, omitted item, or foreign item is rejected without consuming the
+publication slot. Exact retries are idempotent, while changed payloads conflict
+without a second mutation.
 
 The current plan publication contract checks observable evidence, explicit
 stage ownership and dependencies, verification, residual risks, unresolved
@@ -1014,11 +1039,10 @@ directory rather than the target project, and Cortex 1.12.2 has no root-inferenc
 
 The task's operational `objective` is English-normalized. `open_task` also
 preserves exact `user_request_original`, `user_language`, and the
-`cortex/task-contract/v1` result contract: requirements, constraints,
-acceptance criteria, and verification plan. The first three arrays are required;
-an omitted verification plan is deterministically derived from acceptance
-criteria before storage. Each contract list contains at most 100 non-empty
-items of at most 4,096 characters. The public call requires the
+`cortex/task-contract/v3-outcome-linked` result contract: independent outcomes,
+each outcome's linked acceptance criteria, and task constraints. Acceptance is
+not copied into a standalone verification plan. Each public contract list is
+bounded by its advertised live schema. The public call requires the
 exact original request and a concrete language; compatibility defaults exist
 only for already-retained older pre-release rows. Coordinator-to-user messages
 follow the latest meaningful user language. Every native worker commentary,
@@ -1141,9 +1165,9 @@ infrastructure ownership. An independent verifier must rerun the failed and
 affected gates after correction. A passing focused subset or unrelated later
 work cannot silently supersede unresolved QA evidence.
 
-Before each rework assignment, the coordinator also preflights the selected
-profile's packaged ownership class against current governance and predecessor
-evidence. Light/full production-owner work requires finalized approved planner
+Before each rework assignment, the coordinator also preflights the mission's
+explicit responsibility and exact item scope against current governance and
+predecessor evidence; the selected profile supplies expertise only. Light/full production-owner work requires finalized approved planner
 evidence; bounded C1 owner work that genuinely needs no plan stays minimal from
 the outset, while test-only QA correction remains non-owning. Multiple workers
 or rework alone do not justify light/full governance. A rejected first attempt
@@ -1203,7 +1227,7 @@ from host metadata, thread identity, or process working directory.
 
 | Tool | Contract |
 | --- | --- |
-| `open_task` / `read_task` | Open and read the durable task contract and current task projection. |
+| `open_task` / `read_task` | Open/read task state, or consume bounded canonical report bodies with coordinator digest receipts. |
 | `open_clarification` / `record_clarification` | Open one server-owned clarification binding and consume it with the matching user response. |
 | `open_plan_review` / `record_plan_review` | Open one server-owned plan-review binding and consume it with the matching review outcome. |
 | `open_steering` / `record_steering` | Open one server-owned steering binding and consume it with the matching contract change. |
@@ -1274,12 +1298,13 @@ cyclic same-project dependencies are retained as warnings and do not block
 status updates or closure.
 
 Task and initiative advisory closure verdicts are `ready`, `ready_with_risks`, and
-`not_ready`. The coordinator selects the verdict from sufficient completed
+`not_ready`. The coordinator requests a verdict from sufficient completed
 worker evidence; it is an advisory recommendation, not a user-confirmation
-request or a backend gate. `ready_with_risks` therefore needs no user
-confirmation. A closure may cite evidence, unresolved risks, follow-ups,
-completion notes, and—when applicable—an initiative status. The backend
-records the statement but never chooses what happens next.
+request or a backend gate. The ledger normalizes an overstated request downward
+to its current conformance projection and returns both requested and recorded
+values; it never upgrades a verdict or chooses the next stage. `ready_with_risks`
+therefore needs no user confirmation. A closure may cite evidence, unresolved
+risks, follow-ups, completion notes, and—when applicable—an initiative status.
 
 `inspect_task` exposes exact independent projections. `execution_outcome`
 contains `evidence_status`, `finalized_report_count`, `completed_report_count`,
@@ -1593,8 +1618,10 @@ Build metadata after `+` is content-addressed as
 `codex.sha256.<digest-prefix>`; it identifies the exact isolated candidate and
 the exact production package and cannot be reused for different bytes. Runtime
 startup recomputes the packaged digest before MCP initialization and rejects a
-missing, stale, or invented suffix. Plain `1.12.2` is reserved for explicitly
-enabled source-mode execution and is not an installable release. The
+missing, stale, or invented suffix outside explicit source mode. An explicitly
+source-mode checkout may use plain `1.12.2` or retain its last stamped suffix
+while edited and reports `parityVerified=false`; neither is an installable
+release until release validation stamps the exact current digest. The
 product/server compatibility boundary remains `1.12.2`. V11 tools and unfinished
 V11 tasks are not compatible with Cortex 1.12.2.
 

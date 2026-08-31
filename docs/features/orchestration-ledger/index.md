@@ -97,7 +97,7 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | `set_governance_mode` | Use `task_ref` to append a model or user-override assessment. |
 | `record_initiative` | Use `task_ref` only as the project anchor to create or revise an initiative and its links. |
 | `inspect_governance` | Use `task_ref` to read bounded project/task/initiative assessments, revisions, links, warnings, and closures. |
-| `submit_governance_closure` | After sufficient finalized worker evidence, use `task_ref` to append an advisory verdict and evidence for required `subject_type` plus matching compact task/initiative `subject_ref`; the service automatically inspects the intended record and returns `closure_confirmation` separately from `execution_outcome`. |
+| `submit_governance_closure` | After sufficient finalized worker evidence, use `task_ref` to append an advisory verdict and evidence for required `subject_type` plus matching compact task/initiative `subject_ref`; the service automatically inspects the intended record and returns `closure_confirmation` separately from `execution_outcome` and the current `conformance_review` projection. |
 | `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
 | `open_plan_review` → `record_plan_review` | Present and record one immutable plan review through a matching server-owned binding. |
 | `open_steering` → `record_steering` | Ask and record one steering change through a matching server-owned binding. |
@@ -142,13 +142,16 @@ reflects the latest such result as `completed` or `incomplete`. The projection
 makes no native-lifecycle claim, and `inspect_task` always exposes it
 independently of closure records.
 
-The coordinator selects `ready`, `ready_with_risks`, or `not_ready` from
+The coordinator requests `ready`, `ready_with_risks`, or `not_ready` from
 sufficient completed evidence and then automatically attempts the advisory
 closure write followed by bounded inspection of the intended record. This
 policy does not make closure a scheduler, admission check, or user-confirmation
 step. `ready_with_risks` needs no user confirmation; any genuine user decision
 is handled through ordinary chat and the matching narrow decision record operation only where the
 coordinator's plan or product policy requires it.
+The closure mutation never upgrades a request. It normalizes an overstated
+verdict downward to the current conformance projection and returns the requested
+and recorded values without choosing the next orchestration stage.
 
 `inspect_task` also returns `advisory_closure`, whose `record_status` is
 `recorded` or `not_recorded` and whose `latest_record` is the latest closure
@@ -160,6 +163,10 @@ The service performs at most one same-idempotency retry for a verified transient
 persistence or inspection failure. A remaining `unconfirmed` result is honest
 advisory bookkeeping uncertainty only: it leaves the independent
 `execution_outcome` intact; it does not change the advisory verdict.
+The mutation response also includes the current `conformance_review`
+projection, complete canonical-body consumption status, and any unresolved
+active specialist dispositions, so a recorded advisory verdict cannot be
+mistaken for evidence readiness.
 
 ## Delegations and report handoff
 
@@ -178,11 +185,16 @@ routing.
 plan. It is required, must contain at least one character, and is limited to
 65,536 characters. Detailed execution belongs in `instructions`; object-valued
 scope is rejected by the closed schema.
+Every assignment also selects a non-empty exact set of current outcome-item
+references. The selection is required even for planning and single-outcome
+work, so prose labels cannot silently widen or replace durable scope.
 
 Workers publish immutable `progress`, `result`, `synthesis`, or `plan` reports
 and return a concise native `Summary` plus exact `Report ref` in the completion
-handoff. The coordinator consumes that handoff without rereading the report
-body merely to summarize it. Later delegations receive only relevant finalized report refs, their exact
+handoff. That summary is routing context, not semantic evidence: before
+synthesis, revision, rework, closure, or a final answer, the coordinator reads
+each relevant canonical report body through the task evidence-read mode to
+completion and retains its immutable digest receipt. Later delegations receive only relevant finalized report refs, their exact
 manifest digests, and user-decision refs. A successor must call `read_reports`
 with its own exact `consumer_delegation_ref` before
 using a predecessor report. The server rejects a report outside that delegation's
@@ -205,12 +217,22 @@ approval relation. This classification is evidence, not a scheduler or
 lifecycle gate.
 
 New specialist plan and result reports use the current `v3` evidence envelope.
-Before finalization it requires exact coverage, observable executed or
+Every publication supplies one disposition for each item in its immutable
+assignment scope. Worker bootstrap returns a server-owned ordered
+pre-publication reconciliation receipt: its template contains every required
+item reference without inventing a disposition, and its count and ordered
+reference sequence are the final pre-call completeness check. Compatible
+repeated rows for the same item and status are
+coalesced into one canonical disposition while preserving every unique
+verification fact; conflicting repeated statuses, missing items, extra items,
+or unsupported claims are rejected before the terminal publication slot is
+consumed. Before finalization it requires exact coverage, observable executed or
 explicitly-not-run checks, residual risks/deviations/unresolved items, and a
-documentation-impact decision. A planner maps the complete current effective
-contract—requirements, constraints, acceptance criteria, and derived
-verification items—using the stable item references returned in its semantic
-brief, independent of delivery assignments. It maps every current item exactly
+documentation-impact decision for result/synthesis reports. A planner maps the complete current effective
+contract—one item per independent user outcome, with acceptance, verification,
+constraints, steer extensions, and provenance linked to that outcome—using the
+stable item references returned in its semantic brief, independent of delivery
+assignments. It maps every current item exactly
 once and provides ordered stages with an owner, earlier dependencies, work, and
 verification. An incomplete or predictably semantic-invalid V3 report remains
 assembling for corrective append; a corrective coverage mapping is the final
@@ -231,20 +253,23 @@ does not block replacement or synthesis. Status is `partial`, `completed`,
 ## Effective outcome coverage
 
 The immutable task/result contract remains the original record of intent.
-`inspect_task` projects its active, revisioned effective contract as stable
-`o_` item references across requirements, constraints, acceptance criteria,
-and verification expectations. Delegations explicitly associate their current
-items as `owned`, `contributing`, or `evidence-producing`; each active item has
+`inspect_task` projects its active, revisioned effective contract as one stable
+`o_` item reference per independent user outcome. Acceptance and verification
+criteria, task constraints, steer additions, and exact source fragments are
+linked to that outcome rather than materialized as more items. Delegations
+explicitly associate their current
+outcomes as `owned`, `contributing`, or `evidence-producing`; each active item has
 at most one owner, while support and evidence roles may be shared.
 
-Finalized V2 report coverage is accepted only for item references assigned to
-that report's delegation at the active revision. Aggregate coverage considers
+Finalized V2/V3 report coverage is accepted only for item references assigned to
+that report's immutable delegation snapshot. Aggregate coverage considers
 only active items and labels each one `complete`, `missing`, `partial`,
 `unverified`, `stale`, or `contradictory`. A user `steer` decision creates a
-new revision, retires only its named items, and adds only its stated items;
+new revision, replaces only each named outcome with its merged linked data, and
 unaffected references and evidence remain valid. The advisory conformance
-projection relates the active revision, decision refs, finalized report
-manifests, completed coordinator-read digests, and aggregate coverage. It
+projection relates the active revision, decision refs, active non-superseded
+report manifests, complete all-section coordinator-read receipts, unresolved
+specialist dispositions, and aggregate coverage. It
 guides model-owned rework, verification, and closure review; it cannot alter
 report/delegation lifecycle or block safe coordination.
 

@@ -45,10 +45,10 @@ document, report its exact path, contrary evidence, and discovery impact.
 
 ## Evidence report
 
-Report consumed predecessor IDs, exact cited paths and symbols, the concise
-execution map, owners, contracts, constraints, alternate paths, contradictions,
-unknowns, uncertainty, and residual risk. Include commands with cwd and exit
-codes, or explain why no command ran.
+Via the live-advertised result publication, report consumed predecessor IDs;
+paths/symbols; execution map, owners, contracts, constraints, alternate paths,
+contradictions, unknowns, uncertainty, residual risk; and commands with cwd/exit
+codes or why none ran. This profile adds no explorer report shape.
 
 ## Stop and escalate
 

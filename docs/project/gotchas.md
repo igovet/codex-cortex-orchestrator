@@ -15,12 +15,14 @@
 - Optional `create_task.context` is arbitrary JSON, not a project-root binding.
 - Before the first project delegation, save the complete versioned task/result
   contract: exact `user_request_original`, `user_language`, English `objective`,
-  requirements, constraints, acceptance criteria, and verification plan. Do not
-  silently overwrite the original request or treat the contract as a backend
-  execution permission.
-- Empty or placeholder task/result arrays are not complete. Each of requirements,
-  constraints, acceptance criteria, and verification plan needs meaningful
-  English content before `create_task`; optional context is not a substitute.
+  independent outcomes with their linked acceptance criteria, and constraints.
+  Do not silently overwrite the original request, copy acceptance into a
+  standalone verification plan, or treat the contract as backend execution
+  permission.
+- Empty or placeholder outcomes are not complete. Each independent outcome needs
+  a meaningful English requirement and its own meaningful acceptance criteria;
+  optional constraints and context are not substitutes, and verification is not
+  a fourth required obligation array.
 - Do not edit SQLite, WAL, SHM, schema metadata, timeline sequences, or
   idempotency rows manually.
 - Durable IDs, digests, and cursors are opaque references, not capabilities.

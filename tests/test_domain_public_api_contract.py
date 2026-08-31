@@ -19,13 +19,45 @@ if str(SCRIPTS) not in sys.path:
 
 from cortex import PUBLIC_TOOLS, SERVER_VERSION  # noqa: E402
 from cortex_runtime.domain_api import (  # noqa: E402
-    assess_governance, consume_assignment_evidence, open_assignment, open_task, open_clarification, publish_documentation,
-    publish_plan, publish_result, open_steering, record_clarification, record_steering, read_task,
+    assess_governance, consume_assignment_evidence, open_assignment as _open_assignment, open_task, open_clarification, publish_documentation as _publish_documentation,
+    publish_plan as _publish_plan, publish_result as _publish_result, open_steering, record_clarification, record_steering, read_task,
 )
 from cortex_runtime.v12_contract import record_ref, task_ref  # noqa: E402
 from cortex_runtime.v12_service import V12ServiceError  # noqa: E402
 from cortex_runtime.v12_store import V12Store  # noqa: E402
 from cortex_runtime.v12_projections import human_view as projection_human_view  # noqa: E402
+
+
+_EVIDENCE_PROFILES = {"accessibility_auditor", "build_verification", "code_reviewer", "database_architect", "explorer", "performance_engineer", "qa_engineer", "security_auditor", "technical_writer"}
+
+
+def open_assignment(*, task_ref: str, mission: dict, **kwargs: object) -> dict:
+    """Make each legacy fixture explicit about the new mission responsibility."""
+    profile = mission.get("profile_name")
+    responsibility = "planning" if profile == "planner" else "evidence" if profile in _EVIDENCE_PROFILES else "delivery"
+    return _open_assignment(task_ref=task_ref, mission={**mission, "responsibility": responsibility}, **kwargs)
+
+
+def _covered(assignment_ref: str, evidence: dict, *, kind: str) -> dict:
+    if "contract_coverage" in evidence:
+        return evidence
+    store, assignment_id = V12Store.for_record_ref(assignment_ref, label="delegation_id")
+    brief = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)["worker_brief"]["effective_contract"]
+    items = brief.get("planning_items", []) if kind == "plan" else brief.get("assigned_items", [])
+    status = "planned" if kind == "plan" else "complete"
+    return {**evidence, "contract_coverage": [{"item_ref": item["item_ref"], "status": status, "verification": ["Fixture reconciled this exact assigned item."]} for item in items]}
+
+
+def publish_plan(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    return _publish_plan(assignment_ref=assignment_ref, evidence=_covered(assignment_ref, evidence, kind="plan"), **kwargs)
+
+
+def publish_result(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    return _publish_result(assignment_ref=assignment_ref, evidence=_covered(assignment_ref, evidence, kind="result"), **kwargs)
+
+
+def publish_documentation(*, assignment_ref: str, evidence: dict, **kwargs: object) -> dict:
+    return _publish_documentation(assignment_ref=assignment_ref, evidence=_covered(assignment_ref, evidence, kind="documentation"), **kwargs)
 
 
 class DomainPublicApiContractTests(unittest.TestCase):
@@ -39,6 +71,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
         self.assertNotIn("delegation_id", properties)
         self.assertNotIn("dispatch_correlation", properties)
         self.assertNotIn("parent_assignment_ref", properties)
+        self.assertIn("item_refs", assignment["properties"]["mission"]["required"])
         for name in ("open_clarification", "open_steering"):
             self.assertNotIn("decision_id", set(PUBLIC_TOOLS[name]["inputSchema"]["properties"]))
         self.assertNotIn("subject_ref", set(PUBLIC_TOOLS["open_clarification"]["inputSchema"]["properties"]))
@@ -155,8 +188,19 @@ class DomainPublicApiContractTests(unittest.TestCase):
         self._codex_home = tempfile.TemporaryDirectory(prefix="cortex-domain-codex-home-")
         self._previous_codex_home = os.environ.get("CODEX_HOME")
         os.environ["CODEX_HOME"] = self._codex_home.name
+        self._provenance = patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value={
+                "build_digest": "sha256:" + "1" * 64,
+                "candidate_digest": "sha256:" + "2" * 64,
+                "source_digest": "sha256:" + "2" * 64,
+                "catalogue_digest": "sha256:" + "3" * 64,
+            },
+        )
+        self._provenance.start()
 
     def tearDown(self) -> None:
+        self._provenance.stop()
         if self._previous_codex_home is None:
             os.environ.pop("CODEX_HOME", None)
         else:
@@ -276,7 +320,9 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(refreshed["effective_contract"]["revision"], 1)
             current = read_task(task_ref=tref)
             self.assertEqual(current["effective_contract"]["revision"], 2)
-            added = next(item for item in current["effective_contract"]["items"] if item["text"] == "Verify the final page.")
+            self.assertEqual(len(current["effective_contract"]["items"]), 1)
+            added = current["effective_contract"]["items"][0]
+            self.assertEqual(added["verification_criteria"], ["Verify the final page."])
             self.assertEqual(added["created_revision"], 2)
             published = publish_result(
                 continuation_ref=continuation,
@@ -348,25 +394,25 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 continuation_ref=owner_evidence["continuation_ref"],
                 assignment_ref=owner["assignment_ref"], evidence=self._result_evidence(),
             )
+            current_refs = [item["item_ref"] for item in read_task(task_ref=tref)["effective_contract"]["items"]]
             follow_on = open_assignment(
                 task_ref=tref, input_report_refs=[record_ref(first["report"]["report_id"])],
                 input_decision_refs=[recorded["decision"]["decision_ref"]], mission={
                     "role": "follow-on implementer", "profile_name": "frontend_dev", "goal": "Apply revision.",
+                    "item_refs": current_refs,
                     "constraints": "Preserve prior work.", "instructions": "Publish the revised result.",
                 },
             )
             self.assertEqual(follow_on["relations"]["parent_assignment_ref"], owner["assignment_ref"])
             follow_on_evidence = consume_assignment_evidence(assignment_ref=follow_on["assignment_ref"])
             self.assertEqual(follow_on_evidence["effective_contract"]["revision"], 2)
-            revised_texts = {
-                item["text"] for item in follow_on_evidence["effective_contract"]["assigned_items"]
-                if "revised behavior" in item["text"]
-            }
-            self.assertEqual(revised_texts, {
-                "Implement the revised behavior.",
-                "The revised behavior is complete.",
-                "Verify the revised behavior.",
-            })
+            revised_items = follow_on_evidence["effective_contract"]["assigned_items"]
+            self.assertEqual(len(revised_items), 1)
+            self.assertEqual(revised_items[0]["requirement_extensions"], ["Implement the revised behavior."])
+            self.assertEqual(revised_items[0]["acceptance_criteria"], [
+                "The original artifact is complete.", "The revised behavior is complete.",
+            ])
+            self.assertEqual(revised_items[0]["verification_criteria"], ["Verify the revised behavior."])
             publication = publish_result(
                 continuation_ref=follow_on_evidence["continuation_ref"],
                 assignment_ref=follow_on["assignment_ref"], evidence=self._result_evidence(),
@@ -378,7 +424,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     "WHERE c.report_id=? AND i.created_revision=2",
                     (publication["report"]["report_id"],),
                 ).fetchone()[0]
-            self.assertEqual(covered, 3)
+            self.assertEqual(covered, 1)
 
     def test_clarification_response_can_amend_contract_atomically(self) -> None:
         """A clarification answer and its user delta share one decision receipt."""
@@ -405,7 +451,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertFalse(any(item["text"] == "Use a warm light theme." for item in current["items"]))
 
     def test_terminal_publication_derives_immutable_assignment_coverage(self) -> None:
-        """The server persists complete scope without caller-authored item identity."""
+        """The server validates caller dispositions against immutable assigned scope."""
         with tempfile.TemporaryDirectory(prefix="cortex-domain-coverage-gate-") as root:
             task = open_task(task={
                 "project_root": root, "objective": "Coverage gate.",
@@ -418,7 +464,9 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 "constraints": "Stay in scope.", "instructions": "Produce complete evidence.",
             })
             continuation = self._worker_continuation(assignment)
-            self.assertNotIn("contract_coverage", PUBLIC_TOOLS["publish_result"]["inputSchema"]["properties"]["evidence"]["properties"])
+            evidence_contract = PUBLIC_TOOLS["publish_result"]["inputSchema"]["properties"]["evidence"]
+            self.assertIn("contract_coverage", evidence_contract["properties"])
+            self.assertIn("contract_coverage", evidence_contract["required"])
             with sqlite3.connect(V12Store(root).database_path) as connection:
                 assignment_id = connection.execute("SELECT assignment_id FROM assignment_scope_snapshots LIMIT 1").fetchone()[0]
                 snapshot_count = connection.execute("SELECT COUNT(DISTINCT item_id) FROM assignment_scope_snapshots WHERE assignment_id=?", (assignment_id,)).fetchone()[0]

@@ -141,11 +141,14 @@ to locate and validate the project ledger. `read_delegation` uses
 No host
 metadata, hook, thread identity, or plugin working directory supplies the root.
 The task persists the exact `user_request_original` and `user_language` beside
-the English `objective`, active contract version, requirements, constraints,
-acceptance criteria, verification plan, and optional arbitrary-JSON `context`.
+the English `objective`, active contract version, independent outcomes,
+constraints, linked acceptance criteria, a non-derived verification plan, and
+optional arbitrary-JSON `context`.
 The native worker brief carries the saved root only for project working context.
-The four task/result arrays are non-empty meaningful English contracts before
-task creation; optional context cannot replace one. Every delegation carries
+Each task outcome has a non-empty meaningful English requirement and linked
+acceptance criteria before task creation; acceptance is not copied into a
+standalone verification obligation, and optional context cannot replace an
+outcome. Every delegation carries
 the exact six-part knowledge block once, in order, with non-empty values before
 native spawn. A successful `create_delegation` returns a host-neutral
 `dispatch_brief` and renderer/profile proof. Codex maps the brief to the active
@@ -198,10 +201,12 @@ value. Root receipt fields `next_sequence` and `next_chunk_index` are
 informational and are not `handles` aliases; neither is `retry_handle` a
 substitute for a callable handle.
 
-`inspect_task` also projects the current effective outcome contract. Its stable
-`o_` item references cover the original requirements, constraints, acceptance
-criteria, and verification expectations. A delegation assigns each relevant
-item as owned, contributing, or evidence-producing; current ownership is
+`inspect_task` also projects the current effective outcome contract. Each stable
+`o_` item reference represents one independent user outcome. Acceptance and
+verification criteria, task constraints, steer extensions, and exact source
+fragments remain linked metadata and never become extra coverage items. A
+delegation assigns each relevant outcome as owned, contributing, or
+evidence-producing; current ownership is
 non-overlapping. Finalized v2 reports may claim structured coverage only for
 items assigned to their delegation at the current revision. A user `steer`
 decision creates the next effective-contract revision, retiring only the named
@@ -212,6 +217,16 @@ conformance projection relates that current revision, user decisions,
 finalized-report manifests, completed coordinator-read digests, and aggregate
 coverage. These are advisory evidence for model-owned rework and closure
 reasoning, never a backend lifecycle or permission gate.
+
+For current V3 worker publications, assignment bootstrap also emits a
+server-owned ordered reconciliation receipt. Its template names every required
+scope item without supplying a status or verification claim; the worker must
+preserve the rows and match their count and ordered references before the first
+publication attempt. This prevents a report handoff from silently dropping a
+scope item while leaving every disposition evidence-owned by the worker.
+Steering additions name an active outcome and create a replacement revision
+whose linked metadata includes the new user fragment and decision relation;
+they do not create parallel coverage obligations.
 
 Canonical compact decision references match `u_[0-9a-f]{12}` and remain opaque
 evidence references, copied exactly from a successful receipt.
