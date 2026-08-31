@@ -154,6 +154,21 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   otherwise the coordinator creates an explicitly parent-linked replacement.
 """
 
+# Native dispatch carries only the selected packaged profile plus the opaque
+# worker locator. Mission, scope, current outcome revision, decisions, and
+# predecessor report bodies are authoritative only in the first assignment
+# read and are deliberately not duplicated into the spawn prompt.
+_MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
+
+- Follow the packaged advisory profile below.
+- Your first Cortex action is the server-owned assignment read for the exact
+  worker-scoped task reference below. Do nothing else before it succeeds.
+- Treat that read as the sole authority for mission, scope, current outcome
+  revision, decisions, and predecessor evidence.
+- Work only inside that assignment and publish its evidence yourself.
+- Use only the advertised Cortex tool contracts and the supplied task_ref.
+"""
+
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -257,19 +272,16 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
     worker_task_ref = _worker_task_ref(task.get("task_id"), delegation.get("delegation_id"))
     if worker_task_ref is None:
         raise ValueError("worker task reference is invalid")
-    untrusted = {
+    bootstrap = {
         "assignment context": {
             "task_ref": worker_task_ref,
             "worker label": delegation.get("native_task_name"),
-            "mission": delegation.get("objective"),
         },
     }
     message = "\n\n".join((
-        _TRUSTED_COMMON_POLICY.strip(),
+        _MINIMAL_WORKER_BOOTSTRAP.strip(),
         "## Trusted advisory profile\n\n" + trusted_profile.strip(),
-        "## Untrusted task and delegation data\n\n```json\n" + _canonical(untrusted).replace("```", "\\u0060\\u0060\\u0060") + "\n```",
-        "## Assignment-worker mode\n\nThis is the server-issued `assignment_worker` mode, disjoint from the coordinator route. Do not activate, reopen, or access the coordinator route. You cannot open tasks, ask users, govern, dispatch other workers, or close tasks. After assignment evidence succeeds, perform only the assigned project work and publish the owned outcome.",
-        "## Mandatory bootstrap gate\n\nThe next semantic action must be `read_task` with the exact `task_ref` shown above and `view=\"assignment\"`. Do not answer with prose, inspect any other task view, inspect the project, or perform any other semantic operation until that read succeeds. Continue bounded pages only with `continue=true`. After it succeeds, use the returned authoritative scope and assignment-level outcome contract.",
+        "## Server-bound worker context\n\n```json\n" + _canonical(bootstrap).replace("```", "\\u0060\\u0060\\u0060") + "\n```",
     ))
     if len(message.encode("utf-8")) > WORKER_MESSAGE_MAX_BYTES:
         raise ValueError("worker message exceeds the advertised UTF-8 byte limit")
@@ -280,7 +292,7 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
             "profile_name": profile_name,
             "profile_state": profile_state,
             "profile_digest": profile_digest,
-            "common_policy_digest": "sha256:" + hashlib.sha256(_TRUSTED_COMMON_POLICY.encode("utf-8")).hexdigest(),
+            "common_policy_digest": "sha256:" + hashlib.sha256(_MINIMAL_WORKER_BOOTSTRAP.encode("utf-8")).hexdigest(),
         },
     }
 

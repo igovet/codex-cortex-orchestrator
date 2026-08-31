@@ -104,8 +104,8 @@ def _internalize_publication_evidence(store: V12Store, assignment_id: str, evide
     typed_items = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
     internal: list[dict[str, Any]] = []
     for row in coverage:
-        if not isinstance(row, Mapping) or not isinstance(row.get("outcome"), Mapping):
-            raise V12ServiceError("publication coverage requires semantic outcomes", code="invalid_argument", details={"field": "evidence.contract_coverage"})
+        if not isinstance(row, Mapping) or not isinstance(row.get("outcome"), str):
+            raise V12ServiceError("publication coverage requires a semantic outcome name", code="invalid_argument", details={"field": "evidence.contract_coverage"})
         matches = _match_outcomes(typed_items, [row["outcome"]])
         internal.append({"item_ref": matches[0], **{key: value for key, value in row.items() if key != "outcome"}})
     result["contract_coverage"] = internal
@@ -117,15 +117,26 @@ def _match_outcomes(current_items: list[Mapping[str, Any]], requested: object) -
         raise V12ServiceError("assignment outcome scope is required", code="invalid_argument", details={"field": "mission.outcomes"})
     selected: list[str] = []
     for candidate in requested:
-        if not isinstance(candidate, Mapping):
+        if isinstance(candidate, str):
+            normalized = {"outcome": candidate}
+        elif isinstance(candidate, Mapping):
+            normalized = {
+                "outcome": candidate.get("outcome"),
+                "acceptance": list(candidate.get("acceptance", [])),
+                "constraints": list(candidate.get("constraints", [])),
+                "verification": list(candidate.get("verification", [])),
+            }
+        else:
             raise V12ServiceError("assignment outcome scope is invalid", code="invalid_argument", details={"field": "mission.outcomes"})
-        normalized = {
-            "outcome": candidate.get("outcome"),
-            "acceptance": list(candidate.get("acceptance", [])),
-            "constraints": list(candidate.get("constraints", [])),
-            "verification": list(candidate.get("verification", [])),
-        }
-        matches = [item for item in current_items if _semantic_outcome(item) == normalized]
+        matches = [item for item in current_items if _semantic_outcome(item) == normalized] if len(normalized) > 1 else []
+        if not matches and isinstance(normalized["outcome"], str):
+            # Semantic child fields are useful evidence but are routinely
+            # paraphrased by an LLM between reads.  A unique outcome title is
+            # sufficient identity; only zero or multiple matches are unsafe.
+            matches = [
+                item for item in current_items
+                if _semantic_outcome(item).get("outcome") == normalized["outcome"]
+            ]
         if len(matches) != 1 or not isinstance(matches[0].get("item_ref"), str):
             raise V12ServiceError("assignment outcome is missing or ambiguous", code="outcome_item_not_found", details={"field": "mission.outcomes"})
         selected.append(str(matches[0]["item_ref"]))
@@ -142,9 +153,9 @@ def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_re
             rows = connection.execute("SELECT report_id FROM reports WHERE task_id=? AND assembly_state='finalized' ORDER BY created_sequence", (task_id,)).fetchall()
         elif policy == "active_plan":
             rows = connection.execute(
-                "SELECT r.report_id FROM reports r JOIN user_decisions u ON u.task_id=r.task_id AND u.subject_id=r.report_id "
-                "WHERE r.task_id=? AND r.report_type='plan' AND r.assembly_state='finalized' AND u.decision_type='approve' "
-                "ORDER BY u.created_sequence DESC LIMIT 1", (task_id,),
+                "SELECT r.report_id FROM reports r "
+                "WHERE r.task_id=? AND r.report_type='plan' AND r.assembly_state='finalized' "
+                "ORDER BY r.created_sequence DESC LIMIT 1", (task_id,),
             ).fetchall()
         elif policy == "latest_for_scope":
             # Coverage identity stays private. Choose the latest finalized
@@ -229,6 +240,13 @@ def open_task(*, project_root: str, request_original: str, user_language: str,
             "verification": list(outcome.get("verification", [])),
             "constraints": list(outcome.get("constraints", [])),
         })
+    outcome_names = [item.get("requirement") for item in outcome_contracts]
+    if len(set(outcome_names)) != len(outcome_names):
+        raise V12ServiceError(
+            "task outcome names must be unique",
+            code="outcome_assignment_conflict",
+            details={"field": "outcomes"},
+        )
     # The exact original request is already the immutable task objective.
     # Requiring a second model-authored summary created a redundant first-call
     # failure mode and allowed the two values to drift.
@@ -265,8 +283,6 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
         cursor = None
         context.pop("cursor", None)
     if view == "state":
-        if assignment_id is not None:
-            raise V12ServiceError("worker task context permits assignment view first", code="capability_stale")
         raw = ledger.inspect_task(task_ref=coordinator_ref, after_sequence=0)
         data = _publicize(raw)
         result = {"task_ref": task_ref, "view": view, "data": data, "has_more": False}
@@ -284,11 +300,13 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
         if assignment_id is not None:
             if context.get("assignment_id") != assignment_id:
                 raise V12ServiceError("worker assignment must be read before evidence", code="capability_stale")
-            # Worker predecessor bodies are served by assignment pages only;
-            # this view is a coordinator evidence selection surface.
-            raise V12ServiceError("worker evidence is part of the assignment view", code="invalid_argument")
-        report_ids = _select_report_inputs(store, canonical, report_policy, [])
-        raw = store.read_reports(task_id=canonical, report_ids=report_ids, cursor=cursor, max_bytes=65_536, consumer_delegation_id=None) if report_ids else {"reports": [], "has_more": False, "next_cursor": None}
+            assignment_page = _read_assignment_page(store=store, assignment_id=assignment_id, cursor=cursor)
+            raw = assignment_page.get("evidence")
+            if not isinstance(raw, Mapping):
+                raise V12ServiceError("worker evidence is unavailable", code="ledger_error")
+        else:
+            report_ids = _select_report_inputs(store, canonical, report_policy, [])
+            raw = store.read_reports(task_id=canonical, report_ids=report_ids, cursor=cursor, max_bytes=65_536, consumer_delegation_id=None) if report_ids else {"reports": [], "has_more": False, "next_cursor": None}
         has_more = bool(raw.get("has_more"))
         context.update({"read_key": page_key, "cursor": raw.get("next_cursor"), "has_more": has_more})
         result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
@@ -311,20 +329,15 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
     }.get(responsibility)
     if assignment_policy is None:
         raise V12ServiceError("assignment responsibility is invalid", code="invalid_argument", details={"field": "mission.responsibility"})
-    if (responsibility == "planning") != (profile_name == "planner"):
-        raise V12ServiceError("planning responsibility and planner profile must agree", code="invalid_argument", details={"field": "mission.responsibility"})
     current = ledger.inspect_task(task_ref=task_ref).get("effective_contract")
     current_items = current.get("items") if isinstance(current, Mapping) else None
     if not isinstance(current_items, list):
         raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
     typed_items = [item for item in current_items if isinstance(item, Mapping)]
     item_refs = _match_outcomes(typed_items, outcomes)
-    current_refs = {str(item.get("item_ref")) for item in typed_items if isinstance(item.get("item_ref"), str)}
-    if responsibility == "planning" and set(item_refs) != current_refs:
-        raise V12ServiceError("planning must map the complete current contract", code="invalid_argument", details={"field": "mission.outcomes"})
     outcome_assignments = {
         "owned": list(item_refs) if responsibility == "delivery" else [],
-        "contributing": list(item_refs) if responsibility == "evidence" else [],
+        "contributing": list(item_refs) if responsibility in {"evidence", "planning"} else [],
         "evidence_producing": list(item_refs) if responsibility == "evidence" else [],
     }
     try:
@@ -452,9 +465,10 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
             for item in assigned_items
             if isinstance(item, Mapping)
         } if isinstance(assigned_items, list) else set()
+        planning_items = effective_contract.get("planning_items")
         assignment_context["responsibility"] = (
             "planning"
-            if assignment_context.get("profile_name") == "planner"
+            if isinstance(planning_items, list)
             else "delivery"
             if "owned" in assigned_roles
             else "evidence"
@@ -730,15 +744,6 @@ def open_plan_review(*, task_ref: str, prompt: str,
         if len(plans) != 1:
             raise V12ServiceError("an active finalized plan is required", code="approval_view_required")
         plan_id = str(plans[0]["report_id"])
-        chunks = store._read(lambda connection: store._report_chunks(connection, plan_id))
-        body = chunks[0].get("content") if len(chunks) == 1 and isinstance(chunks[0], Mapping) else None
-        unresolved = body.get("unresolved") if isinstance(body, Mapping) else None
-        if isinstance(unresolved, list) and unresolved:
-            raise V12ServiceError(
-                "plan contains unresolved decisions and is not ready for generic approval",
-                code="plan_clarification_required",
-                details={"field": "task_ref"},
-            )
         issued = DecisionAggregate(store).open_plan_review(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
             subject_type="plan", subject_id=plan_id,

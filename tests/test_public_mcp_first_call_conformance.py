@@ -47,7 +47,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         base = {
             "task_ref": worker, "summary": "Done.", "outcome": "Done.", "changes": [],
             "verification_facts": [{"state": "executed", "summary": "Focused check passed."}],
-            "outcome_coverage": [{"outcome": {"outcome": "Build.", "acceptance": [], "constraints": [], "verification": []}, "status": "complete", "verification": ["Passed."]}],
+            "outcome_coverage": [{"outcome": "Build.", "status": "complete", "verification": ["Passed."]}],
             "documentation_impact": "No documentation impact.", "risks": [], "unresolved": [], "status": "completed",
         }
         _validate_schema(PUBLIC_TOOLS["publish_result"]["inputSchema"], base)
@@ -69,6 +69,13 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertNotIn("task", PUBLIC_TOOLS["open_task"]["inputSchema"]["properties"])
         self.assertNotIn("mission", PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"])
         self.assertIn("outcomes", PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"])
+        self.assertEqual(
+            PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"]["outcomes"]["items"]["type"],
+            "string",
+        )
+        for name in ("publish_plan", "publish_result", "publish_documentation"):
+            coverage = PUBLIC_TOOLS[name]["inputSchema"]["properties"]["outcome_coverage"]["items"]
+            self.assertEqual(coverage["properties"]["outcome"]["type"], "string")
 
     def test_serialized_catalogue_contains_no_removed_callable_names(self) -> None:
         serialized = json.dumps({name: value["inputSchema"] for name, value in PUBLIC_TOOLS.items()}, sort_keys=True)

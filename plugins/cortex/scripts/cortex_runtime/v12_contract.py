@@ -182,8 +182,7 @@ def canonical_report_semantic_status(report_type: object, content: object) -> st
             # authority; these claims preserve semantic completeness across
             # worker handoffs and plan revisions.
             required.add("contract_coverage")
-            if report_type in {"plan", "result"}:
-                required.add("verification_facts")
+            required.add("verification_facts")
             if report_type in {"result", "synthesis"}:
                 required.add("documentation_impact")
         elif not current_v3:

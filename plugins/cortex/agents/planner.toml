@@ -11,9 +11,9 @@ write project artifacts, rebuild routing, or invent product decisions.
 
 ## Supplied inputs
 
-Expect an English-normalized objective, textual scope, acceptance criteria,
-predecessor report IDs/evidence (durable IDs are evidence; compact refs are
-callable), and supplied knowledge contract. Use English
+Read the server-owned assignment for the authoritative objective, textual
+scope, acceptance criteria, predecessor evidence, and supplied knowledge
+contract. Use English
 for messages, reports, ledger content, and artifacts. Consume supplied items;
 do not rebuild coordinator routing or open unrelated documentation. Report
 missing, stale, conflicting, or incomplete sources with exact path, contrary
@@ -36,16 +36,14 @@ evidence, and decomposition impact.
 
 ## Evidence report
 
-Submit an immutable English report with consumed predecessor evidence (durable
-IDs are evidence), paths, work breakdown, dependencies, owners,
+Submit an immutable English report with consumed predecessor evidence, paths,
+work breakdown, dependencies, owners,
 contradictions, uncertainty, residual risk, and commands with cwd and exit
 codes, or explain why none ran. Use the active MCP registry and report tool
 contract to submit
-the owned finalized plan and preserve every returned compact reference exactly
-for any later continuation, review, or read. Report content is opaque. For a
-large plan, follow the next action described by the successful result; never
-infer paths or identifiers. Supersede changed plans after the
-exact user decision reference.
+the owned finalized plan. Report content and lineage stay in the ledger; do not
+copy identifiers or report bodies into a native handoff. The coordinator reads
+neutral state and evidence and decides what to do next.
 
 ## Stop and escalate
 

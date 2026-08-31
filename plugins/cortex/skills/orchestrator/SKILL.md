@@ -35,7 +35,7 @@ For routing only, the coordinator may directly read exact known paths `docs/proj
 
 Represent every independently actionable requested result as a semantic outcome with its own acceptance conditions and material constraints. Do not collapse numbered findings, duplicate acceptance as another obligation, invent placeholders, or turn implementation steps into backend permissions. Keep facts, assumptions, verification needs, and constraints distinguishable.
 
-The coordinator stores only `task_ref`. It never stores, copies, reconstructs, or passes internal assignment, report, decision, outcome, publication, continuation, binding, cursor, digest, revision, slot, or idempotency identity. Semantic outcome objects returned by `read_task` are the only assignment and coverage selectors.
+The coordinator stores only `task_ref`. It never stores, copies, reconstructs, or passes internal assignment, report, decision, outcome, publication, continuation, binding, cursor, digest, revision, slot, or idempotency identity. Unique semantic outcome names returned by `read_task` are the only assignment and coverage selectors. Outcome details remain versioned in the ledger and are never recopied between agents.
 
 ## Reading
 
@@ -47,7 +47,7 @@ The coordinator chooses the packaged profile, model, reasoning effort, responsib
 
 The available model routes are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`; the live schema advertises valid effort values. The coordinator makes the task-specific choice, including `high` effort when evidence warrants it.
 
-`open_assignment` creates private lineage and returns `native_dispatch`. Forward it exactly to native spawn. Do not rewrite its message, task name, model, effort, or fork behavior. PreToolUse/SubagentStart correlates the actual child session with the private assignment; never choose a “latest assignment” or reconstruct the worker message.
+`open_assignment` creates private lineage and returns `native_dispatch`. Forward it exactly to native spawn. Native spawn is the immediate next action: add no commentary, read, planning step, or other tool call between the successful assignment result and spawn. Do not rewrite its message, task name, model, effort, or fork behavior. PreToolUse/SubagentStart correlates the actual child session with the private assignment; never choose a “latest assignment” or reconstruct the worker message.
 
 The worker consumes its assignment view before project work, follows its bounded semantic scope, does not delegate or ask the user, and publishes only its own evidence. A coordinator never publishes worker evidence. A worker never publishes for another assignment or task.
 
@@ -61,7 +61,7 @@ Coverage accounts for every assigned outcome. `not_run`, `failed`, `partial`, `b
 
 At most one user decision is pending per task. Use distinct clarification, plan-review, and steering operations. Open the decision, render its neutral question in the user's language, record the exact response, then read current state before choosing more work. The server resolves pending binding, active plan relation, revision, and supersession atomically; the model never sees or supplies those identities.
 
-Approval never causes backend scheduling. Approval, revision request, cancellation, and steering become ledger evidence; the LLM chooses any next assignment. Steering uses complete semantic outcome objects from current task state.
+Approval never causes backend scheduling. Approval, revision request, cancellation, and steering become ledger evidence; the LLM chooses any next assignment. Steering uses complete semantic outcome objects from current task state because it intentionally creates a new versioned outcome revision. Existing worker snapshots remain immutable; later assignments resolve the current revision by its unique semantic name.
 
 ## Verification, governance, documentation, and closure
 

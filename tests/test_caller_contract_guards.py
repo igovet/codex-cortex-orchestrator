@@ -27,7 +27,7 @@ class CallerContractGuardTests(unittest.TestCase):
             "summary": "Plan.", "scope": "Bounded.",
             "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Test."]}],
             "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
-            "outcome_coverage": [{"outcome": {"outcome": "Build.", "acceptance": [], "constraints": [], "verification": []}, "status": "planned", "verification": ["Mapped."]}],
+            "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped."]}],
             "risks": [], "unresolved": [], "status": "completed",
         }
         _validate_schema(schema, valid)

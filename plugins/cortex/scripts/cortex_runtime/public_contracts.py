@@ -55,7 +55,13 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
         "outcome": _string(minimum=1, description="Exact semantic outcome text returned by read_task."),
         "acceptance": _texts(), "constraints": _texts(), "verification": _texts(),
     }, ("outcome", "acceptance", "constraints", "verification"), description="Copy this complete semantic outcome from read_task; Cortex resolves it atomically to private ledger identity and rejects zero or ambiguous matches.")
-    outcomes = {"type": "array", "description": "Exact semantic outcomes.", "minItems": 1, "maxItems": TASK_CONTRACT_MAX_ITEMS, "items": outcome}
+    outcomes = {"type": "array", "description": "Semantic outcome definitions.", "minItems": 1, "maxItems": TASK_CONTRACT_MAX_ITEMS, "items": outcome}
+    outcome_names = {
+        "type": "array",
+        "description": "Unique semantic outcome names selected by the LLM; Cortex resolves their current ledger revisions atomically.",
+        "minItems": 1, "maxItems": TASK_CONTRACT_MAX_ITEMS,
+        "items": _string(minimum=1, description="Exact unique outcome name from read_task."),
+    }
     report_policy = _string(enum=("none", "active_plan", "latest_for_scope", "all_finalized"), maximum=32, description="Server-side semantic evidence selection policy.")
     state = _string(maximum=64, description="Semantic operation state.")
     replayed = {"type": "boolean", "description": "Whether the identical private mutation was reconciled."}
@@ -76,7 +82,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
     }, ("state", "summary"), description="One observable verification fact.")
     verification_facts = {"type": "array", "description": "Observable verification evidence.", "minItems": 1, "maxItems": TASK_CONTRACT_MAX_ITEMS, "items": verification_fact}
     coverage = _closed({
-        "outcome": outcome,
+        "outcome": _string(minimum=1, description="Exact unique outcome name from the assignment read."),
         "status": _string(enum=("planned", "complete", "partial", "unverified", "blocked"), maximum=16, description="Evidence-backed disposition for this semantic outcome."),
         "verification": _texts(minimum=1),
     }, ("outcome", "status", "verification"), description="One semantic outcome disposition; private outcome identity is resolved by Cortex.")
@@ -157,7 +163,7 @@ def build_public_contracts() -> dict[str, dict[str, Any]]:
             "goal": _string(minimum=1, description="Concrete worker goal."),
             "scope": _string(minimum=1, description="Worker scope boundary."),
             "instructions": _string(minimum=1, description="Task-specific worker instructions."),
-            "outcomes": outcomes, "report_policy": report_policy,
+            "outcomes": outcome_names, "report_policy": report_policy,
         }, ("task_ref", "role", "profile_name", "model", "reasoning_effort", "responsibility", "goal", "scope", "instructions", "outcomes", "report_policy")), _closed({"native_dispatch": native_dispatch, "replayed": replayed}, ("native_dispatch", "replayed"))),
         "publish_plan": _contract("Worker-only atomic plan publication; lineage is private.", plan_publication, receipt),
         "publish_result": _contract("Worker-only atomic result publication; lineage is private.", result_publication, receipt),

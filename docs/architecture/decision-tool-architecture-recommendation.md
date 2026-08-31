@@ -123,12 +123,9 @@ Advantages:
 Risks:
 
 - the model must select one of three record tools;
-- a wrong sibling selection can still happen if the open result does not make
-  its next operation unambiguous;
-- this is mitigated by making `next_action` an exact enum in every open result,
-  making the matching operation's description state that it alone consumes the
-  returned binding family, and having the backend reject cross-family bindings
-  without mutation;
+- a wrong sibling selection can still happen, so each tool description names
+  its decision family and the backend rejects cross-family bindings without
+  mutation;
 - catalogue size increases from 13 to 15, but the known host admitted the
   earlier 15-tool surface and the failure was caused by ambiguous nested/input
   shape rather than catalogue count.
@@ -157,7 +154,7 @@ These are not suitable as the primary contract here:
 | Clarification with plan outcome | Schema accepts; backend rejects | Schema rejects or wrong-tool call is rejected before mutation |
 | Clarification with steering fields | Schema accepts; backend rejects | Schema rejects or wrong-tool call is rejected before mutation |
 | Plan review without outcome | Backend rejects after call | Required-field schema rejects before mutation |
-| Steering with no add/retire operation | Schema may accept empty arrays; backend rejects | Backend rejects semantic emptiness; shape remains shallow |
+| Steering with no add/retire operation | Records the user's no-change answer | Records the user's no-change answer |
 | Steering nested wrapper invented by model | Closed schema rejects, if host preserves it | Closed schema rejects; no wrapper is advertised |
 | Wrong sibling against binding | Backend rejects | Backend rejects precisely and without mutation |
 | Replay of exact accepted response | Server replays | Server replays through the same family aggregate |
@@ -176,9 +173,9 @@ only the public operation boundary becomes family-specific.
 
 Required safeguards for B:
 
-1. Every `open_*` result advertises exactly one enum-valued `next_action` and
-   one binding handle.
-2. Each record operation has a closed shallow schema with no generic envelope,
+1. Every `open_*` result returns neutral task state only. The LLM selects the
+   following operation; no backend workflow command or public binding exists.
+2. Each record operation has a closed shallow task-ref-only schema with no generic envelope,
    no compatibility alias, and no unadvertised bookkeeping field.
 3. `record_steering` advertises only top-level `add` and
    `retire_item_refs`; the backend converts them to the existing internal
@@ -189,8 +186,8 @@ Required safeguards for B:
 5. Real stdio tests must execute clarification, plan approve/revise/cancel,
    and steering add/retire through their matching operations, plus wrong-family,
    empty-steering, replay, stale, supersession, and concurrency cases.
-6. The host-admission test must assert all 15 tools are present, each shallow
-   schema is visible, and no retired storage names or nested steering wrapper
+6. The host-admission test must assert all 14 tools are present, each shallow
+   schema is visible, and no private storage names or nested steering wrapper
    appears in the model-facing catalogue.
 
 The recommendation does not claim that tool count alone guarantees model
