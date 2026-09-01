@@ -6805,6 +6805,22 @@ class V12Store:
                         )
                     ):
                         raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+                elif category == "outcome_replacement":
+                    if (
+                        set(addition) != {
+                            "category", "outcome_ref", "text", "acceptance",
+                            "constraints", "verification",
+                        }
+                        or not isinstance(addition.get("outcome_ref"), str)
+                        or not isinstance(addition.get("text"), str)
+                        or not addition["text"].strip()
+                        or any(
+                            not isinstance(addition.get(field), list)
+                            or any(not isinstance(item, str) or not item.strip() for item in addition[field])
+                            for field in ("acceptance", "constraints", "verification")
+                        )
+                    ):
+                        raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
                 elif (
                     set(addition) - {"outcome_ref", "category", "text"}
                     or not {"category", "text", "outcome_ref"}.issubset(addition)
@@ -6959,16 +6975,59 @@ class V12Store:
                         details = _load_json(str(prior["details_json"]), label="effective contract item details")
                         if not isinstance(details, Mapping):
                             raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
-                        merged = {
-                            "acceptance_criteria": list(details.get("acceptance_criteria", [])),
-                            "verification_criteria": list(details.get("verification_criteria", [])),
-                            "constraints": list(details.get("constraints", [])),
-                            "requirement_extensions": list(details.get("requirement_extensions", [])),
-                            "source_fragments": list(details.get("source_fragments", [])),
-                            "supersedes_item_ref": self._outcome_ref(prior_item_id),
-                        }
-                        replacement_text = str(prior["text"])
-                        for addition_index, addition in additions:
+                        complete_replacements = [
+                            item for item in additions
+                            if item[1].get("category") == "outcome_replacement"
+                        ]
+                        if complete_replacements:
+                            if len(complete_replacements) != 1 or len(additions) != 1:
+                                raise V12StoreError("steering replacement is ambiguous", code="invalid_argument", details={"field": "steering_delta.add"})
+                            addition_index, addition = complete_replacements[0]
+                            acceptance = list(addition["acceptance"])
+                            constraints = list(addition["constraints"])
+                            verification = [
+                                value for value in addition["verification"]
+                                if value not in acceptance
+                            ]
+                            replacement_text = str(addition["text"])
+                            fragments = [{
+                                "source_type": "user_steer",
+                                "path": f"steer.add[{addition_index}].text",
+                                "text": replacement_text,
+                                "decision_ref": record_ref(identifier),
+                            }]
+                            for field, values in (
+                                ("acceptance", acceptance),
+                                ("constraints", constraints),
+                                ("verification", verification),
+                            ):
+                                fragments.extend({
+                                    "source_type": "user_steer",
+                                    "path": f"steer.add[{addition_index}].{field}[{value_index}]",
+                                    "text": value,
+                                    "decision_ref": record_ref(identifier),
+                                } for value_index, value in enumerate(values))
+                            merged = {
+                                "acceptance_criteria": acceptance,
+                                "verification_criteria": verification,
+                                "constraints": constraints,
+                                "requirement_extensions": [],
+                                "source_fragments": fragments,
+                                "supersedes_item_ref": self._outcome_ref(prior_item_id),
+                            }
+                        else:
+                            merged = {
+                                "acceptance_criteria": list(details.get("acceptance_criteria", [])),
+                                "verification_criteria": list(details.get("verification_criteria", [])),
+                                "constraints": list(details.get("constraints", [])),
+                                "requirement_extensions": list(details.get("requirement_extensions", [])),
+                                "source_fragments": list(details.get("source_fragments", [])),
+                                "supersedes_item_ref": self._outcome_ref(prior_item_id),
+                            }
+                            replacement_text = str(prior["text"])
+                        for addition_index, addition in (
+                            additions if not complete_replacements else []
+                        ):
                             category, text = str(addition["category"]), str(addition["text"])
                             if category == "acceptance":
                                 if text in merged["verification_criteria"]:

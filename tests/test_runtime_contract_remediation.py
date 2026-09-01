@@ -152,6 +152,11 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             state = read_task(task_ref=task["task_ref"], view="state")
             names = [item["outcome"] for item in state["data"]["effective_contract"]["items"]]
             self.assertEqual(names, [replacement["outcome"], first["outcome"], second["outcome"]])
+            replaced = state["data"]["effective_contract"]["items"][0]
+            self.assertEqual(replaced["acceptance"], replacement["acceptance"])
+            self.assertEqual(replaced["constraints"], replacement["constraints"])
+            self.assertEqual(replaced["verification"], replacement["verification"])
+            self.assertNotIn(original["acceptance"][0], replaced["acceptance"])
             with self.assertRaises(V12ServiceError) as stale:
                 self._assignment(
                     task["task_ref"], [original["outcome"]], role="stale",
@@ -161,6 +166,37 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             self._assignment(
                 task["task_ref"], [replacement["outcome"]], role="current",
             )
+
+    def test_same_name_steering_replacement_does_not_merge_retired_contract(self) -> None:
+        original = {
+            "outcome": "Public helper.",
+            "acceptance": ["reset removes state."],
+            "constraints": ["reset is thread-safe."],
+            "verification": ["reset tests pass."],
+        }
+        replacement = {
+            "outcome": "Public helper.",
+            "acceptance": ["contains observes state."],
+            "constraints": ["contains is read-only."],
+            "verification": ["contains tests pass."],
+        }
+        with tempfile.TemporaryDirectory() as root:
+            task = self._task(root, [original])
+            open_steering(
+                task_ref=task["task_ref"], prompt="Replace reset with contains?",
+                prompt_language="en",
+            )
+            record_steering(
+                task_ref=task["task_ref"], response_original="Replace it.",
+                user_language="en", add=[replacement], retire=[original],
+            )
+            state = read_task(task_ref=task["task_ref"], view="state")
+            current = state["data"]["effective_contract"]["items"]
+            self.assertEqual(len(current), 1)
+            self.assertEqual(current[0]["outcome"], replacement["outcome"])
+            self.assertEqual(current[0]["acceptance"], replacement["acceptance"])
+            self.assertEqual(current[0]["constraints"], replacement["constraints"])
+            self.assertEqual(current[0]["verification"], replacement["verification"])
 
     def test_exact_record_steering_replays_after_contract_revision(self) -> None:
         """Compaction may repeat a successful decision after its binding was consumed."""

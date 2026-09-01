@@ -1584,16 +1584,14 @@ def record_steering(*, task_ref: str, response_original: str,
         if paired_replacement:
             item = typed_add[0]
             target = retire_refs[0]
-            fields = [
-                ("requirement", item["outcome"]),
-                *(("acceptance", value) for value in item["acceptance"]),
-                *(("constraint", value) for value in item["constraints"]),
-                *(("verification", value) for value in item["verification"]),
-            ]
-            additions.extend(
-                {"category": category, "text": text, "outcome_ref": target}
-                for category, text in fields
-            )
+            additions.append({
+                "category": "outcome_replacement",
+                "outcome_ref": target,
+                "text": item["outcome"],
+                "acceptance": list(item["acceptance"]),
+                "constraints": list(item["constraints"]),
+                "verification": list(item["verification"]),
+            })
         else:
             # Unpaired public additions are complete independent outcomes.
             # Keep them grouped as private durable atoms so the store never

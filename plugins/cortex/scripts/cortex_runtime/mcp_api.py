@@ -1321,8 +1321,13 @@ def serve_stdio(
                 {
                     **catalog_by_name[name],
                     "description": (
-                        "Worker-candidate assignment bootstrap. Assignment is the only "
-                        "advertised semantic view; use only this closed schema."
+                        "Worker-candidate assignment bootstrap with one closed input object. "
+                        "The only required property is task_ref, copied exactly from the "
+                        "server-rendered dispatch. The only optional properties are view, "
+                        "which when present must equal assignment, and continue, which is "
+                        "used only after the immediately preceding response says more data "
+                        "remains. Do not send a worker name, worker label, agent identity, "
+                        "role, assignment identifier, cursor, or any other property."
                     ),
                     "inputSchema": _worker_candidate_read_schema(public_tools[name]),
                 }

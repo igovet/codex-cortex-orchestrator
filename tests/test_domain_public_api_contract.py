@@ -779,7 +779,12 @@ class DomainPublicApiContractTests(unittest.TestCase):
     def test_unique_outcome_name_resolves_current_user_refined_revision(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
             task, outcomes = self._task(root)
-            refined = dict(outcomes[0]) | {"acceptance": ["The refined criterion also works."]}
+            refined = dict(outcomes[0]) | {
+                "acceptance": [
+                    *outcomes[0]["acceptance"],
+                    "The refined criterion also works.",
+                ],
+            }
             open_steering(task_ref=task["task_ref"], prompt="Apply the requested refinement?", prompt_language="en")
             record_steering(
                 task_ref=task["task_ref"], response_original="Apply it.", user_language="en",

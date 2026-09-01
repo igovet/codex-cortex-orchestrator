@@ -383,6 +383,14 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 )
                 self.assertNotIn("const", worker_read["inputSchema"]["properties"]["task_ref"])
                 self.assertFalse(worker_read["inputSchema"]["additionalProperties"])
+                self.assertIn(
+                    "The only required property is task_ref",
+                    worker_read["description"],
+                )
+                self.assertIn(
+                    "Do not send a worker name, worker label, agent identity",
+                    worker_read["description"],
+                )
                 self.assertNotIn("worker_label", json.dumps(worker_read, sort_keys=True))
 
     def test_pre_spawn_signed_hint_projects_worker_catalogue_without_authority(self) -> None:
