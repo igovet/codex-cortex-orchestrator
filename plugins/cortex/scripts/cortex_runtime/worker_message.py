@@ -73,6 +73,14 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   worker-scoped `task_ref` supplied below. Do not read any other task view or
   inspect the project before that read succeeds. Its result is the only bootstrap
   authority for continuing this assignment.
+- Derive that finite first read only from the live advertised contract. If a
+  deterministic caller-shape rejection provides bounded diagnostics that make
+  one local correction unambiguous, make exactly one materially corrected
+  attempt. Never repeat the unchanged malformed request, guess identity or
+  authority, or begin project work before consumption succeeds. A second
+  deterministic failure, incomplete diagnostics, or a correction that requires
+  guessing ends the assignment. An ambiguous transport outcome permits only
+  identical reconciliation.
 - You are a worker, never a coordinator. Do not invoke coordinator-only operations,
   including `assess_governance`; do not create tasks, open or record
   user decisions, create assignments, or close tasks. The assignment read
@@ -119,10 +127,19 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   evidence in your final publication. If an input is incomplete, mismatched, or
   unreadable, publish an honest blocked/partial outcome and do not claim it was
   consumed.
+- Continue an assignment read only when the immediately preceding otherwise-
+  identical read explicitly reports more data, and continue immediately. Once
+  the terminal page reports completion, never read the assignment again.
 - Publish one complete terminal outcome only after its declared evidence is
   consumed. A provisional outcome followed by a replacement is not the normal
   flow: use the active recovery/rework assignment semantics when correction is
   genuinely required.
+- A confirmed successful terminal-publication response ends this worker's tool
+  activity. After that success, do not call Cortex, project, discovery, or any
+  other tool again and never reconcile or repeat the publication. Immediately
+  emit the single compact native coordinator handoff and stop. Replay is only
+  transport reconciliation after an actually ambiguous response, never a
+  post-success confirmation step.
 
 - A plan publication always declares one explicit review disposition. Use
   required review when the assignment or governance evidence requires it, or
@@ -197,17 +214,43 @@ _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
 
 - Before any other action or tool call, consume the server-owned Cortex
   assignment using the exact worker task reference below.
+- Build that finite first read from the live contract. After a deterministic
+  local-shape rejection, correct it once only when diagnostics are unambiguous;
+  never repeat malformed input or guess authority. Ambiguous transport permits
+  only identical reconciliation.
 - That assignment read is the sole authority for the full common policy,
   packaged profile, mission, scope, outcomes, decisions, and evidence.
-- You are a worker, not a coordinator. If the assignment read fails, stop and
-  report the blocker; never reconstruct, replace, or broaden the assignment.
+- You are a worker, not a coordinator. Coordinator-only operations, including
+  governance assessment, are prohibited for every profile. Do no project work
+  before successful consumption. If safe correction fails, stop; never
+  reconstruct, replace, or broaden the assignment.
 """
 
 # The full common policy is retained for continuation/contract documentation,
 # but fresh dispatches must stay below the transport's compact-message budget.
-# These two invariants are the worker-facing admission-critical subset.
+# This is the worker-facing admission-critical policy delivered by assignment read.
 _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
 
+- A fresh native worker derives its finite first assignment read only from the
+  live advertised contract and exact server-rendered authority. It performs no
+  project action before that read succeeds. One materially corrected attempt is
+  permitted only after a deterministic caller-shape rejection with bounded,
+  unambiguous diagnostics; never repeat the unchanged malformed request or
+  guess identity or authority. A second deterministic failure, incomplete
+  diagnostics, or a correction requiring guesses ends the assignment. Ambiguous
+  transport permits only identical reconciliation.
+- Continue only when the immediately preceding otherwise-identical assignment
+  read explicitly reports more data, and continue immediately. Never repeat a
+  terminal assignment read. After terminal consumption, perform bounded role
+  work and publish exactly one matching terminal outcome; unresolved evidence
+  produces an honest partial or blocked publication instead of a read loop.
+- A confirmed successful terminal-publication response ends all worker tool
+  activity. Never call any tool or repeat/reconcile that mutation after success;
+  immediately emit the compact native coordinator handoff and stop. Identical
+  reconciliation is reserved only for an actually ambiguous transport result.
+- Every native worker and packaged profile is worker-only. Coordinator-only
+  operations, including governance assessment, remain prohibited for planners,
+  replacements, rework, and repeated-planning assignments.
 - before any structural project-code discovery or local repository search, use
   Codebase Memory as the mandatory first evidence route and bind it to the exact
   canonical `project_root` returned in the server-owned assignment context. The

@@ -198,6 +198,12 @@ scope is rejected by the closed schema.
 Every assignment also selects a non-empty exact set of current outcome-item
 references. The selection is required even for planning and single-outcome
 work, so prose labels cannot silently widen or replace durable scope.
+The public assignment projection places exact semantic outcome names in a
+compact reconciliation header before the larger policy and contract body.
+Medium and large structured responses are not duplicated into text. Evidence
+pages continue only through immediate server-owned continuation, and an exact
+restarted terminal page reuses the existing consumption receipt without a new
+timeline event.
 
 Workers publish immutable plan, result, or documentation evidence
 and return a concise native `Summary` plus exact `Report ref` in the completion
@@ -215,6 +221,13 @@ remains authoritative; coordinator prose and native-worker handoffs are routing
 context, not semantic evidence. Multiple independently authored reports chosen
 by a broad report policy remain valid inputs without implying a unique parent;
 private report-reference fields never cross the public error boundary.
+
+Complete unpaired steering additions create independent current outcomes.
+Exactly one retire plus one add replaces one outcome atomically; unrelated
+outcomes and their coverage remain current. Delivery ownership is
+transactionally singular per outcome, so distinct outcomes may progress in
+parallel while same, stale, overlapping, or ambiguous ownership remains
+fail-closed.
 
 Canonical product-facing reports support the fixed
 `cortex/report/{progress,result,synthesis,plan}/v1` schemas and additive
@@ -284,10 +297,18 @@ specialist dispositions, and aggregate coverage. It
 guides model-owned rework, verification, and closure review; it cannot alter
 report/delegation lifecycle or block safe coordination.
 
+Closure is never probed speculatively. Even when the initial request asks to
+close automatically after future work, the coordinator first presents the
+finished current result and records the required post-result closure review;
+only that current explicit close choice permits the first `close_task` call.
+
 Private/internal report storage may retain immutable assembly metadata and
 chunking limits, but the public facade has no `begin`/`append`/`finalize`/`abort`
 operations. Public workers submit one complete plan, result, or documentation
-payload through the corresponding publication operation.
+payload through the corresponding publication operation. A confirmed terminal
+publication success ends that worker's tool activity immediately; identical
+reconciliation is reserved for an actually ambiguous transport result and is
+never a post-success confirmation call.
 
 Worker evidence reads are exposed through the bounded `read_task` evidence
 view. The public caller supplies no publication/assignment reference or cursor;

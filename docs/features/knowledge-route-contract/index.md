@@ -15,7 +15,7 @@ ordinary orchestration.
 - [documentation-sync/SKILL.md](../../../plugins/cortex/skills/documentation-sync/SKILL.md) governs verified documentation updates after material work.
 - [feature-census.md](../../../plugins/cortex/skills/knowledge-harvest/references/feature-census.md) defines the bounded feature inventory.
 - [profiles.json](../../../plugins/cortex/profiles.json) supplies advisory explorer/planner/architect/writer roles.
-- [test_marketplace_release_gate.py](../../../tests/test_marketplace_release_gate.py) validates the release-facing package and docs closure.
+- The complete `tests/` suite validates the release-facing package and docs closure; CI runs it with `PYTHONPATH=plugins/cortex/scripts`.
 
 ## Behavior
 

@@ -48,7 +48,9 @@ _SAFE_EXPECTED_VALUES = frozenset({
     "string", "integer", "object", "array", "permitted_value", "constant",
     "bounded_length", "bounded_range", "lowercase_section_label", "unique_items",
     "permitted_input_shape", "bounded_json_value", "r_[0-9a-f]{12}",
-    "progress|result|synthesis|plan",
+    "progress|result|synthesis|plan", "complete_outcome_object",
+    "current_semantic_outcome", "unique_current_semantic_outcome",
+    "non_overlapping_outcome_scope",
 })
 _SAFE_VALIDATION_REASONS = frozenset({
     "required", "additional_property", "type", "enum", "constant", "length",
@@ -58,6 +60,9 @@ _SAFE_VALIDATION_REASONS = frozenset({
     "documentation_impact_incomplete",
     "contract_coverage_missing", "contract_coverage_invalid", "contract_coverage_extra",
     "contract_coverage_duplicate", "contract_coverage_incomplete",
+    "semantic_outcome_missing", "semantic_outcome_ambiguous",
+    "stale_current_outcome", "ownership_conflict", "scope_overlap",
+    "invalid_decomposition", "unchanged_retry", "correction_exhausted",
 })
 
 
@@ -88,11 +93,18 @@ class _RpcError(Exception):
 
 
 class _SchemaError(ValueError):
-    def __init__(self, path: str, message: str, *, missing_fields: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, path: str, message: str, *, missing_fields: tuple[str, ...] = (),
+        actual_bytes: int | None = None, max_bytes: int | None = None,
+        correction_state: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.path = path
         self.message = message
         self.missing_fields = missing_fields
+        self.actual_bytes = actual_bytes
+        self.max_bytes = max_bytes
+        self.correction_state = correction_state
 
 
 def _is_json_value(value: object) -> bool:
@@ -312,8 +324,12 @@ def _validate_schema(schema: Mapping[str, Any], value: object, path: str = "$") 
         raise _SchemaError(path, "value is not one of the permitted values")
     maximum_bytes = schema.get("maxBytes")
     if isinstance(maximum_bytes, int) and not isinstance(maximum_bytes, bool):
-        if _encoded_json_bytes(value, path) > maximum_bytes:
-            raise _SchemaError(path, "JSON value exceeds the maximum encoded byte length")
+        actual_bytes = _encoded_json_bytes(value, path)
+        if actual_bytes > maximum_bytes:
+            raise _SchemaError(
+                path, "JSON value exceeds the maximum encoded byte length",
+                actual_bytes=actual_bytes, max_bytes=maximum_bytes,
+            )
     if isinstance(value, str):
         minimum = schema.get("minLength")
         maximum = schema.get("maxLength")
@@ -467,6 +483,28 @@ def _safe_details(value: object) -> dict[str, object]:
     retry_after_ms = value.get("retry_after_ms")
     if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool) and 0 <= retry_after_ms <= 60_000:
         details["retry_after_ms"] = retry_after_ms
+    for name in ("actual_bytes", "max_bytes"):
+        number = value.get(name)
+        if isinstance(number, int) and not isinstance(number, bool) and 0 <= number <= MAX_PHYSICAL_JSONL_FRAME_BYTES:
+            details[name] = number
+    sections = value.get("sections")
+    if isinstance(sections, list):
+        safe_sections: list[dict[str, object]] = []
+        for item in sections[:16]:
+            if not isinstance(item, Mapping):
+                continue
+            section = item.get("section")
+            encoded_bytes = item.get("encoded_bytes")
+            if (
+                isinstance(section, str)
+                and _SAFE_FIELD_RE.fullmatch(section)
+                and isinstance(encoded_bytes, int)
+                and not isinstance(encoded_bytes, bool)
+                and 0 <= encoded_bytes <= MAX_PHYSICAL_JSONL_FRAME_BYTES
+            ):
+                safe_sections.append({"section": section, "encoded_bytes": encoded_bytes})
+        if safe_sections:
+            details["sections"] = safe_sections
     return details
 
 
@@ -515,9 +553,27 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
         retry_after_ms = details.get("retry_after_ms")
         if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool):
             parts.append(f"Retry after: {retry_after_ms} ms.")
+        actual_bytes = details.get("actual_bytes")
+        max_bytes = details.get("max_bytes")
+        if (
+            isinstance(actual_bytes, int) and not isinstance(actual_bytes, bool)
+            and isinstance(max_bytes, int) and not isinstance(max_bytes, bool)
+        ):
+            parts.append(f"Encoded bytes: actual={actual_bytes}, maximum={max_bytes}.")
+        sections = details.get("sections")
+        if isinstance(sections, list) and sections:
+            rendered_sections = ", ".join(
+                f"{item['section']}={item['encoded_bytes']}"
+                for item in sections
+                if isinstance(item, Mapping)
+                and isinstance(item.get("section"), str)
+                and isinstance(item.get("encoded_bytes"), int)
+            )
+            if rendered_sections:
+                parts.append(f"Largest known sections: {rendered_sections} bytes.")
     parts.append(f"Mutation: {mutation}.")
     parts.append(f"Action: {action}")
-    if code in {"validation_error", "invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found", "initiative_not_found", "decision_not_found"}:
+    if code in {"invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found", "initiative_not_found", "decision_not_found"}:
         parts.append("Handle rule: do not retry a shortened, ellipsized, inferred, or reconstructed value; reuse the exact structuredContent.handles value from the last success.")
     parts.append("Retryable now: yes." if retryable else "Retryable unchanged: no; correct the request first.")
     return " ".join(parts)[:2_048]
@@ -539,7 +595,32 @@ def _service_failure(error: V12ServiceError) -> dict[str, Any]:
     }
 
 
-def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+def _known_section_sizes(
+    arguments: Mapping[str, Any], input_schema: Mapping[str, Any],
+) -> list[dict[str, object]]:
+    """Return bounded sizes for advertised top-level sections only."""
+    properties = input_schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return []
+    sizes: list[dict[str, object]] = []
+    for name in properties:
+        if (
+            isinstance(name, str)
+            and _SAFE_FIELD_RE.fullmatch(name)
+            and name in arguments
+        ):
+            sizes.append({
+                "section": name,
+                "encoded_bytes": _encoded_json_bytes({name: arguments[name]}, "$"),
+            })
+    sizes.sort(key=lambda item: (-int(item["encoded_bytes"]), str(item["section"])))
+    return sizes[:8]
+
+
+def _validation_failure(
+    error: _SchemaError, *, tool_name: str, arguments: Mapping[str, Any],
+    input_schema: Mapping[str, Any],
+) -> dict[str, Any]:
     # Keep a closed-schema failure actionable without echoing arbitrary parser
     # messages or caller values.  The schema validator itself records a safe
     # JSON path; root-level required/additional-property failures need the
@@ -586,12 +667,25 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
         if message.startswith(prefix):
             reason, expected = mapped_reason, mapped_expected
             break
+    if error.correction_state == "unchanged":
+        reason = "unchanged_retry"
+    elif error.correction_state == "exhausted":
+        reason = "correction_exhausted"
+    sections = (
+        _known_section_sizes(arguments, input_schema)
+        if reason in {"encoded_size", "unchanged_retry", "correction_exhausted"}
+        and error.path == "$"
+        else []
+    )
     details = _safe_details({
         "path": error.path,
         "field": field,
         "missing_fields": error.missing_fields,
         "reason": reason,
         "expected": expected,
+        "actual_bytes": error.actual_bytes,
+        "max_bytes": error.max_bytes,
+        "sections": sections,
     })
     retryable, action = _recovery("validation_error", details)
     if error.missing_fields:
@@ -599,6 +693,24 @@ def _validation_failure(error: _SchemaError, *, tool_name: str, arguments: Mappi
             "Add every missing required property to one complete request: "
             + ", ".join(error.missing_fields)
             + ". Then call the same tool once with the corrected complete payload."
+        )
+    if error.path == "$" and reason == "encoded_size":
+        action = (
+            "Compact redundant prose and formatting across the identified advertised sections, "
+            "preserve every required semantic section and evidence fact, preflight the complete "
+            "compact UTF-8 JSON object against the reported maximum, then make exactly one "
+            "materially smaller complete corrected call. Do not ellipsize, byte-slice, omit, "
+            "infer, or reconstruct content."
+        )
+    elif reason == "unchanged_retry":
+        action = (
+            "Stop this correction path: the unchanged oversize request is not a material "
+            "correction and must not be called again."
+        )
+    elif reason == "correction_exhausted":
+        action = (
+            "Stop this correction path: the single permitted aggregate-size correction has "
+            "already failed and no further retry is allowed on this worker connection."
         )
     if tool_name == "create_delegation" and "delegation_id" in arguments:
         action = (
@@ -834,7 +946,24 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
     content = []
     if leading_view is not None:
         content.append({"type": "text", "text": leading_view})
-    content.append({"type": "text", "text": serialized})
+    # Duplicating a large structured result into TextContent can make an
+    # otherwise bounded result exceed the physical JSONL frame. Preserve the
+    # compatibility duplicate for ordinary responses, but use one fixed
+    # non-authoritative notice once the structured body itself is large. The
+    # complete authoritative value remains in ``structuredContent``.
+    # Keep ordinary compact results duplicated for older clients, but do not
+    # double a medium/large assignment into both MCP content channels. The
+    # aggregate operation limit is the conservative model-visible threshold;
+    # using one quarter leaves room for the outer JSON-RPC envelope and keeps
+    # large structured assignment evidence from being displaced by its own
+    # redundant text copy.
+    text_duplicate_max_bytes = MCP_OPERATION_MAX_BYTES // 4
+    text_payload = (
+        serialized
+        if len(serialized.encode("utf-8")) <= text_duplicate_max_bytes
+        else "Complete Cortex result is available in structuredContent."
+    )
+    content.append({"type": "text", "text": text_payload})
     return {
         # MCP recommends serialized structured content in TextContent for
         # clients that predate structuredContent.  Both blocks are derived
@@ -1305,11 +1434,53 @@ def serve_stdio(
                 continue
             contract = public_tools[name]
             resolved_arguments = dict(arguments)
+            input_schema = contract.get("_runtimeInputSchema", contract["inputSchema"])
+            correcting_aggregate = False
             try:
-                if _encoded_json_bytes(arguments, "$") > MCP_OPERATION_MAX_BYTES:
-                    raise _SchemaError("$", "JSON value exceeds the maximum encoded byte length")
-                input_schema = contract.get("_runtimeInputSchema", contract["inputSchema"])
+                actual_argument_bytes = _encoded_json_bytes(arguments, "$")
+                corrections = connection_context.setdefault("validation_corrections", {})
+                correction = corrections.get(name) if isinstance(corrections, dict) else None
+                correcting_aggregate = name == "publish_result" and isinstance(correction, dict)
+                if correcting_aggregate and correction.get("exhausted") is True:
+                    raise _SchemaError(
+                        "$", "JSON aggregate correction is exhausted",
+                        actual_bytes=actual_argument_bytes,
+                        max_bytes=MCP_OPERATION_MAX_BYTES,
+                        correction_state="exhausted",
+                    )
+                if actual_argument_bytes > MCP_OPERATION_MAX_BYTES:
+                    correction_state = None
+                    if name == "publish_result" and isinstance(corrections, dict):
+                        rendered_arguments = json.dumps(
+                            arguments, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"), allow_nan=False,
+                        ).encode("utf-8")
+                        request_digest = hashlib.sha256(rendered_arguments).hexdigest()
+                        if not isinstance(correction, dict):
+                            corrections[name] = {
+                                "digest": request_digest,
+                                "actual_bytes": actual_argument_bytes,
+                                "exhausted": False,
+                            }
+                            correction_state = "available"
+                        elif correction.get("digest") == request_digest:
+                            correction["exhausted"] = True
+                            correction_state = "unchanged"
+                        else:
+                            correction["exhausted"] = True
+                            correction_state = "exhausted"
+                    raise _SchemaError(
+                        "$", "JSON value exceeds the maximum encoded byte length",
+                        actual_bytes=actual_argument_bytes,
+                        max_bytes=MCP_OPERATION_MAX_BYTES,
+                        correction_state=correction_state,
+                    )
                 _validate_schema(input_schema, arguments)
+                if correcting_aggregate and isinstance(corrections, dict):
+                    # A complete schema-valid correction has crossed the
+                    # pre-dispatch boundary. Durable publication idempotency,
+                    # not the validation retry guard, owns any later replay.
+                    corrections.pop(name, None)
                 properties = input_schema.get("properties") if isinstance(input_schema, Mapping) else None
                 if (
                     name != "open_task"
@@ -1325,7 +1496,18 @@ def serve_stdio(
                     resolved_arguments["task_ref"] = active_task_ref
                 _validate_public_call_shape(name, resolved_arguments)
             except _SchemaError as error:
-                failure = _validation_failure(error, tool_name=name, arguments=arguments)
+                if (
+                    correcting_aggregate
+                    and error.correction_state is None
+                    and isinstance(corrections, dict)
+                    and isinstance(corrections.get(name), dict)
+                ):
+                    corrections[name]["exhausted"] = True
+                    error.correction_state = "exhausted"
+                failure = _validation_failure(
+                    error, tool_name=name, arguments=arguments,
+                    input_schema=input_schema,
+                )
                 finish_tool_call(request_id, name, arguments, _tool_error_result(failure, mutation=name), success=False, fault=str(failure["code"]), failure=failure)
                 continue
             try:

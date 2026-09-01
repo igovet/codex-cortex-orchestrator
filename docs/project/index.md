@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.0 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.14.1 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -161,6 +161,12 @@ forwards it unchanged to the active host spawn operation. The `read_task`
 assignment view is the server-owned
 full-policy/evidence surface and is required as the worker's first task read on
 both healthy and recovery paths.
+Its compact reconciliation header exposes exact public outcome selectors before
+the potentially large policy body, and medium or large structured results are
+not redundantly copied into text. Evidence pagination is server-owned;
+continuation is legal only immediately after the identical prior page returned
+`has_more=true`. Terminal replay reconciles the existing receipt without a
+second receipt or timeline mutation.
 
 `publish_plan`, `publish_result`, and `publish_documentation` record immutable
 worker-owned evidence through semantic publication operations. The server owns storage,
@@ -207,9 +213,12 @@ delegation assigns each relevant outcome as owned, contributing, or
 evidence-producing; current ownership is
 non-overlapping. Finalized v2 reports may claim structured coverage only for
 items assigned to their delegation at the current revision. A user `steer`
-decision creates the next effective-contract revision, retiring only the named
-items and adding the stated replacements, so unaffected item references and
-their evidence remain current. Aggregate coverage classifies each active item
+decision creates the next effective-contract revision. Complete unpaired
+additions become independent top-level outcomes, while exactly one retire plus
+one add is an atomic replacement. Unaffected outcomes and evidence remain
+current. One transactional owner is retained per outcome, allowing parallel
+delivery only across distinct outcomes and rejecting same or ambiguous
+ownership. Aggregate coverage classifies each active item
 as complete, missing, partial, unverified, stale, or contradictory. The
 conformance projection relates that current revision, user decisions,
 finalized-report manifests, completed coordinator-read digests, and aggregate

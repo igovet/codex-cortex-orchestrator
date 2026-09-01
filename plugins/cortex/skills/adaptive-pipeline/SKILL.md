@@ -115,6 +115,23 @@ when governance, user constraints, or worker evidence justifies them. Their
 order and presence are dynamic; documentation is a final conditional stage,
 while knowledge harvest is selected only by an explicit harvest route.
 
+Pre-planner analysis is also conditional. Create read-only Luna evidence
+assignments only when separable repository facts, cross-domain dependencies,
+material uncertainty, or contradictory evidence would otherwise force the
+planner to speculate or duplicate broad discovery. Select Luna effort
+explicitly from its entire currently advertised range in proportion to each
+scope, using the highest available effort only when the analysis genuinely
+warrants it. Each assignment owns a distinct question and stopping boundary.
+
+Do not impose a finite total evidence-assignment cap. Limit active assignments
+to the native slots currently available, keep additional justified work queued
+in the model-owned DAG, and dispatch the next non-overlapping ready assignment
+when a slot frees. Stop adding or dispatching evidence work when the finalized
+set answers the planning questions, no distinct domain remains, or incremental
+value no longer justifies latency and cost. The planner consumes the relevant
+finalized evidence, investigates only remaining gaps, reconciles conflicts, and
+remains the sole owner of one terminal project plan.
+
 Reassessment may compare reported evidence with acceptance criteria, but it
 must not turn into direct inspection or testing of the target project. Create a
 focused evidence-gathering or verification delegation when the reports do not
@@ -144,17 +161,19 @@ names the approved plan/decision and relevant finalized result refs, followed
 by a coordinator report read. The report content remains opaque and no-impact
 does not require a documentation edit.
 
-Use `assess_governance` for an evidence-backed governance assessment. Use
-`open_assignment` for new, replacement, or rework ownership. The model
-chooses the role, exact model, and reasoning effort for every delegation; the
-backend records the choice but never promotes a model, substitutes a profile,
-or chooses a recovery route.
+Governance assessment belongs only to the root coordinator: no native worker,
+profile, planner revision, replacement, or rework path may invoke it. The
+coordinator performs the initial assessment in its required lifecycle position
+and reassesses only after material evidence changes risk and it deliberately
+selects a current depth. The model chooses the role, exact model, and reasoning
+effort for every delegation; the backend records the choice but never promotes
+a model, substitutes a profile, or chooses a recovery route.
 
 Routing remains Luna-first: Explorer and ordinary discovery always use Luna,
-with effort increased before a model change. Terra requires evidence of
-genuinely complex non-security work or planning; Sol is reserved for security
-work and review. Do not encode an automatic escalation ladder in a pipeline
-revision.
+with task-specific effort selected from the full live-advertised range before a
+model change. Terra requires evidence of genuinely complex non-security work
+or planning; Sol is reserved for security work and review. Do not encode an
+automatic escalation ladder or fixed Luna effort in a pipeline revision.
 
 A failed worker, partial report, missing report, or `not_ready` closure is
 evidence for the model's next decision, not a lifecycle barrier. Create a

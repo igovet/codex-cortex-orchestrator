@@ -4,6 +4,8 @@ import hashlib
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/cortex/scripts"))
 from cortex_runtime import worker_message
 
@@ -23,6 +25,7 @@ def _delegation() -> dict[str, str]:
 def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     rendered = worker_message.render_worker_message(task=_task(), delegation=_delegation(), decisions=[])
     message = rendered["message"]
+    normalized_message = " ".join(message.split())
     policy = worker_message.assignment_worker_policy("explorer")
     assert policy is not None
     normalized = " ".join(policy["common_policy"].split())
@@ -31,6 +34,11 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "assignment read is the sole authority" in message
     assert "Codebase Memory as the mandatory first evidence route" not in message
     assert len(message.encode("utf-8")) < 1_024
+    assert "finite first read from the live contract" in message
+    assert "correct it once only when diagnostics are unambiguous" in message
+    assert "never repeat malformed input or guess authority" in message
+    assert "Coordinator-only operations" in message
+    assert "Do no project work before successful consumption" in normalized_message
     assert "Codebase Memory as the mandatory first evidence route" in normalized
     assert "canonical `project_root` returned in the server-owned assignment context" in normalized
     assert "bounded repository-native enumeration or text-search fallback" in normalized
@@ -41,6 +49,13 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
     assert "never publishes a supplementary result or documentation outcome" in normalized
     assert "separate evidence assignment followed by a fresh planning revision" in normalized
+    assert "Never repeat a terminal assignment read" in normalized
+    assert "publish exactly one matching terminal outcome" in normalized
+    assert "confirmed successful terminal-publication response ends all worker tool activity" in normalized
+    assert "Never call any tool or repeat/reconcile that mutation after success" in normalized
+    assert "actually ambiguous transport result" in normalized
+    assert "Every native worker and packaged profile is worker-only" in normalized
+    assert "including governance assessment" in normalized
     assert policy["profile_name"] == "explorer"
     assert policy["profile_instructions"]
     assert rendered["renderer"]["common_policy_digest"] == (
@@ -69,3 +84,16 @@ def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_aut
     first_action = message.index("Before any other action or tool call")
     assert message.index("server-owned Cortex", first_action) > first_action
     assert "You are a worker, not a coordinator" in message
+
+
+@pytest.mark.parametrize("profile_name", worker_message.packaged_profile_names())
+def test_every_packaged_profile_inherits_worker_only_governance_and_terminal_read_policy(profile_name):
+    policy = worker_message.assignment_worker_policy(profile_name)
+    assert policy is not None
+    normalized = " ".join(policy["common_policy"].split())
+
+    assert "Every native worker and packaged profile is worker-only" in normalized
+    assert "Coordinator-only operations, including governance assessment" in normalized
+    assert "Never repeat a terminal assignment read" in normalized
+    assert "publish exactly one matching terminal outcome" in normalized
+    assert "confirmed successful terminal-publication response ends all worker tool activity" in normalized

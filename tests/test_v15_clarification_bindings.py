@@ -43,7 +43,7 @@ class ClarificationBindingTests(unittest.TestCase):
 
     def test_stale_revision_and_cross_project_fail_closed(self) -> None:
         binding = self.store.issue_clarification_binding(task_id=self.task_id, prompt="Choose theme", prompt_language="en")["binding"]["clarification_binding"]
-        self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="steer", prompt="steer", response_original="update", user_language="en", steering_delta={"add": [{"category": "requirement", "text": "new"}]}, idempotency_key="steer")
+        self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="steer", prompt="steer", response_original="update", user_language="en", steering_delta={"add": [{"category": "outcome", "text": "new", "acceptance": [], "constraints": [], "verification": []}]}, idempotency_key="steer")
         with self.assertRaises(V12StoreError) as ctx:
             self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="clarification", prompt="Choose theme", response_original="warm", user_language="en", clarification_binding=binding, idempotency_key="stale")
         self.assertIn(ctx.exception.code, {"clarification_binding_mismatch", "clarification_binding_stale"})

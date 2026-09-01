@@ -32,10 +32,10 @@ from cortex_runtime.observation_generation import (  # noqa: E402
 def _fixture(tmp_path: Path) -> tuple[Path, str, str, str, str, str]:
     code_home = tmp_path / "codex"
     code_home.mkdir(mode=0o700)
-    candidate = code_home / "plugins/cache/cortex/cortex/1.14.0"
+    candidate = code_home / "plugins/cache/cortex/cortex/1.14.1"
     candidate.mkdir(parents=True, mode=0o700)
     build_id = "sha256:" + ("a" * 64)
-    version = "1.14.0"
+    version = "1.14.1"
     digest = "b" * 64
     nonce = "c" * 64
     request_generation(code_home=code_home, build_id=build_id, candidate_version=version, catalogue_count=15, catalogue_digest=digest, session_nonce=nonce)

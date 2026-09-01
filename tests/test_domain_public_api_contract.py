@@ -558,7 +558,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.14.0")
+        self.assertEqual(SERVER_VERSION, "1.14.1")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

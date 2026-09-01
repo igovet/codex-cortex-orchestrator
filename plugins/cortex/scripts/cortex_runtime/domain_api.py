@@ -16,7 +16,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from cortex_runtime import v12_service as ledger
-from cortex_runtime.v12_contract import record_ref, task_ref as compact_task_ref
+from cortex_runtime.v12_contract import (
+    MCP_OPERATION_MAX_BYTES, REPORT_CHUNK_MAX_BYTES, REPORT_READ_MAX_BYTES,
+    REPORT_RESPONSE_MAX_BYTES,
+    record_ref, task_ref as compact_task_ref,
+)
 from cortex_runtime.v12_service import V12ServiceError, _record_list_in_task, _task_store
 from cortex_runtime.v12_store import V12Store, V12StoreError
 from cortex_runtime.domain_kernel import DecisionAggregate
@@ -49,6 +53,46 @@ def _semantic_outcome(item: Mapping[str, Any]) -> dict[str, Any]:
         "constraints": list(item.get("constraints", [])) if isinstance(item.get("constraints"), list) else [],
         "verification": list(item.get("verification_criteria", [])) if isinstance(item.get("verification_criteria"), list) else [],
     }
+
+
+def _validated_public_outcome(value: object, *, path: str) -> dict[str, Any]:
+    """Validate one complete public semantic outcome with a safe path."""
+    required = {"outcome", "acceptance", "constraints", "verification"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise V12ServiceError(
+            "semantic outcome is incomplete",
+            code="invalid_argument",
+            details={
+                "path": path,
+                "expected": "complete_outcome_object",
+                "reason": "canonical_semantic_invalid",
+            },
+        )
+    outcome = value.get("outcome")
+    if not isinstance(outcome, str) or not outcome.strip():
+        raise V12ServiceError(
+            "semantic outcome name is invalid", code="invalid_argument",
+            details={
+                "path": f"{path}.outcome", "expected": "current_semantic_outcome",
+                "reason": "canonical_semantic_invalid",
+            },
+        )
+    result: dict[str, Any] = {"outcome": outcome}
+    for field in ("acceptance", "constraints", "verification"):
+        entries = value.get(field)
+        if (
+            not isinstance(entries, list)
+            or any(not isinstance(item, str) or not item.strip() for item in entries)
+        ):
+            raise V12ServiceError(
+                "semantic outcome evidence is invalid", code="invalid_argument",
+                details={
+                    "path": f"{path}.{field}", "expected": "array",
+                    "reason": "canonical_semantic_invalid",
+                },
+            )
+        result[field] = list(entries)
+    return result
 
 
 def _publicize(value: Any) -> Any:
@@ -106,28 +150,37 @@ def _internalize_publication_evidence(store: V12Store, assignment_id: str, evide
     for row in coverage:
         if not isinstance(row, Mapping) or not isinstance(row.get("outcome"), str):
             raise V12ServiceError("publication coverage requires a semantic outcome name", code="invalid_argument", details={"field": "evidence.contract_coverage"})
-        matches = _match_outcomes(typed_items, [row["outcome"]])
+        matches = _match_outcomes(
+            typed_items, [row["outcome"]], path="$.outcome_coverage",
+        )
         internal.append({"item_ref": matches[0], **{key: value for key, value in row.items() if key != "outcome"}})
     result["contract_coverage"] = internal
     return result
 
 
-def _match_outcomes(current_items: list[Mapping[str, Any]], requested: object) -> list[str]:
+def _match_outcomes(
+    current_items: list[Mapping[str, Any]], requested: object, *,
+    path: str = "$.outcomes",
+) -> list[str]:
     if not isinstance(requested, list) or not requested:
-        raise V12ServiceError("assignment outcome scope is required", code="invalid_argument", details={"field": "mission.outcomes"})
+        raise V12ServiceError(
+            "assignment outcome scope is required", code="invalid_argument",
+            details={"path": path, "expected": "bounded_length", "reason": "length"},
+        )
     selected: list[str] = []
-    for candidate in requested:
+    for index, candidate in enumerate(requested):
         if isinstance(candidate, str):
             normalized = {"outcome": candidate}
         elif isinstance(candidate, Mapping):
-            normalized = {
-                "outcome": candidate.get("outcome"),
-                "acceptance": list(candidate.get("acceptance", [])),
-                "constraints": list(candidate.get("constraints", [])),
-                "verification": list(candidate.get("verification", [])),
-            }
+            normalized = _validated_public_outcome(candidate, path=f"{path}[{index}]")
         else:
-            raise V12ServiceError("assignment outcome scope is invalid", code="invalid_argument", details={"field": "mission.outcomes"})
+            raise V12ServiceError(
+                "assignment outcome scope is invalid", code="invalid_argument",
+                details={
+                    "path": f"{path}[{index}]", "expected": "current_semantic_outcome",
+                    "reason": "canonical_semantic_invalid",
+                },
+            )
         matches = [item for item in current_items if _semantic_outcome(item) == normalized] if len(normalized) > 1 else []
         if not matches and isinstance(normalized["outcome"], str):
             # Semantic child fields are useful evidence but are routinely
@@ -138,10 +191,25 @@ def _match_outcomes(current_items: list[Mapping[str, Any]], requested: object) -
                 if _semantic_outcome(item).get("outcome") == normalized["outcome"]
             ]
         if len(matches) != 1 or not isinstance(matches[0].get("item_ref"), str):
-            raise V12ServiceError("assignment outcome is missing or ambiguous", code="outcome_item_not_found", details={"field": "mission.outcomes"})
+            raise V12ServiceError(
+                "assignment outcome is missing or ambiguous",
+                code="outcome_item_not_found",
+                details={
+                    "path": f"{path}[{index}]",
+                    "expected": "unique_current_semantic_outcome",
+                    "reason": "semantic_outcome_missing" if not matches else "semantic_outcome_ambiguous",
+                },
+            )
         selected.append(str(matches[0]["item_ref"]))
     if len(set(selected)) != len(selected):
-        raise V12ServiceError("assignment outcome scope is ambiguous", code="outcome_assignment_conflict", details={"field": "mission.outcomes"})
+        raise V12ServiceError(
+            "assignment outcome scope is ambiguous",
+            code="outcome_assignment_conflict",
+            details={
+                "path": path, "expected": "non_overlapping_outcome_scope",
+                "reason": "scope_overlap",
+            },
+        )
     return selected
 
 
@@ -240,7 +308,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.14.0",
+        "1.14.1",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -337,6 +405,7 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
     if view == "state":
         raw = ledger.inspect_task(task_ref=coordinator_ref, after_sequence=0)
         data = _publicize(raw)
+        context.update({"read_key": page_key, "cursor": None, "has_more": False})
         result = {"task_ref": task_ref, "view": view, "data": data, "has_more": False}
     elif view == "assignment":
         if assignment_id is None:
@@ -344,7 +413,8 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
         raw = _read_assignment_page(store=store, assignment_id=assignment_id, cursor=cursor)
         context.update({"actor": "worker", "assignment_id": assignment_id,
                         "continuation_ref": raw.get("continuation_ref"), "task_id": canonical,
-                        "worker_task_ref": task_ref})
+                        "worker_task_ref": task_ref,
+                        "assignment_evidence": raw.get("evidence")})
         has_more = bool(raw.get("has_more"))
         context.update({"read_key": page_key, "cursor": raw.get("next_cursor"), "has_more": has_more})
         result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
@@ -352,8 +422,12 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
         if assignment_id is not None:
             if context.get("assignment_id") != assignment_id:
                 raise V12ServiceError("worker assignment must be read before evidence", code="capability_stale")
-            assignment_page = _read_assignment_page(store=store, assignment_id=assignment_id, cursor=cursor)
-            raw = assignment_page.get("evidence")
+            if context.get("has_more"):
+                raise V12ServiceError(
+                    "the current assignment page must be continued before another view",
+                    code="report_cursor_invalid",
+                )
+            raw = context.get("assignment_evidence")
             if not isinstance(raw, Mapping):
                 raise V12ServiceError("worker evidence is unavailable", code="ledger_error")
         else:
@@ -370,7 +444,7 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
 def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
                     reasoning_effort: str,
                     responsibility: str, goal: str, scope: str,
-                    instructions: str, outcomes: list[Mapping[str, object]],
+                    instructions: str, outcomes: list[str],
                     report_policy: str) -> dict[str, Any]:
     """Atomically bind a worker assignment to its current effective contract."""
     from cortex_runtime.model_routing import validate_model_selection
@@ -388,7 +462,7 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
     if not isinstance(current_items, list):
         raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
     typed_items = [item for item in current_items if isinstance(item, Mapping)]
-    item_refs = _match_outcomes(typed_items, outcomes)
+    item_refs = _match_outcomes(typed_items, outcomes, path="$.outcomes")
     outcome_assignments = {
         "owned": list(item_refs) if responsibility == "delivery" else [],
         "contributing": list(item_refs) if responsibility in {"evidence", "planning"} else [],
@@ -564,9 +638,20 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
         publication_reconciliation = {
             "coverage_source": coverage_source,
             "required_item_count": len(required_item_refs),
-            "required_item_refs": required_item_refs,
+            # Keep the exact public outcome selectors in a compact block that
+            # is rendered before the potentially large contract/policy body.
+            # Workers can retain terminal-publication authority even when a
+            # host abbreviates later diagnostic presentation. Private item
+            # references remain server-owned and never cross the projection.
+            "required_outcomes": [
+                str(item.get("text"))
+                for item in coverage_items
+                if isinstance(item, Mapping) and isinstance(item.get("text"), str)
+            ],
             "contract_coverage_template": [
-                {"item_ref": item_ref} for item_ref in required_item_refs
+                {"outcome": str(item.get("text"))}
+                for item in coverage_items
+                if isinstance(item, Mapping) and isinstance(item.get("text"), str)
             ],
         }
         predecessor_evidence = []
@@ -589,9 +674,9 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
                     "user_language": item.get("user_language"),
                 })
         authority = {
-            "effective_contract": dict(effective_contract),
             "publication_reconciliation": publication_reconciliation,
             "assignment_context": assignment_context,
+            "effective_contract": dict(effective_contract),
             "predecessor_evidence": predecessor_evidence if isinstance(predecessor_evidence, list) else [],
             "decision_evidence": decision_evidence if isinstance(decision_evidence, list) else [],
         }
@@ -605,11 +690,42 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
         report_ids = worker.get("input_report_ids") if isinstance(worker, Mapping) else None
         if not isinstance(report_ids, list) or not report_ids:
             return {"continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "none", "reports": []}, "next_cursor": None, "has_more": False}
+        authority_envelope = {
+            "continuation_ref": continuation_ref,
+            "task_ref": bound_task_ref,
+            **authority,
+            "evidence": {"state": "consumed", "reports": []},
+            "next_cursor": None,
+            "has_more": True,
+        }
+        authority_bytes = len(json.dumps(
+            authority_envelope, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8"))
+        response_budget = REPORT_RESPONSE_MAX_BYTES - authority_bytes - 4_096
+        if response_budget < REPORT_CHUNK_MAX_BYTES + 4_096:
+            raise V12ServiceError(
+                "assignment authority leaves no bounded evidence response budget",
+                code="ledger_error",
+            )
         result = store.read_reports(
-            report_ids=report_ids, cursor=cursor, max_bytes=65_536,
+            report_ids=report_ids, cursor=cursor,
+            max_bytes=min(REPORT_READ_MAX_BYTES, response_budget - 4_096),
+            response_max_bytes=response_budget,
             consumer_delegation_id=delegation_id,
         )
-        return {"continuation_ref": continuation_ref, "task_ref": bound_task_ref, **authority, "evidence": {"state": "consumed", **result}}
+        return {
+            "continuation_ref": continuation_ref,
+            "task_ref": bound_task_ref,
+            **authority,
+            "evidence": {"state": "consumed", **result},
+            # Position remains server-owned and is removed by the public
+            # projection. The outer read receipt must still expose whether
+            # ``continue=true`` is valid and retain the opaque position in
+            # this connection's private context.
+            "next_cursor": result.get("next_cursor"),
+            "has_more": bool(result.get("has_more")),
+        }
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
@@ -755,6 +871,33 @@ def publish_result(*, task_ref: str, summary: str, outcome: str,
                    outcome_coverage: list[Mapping[str, Any]], documentation_impact: str,
                    risks: list[str], unresolved: list[str], status: str,
                    _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    public_arguments = {
+        "task_ref": task_ref, "summary": summary, "outcome": outcome,
+        "changes": changes, "verification_facts": verification_facts,
+        "outcome_coverage": outcome_coverage,
+        "documentation_impact": documentation_impact,
+        "risks": risks, "unresolved": unresolved, "status": status,
+    }
+    try:
+        actual_bytes = len(json.dumps(
+            public_arguments, ensure_ascii=False, separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise V12ServiceError(
+            "result publication is not finite JSON", code="content_invalid",
+            details={"path": "$", "expected": "bounded_json_value"},
+        ) from exc
+    if actual_bytes > MCP_OPERATION_MAX_BYTES:
+        raise V12ServiceError(
+            "result publication exceeds the aggregate encoded size",
+            code="validation_error",
+            details={
+                "path": "$", "expected": "bounded_json_value",
+                "reason": "encoded_size", "actual_bytes": actual_bytes,
+                "max_bytes": MCP_OPERATION_MAX_BYTES,
+            },
+        )
     evidence = _publication_evidence(schema_kind="result", summary=summary, verification_facts=verification_facts,
                                      outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
                                      outcome=outcome, changes=[dict(item) for item in changes],
@@ -919,24 +1062,58 @@ def record_steering(*, task_ref: str, response_original: str,
     try:
         binding_ref = _pending_binding(store, canonical, decision_type="steer")
         current = ledger.inspect_task(task_ref=task_ref).get("effective_contract", {}).get("items", [])
-        retire_refs = _match_outcomes([item for item in current if isinstance(item, Mapping)], retire or []) if retire else []
+        if not isinstance(add, list) or not isinstance(retire, list):
+            raise V12ServiceError(
+                "steering outcome sets are invalid", code="invalid_argument",
+                details={
+                    "path": "$.add" if not isinstance(add, list) else "$.retire",
+                    "expected": "array", "reason": "type",
+                },
+            )
+        typed_add = [
+            _validated_public_outcome(item, path=f"$.add[{index}]")
+            for index, item in enumerate(add)
+        ]
+        typed_retire = [
+            _validated_public_outcome(item, path=f"$.retire[{index}]")
+            for index, item in enumerate(retire)
+        ]
+        retire_refs = _match_outcomes(
+            [item for item in current if isinstance(item, Mapping)],
+            typed_retire, path="$.retire",
+        ) if typed_retire else []
         additions: list[dict[str, Any]] = []
-        paired_replacements = bool(add and retire_refs and len(add) == len(retire_refs))
-        for index, item in enumerate(add or []):
-            target = retire_refs[index] if paired_replacements else None
+        paired_replacement = len(typed_add) == 1 and len(retire_refs) == 1
+        if paired_replacement:
+            item = typed_add[0]
+            target = retire_refs[0]
             fields = [
-                ("requirement", item.get("outcome")),
-                *(("acceptance", value) for value in item.get("acceptance", [])),
-                *(("constraint", value) for value in item.get("constraints", [])),
-                *(("verification", value) for value in item.get("verification", [])),
+                ("requirement", item["outcome"]),
+                *(("acceptance", value) for value in item["acceptance"]),
+                *(("constraint", value) for value in item["constraints"]),
+                *(("verification", value) for value in item["verification"]),
             ]
-            additions.extend({"category": category, "text": text, **({"outcome_ref": target} if target else {})}
-                             for category, text in fields if isinstance(text, str) and text.strip())
+            additions.extend(
+                {"category": category, "text": text, "outcome_ref": target}
+                for category, text in fields
+            )
+        else:
+            # Unpaired public additions are complete independent outcomes.
+            # Keep them grouped as private durable atoms so the store never
+            # infers an existing target or merges unrelated additions.
+            additions.extend({
+                "category": "outcome",
+                "text": item["outcome"],
+                "acceptance": list(item["acceptance"]),
+                "constraints": list(item["constraints"]),
+                "verification": list(item["verification"]),
+            } for item in typed_add)
         steering_delta = {
             "add": additions,
-            # An addition against an outcome atomically supersedes that row;
-            # an unpaired retirement removes it without replacement.
-            "retire_item_refs": [] if paired_replacements else retire_refs,
+            # One exact replacement targets and supersedes its current row.
+            # All other additions remain independent while explicit retires
+            # are committed in the same transaction.
+            "retire_item_refs": [] if paired_replacement else retire_refs,
         }
         issued = DecisionAggregate(store).record_steering(
             task_id=canonical, binding_ref=binding_ref,
@@ -945,6 +1122,8 @@ def record_steering(*, task_ref: str, response_original: str,
             supersedes_decision_id=None,
         )
         return _decision_receipt(task_ref, "steering_recorded", issued)
+    except V12ServiceError:
+        raise
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 

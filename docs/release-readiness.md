@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.0.
+Status: content-addressed production and development release contract for Cortex 1.14.1.
 
 ## Current release identity
 
-- semantic release label: 1.14.0
-- installable identity: `1.14.0+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.1
+- installable identity: `1.14.1+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
@@ -59,6 +59,13 @@ When multiple required properties are absent, safe error details and the
 recovery action include the complete bounded `missing_fields` list so the
 caller can correct the request in one call. Server-state failures are
 sanitized JSON-RPC internal errors.
+
+Each input schema advertises the 65,536-byte compact UTF-8 aggregate argument
+bound independently of per-field limits. Root aggregate diagnostics disclose
+only bounded numeric sizes and safe advertised-section contributions. Large
+successful structured results are not duplicated into text, so authoritative
+assignment evidence remains within the physical response frame and the host's
+model-visible output budget.
 
 The complete catalogue must fit in one `tools/list` JSON-RPC response below
 65,536 bytes. This bounded discovery contract is substantially below the 256
@@ -202,11 +209,20 @@ Release evidence must prove:
   `evidence` views with server-owned continuation through `continue=true`; a
   fresh worker's first call consumes the assignment view and is its only
   authoritative route to declared predecessor bodies;
+- the compact assignment reconciliation header retains exact public outcome
+  names before the larger policy body, continuation occurs only immediately
+  after `has_more=true`, and restarted identical terminal reads reuse existing
+  consumption receipts without new timeline events;
+- `publish_result` aggregate-size tests cover below/exact/above boundaries,
+  Unicode byte accounting, safe actual/maximum diagnostics, section redaction,
+  one materially corrected complete retry, and rejection of unchanged,
+  incomplete, still-oversize, or second corrections before mutation;
 - effective-contract item references remain stable across requirements,
   constraints, acceptance criteria, and verification expectations; current
   ownership is non-overlapping, finalized report coverage detects missing,
-  partial, unverified, stale, and contradictory evidence, and user steering
-  revises only affected items;
+  partial, unverified, stale, and contradictory evidence, complete unpaired
+  steering additions create independent outcomes, and one retire plus one add
+  atomically replaces only the selected outcome;
 - failed or partial QA, failed executed checks, and required unrun checks create
   bounded corrective ownership for source or release/verification infrastructure
   and require an independent rerun of failed and affected gates before closure;
@@ -345,7 +361,7 @@ fourteen-tool semantic facade and runtime, schema-v1 store, host-private operato
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 and assets. It must not ship lifecycle hooks or lifecycle hook code.
 
-The package and repository metadata must consistently identify Cortex 1.14.0,
+The package and repository metadata must consistently identify Cortex 1.14.1,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the exact fourteen-tool semantic catalog. Stale claims about waves, gates, capabilities,
 plan authority, host epochs, receipt-gated lifecycle, required wait/read order,
@@ -363,7 +379,7 @@ are incompatible with V12 and cannot serve as fallback authority.
 Run the isolated release/protocol test:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_marketplace_release_gate.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
 ```
 
 The test must build the explicit source candidate, compile bundled Python,

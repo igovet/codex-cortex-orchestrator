@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.0 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.1 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -208,6 +208,15 @@ to a sanitized ledger or validation error.
 For example, an unsupported publication field returns bounded structural
 diagnostics naming the field and expected advertised value without echoing the
 supplied value. Any schema validation failure leaves the ledger unchanged.
+
+Aggregate encoded-size diagnostics are likewise value-blind. They may expose
+the root path, bounded numeric actual/maximum byte counts, and sizes of known
+advertised top-level sections, but never caller text, arbitrary keys, task
+content, filesystem paths, handles, revisions, digests, or private ownership
+identity. A root failure never invents a named field. Publication correction is
+limited to one materially changed complete request on the same worker
+connection; unchanged, incomplete, still-oversize, second, and ambiguous
+attempts fail closed before durable mutation.
 
 The stdio transport bounds one JSON frame at 256 KiB. An oversized frame is
 fully drained and returns a sanitized parse error so the next valid
@@ -575,8 +584,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.0+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.0` is
+`1.14.1+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.1` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a

@@ -22,7 +22,8 @@ class SemanticRegistryConformanceTests(unittest.TestCase):
         self.assertEqual(len(set(OPERATION_NAMES)), 14)
         for name, contract in contracts.items():
             self.assertEqual(contract["inputSchema"].get("type"), "object", name)
-            self.assertFalse(set(contract["inputSchema"]) - {"$schema", "type", "description", "additionalProperties", "properties", "required"}, name)
+            self.assertFalse(set(contract["inputSchema"]) - {"$schema", "type", "description", "additionalProperties", "properties", "required", "maxBytes"}, name)
+            self.assertEqual(contract["inputSchema"].get("maxBytes"), 65_536, name)
             self.assertIn("outputSchema", contract, name)
 
     def test_every_declared_feature_and_capability_is_mapped(self) -> None:

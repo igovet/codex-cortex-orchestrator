@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.0 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.14.1 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -51,6 +51,12 @@ as one bounded `details.missing_fields` list and in the recovery action, so the
 caller can correct the complete request at once. Server-state faults use
 sanitized JSON-RPC internal errors. The server is a storage/integrity sidecar and contains no V11
 control-plane route.
+
+Every input schema also advertises the complete compact UTF-8 JSON aggregate
+bound independently of per-field limits. Root aggregate diagnostics are
+value-blind and bounded. Large successful structured results use a fixed text
+notice rather than duplicating the same body across both MCP content channels,
+keeping assignment authority and the full response below the physical frame.
 
 The standard MCP `tools/list` response returns the complete unchanged
 fourteen-tool catalogue in one page. A release fails validation if the final
@@ -165,11 +171,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.14.0+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.14.1+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.14.0` manifest is source-mode only and the
+in provenance strength. A plain `1.14.1` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -199,7 +205,7 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.14.0 and a suffix matching the complete normalized plugin payload;
+  1.14.1 and a suffix matching the complete normalized plugin payload;
 - exact fourteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private

@@ -116,7 +116,10 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             "publish_result": ("worker-only", "atomic", "complete"),
             "publish_documentation": ("worker-only", "atomic", "complete"),
             "assess_governance": ("coordinator-only", "before the first worker", "explicit"),
-            "close_task": ("coordinator-only", "ledger", "unresolved evidence"),
+            "close_task": (
+                "coordinator-only", "ledger", "unresolved evidence",
+                "post-result review", "readiness probe",
+            ),
         }
         for name, tokens in semantic_tokens.items():
             with self.subTest(tool=name):
@@ -161,6 +164,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 error,
                 tool_name="publish_result",
                 arguments={"task_ref": "t_0123456789ab_" + "a" * 32},
+                input_schema=schema,
             )
             details = failure["details"]
             self.assertEqual(details["missing_fields"], list(missing))

@@ -622,7 +622,7 @@ def _native_arguments(value: object) -> dict[str, Any] | None:
             or len(candidate["message"].encode("utf-8")) > 65_536
             or not isinstance(candidate.get("task_name"), str)
             or not candidate.get("task_name")
-            or ("model" in candidate and candidate.get("model") not in (SUPPORTED_NATIVE_MODELS - {"gpt-5.6-luna"}))
+            or ("model" in candidate and candidate.get("model") not in SUPPORTED_NATIVE_MODELS)
             or ("reasoning_effort" in candidate and candidate.get("reasoning_effort") not in SUPPORTED_REASONING_EFFORTS)):
         return None
     return {key: candidate[key] for key in supplied_fields}
@@ -888,8 +888,19 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         # fields exactly; SubagentStart delivers the server-owned plaintext
         # bootstrap from the receipt, so the encrypted host message is never
         # treated as assignment authority here.
-        routing_fields = ("fork_turns", "task_name", "model", "reasoning_effort")
+        routing_fields = ("fork_turns", "task_name", "reasoning_effort")
         if any(args.get(key) != authoritative.get(key) for key in routing_fields):
+            return None
+        # The server omits the model only for Luna so the configured native
+        # default is used. Current hosts may materialize that same default in
+        # PreToolUse. Treat absent server model and explicit Luna as one routing
+        # choice; every non-Luna model still requires exact equality.
+        authoritative_model = authoritative.get("model")
+        host_model = args.get("model")
+        if authoritative_model is None:
+            if host_model not in {None, "gpt-5.6-luna"}:
+                return None
+        elif host_model != authoritative_model:
             return None
         identity = session_id if isinstance(session_id, str) and session_id else turn_id
         session_digest = _value_fingerprint(identity)

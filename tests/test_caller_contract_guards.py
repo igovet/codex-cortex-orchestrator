@@ -56,7 +56,9 @@ class CallerContractGuardTests(unittest.TestCase):
             error.missing_fields,
             tuple(schema["required"]),
         )
-        failure = _validation_failure(error, tool_name="publish_result", arguments={})
+        failure = _validation_failure(
+            error, tool_name="publish_result", arguments={}, input_schema=schema,
+        )
         self.assertEqual(failure["details"]["missing_fields"], list(schema["required"]))
 
 

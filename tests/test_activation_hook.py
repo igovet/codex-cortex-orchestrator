@@ -95,6 +95,19 @@ def test_host_protected_message_preserves_server_dispatch_correlation(tmp_path: 
     assert result["hookSpecificOutput"]["additionalContext"]
 
 
+def test_host_explicit_luna_matches_server_omitted_default_model(tmp_path: Path) -> None:
+    session, turn = "root", "turn"
+    worker_ref = "t_0123456789ab_" + "a" * 32
+    invoke(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": session, "turn_id": turn, "prompt": "$cortex:orchestrator"})
+    native = native_dispatch(worker_ref, "worker")
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_assignment", "tool_input": {"task_ref": "t_0123456789ab"}, "tool_response": {"isError": False, "structuredContent": {"native_dispatch": native, "replayed": False}}})
+    materialized = dict(native)
+    materialized["model"] = "gpt-5.6-luna"
+    code, result = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": turn, "tool_use_id": "spawn", "tool_name": "collaboration.spawn_agent", "tool_input": materialized})
+    assert code == 0
+    assert result["hookSpecificOutput"]["additionalContext"]
+
+
 def test_spawn_routing_must_equal_the_server_projection(tmp_path: Path) -> None:
     session, turn = "root", "turn"
     worker_ref = "t_0123456789ab_" + "a" * 32

@@ -13,7 +13,7 @@
         orchestration and safe next-step decision to the model.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-1.14.0-7c3aed" alt="Cortex 1.14.0" />
+        <img src="https://img.shields.io/badge/Cortex-1.14.1-7c3aed" alt="Cortex 1.14.1" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-SQLite%20schema%20v1-0f766e" alt="SQLite ledger schema v1" />
@@ -183,7 +183,7 @@ Codex afterward, then start a new task.
 ### Required Codex configuration
 
 > [!IMPORTANT]
-> Configure Codex before the first Cortex 1.14.0 orchestration, then start a **new task**.
+> Configure Codex before the first Cortex 1.14.1 orchestration, then start a **new task**.
 > Cortex requires the Codex multi-agent runtime, and the global default model
 > for internal subagents must be **Luna**.
 
@@ -238,7 +238,7 @@ user's configured approval policy.
 ### Required post-install hook trust
 
 > [!IMPORTANT]
-> **Cortex 1.14.0 ships an activation guard and a sanitized lifecycle
+> **Cortex 1.14.1 ships an activation guard and a sanitized lifecycle
 > observer.** Review and trust only the callbacks declared by the installed
 > Cortex package. They apply only to an explicitly selected Cortex route.
 
@@ -369,7 +369,7 @@ CLI, use `$cortex:orchestrator` or `/skills`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.14.0 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
+| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.14.1 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
 | `$cortex:orchestrator help` | Show read-only help without changing the project or ledger | `$cortex:orchestrator help` |
 | `$cortex:orchestrator harvest` | Update missing or stale source-backed project knowledge | `$cortex:orchestrator harvest` |
 | `$cortex:orchestrator harvest-refresh` | Re-audit and rebuild project knowledge documentation | `$cortex:orchestrator harvest-refresh` |
@@ -394,7 +394,7 @@ $cortex:orchestrator harvest-refresh
 > ### Knowledge maintenance is an explicit route, not a lifecycle prerequisite
 >
 > Run `$cortex:orchestrator harvest` when an existing repository needs a
-> source-backed knowledge baseline. Cortex 1.14.0 never blocks ordinary coordination
+> source-backed knowledge baseline. Cortex 1.14.1 never blocks ordinary coordination
 > because harvest has not run or project documentation is incomplete.
 
 Start the knowledge update with:
@@ -497,7 +497,7 @@ honest closure or final answer.
 
 ## How orchestration works
 
-Cortex is more than a prompt asking Codex to “run several agents.” Cortex 1.14.0 combines
+Cortex is more than a prompt asking Codex to “run several agents.” Cortex 1.14.1 combines
 a durable local coordination ledger with model-owned orchestration and
 governance. The root coordinator is a strict control plane: it delegates every
 project action and every substantive domain analysis to workers, then reasons
@@ -638,7 +638,7 @@ flowchart TB
     EVIDENCE -. "link report evidence" .-> IL
     IC -. "program evidence" .-> REVIEW
 
-    subgraph LEDGER["Durable Cortex 1.14.0 backend sidecar — storage and integrity only"]
+    subgraph LEDGER["Durable Cortex 1.14.1 backend sidecar — storage and integrity only"]
         direction LR
         DB[("~/.codex/cortex/v12/projects/<br/>p-&lt;project-hash&gt;/cortex.db<br/>SQLite schema v1")]
         ROOT["open_task alone carries project_root<br/>saves canonical root + canonical task ID<br/>returns task_ref; no host-root inference"]
@@ -698,7 +698,7 @@ flowchart TB
 ### The coordinator-only boundary
 
 The root coordinator orchestrates; it does not perform the project task. This
-is a permanent Cortex 1.14.0 invariant, independent of governance mode, task size, or
+is a permanent Cortex 1.14.1 invariant, independent of governance mode, task size, or
 worker availability.
 
 | Coordinator may | Coordinator must delegate to workers |
@@ -818,6 +818,9 @@ apply.
    rework, closure, or the final answer, it consumes the relevant canonical
    report bodies through `read_task` evidence mode to completion, and it never
    submits on behalf of a worker. Every publication is complete and immutable;
+   a confirmed successful publication ends that worker's tool activity, so it
+   emits its compact native handoff without a second publication call;
+   identical reconciliation is reserved for an actually ambiguous transport result.
    every compact ref and digest is copied byte-for-byte from a successful result or inspection,
    never parsed, reconstructed, normalized, or suffixed.
 7. **Evidence-driven adaptation.** The coordinator loads `adaptive-pipeline`
@@ -885,7 +888,7 @@ apply.
    summaries, disclosing any closure or projection limitation and summarizing
    canonical SQLite evidence inline.
 
-### Cortex 1.14.0 delegation and publication protocol
+### Cortex 1.14.1 delegation and publication protocol
 
 A worker assignment is a durable, model-authored work record. Its required `scope` is
 a non-empty text string of at most 65,536 characters containing a concise
@@ -906,6 +909,15 @@ profile proof. An unavailable fallback is limited to a degraded non-durable
 dispatch with a complete role contract plus explicit disclosure. The worker's
 first semantic operation is `read_task(view=assignment)`; it then performs its
 bounded work and publishes immutable evidence using its worker-scoped `task_ref`.
+The assignment response places a compact publication-reconciliation block with
+the exact public outcome names ahead of the larger policy and contract body.
+Medium and large structured results are not duplicated into `TextContent`, so
+the authoritative selectors are not displaced by a redundant copy of the same
+JSON. Predecessor evidence uses server-owned pagination. A worker continues
+only immediately after an otherwise-identical read returns `has_more=true`;
+after the terminal page it proceeds to work and one publication instead of
+rereading the assignment. An identical restarted page reconciles the durable
+consumption receipt without adding a second receipt or timeline event.
 The worker owns every publication call; the coordinator never submits plan,
 result, verification, synthesis, or documentation-impact evidence on its behalf.
 There is no separate public evidence-consumption operation. Neither the public
@@ -947,6 +959,17 @@ the coordinator consumes bounded evidence through `read_task`, and later
 workers receive the selected predecessor evidence inside the server-rendered
 assignment bootstrap.
 
+The complete compact UTF-8 JSON argument object for every operation has an
+advertised 65,536-byte aggregate bound independent of per-field limits. For
+`publish_result`, a root aggregate-size failure reports only bounded numeric
+actual/maximum sizes and safe advertised-section contributions. It does not
+invent a field name or include handle-reuse guidance. The worker may make one
+materially smaller, schema-complete correction that preserves every required
+coverage row, change, verification state, risk, unresolved item,
+documentation-impact conclusion, and status. Unchanged, ellipsized, truncated,
+incomplete, or still-oversize corrections stop; Cortex never silently trims
+evidence or creates a publication before validation succeeds.
+
 Later assignments receive only the relevant finalized publication evidence and
 decision context selected by the server-side report policy. Worker evidence
 remains immutable, and contradictory, blocked, or incomplete results remain
@@ -964,7 +987,7 @@ worker before consuming its worker-owned report. If it ends without a report,
 the coordinator can disclose the evidence gap and create a parent-linked
 replacement delegation.
 
-### Cortex 1.14.0 plans and user decisions
+### Cortex 1.14.1 plans and user decisions
 
 A plan is a complete `publish_plan` publication with private canonical
 content/manifest identity. It must include the explicit
@@ -984,6 +1007,14 @@ review additionally checks the current private ready view. Missing, extra,
 renamed, or cross-mixed fields are validation errors; retry with the exact
 advertised task-scoped shape rather than guessing an alias.
 
+Steering additions are complete outcomes. Independent unpaired additions create
+independent top-level contract items even when the task previously had only one
+outcome; one retire plus one add is an atomic replacement. Assignment ownership
+remains transactional and singular per current outcome. Delivery may proceed in
+parallel across distinct current outcomes, while same, stale, overlapping, or
+ambiguous ownership fails closed with bounded public classification and no
+private ledger identity.
+
 The record is evidence, not cryptographic proof that a particular human acted.
 For a plan marked `required`, and for the active `light`/`full` relation, the
 coordinator asks for explicit review before dependent work. Cortex checks the
@@ -993,12 +1024,22 @@ and a revised plan requires a new decision. Inspection, evidence reads,
 recovery, and safe planning work remain available; the narrow relation prevents
 only downstream delegation that would bypass the required review.
 
-### Cortex 1.14.0 evidence and briefing boundaries
+### Cortex 1.14.1 evidence and briefing boundaries
 
 The bundled `orchestrator` and `cortex-control` skills define coordinator
 policy, safety, governance, evidence handoff, model routing, and the uniform
 tool protocol. Advisory profiles add worker role guidance without becoming a
 second runtime contract.
+
+For planning-heavy work, pre-planner analysis is conditional. The coordinator
+creates bounded read-only Luna evidence assignments only when material
+uncertainty, separable repository questions, cross-domain dependencies, or
+conflicting evidence would otherwise force the planner to repeat broad
+discovery. Effort is chosen per question from the full advertised Luna range up
+to `max`; it is not pinned globally. There is no arbitrary total worker cap:
+useful non-duplicative assignments queue in the model-owned DAG and dispatch as
+native slots become free. The planner consumes finalized evidence, fills only
+remaining gaps, and remains the sole owner of one immutable plan.
 
 The bundled `orchestrator` is the single authority for bounded knowledge
 routing and its reusable per-delegation template. The host-injected
@@ -1030,7 +1071,7 @@ Only `open_task` accepts the exact resolved `project_root` and stores the
 canonical project association. It returns a 14-character deterministic
 `task_ref` (`t_` plus a 12-hex task suffix) for public task-anchored calls and
 preserves the full `task_id` as durable evidence. Resolution scans only private
-Cortex 1.14.0 shards and fails closed on zero or ambiguous matches.
+Cortex 1.14.1 shards and fails closed on zero or ambiguous matches.
 Its optional arbitrary JSON `context` never supplies or overrides the root.
 The seven task-anchored public tools use `task_ref` to locate and validate the
 saved project ledger; historical full `task_id` locators remain direct-service
@@ -1038,7 +1079,7 @@ compatibility only. Initiative calls use the task only as a project anchor,
 never as permission. The mandatory first assignment read carries the saved root
 for working-directory context. MCP call metadata has no
 guaranteed project-root binding, the plugin's stdio `cwd="."` is the plugin
-directory rather than the target project, and Cortex 1.14.0 has no root-inference hook.
+directory rather than the target project, and Cortex 1.14.1 has no root-inference hook.
 
 The task's operational `objective` is English-normalized. Before `open_task`,
 the coordinator reads every available user-supplied attachment or pasted
@@ -1095,9 +1136,9 @@ body. Every repaired payload carries a bounded `backfill` marker; ambiguous
 report-only lineage is warned about rather than guessed. The repair transaction
 also queues a best-effort refresh of the affected host-private views.
 
-### Cortex 1.14.0 host-private human-readable views
+### Cortex 1.14.1 host-private human-readable views
 
-SQLite remains the sole canonical store, but Cortex 1.14.0 projects current task state to
+SQLite remains the sole canonical store, but Cortex 1.14.1 projects current task state to
 private Markdown beside the database:
 
 ```text
@@ -1157,7 +1198,7 @@ The full projection layout, tamper behavior, publication contract, and
 verification scenarios are documented in
 [human-readable task views](docs/features/human-readable-task-views/index.md).
 
-### Cortex 1.14.0 model-owned rework and recovery
+### Cortex 1.14.1 model-owned rework and recovery
 
 The server owns no recovery state machine and no Luna → Terra → Sol escalation.
 After new or failed evidence, the coordinator chooses whether to create rework,
@@ -1188,7 +1229,7 @@ dependency, or failed ledger write does not prohibit the next safe meaningful
 step. The model should disclose only material missing evidence and residual
 risk.
 
-### Cortex 1.14.0 closed public response boundary
+### Cortex 1.14.1 closed public response boundary
 
 Every tool has a closed input schema and a compact public output schema in the
 active MCP registry. The complete
@@ -1234,7 +1275,7 @@ admission requires an assessment before every assignment and, for light/full
 delivery, an approved current plan whose immutable identity is derived from
 ledger state rather than supplied by the caller.
 
-### Cortex 1.14.0 public API and audience boundary
+### Cortex 1.14.1 public API and audience boundary
 
 `tools/list` exposes exactly the same fourteen tools to coordinators and workers.
 `open_task` is the sole explicit root boundary. Task-anchored operations use
@@ -1267,7 +1308,7 @@ input remains host-owned and is never rewritten through `PreToolUse.updatedInput
 the child's first assignment read supplies the authoritative full policy,
 profile, task contract, and predecessor evidence.
 
-### Cortex 1.14.0 bundled skills and advisory roles
+### Cortex 1.14.1 bundled skills and advisory roles
 
 The bundled `orchestrator` and `cortex-control` skills are the authoritative
 runtime model contract. A delegation carries bounded assignment data and exact
@@ -1306,7 +1347,7 @@ advisory closure and the final answer. Missing update or
 documentation-verification evidence leads to model-owned rework, replacement,
 or explicit risk disclosure; it never becomes a backend lifecycle gate.
 
-### Cortex 1.14.0 governance, security, and verification
+### Cortex 1.14.1 governance, security, and verification
 
 Governance assessments are append-only. An explicit user override is stored as
 `source=user_override` and is never rewritten by a backend classifier. The
@@ -1398,7 +1439,7 @@ plugins/cortex/
 └── skills/                     # Authoritative bundled runtime model contract
 ```
 
-The Cortex 1.14.0 database is separate for each resolved project root:
+The Cortex 1.14.1 database is separate for each resolved project root:
 
 ```text
 ~/.codex/cortex/v12/projects/p-<sha256-of-resolved-project-root>/cortex.db
@@ -1420,8 +1461,8 @@ pre-human-view 1.12.1 layout transactionally, preserving existing rows and
 canonicalizing its legacy reports into immutable chunks. Other unknown or
 future layouts fail closed; V11 remains a separate, untouched database family.
 
-Cortex 1.14.0 never opens, migrates, deletes, or modifies V11 databases. V11 tools and
-unfinished V11 tasks are incompatible with Cortex 1.14.0; the historical V11 namespace
+Cortex 1.14.1 never opens, migrates, deletes, or modifies V11 databases. V11 tools and
+unfinished V11 tasks are incompatible with Cortex 1.14.1; the historical V11 namespace
 is neither an identity source nor a fallback recovery surface.
 
 ---
@@ -1496,7 +1537,7 @@ Important entry points:
 
 | Path | Purpose |
 | --- | --- |
-| `plugins/cortex/scripts/cortex.py` | Cortex 1.14.0 MCP server facade |
+| `plugins/cortex/scripts/cortex.py` | Cortex 1.14.1 MCP server facade |
 | `plugins/cortex/.mcp.json` | Direct Python MCP server startup configuration |
 | `plugins/cortex/scripts/cortex_runtime/v12_contract.py` | Bounded task/report constants and canonical report digests |
 | `plugins/cortex/scripts/cortex_runtime/v12_store.py` | Project-isolated schema-v1 storage |
@@ -1526,7 +1567,7 @@ checkout from the helper's own location, creates or reuses the dedicated
 `$HOME/.cortex-dev` directory with owner-only permissions, exports
 `HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.cortex-dev/.codex` inside that candidate
 runtime, synchronizes the checkout there, and then starts ordinary interactive
-Codex. The candidate HOME, `CODEX_HOME`, plugin cache, configuration, and Cortex 1.14.0
+Codex. The candidate HOME, `CODEX_HOME`, plugin cache, configuration, and Cortex 1.14.1
 state are isolated from the stable runtime. One explicit exception supplies the
 required worker MCP: `cortex-dev` projects the enabled production
 `mcp_servers.codebase_memory` command/approval settings into the candidate and
@@ -1565,7 +1606,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-host-preflight.py
 
 # 2. Run source contract checks
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-prompt-lint.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_marketplace_release_gate.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
 
 # 3. Preview the source update without writing
 ./scripts/sync-cortex.sh --dry-run
@@ -1603,11 +1644,11 @@ CORTEX_PYTHON=/absolute/path/to/python3.11 ./scripts/sync-cortex.sh
 
 ### Operator maintenance
 
-Cortex 1.14.0 also packages a local administrator CLI for explicit health, project-shard
+Cortex 1.14.1 also packages a local administrator CLI for explicit health, project-shard
 backup, checkpoint, optimize, vacuum, offline restore, derived-projection
 prune/regeneration, and sealed-backup retention. It is **not** an MCP tool and
 does not change the exact fourteen-tool semantic catalog. Every operation starts from an
-existing Cortex 1.14.0 `task_id`, derives the host-private shard from that ID, accepts no
+existing Cortex 1.14.1 `task_id`, derives the host-private shard from that ID, accepts no
 `project_root` or arbitrary destination, emits bounded sanitized JSON, touches
 no V11 state, and writes nothing to the target project.
 
@@ -1633,11 +1674,11 @@ The complete commands, safety boundaries, and verification contract are in
 
 ### Versioning
 
-The current Cortex public contract release is **1.14.0**. Version and build identity are
+The current Cortex public contract release is **1.14.1**. Version and build identity are
 defined by `plugins/cortex/.codex-plugin/plugin.json`. The installable manifest always
-uses `1.14.0+codex.sha256.<digest-prefix>` in both the GitHub Marketplace package and
+uses `1.14.1+codex.sha256.<digest-prefix>` in both the GitHub Marketplace package and
 the isolated development candidate; the MCP server continues to advertise semantic
-version `1.14.0`.
+version `1.14.1`.
 
 When changing the plugin, update the version according to SemVer:
 
@@ -1650,11 +1691,11 @@ Build metadata after `+` is content-addressed as
 the exact production package and cannot be reused for different bytes. Runtime
 startup recomputes the packaged digest before MCP initialization and rejects a
 missing, stale, or invented suffix outside explicit source mode. An explicitly
-source-mode checkout may use plain `1.14.0` or retain its last stamped suffix
+source-mode checkout may use plain `1.14.1` or retain its last stamped suffix
 while edited and reports `parityVerified=false`; neither is an installable
 release until release validation stamps the exact current digest. The
-product/server compatibility boundary remains `1.14.0`. V11 tools and unfinished
-V11 tasks are not compatible with Cortex 1.14.0.
+product/server compatibility boundary remains `1.14.1`. V11 tools and unfinished
+V11 tasks are not compatible with Cortex 1.14.1.
 
 ### Development agreements
 
@@ -1712,7 +1753,7 @@ V11 tasks are not compatible with Cortex 1.14.0.
   SQLite, and publish only verified current absolute paths with localized
   summaries.
 - Keep operator maintenance outside the MCP registry. Derive its only targets
-  from a retained Cortex 1.14.0 `task_id`; accept no project root, arbitrary path, or V11
+  from a retained Cortex 1.14.1 `task_id`; accept no project root, arbitrary path, or V11
   target; preserve canonical data during projection/backup cleanup.
 - Keep restore strictly offline. `RESTORE`, exact task/shard, backup ID, and
   `MCP_STOPPED` record deliberate operator intent but never substitute for
@@ -1752,7 +1793,7 @@ entirely optional.
 Run the release/protocol gate before publishing a change:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_marketplace_release_gate.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
 ```
 
 The gate builds the allowlisted source candidate, compiles the bundled Python,
