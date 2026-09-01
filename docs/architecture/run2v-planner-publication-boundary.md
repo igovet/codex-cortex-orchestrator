@@ -1,5 +1,11 @@
 # run2v planner first-call publication boundary
 
+Historical development analysis. Cortex 1.14.9 no longer renders or accepts a
+bearer bootstrap capability. The exact server-rendered native message carries
+only the worker-scoped locator; a supported-host digest receipt plus the first
+terminal assignment read binds the monotonic worker connection. The historical
+text below explains the earlier failure and is not a current runtime contract.
+
 ## Finding
 
 The failure is not a reason to relax publication admission. The server already

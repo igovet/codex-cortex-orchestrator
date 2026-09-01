@@ -200,10 +200,12 @@
 - Treat planner-authored implementation microtasks as evidence for the
   model-owned orchestration DAG only. They are not backend jobs, scheduling
   instructions, worker-subtask checklists, or report-body copies.
-- Do not add a server-owned model fallback, worker recovery route, wave/gate
-  state machine, receipt-gated lifecycle, or lifecycle authorization. Preserve
-  only the narrow pre-dispatch assessment and exact light/full plan-approval
-  admission invariants; they do not schedule work or block an already bound worker.
+- Do not add a server-owned model fallback, fresh-connection worker-authority
+  recovery, wave/gate state machine, or server-selected native lifecycle.
+  Preserve the digest-only supported-host audience receipt, monotonic MCP
+  connection roles, explicit blocked/aborted successor lineage, and the narrow
+  pre-dispatch assessment plus exact light/full plan-approval admission
+  invariants; none schedules project work.
 - The activation/lifecycle hooks bind native dispatch and enforce the
   coordinator/worker capability boundary. Native wait/stop state remains outside
   the ledger and is never a prerequisite for report access or completion.

@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.1 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.14.9 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -90,12 +90,12 @@ existence/absence or unchanged-state, and project-local `.codex` checks,
 including when the user asks the coordinator to perform one.
 
 The sidecar enforces strict schemas, reference existence, project isolation,
-idempotency, transactions, uniqueness, and SQLite integrity. It does not
-enforce waves, gates, plan authority, capabilities, receipt-gated lifecycle,
-host lifecycle, profile-based capability admission, governance promotion, or a
-recovery state machine. Worker handoff reads may still emit immutable delivery
-receipts; those receipts are evidence, not enforcement. Exact packaged
-`profile_name` validation is a prompt-integrity check.
+idempotency, transactions, uniqueness, SQLite integrity, monotonic connection
+audiences, exact host-bound worker bootstrap, ordered assignment-page receipts,
+and immutable lost-assignment successor lineage. It does not enforce waves,
+model-owned gates, profile-based capability admission, governance promotion, or
+a server-selected recovery ladder. Exact packaged `profile_name` validation is
+a prompt-integrity check.
 
 ## Stack and entry points
 
@@ -122,16 +122,23 @@ receipts; those receipts are evidence, not enforcement. Exact packaged
 - `agents.default_subagent_model = "gpt-5.6-luna"`;
 - macOS or Linux, with WSL recommended on Windows.
 
-V12 ships no lifecycle hooks and requires no hook-trust flow.
+V12 ships the Cortex activation guard and sanitized lifecycle observer. Review
+and trust only the hook callbacks declared by the installed package. They are
+host-side ordering, audience-correlation, and observation guardrails; the MCP
+server independently owns connection roles, assignment evidence, publication,
+reconciliation, and durable ledger authority.
 
 ## Public contract
 
-The same fourteen tools are visible to every participant: `open_task`,
+The complete private registry contains fourteen tools: `open_task`,
 `read_task`, `open_clarification`, `record_clarification`,
 `open_plan_review`, `record_plan_review`, `open_steering`, `record_steering`,
 `open_assignment`, `publish_plan`,
 `publish_result`, `publish_documentation`, `assess_governance`, and
-`close_task`.
+`close_task`. Coordinator `tools/list` exposes coordinator operations plus
+`read_task`; a signed worker-candidate or worker receives only `read_task` and
+the three publication operations. The MCP server authorizes that boundary
+independently of discovery.
 
 The active MCP registry owns exact shapes. `open_task` alone accepts the
 resolved `project_root` and returns preferred compact `task_ref`; its canonical

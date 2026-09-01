@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.14.1 source, package, installed-host, and
+This page describes Cortex 1.14.9 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -31,12 +31,14 @@ either module.
 
 The V12 protocol evidence must prove:
 
-- `tools/list` exposes exactly the fourteen current operations: `open_task`,
+- the complete registry contains exactly the fourteen current operations: `open_task`,
   `read_task`, `open_assignment`, `publish_plan`, `publish_result`,
   `publish_documentation`, `assess_governance`, `close_task`, and the six
   narrow clarification, plan-review, and steering open/record operations;
-- coordinator and worker catalogs are identical, with no audience filtering,
-  capabilities, tool-name aliases, or selector branches;
+- coordinator `tools/list` excludes all worker publications; signed
+  worker-candidate/worker `tools/list` contains exactly `read_task` and the
+  three publications and excludes assignment creation, governance, decisions,
+  and closure;
 - runtime validation uses the same closed input schemas advertised by the
   registry and validates successful results against each complete private
   runtime result schema; the advertised `outputSchema` is a compact public
@@ -134,6 +136,18 @@ The V12 protocol evidence must prove:
   outcome names, and
   disposition-free rows agree with the planner or assigned item collection and
   are preserved through a clean first publication call;
+- worker assignment authority and predecessor evidence paginate with private
+  ordered positions and digest-only receipts; exact page restart is
+  non-mutating, skipped/stale continuations fail closed, UTF-8 fragmentation is
+  lossless at the byte boundary, and publication is unavailable until the
+  terminal page;
+- real persistent source-stdio tests prove the original host-bound connection
+  can consume and publish once, a copied locator on another initialized process
+  cannot read or publish, a coordinator connection cannot switch to worker
+  audience, and no failed copy creates a report operation;
+- lost-worker tests require explicit blocked/aborted reason and non-empty
+  evidence, atomically stale the old lease and link one successor, reject
+  unrecorded consumed or expired leases, and preserve immutable evidence;
 - `read_task` exposes the revisioned effective contract and aggregate
   coverage. Verify one stable active item per independent user outcome, linked
   acceptance/verification without duplicates, exact source fragments, one current owner per item,
@@ -262,8 +276,8 @@ Also prove all of the following:
 Verify `cortex_runtime.v12_maintenance` as a separately invoked local operator
 module, not an MCP tool:
 
-- `tools/list` remains the exact fourteen-tool registry when the module is
-  packaged;
+- the complete registry remains fourteen tools and both audience projections
+  remain exact when the module is packaged;
 - every command in this separately invoked non-MCP operator module requires a
   valid retained V12 durable `task_id`, derives the exact host-private shard,
   and rejects a root, arbitrary filesystem target, unsafe
@@ -355,7 +369,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.14.1+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.14.9+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -404,7 +418,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.14.1` with
+successful `initialize`, report semantic version `1.14.9` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -513,8 +527,14 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     exact returned initiative, and verifies the closure and links through both
     task-scoped and initiative-scoped governance. A report-only initiative,
     premature ready claim, or edited/reconstructed ID fails the scenario.
-18. Explicit activation uses host-supplied skill context without any
-    `read_mcp_resource`, `resources/read`, or `skill://` MCP request.
+18. Explicit activation uses the real `$cortex:orchestrator` token or host
+    skill picker and normally receives complete host-supplied skill context.
+    After compaction the `SessionStart(source=compact)` hook reinjects the exact
+    packaged skills with `additionalContextLimit=0`; `PostCompact` is
+    observation-only, and the host skill loader may repeat
+    the same load whenever needed. It uses no `cat`, filesystem/shell read,
+    approval, elevated execution, MCP resource, project copy, or `skill://`;
+    decorative bracket text is not activation.
 19. Four successful durable delegations produce four distinct matching native
     spawns from their returned payloads, each with `fork_turns="none"`, explicit
     selected effort, correct Luna/Terra/Sol model transport, full renderer and
@@ -577,7 +597,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.14.1/schema-v1 identifiers;
+- V12/1.14.9/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional

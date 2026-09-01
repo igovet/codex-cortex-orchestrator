@@ -1,9 +1,9 @@
-"""Small, policy-neutral MCP stdio transport for the Cortex v12 ledger.
+"""Bounded MCP stdio transport and connection-audience boundary for Cortex.
 
-This module intentionally knows nothing about coordinator/worker roles, native
-children, host threads, governance state, or lifecycle progression.  It only
-advertises one fixed catalogue, validates its schemas, and transports durable
-service results as JSON-RPC MCP tool results.
+The module owns one complete registry but advertises an audience-specific
+projection on each connection. Host lifecycle supplies one signed, digest-only
+worker-candidate claim; semantic assignment consumption and durable authority
+remain in the ledger/domain layer.
 """
 from __future__ import annotations
 
@@ -21,6 +21,12 @@ from cortex_runtime.provenance import verify_runtime
 from cortex_runtime.event_journal import EventJournal
 from cortex_runtime.raw_diagnostic import append as raw_diagnostic
 from cortex_runtime.observation_generation import ObservationGenerationError, candidate_codex_home, claim_generation, write_ready_receipt
+from cortex_runtime.audience_attestation import (
+    claim_matches_task,
+    claim_worker_candidate,
+    fresh_worker_candidate_available,
+    release_worker_candidate_claim,
+)
 from cortex_runtime.v12_service import V12ServiceError
 from cortex_runtime.v12_contract import MCP_OPERATION_MAX_BYTES, record_ref, record_ref_parts, task_ref, task_ref_parts
 from cortex_runtime.semantic_registry import OPERATION_NAMES, error_contract, spec_for
@@ -34,12 +40,22 @@ from cortex_runtime.semantic_registry import OPERATION_NAMES, error_contract, sp
 MCP_SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
 MCP_PROTOCOL_VERSION = MCP_SUPPORTED_PROTOCOL_VERSIONS[0]
 _MAX_TOOLS = len(OPERATION_NAMES)
+_WORKER_PUBLICATIONS = frozenset({
+    "publish_plan", "publish_result", "publish_documentation",
+})
+_WORKER_AUDIENCE_TOOLS = frozenset({"read_task", *_WORKER_PUBLICATIONS})
+_COORDINATOR_AUDIENCE_TOOLS = frozenset(OPERATION_NAMES) - _WORKER_PUBLICATIONS
 # MCP stdio is JSONL.  Enforce this at the byte transport boundary before a
 # JSON parser can allocate for an unbounded physical line.  The terminating
 # newline is part of the physical frame when present.
 MAX_PHYSICAL_JSONL_FRAME_BYTES = 256 * 1024
 _FRAME_READ_LIMIT = MAX_PHYSICAL_JSONL_FRAME_BYTES + 1
 _MAX_REQUEST_ID_BYTES = 512
+# A request id is bounded before reply construction, but JSON string escaping
+# can expand it on the wire.  Keep a larger fixed allowance for the JSON-RPC
+# envelope when deciding whether compatibility TextContent can carry the full
+# successful result as well as structuredContent.
+_TOOL_RESULT_WIRE_RESERVE_BYTES = 8 * 1024
 _TOOLS_LIST_CURSOR_PREFIX = "cortex-tools-list-v1:"
 _SAFE_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_PATH_RE = re.compile(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}|\[[0-9]{1,4}\]){0,16}$")
@@ -64,6 +80,56 @@ _SAFE_VALIDATION_REASONS = frozenset({
     "stale_current_outcome", "ownership_conflict", "scope_overlap",
     "invalid_decomposition", "unchanged_retry", "correction_exhausted",
 })
+
+
+def _plugin_data_root() -> Path | None:
+    """Resolve the exact shared owner-private plugin data directory."""
+    data_root = os.environ.get("PLUGIN_DATA")
+    if isinstance(data_root, str) and data_root:
+        return Path(data_root)
+    codex_home = os.environ.get("CODEX_HOME")
+    if not isinstance(codex_home, str) or not codex_home:
+        return None
+    return Path(codex_home) / "plugins" / "data" / "cortex-cortex"
+
+
+def _host_worker_candidate_available() -> bool:
+    """Select the candidate catalogue from fresh signed host lifecycle state."""
+    plugin_data = _plugin_data_root()
+    if plugin_data is None:
+        return False
+    return fresh_worker_candidate_available(plugin_data)
+
+
+def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Advertise the only model-selected fields valid before worker bootstrap."""
+    source = contract.get("inputSchema")
+    properties = source.get("properties") if isinstance(source, Mapping) else None
+    if not isinstance(properties, Mapping) or not isinstance(properties.get("task_ref"), Mapping):
+        raise RuntimeError("read_task candidate schema is unavailable")
+    candidate_properties: dict[str, Any] = {
+        "task_ref": dict(properties["task_ref"]),
+    }
+    if not isinstance(properties.get("view"), Mapping):
+        raise RuntimeError("read_task candidate view schema is unavailable")
+    candidate_properties["view"] = {
+        **dict(properties["view"]),
+        "enum": ["assignment"],
+        "description": "Required worker-candidate view; assignment is the only permitted value.",
+    }
+    if isinstance(properties.get("continue"), Mapping):
+        candidate_properties["continue"] = dict(properties["continue"])
+    return {
+        "type": "object",
+        "description": (
+            "Worker-candidate assignment bootstrap. Supply only the exact server-rendered "
+            "worker-scoped task_ref and the sole advertised assignment view. After a page "
+            "returns has_more=true, repeat with continue=true; otherwise omit continue."
+        ),
+        "properties": candidate_properties,
+        "required": ["task_ref", "view"],
+        "additionalProperties": False,
+    }
 
 
 def catalogue_identity(public_tools: Mapping[str, Mapping[str, Any]]) -> dict[str, object]:
@@ -575,7 +641,15 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
     parts.append(f"Action: {action}")
     if code in {"invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found", "initiative_not_found", "decision_not_found"}:
         parts.append("Handle rule: do not retry a shortened, ellipsized, inferred, or reconstructed value; reuse the exact structuredContent.handles value from the last success.")
-    parts.append("Retryable now: yes." if retryable else "Retryable unchanged: no; correct the request first.")
+    if retryable:
+        parts.append("Retryable now: yes.")
+    elif code in {
+        "assignment_not_consumed", "wrong_connection", "connection_lost",
+        "assignment_stale", "publication_conflict",
+    }:
+        parts.append("Retryable unchanged: no.")
+    else:
+        parts.append("Retryable unchanged: no; correct the request first.")
     return " ".join(parts)[:2_048]
 
 
@@ -946,24 +1020,29 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
     content = []
     if leading_view is not None:
         content.append({"type": "text", "text": leading_view})
-    # Duplicating a large structured result into TextContent can make an
-    # otherwise bounded result exceed the physical JSONL frame. Preserve the
-    # compatibility duplicate for ordinary responses, but use one fixed
-    # non-authoritative notice once the structured body itself is large. The
-    # complete authoritative value remains in ``structuredContent``.
-    # Keep ordinary compact results duplicated for older clients, but do not
-    # double a medium/large assignment into both MCP content channels. The
-    # aggregate operation limit is the conservative model-visible threshold;
-    # using one quarter leaves room for the outer JSON-RPC envelope and keeps
-    # large structured assignment evidence from being displaced by its own
-    # redundant text copy.
-    text_duplicate_max_bytes = MCP_OPERATION_MAX_BYTES // 4
-    text_payload = (
-        serialized
-        if len(serialized.encode("utf-8")) <= text_duplicate_max_bytes
-        else "Complete Cortex result is available in structuredContent."
-    )
-    content.append({"type": "text", "text": text_payload})
+    # Some supported hosts expose only TextContent to the model even though
+    # the MCP event retains structuredContent.  In particular, a successful
+    # one-shot worker bootstrap must therefore be self-contained in the first
+    # model-visible response: a placeholder would invite an invalid replay of
+    # the already consumed assignment.  Duplicate the canonical JSON whenever
+    # the *complete encoded tool result* still leaves a conservative allowance
+    # for the bounded JSON-RPC request id and envelope.  Only genuinely large
+    # non-duplicable results fall back to the fixed notice.
+    candidate_content = [*content, {"type": "text", "text": serialized}]
+    candidate = {
+        "content": candidate_content,
+        "structuredContent": structured,
+        "isError": False,
+    }
+    candidate_bytes = len(json.dumps(
+        candidate, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8"))
+    if candidate_bytes <= MAX_PHYSICAL_JSONL_FRAME_BYTES - _TOOL_RESULT_WIRE_RESERVE_BYTES:
+        return candidate
+    content.append({
+        "type": "text",
+        "text": "Complete Cortex result is available in structuredContent.",
+    })
     return {
         # MCP recommends serialized structured content in TextContent for
         # clients that predate structuredContent.  Both blocks are derived
@@ -1045,15 +1124,16 @@ def serve_stdio(
         ):
             raise RuntimeError("Cortex v12 public tool binding is invalid")
 
-    catalog_tools = tuple(
-        {
+    catalog_by_name = {
+        name: {
             "name": name,
             "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
             "outputSchema": dict(contract["outputSchema"]),
         }
         for name, contract in public_tools.items()
-    )
+    }
+    catalog_tools = tuple(catalog_by_name[name] for name in public_tools)
     # MCP outputSchema is optional.  Keep the family-specific result schemas
     # private to the runtime validation boundary below instead of repeating
     # them in every deferred host-tool declaration.  The successful result's
@@ -1151,6 +1231,7 @@ def serve_stdio(
             operation=name, kind=kind, success=success, fault=fault,
             mutation=mutation, task_anchor=task_anchor,
             assignment_anchor=assignment_anchor,
+            connection_role=connection_context.get("_role"),
             publication_type=publication_type, publication_status=publication_status,
             dispatch_correlation_marker=dispatch_marker,
             validation_location=validation_location, validation_field=validation_field,
@@ -1217,20 +1298,41 @@ def serve_stdio(
         """Build the largest complete catalog page that fits one JSONL frame.
 
         MCP defines ``tools/list`` pagination through ``nextCursor``. Cortex
-        keeps its fixed public catalogue in the first bounded response because
-        ordinary Codex discovery consumes that response as the advertised
-        catalog. The wire carries each operation's complete input and output
-        schema; structuredContent remains unchanged on every call.
+        keeps each immutable audience projection in one bounded response so
+        ordinary Codex discovery sees no operation outside the connection's
+        authenticated audience. The complete private registry still owns the
+        schemas and handlers behind the independent server authorization gate.
         """
-        start = _tools_list_offset(cursor, len(catalog_tools))
+        audience = connection_context.get("_audience")
+        allowed = (
+            _WORKER_AUDIENCE_TOOLS
+            if audience in {"worker_candidate", "worker"}
+            else _COORDINATOR_AUDIENCE_TOOLS
+        )
+        advertised_tools = tuple(
+            (
+                {
+                    **catalog_by_name[name],
+                    "description": (
+                        "Worker-candidate assignment bootstrap. Assignment is the only "
+                        "advertised semantic view; use only this closed schema."
+                    ),
+                    "inputSchema": _worker_candidate_read_schema(public_tools[name]),
+                }
+                if audience == "worker_candidate" and name == "read_task"
+                else catalog_by_name[name]
+            )
+            for name in public_tools if name in allowed
+        )
+        start = _tools_list_offset(cursor, len(advertised_tools))
         if start is None:
             return None
         page: list[Mapping[str, Any]] = []
-        for offset in range(start, len(catalog_tools)):
-            candidate = [*page, catalog_tools[offset]]
+        for offset in range(start, len(advertised_tools)):
+            candidate = [*page, advertised_tools[offset]]
             next_offset = offset + 1
             result: dict[str, Any] = {"tools": candidate}
-            if next_offset < len(catalog_tools):
+            if next_offset < len(advertised_tools):
                 result["nextCursor"] = _tools_list_cursor(next_offset)
             payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
             if len(render(payload).encode("utf-8")) > MAX_PHYSICAL_JSONL_FRAME_BYTES:
@@ -1245,7 +1347,7 @@ def serve_stdio(
             return {"tools": []}
         next_offset = start + len(page)
         result = {"tools": page}
-        if next_offset < len(catalog_tools):
+        if next_offset < len(advertised_tools):
             result["nextCursor"] = _tools_list_cursor(next_offset)
         return result
 
@@ -1263,7 +1365,34 @@ def serve_stdio(
     active_task_ref: str | None = None
     # Private per-connection actor and bounded-read state. It is never merged
     # into advertised schemas or returned structured content.
-    connection_context: dict[str, Any] = {}
+    connection_context: dict[str, Any] = {
+        # Durable for the lifetime of this stdio connection and deliberately
+        # separate from bounded-read/publication transient fields. A role is
+        # committed only after a successful semantic boundary and is never
+        # cleared by cursor resets, validation failures, or handler errors.
+        "_role": "unknown",
+        "_role_history": [],
+        "_connection_nonce": os.urandom(32).hex(),
+        "_audience": "unattributed",
+        "_host_worker_claim": None,
+    }
+
+    def release_failed_candidate() -> None:
+        """Undo only the server claim when worker bootstrap did not succeed."""
+        if (
+            connection_context.get("_audience") != "worker_candidate"
+            or connection_context.get("_role") == "worker"
+        ):
+            return
+        claim = connection_context.get("_host_worker_claim")
+        plugin_data = _plugin_data_root()
+        if plugin_data is not None and isinstance(claim, Mapping):
+            release_worker_candidate_claim(
+                plugin_data, claim=claim,
+                connection_nonce=str(connection_context["_connection_nonce"]),
+            )
+        connection_context["_host_worker_claim"] = None
+
     while True:
         line, frame_rejected = _read_physical_jsonl_frame(sys.stdin)
         if frame_rejected:
@@ -1332,6 +1461,10 @@ def serve_stdio(
                     provenance = verify_runtime(package_root, server_version, allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1")
                 except RuntimeError as exc:
                     raise SystemExit(f"Cortex candidate provenance verification failed: {exc}") from exc
+                if not _host_worker_candidate_available():
+                    connection_context["_audience"] = "coordinator"
+                else:
+                    connection_context["_audience"] = "worker_candidate"
                 requested_protocol_version = params["protocolVersion"]
                 negotiated_protocol_version = (
                     requested_protocol_version
@@ -1434,7 +1567,52 @@ def serve_stdio(
                 continue
             contract = public_tools[name]
             resolved_arguments = dict(arguments)
-            input_schema = contract.get("_runtimeInputSchema", contract["inputSchema"])
+            audience = connection_context.get("_audience")
+            role = connection_context.get("_role")
+            input_schema = (
+                _worker_candidate_read_schema(contract)
+                if audience == "worker_candidate" and name == "read_task"
+                else contract.get("_runtimeInputSchema", contract["inputSchema"])
+            )
+            allowed = (
+                _WORKER_AUDIENCE_TOOLS
+                if audience in {"worker_candidate", "worker"}
+                else _COORDINATOR_AUDIENCE_TOOLS
+            )
+            audience_failure: str | None = None
+            if audience == "worker_candidate" and name in _WORKER_PUBLICATIONS:
+                audience_failure = "assignment_not_consumed"
+            elif name not in allowed:
+                if audience == "coordinator" and name in _WORKER_PUBLICATIONS:
+                    from cortex_runtime.domain_api import worker_assignment_connection_code
+                    audience_failure = worker_assignment_connection_code(
+                        arguments.get("task_ref")
+                    )
+                else:
+                    audience_failure = "wrong_connection"
+            elif name == "read_task" and isinstance(arguments, Mapping):
+                requested_view = arguments.get("view")
+                if audience == "coordinator" and requested_view == "assignment":
+                    from cortex_runtime.domain_api import worker_assignment_connection_code
+                    audience_failure = worker_assignment_connection_code(
+                        arguments.get("task_ref")
+                    )
+                elif audience == "worker" and requested_view == "state":
+                    audience_failure = "wrong_connection"
+            if audience_failure is not None:
+                failure = {
+                    "code": audience_failure,
+                    "message": _safe_message(audience_failure),
+                    "details": {},
+                    "retryable": _recovery(audience_failure, {})[0],
+                    "action": _recovery(audience_failure, {})[1],
+                }
+                finish_tool_call(
+                    request_id, name, arguments,
+                    _tool_error_result(failure, mutation=name),
+                    success=False, fault=audience_failure, failure=failure,
+                )
+                continue
             correcting_aggregate = False
             try:
                 actual_argument_bytes = _encoded_json_bytes(arguments, "$")
@@ -1495,6 +1673,38 @@ def serve_stdio(
                         )
                     resolved_arguments["task_ref"] = active_task_ref
                 _validate_public_call_shape(name, resolved_arguments)
+                if audience == "worker_candidate" and name == "read_task":
+                    plugin_data = _plugin_data_root()
+                    host_worker_claim = connection_context.get("_host_worker_claim")
+                    if not claim_matches_task(
+                        host_worker_claim, resolved_arguments.get("task_ref")
+                    ):
+                        host_worker_claim = (
+                            claim_worker_candidate(
+                                plugin_data,
+                                task_ref=resolved_arguments.get("task_ref"),
+                                connection_nonce=str(connection_context["_connection_nonce"]),
+                            )
+                            if plugin_data is not None else None
+                        )
+                    if not claim_matches_task(
+                        host_worker_claim, resolved_arguments.get("task_ref")
+                    ):
+                        audience_failure = "wrong_connection"
+                        failure = {
+                            "code": audience_failure,
+                            "message": _safe_message(audience_failure),
+                            "details": {},
+                            "retryable": _recovery(audience_failure, {})[0],
+                            "action": _recovery(audience_failure, {})[1],
+                        }
+                        finish_tool_call(
+                            request_id, name, resolved_arguments,
+                            _tool_error_result(failure, mutation=name),
+                            success=False, fault=audience_failure, failure=failure,
+                        )
+                        continue
+                    connection_context["_host_worker_claim"] = host_worker_claim
             except _SchemaError as error:
                 if (
                     correcting_aggregate
@@ -1514,11 +1724,23 @@ def serve_stdio(
                 handler_arguments = dict(resolved_arguments)
                 if name in {"read_task", "publish_plan", "publish_result", "publish_documentation"}:
                     handler_arguments["_connection_context"] = connection_context
+                worker_read = (
+                    name == "read_task"
+                    and (
+                        resolved_arguments.get("view") == "assignment"
+                        or role == "worker"
+                    )
+                )
+                worker_publication = name in {
+                    "publish_plan", "publish_result", "publish_documentation",
+                }
                 result = contract["handler"](**handler_arguments)
             except V12ServiceError as error:
+                release_failed_candidate()
                 failure = _service_failure(error)
                 finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault=str(failure["code"]), failure=failure)
             except sqlite3.Error as error:
+                release_failed_candidate()
                 if _sqlite_is_busy(error):
                     failure = {
                         "code": "storage_busy",
@@ -1532,6 +1754,7 @@ def serve_stdio(
                     failure = _internal_ledger_failure()
                     finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault="ledger_error", failure=failure)
             except (TypeError, ValueError):
+                release_failed_candidate()
                 # Public input validation and typed V12ServiceError cover all
                 # caller-correctable failures. A raw Python type/value error
                 # after dispatch is an implementation fault, not a second
@@ -1539,12 +1762,32 @@ def serve_stdio(
                 failure = _internal_ledger_failure()
                 finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault="ledger_error", failure=failure)
             except Exception:
+                release_failed_candidate()
                 failure = _internal_ledger_failure()
                 finish_tool_call(request_id, name, resolved_arguments, _tool_error_result(failure, mutation=name), success=False, fault="ledger_error", failure=failure)
             else:
                 if not isinstance(result, Mapping) or not _is_json_value(result):
+                    release_failed_candidate()
                     finish_internal_tool_error(request_id, name, resolved_arguments)
                     continue
+                if role == "unknown":
+                    if connection_context.get("_role") == "worker":
+                        committed_role = "worker"
+                        connection_context["_audience"] = "worker"
+                    elif name == "read_task" and resolved_arguments.get("view") == "assignment":
+                        # Non-terminal assignment pages deliberately leave the
+                        # connection unknown. The terminal page handler is the
+                        # sole worker-role commitment boundary.
+                        committed_role = "unknown"
+                    elif worker_publication:
+                        committed_role = "unknown"
+                    else:
+                        committed_role = "coordinator"
+                        connection_context["_role"] = committed_role
+                    if committed_role != "unknown":
+                        history = connection_context.get("_role_history")
+                        if isinstance(history, list) and not history:
+                            history.append(committed_role)
                 discovered_task_ref = result.get("task_ref")
                 # Keep one private, observation-only snapshot before public
                 # projection removes internal correlation metadata.  The
@@ -1571,6 +1814,7 @@ def serve_stdio(
                             "result": result,
                         },
                     )
+                    release_failed_candidate()
                     finish_internal_tool_error(request_id, name, resolved_arguments)
                     continue
                 if isinstance(discovered_task_ref, str) and task_ref_parts(discovered_task_ref) is not None:

@@ -40,6 +40,25 @@ def test_activation_kernels_define_task_ref_only_llm_owned_orchestration() -> No
 def test_preload_metadata_blocks_unanchored_user_questions() -> None:
     orchestrator = (ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8").lower()
     description = orchestrator.split("---", 2)[1]
-    assert "read this skill completely before task-specific commentary, questions, plans, or results" in description
-    assert "first project operation is open_task" in description
+    assert "read this skill completely before task-specific output" in description
+    assert "after compaction or reset, accept its complete exact repeat" in description
+    assert "without requesting user approval" in description
+    assert "first task-specific output or action must be open_task" in description
+    assert "no activation acknowledgement, commentary, question, plan, or result before its success" in description
     assert "no user question may be rendered before" in orchestrator
+
+
+def test_compaction_reload_is_available_without_an_approval_prompt() -> None:
+    orchestrator = (ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8").lower()
+    recovery = (ROOT / "plugins/cortex/skills/context-compaction/SKILL.md").read_text(encoding="utf-8").lower()
+    combined = orchestrator + recovery
+    for required in (
+        "host skill loader",
+        "sessionstart(source=compact)",
+        "repeated loading remains permitted",
+        "user approval question",
+        "stop safely if exact host reload is unavailable",
+    ):
+        assert required in combined
+    assert "`cat`" in combined
+    assert "additionalcontextlimit=0" in combined

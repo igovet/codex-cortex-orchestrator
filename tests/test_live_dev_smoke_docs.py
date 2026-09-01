@@ -96,6 +96,7 @@ def test_prompt_fixture_is_task_specific_without_mcp_parameter_hints() -> None:
     prompt = (ROOT / "tests/fixtures/live_cortex_stabilization_prompt.txt").read_text(encoding="utf-8")
     assert "already live-dev" in prompt
     assert "selected route is $cortex:orchestrator" in prompt
+    assert "[$cortex:orchestrator]" not in prompt
     assert "Cortex MCP tools for ledger operations and orchestration evidence" in prompt
     assert "Native collaboration/subagents are allowed and required" in prompt
     assert "worker dispatch and report ownership" in prompt
@@ -113,6 +114,7 @@ def test_prompt_fixture_is_task_specific_without_mcp_parameter_hints() -> None:
     assert "If any mutation is repeated, do not emit the success sentinel" in prompt
     workload = (ROOT / "tests/fixtures/live_contract_workload.json").read_text(encoding="utf-8")
     assert "selected route is $cortex:orchestrator" in workload
+    assert "[$cortex:orchestrator]" not in workload
     assert "Cortex MCP tools for ledger operations and orchestration evidence" in workload
     assert "Native collaboration/subagents are allowed and required" in workload
     assert "worker dispatch and report ownership" in workload
@@ -603,7 +605,7 @@ def test_events_rejects_resigned_stale_lease(monkeypatch, tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("field,value", [
     ("candidate_path", "/tmp/not-the-candidate"),
-    ("candidate_version", "1.14.1+codex.sha256." + "0" * 16),
+    ("candidate_version", "1.14.9+codex.sha256." + "0" * 16),
     ("build_id", "sha256:" + "0" * 64),
     ("source_digest", "0" * 64),
     ("candidate_digest", "0" * 64),

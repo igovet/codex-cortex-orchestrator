@@ -98,18 +98,25 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | --- | --- |
 | `open_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful result fields; return preferred `task_ref`. |
 | `read_task` | Use `task_ref` with `view=state|assignment|evidence`; use `continue=true` only to resume the immediately preceding bounded read. |
-| `open_assignment` | Use `task_ref` to store objective, role, packaged profile, scope, instructions, evidence inputs, and model/effort; return the host-neutral worker bootstrap. |
-| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref`; Cortex derives the consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. |
+| `open_assignment` | Use `task_ref` to store objective, role, packaged profile, scope, instructions, evidence inputs, and model/effort; return the host-neutral worker bootstrap. A confirmed lost delivery predecessor requires explicit blocked/aborted reason and evidence; Cortex derives and links the successor atomically. |
+| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref` on the exact host-bound MCP connection; Cortex derives the terminally consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. |
 | `assess_governance` | Use `task_ref` to append a model or user-override assessment. |
 | `close_task` | Record the final advisory closure aggregate from durable evidence. |
 | `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
 | `open_plan_review` → `record_plan_review` | Present and record one immutable plan review through a matching server-owned binding. |
 | `open_steering` → `record_steering` | Ask and record one steering change through a matching server-owned binding. |
 
-The catalog is identical for coordinators and workers. There is no audience
-filter, capability matrix, host-bound lifecycle authority, receipt-gated
-selector, tool-name alias, or profile admission rule. Worker handoff reads may
-emit immutable delivery receipts, but those receipts are not authority.
+The catalog is identical for coordinators and workers, but server roles are
+monotonic per MCP connection and the host lifecycle binds a child audience
+before assignment consumption. The owner-private receipt contains only bounded
+digests and categories; no locator, native message, assignment body, or bearer
+secret is persisted.
+
+Publication reconnect does not create a second bootstrap path. A fresh process
+cannot recover consumed publication authority from the worker-scoped
+`task_ref`, a report, a bare assignment reference, or the durable continuation.
+Confirmed worker loss is handled only by immutable blocked/aborted evidence and
+an explicitly linked successor assignment.
 
 
 Returned task IDs use `task-<64-lowercase-hex-project-shard>-<32-lowercase-hex-record>`
@@ -271,8 +278,10 @@ the standard Codex To-Do projection. The coordinator may use that evidence to
 add, remove, reorder, or rework worker stages while completed reports remain
 immutable.
 Independent delegations may proceed concurrently, and a missing worker report
-does not block replacement or synthesis. Status is `partial`, `completed`,
-`blocked`, or `failed`; it does not imply acceptance or native termination.
+does not block synthesis or unrelated scope. Replacing the same nonterminal
+delivery owner requires explicit blocked/aborted reason and evidence. Status is
+`partial`, `completed`, `blocked`, or `failed`; it does not imply acceptance or
+native termination.
 
 ## Effective outcome coverage
 

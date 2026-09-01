@@ -1,13 +1,23 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.14.1 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
+description: Explicit opt-in Cortex v1.14.9 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. Read this skill completely before task-specific output; after compaction or reset, accept its complete exact repeat through host-supplied context or the host skill loader without requesting user approval. The first task-specific output or action must be open_task: render no activation acknowledgement, commentary, question, plan, or result before its success.
 ---
 
-# Cortex Orchestrator v1.14.1
+# Cortex Orchestrator v1.14.9
 
 ## Activation and language
 
 Activate only when the user explicitly selects `cortex:orchestrator`. `help` is read-only guidance, `harvest` and `harvest-refresh` are explicit knowledge routes, and `normal` leaves Cortex. Never infer activation from complexity or repository state. The live MCP catalogue is authoritative for every call shape; do not teach or guess arguments outside its schemas.
+
+The host supplies this complete skill content when it activates the route.
+Treat that context as the authoritative initial read. After compaction/reset,
+`SessionStart(source=compact)` repeats the exact packaged skill through host context with no
+context truncation; the standard host skill loader may also repeat the same
+exact load whenever needed. Repetition is never forbidden or consumed. Never
+replace either load with `cat`, shell/filesystem inspection, an MCP resource,
+project copy, elevated execution, or a user approval question. If exact host
+reload is unavailable, stop before further project operations and report
+activation recovery as unavailable.
 
 Worker communication, commentary, reports, and durable ledger prose are English. Coordinator communication follows the latest meaningful user-message language unless explicitly overridden. Preserve exact source text only in schema fields intended for it.
 
@@ -45,7 +55,7 @@ The coordinator stores only `task_ref`. It never stores, copies, reconstructs, o
 
 ## Reading
 
-`read_task` is the only task read surface. Coordinator state reads expose current semantic outcomes and neutral facts; coordinator evidence reads use a semantic report policy. A fresh worker's exact first Cortex call is the assignment view using the worker-scoped `task_ref` from the server-rendered native dispatch. Continuation uses only the advertised boolean; the server owns position. After restart, start the read again and let the server reconcile consumption receipts. A worker never first reads general state, infers an assignment, or uses another worker's `task_ref`.
+`read_task` is the only task read surface. Coordinator state reads expose current semantic outcomes and neutral facts; coordinator evidence reads use a semantic report policy. A fresh worker's exact first Cortex call follows the narrow candidate-specific advertised contract using the worker reference from the server-rendered native dispatch; assignment is the only candidate view. The server owns bounded-read position. After restart, start the read again and let the server reconcile consumption receipts. A worker never first reads general state, infers an assignment, or uses another worker's reference.
 
 The fresh worker derives that finite first read only from the live advertised contract and the exact server-rendered authority. A deterministic caller-shape rejection permits one materially corrected attempt only when bounded diagnostics make the correction unambiguous. The worker never repeats the unchanged malformed request, guesses identity or authority, or begins project work before successful consumption. A second deterministic failure, incomplete diagnostics, or a correction that would require guessing ends the assignment honestly. An ambiguous transport outcome permits only identical reconciliation, never a replacement assignment or a changed request.
 
@@ -63,7 +73,21 @@ After the selected evidence set settles, create one planning assignment that con
 
 Every assignment must be scoped from the complete effective contract. Assignment instructions may explain ownership and stopping boundaries, but may not be the sole carrier of a source-derived requirement and may not replace exact outcome acceptance, constraints, verification, or context with "see the attachment" or equivalent shorthand. Before native spawn, confirm that each assigned outcome's exact contract details are present in the server-owned assignment evidence that `read_task` will return.
 
-Immediately before every assignment, read current task state and select the complete exact unique semantic outcome names from that current effective contract. Do not reuse a pre-steering snapshot, paraphrase, merge, or invent an outcome. An explicit stale-current-outcome rejection permits at most one fresh-state read and one rebuilt assignment when the intended scope maps unambiguously to the current contract. Never retry the unchanged request or reconstruct a retired outcome; stop honestly when remapping is ambiguous. A corrected successful non-replayed dispatch still spawns exactly once and immediately, while replayed or ambiguous mutation evidence never creates a duplicate worker.
+Workers must treat the expected absence of planned, optional, or not-yet-created
+paths as successful evidence rather than a failed command. A bounded filesystem
+probe must be existence-aware before addressing such a path, emit a clear
+absent state, and exit cleanly; never run a command directly against a possibly
+missing path merely to learn whether it exists.
+
+Workers must likewise establish repository capability before invoking any Git
+command. The canonical project root is not proof that it is a Git worktree. Use
+a bounded, failure-normalizing capability probe whose own process exits cleanly
+and records either supported or unsupported; invoke Git only after supported is
+established. A non-Git project is successful observed evidence and Git-dependent
+inspection is skipped, never attempted speculatively and never reported through
+a nonzero command failure.
+
+Immediately before every assignment, read current task state and select the complete exact unique semantic outcome names from that current effective contract. Bind selection by the exact outcome-keyed ownership and delivery-assignability disposition, never by aggregate row position. Ordinary delivery selects only `assignable` outcomes; `not_assignable_terminal_owner` outcomes remain immutable evidence, while `loss_recovery_only` outcomes require the explicit confirmed-loss successor path. Planning and evidence work may inspect owned outcomes but cannot turn that responsibility label into delivery ownership. Do not reuse a pre-steering snapshot, paraphrase, merge, or invent an outcome. An explicit stale-current-outcome rejection permits at most one fresh-state read and one rebuilt assignment when the intended scope maps unambiguously to the current contract. Never retry the unchanged request or reconstruct a retired outcome; stop honestly when remapping is ambiguous. A corrected successful non-replayed dispatch still spawns exactly once and immediately, while replayed or ambiguous mutation evidence never creates a duplicate worker.
 
 After task creation and before the first assignment, make and record one explicit, evidence-backed advisory governance assessment and governance-depth decision from the user request and complete semantic contract. Select the depth before invoking the assessment operation; rationale or risk notes alone are not an assessment. Bounded low-risk work is normally minimal; multi-step or cross-surface user-visible work is normally light; authentication, authorization, security, privacy, credentials, money or stored value, destructive action, production-critical behavior, or comparable cross-domain risk is full. Only the root coordinator owns this operation. Reassess only when material new evidence changes risk and only after the coordinator deliberately selects a current depth; worker completion, repeated planning, or plan revision alone is not a reassessment trigger. No native worker or packaged profile may assess governance. The assessment remains advisory and never expands coordinator project access.
 
@@ -106,7 +130,8 @@ choice from silence, an earlier message, a worker report, or the absence of
 objections. An initial request to close automatically after future work is not
 a current post-result review and cannot authorize closure. Never call the
 closure operation as a readiness probe; open and record the current review
-first. Do not attempt closure while that review is unanswered.
+first through the advertised `open_clarification` and `record_clarification`
+operations. Do not attempt closure while that review is unanswered.
 
 If the user chooses to revise, keep the same task open and continue from its
 current semantic contract and evidence. Ask for the missing requirement or

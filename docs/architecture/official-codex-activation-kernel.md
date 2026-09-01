@@ -1,7 +1,15 @@
 # Official Codex activation-kernel design
 
-Status: **source design and hook implementation; candidate/live qualification
-pending**
+Status: **implemented and qualified for the Cortex 1.14.9 supported-host
+boundary**
+
+The original activation kernel has since grown a bounded native-worker
+audience guard. Its owner-only state contains route booleans plus sanitized
+routing categories and correlation digests. It never stores prompt text, task
+or worker locators, native message plaintext, assignment bodies, reports,
+credentials, or raw tool output. The MCP server independently commits
+monotonic connection roles and ledger authority; hook success alone never
+authorizes worker project work or publication.
 
 This design follows the current official OpenAI Codex documentation for
 [Build skills](https://learn.chatgpt.com/docs/build-skills) and
@@ -56,10 +64,13 @@ ordinary turn
 ```
 
 The hook never calls the task-opening operation. The model must make that call
-using the live advertised schema. Hook state contains only booleans and a
-bounded continuation count. State files are stored below `PLUGIN_DATA` under
-a SHA-256 filename derived from the turn identifier; prompt text, call
-arguments, opaque references, reports, and raw tool output are never stored.
+using the live advertised schema. Coordinator activation state is stored below
+`PLUGIN_DATA` under digest-named session/turn paths. Native dispatch receipts
+progress atomically through bounded digest-only lifecycle states; the worker
+MCP process resolves the same owner-only package data root through `CODEX_HOME`
+when the hook-only `PLUGIN_DATA` variable is absent. Prompt text, locators,
+native message plaintext, assignment bodies, reports, credentials, call
+arguments, and raw tool output are never stored.
 
 An opening result that is transport-ambiguous does not cause the hook to issue
 another opening. The coordinator performs read-only reconciliation using the
@@ -72,7 +83,7 @@ stops honestly.
 | --- | --- | --- |
 | `agents/openai.yaml` | Explicit invocation policy and Cortex MCP dependency metadata | Declarative packaging metadata only |
 | `hooks/hooks.json` | Official plugin-bundled lifecycle registration | Requires Codex trust review for changed definitions |
-| `hooks/cortex_activation.py` | Turn-scoped selection, guardrail, anchor observation, bounded stop continuation | No runtime imports, no MCP calls, no raw-data persistence |
+| `hooks/cortex_activation.py` | Session-scoped selection, anchor observation, native child audience binding, bounded stop continuation | No runtime imports, no MCP calls, digest/category-only private persistence |
 | Lean orchestrator skill | Explicit selection, bootstrap, first-call ordering, stop/reconcile rule | Loaded before the task anchor |
 | Post-anchor engine reference | DAG, routing, governance, workers, evidence, clarification, documentation, verification, closure | Loaded only after anchor |
 | Full control reference | Semantic catalogue and post-anchor worker/control rules | Loaded only after anchor |
@@ -101,11 +112,12 @@ not parse readiness, route state, task success, replay, or acceptance. The
 first observed project execution action must be one successful task opening;
 any shell/repository action or worker dispatch before it fails the route gate.
 
-The next source-only gates must exercise the hook protocol with sanitized
-events: explicit selection emits additional context, unselected prompts emit
-nothing, unanchored non-bootstrap tools are denied, bootstrap and task opening
-are allowed, successful task opening transitions to anchored, failed opening
-does not, state contains no raw data, and Stop emits at most one continuation.
+Source and live gates exercise the hook protocol with sanitized events:
+explicit selection emits activation context, unselected prompts emit nothing,
+unanchored non-bootstrap tools are denied, bootstrap and task opening are
+allowed, successful task opening transitions to anchored, failed opening does
+not, native dispatch advances through one host-bound child receipt, stored
+state contains no raw data, and Stop emits at most one continuation.
 
 ## Source references
 
@@ -115,4 +127,3 @@ does not, state contains no raw data, and Stop emits at most one continuation.
 - [OpenAI Hooks](https://learn.chatgpt.com/docs/hooks) — plugin-bundled hook
   discovery/trust, command-hook protocol, event boundaries, and supported
   output behavior.
-

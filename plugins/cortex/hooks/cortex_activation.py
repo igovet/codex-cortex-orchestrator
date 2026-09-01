@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Small host hook for the Cortex first-call activation boundary.
+"""Small host hook for Cortex activation and native-worker audience binding.
 
-The hook is deliberately independent of the Cortex runtime. It keeps only a
-hashed turn key and booleans in PLUGIN_DATA, never prompt text, references,
-tool arguments, reports, or tool output. Hooks are guardrails: the model still
-chooses Cortex and makes the task-opening call from the advertised schema.
+The hook is deliberately independent of the Cortex runtime. It keeps bounded
+route state plus owner-only routing categories and correlation digests in
+``PLUGIN_DATA``; it never persists prompt text, task or worker locators, native
+message plaintext, assignment bodies, reports, credentials, or raw tool
+output. Hooks are defense-in-depth guardrails: the model still chooses Cortex
+and makes semantic calls from the live advertised schemas, while the MCP
+server independently enforces monotonic connection roles and ledger authority.
 """
 from __future__ import annotations
 
@@ -210,6 +213,18 @@ def _fingerprint(value: object) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _worker_thread_digest(event: dict[str, Any]) -> str | None:
+    """Bind SubagentStart to the exact child thread used by its MCP process."""
+    transcript = event.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return None
+    match = re.search(
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.jsonl)?$",
+        Path(transcript).name,
+    )
+    return _fingerprint(match.group(1)) if match is not None else None
+
+
 def _state_path(turn_id: object, session_id: object = None) -> Path | None:
     data_root = os.environ.get("PLUGIN_DATA")
     if not isinstance(data_root, str) or not data_root:
@@ -268,7 +283,6 @@ def _read_state(path: Path | None) -> dict[str, Any]:
         "child_auth": value.get("child_auth") if isinstance(value.get("child_auth"), str) else None,
         "agent_fingerprint": value.get("agent_fingerprint") if isinstance(value.get("agent_fingerprint"), str) else None,
         "assignment_ref_digest": value.get("assignment_ref_digest") if isinstance(value.get("assignment_ref_digest"), str) else None,
-        "worker_task_ref": value.get("worker_task_ref") if isinstance(value.get("worker_task_ref"), str) else None,
         "worker_task_ref_digest": value.get("worker_task_ref_digest") if isinstance(value.get("worker_task_ref_digest"), str) else None,
     }
 
@@ -387,39 +401,6 @@ def _is_consume(tool_name: object) -> bool:
     return tool_name.strip().lower() == "mcp__cortex__read_task"
 
 
-def _is_verified_skill_read(event: dict[str, Any]) -> bool:
-    """Allow only one literal read of one packaged skill entry file."""
-    if event.get("tool_name") != "Bash" or not isinstance(event.get("tool_input"), dict):
-        return False
-    command = event["tool_input"].get("command")
-    candidate = os.environ.get("CORTEX_CANDIDATE_PATH")
-    if not isinstance(command, str) or not isinstance(candidate, str) or not candidate:
-        return False
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
-        return False
-    path_text: str | None = None
-    if len(tokens) == 2 and Path(tokens[0]).name == "cat":
-        path_text = tokens[1]
-    elif (len(tokens) == 4 and Path(tokens[0]).name == "sed" and tokens[1] == "-n"
-            and re.fullmatch(r"[1-9][0-9]*(?:,[1-9][0-9]*)?p", tokens[2])):
-        path_text = tokens[3]
-    if path_text is None:
-        return False
-    try:
-        skill_root = (Path(candidate) / "skills").resolve(strict=True)
-        target = Path(path_text)
-        if not target.is_absolute() or target.is_symlink():
-            return False
-        resolved = target.resolve(strict=True)
-        relative = resolved.relative_to(skill_root)
-        return (len(relative.parts) == 2 and relative.name == "SKILL.md"
-                and not resolved.parent.is_symlink() and resolved.is_file())
-    except (OSError, ValueError):
-        return False
-
-
 def _is_readonly_project_inspection(event: dict[str, Any]) -> bool:
     """Recognize bounded read-only shell inspection before worker bootstrap."""
     if event.get("tool_name") != "Bash" or not isinstance(event.get("tool_input"), dict):
@@ -464,6 +445,39 @@ def _is_readonly_project_inspection(event: dict[str, Any]) -> bool:
         if index > 0 and executable not in {"head", "tail", "grep", "rg"}:
             return False
     return True
+
+
+def _compaction_skill_context(*, child: bool) -> str | None:
+    """Reload exact packaged runtime instructions through host context.
+
+    This is deliberately independent of shell access and approval policy.
+    Codex emits SessionStart(source=compact) after compaction, and that event
+    supports additionalContext. Repeated compact starts repeat the exact load;
+    they do not consume or disable future skill loading.
+    """
+    plugin_root = os.environ.get("PLUGIN_ROOT")
+    if not isinstance(plugin_root, str) or not plugin_root:
+        return None
+    root = Path(plugin_root)
+    names = ("cortex-control",) if child else ("orchestrator", "cortex-control")
+    sections: list[str] = []
+    try:
+        resolved_root = root.resolve(strict=True)
+        for name in names:
+            path = root / "skills" / name / "SKILL.md"
+            if path.is_symlink():
+                return None
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+            data = resolved.read_text(encoding="utf-8")
+            if not data or len(data.encode("utf-8")) > 512 * 1024:
+                return None
+            sections.append(
+                f"Exact packaged Cortex skill reload: {name}/SKILL.md\n\n{data}"
+            )
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return "\n\n".join(sections)
 
 
 def _is_assignment_open(tool_name: object) -> bool:
@@ -633,10 +647,10 @@ def _record_pending_dispatch(event: dict[str, Any]) -> None:
 
     The assignment locator is not a bearer capability; the MCP server still
     resolves and atomically consumes its private worker capability. The
-    owner-only, mode-0600 receipt preserves the exact server host projection
-    across separate hook processes. PreToolUse can therefore correct only the
-    native transport before spawn; SubagentStart never invokes MCP or grants
-    semantic authority.
+    owner-only, mode-0600 receipt preserves only bounded routing categories and
+    correlation digests across hook processes. The host-owned native message
+    remains the sole plaintext delivery; SubagentStart binds an audience but
+    never invokes MCP or grants semantic authority.
     """
     response = event.get("tool_response")
     if not isinstance(response, dict) or response.get("isError") is not False:
@@ -666,28 +680,25 @@ def _record_pending_dispatch(event: dict[str, Any]) -> None:
     if session_root is None or session_digest is None:
         return
     record = {
-        "version": 1,
+        "version": 2,
         "state": "pending",
         "dispatch_digest": digest,
         # The exact server projection digest is retained for private
         # validation and duplicate detection. PreToolUse recomputes it before
         # returning the saved projection to the host.
         "assignment_ref_digest": _value_fingerprint(assignment_ref),
-        "assignment_ref": assignment_ref,
-        "task_ref": coordinator_task_ref,
-        "worker_task_ref": worker_task_ref,
         "worker_task_ref_digest": _value_fingerprint(worker_task_ref),
-        # PreToolUse runs in a separate hook process from PostToolUse. Keep
-        # the exact server-issued host projection in this owner-only receipt
-        # so the later spawn boundary can deliver it byte-for-byte even when
-        # the coordinator model abbreviates the large message. This is host
-        # transport state, not worker authority; the worker still becomes
-        # authoritative only after MCP evidence consumption succeeds.
-        "native_arguments": args,
+        # Persist only bounded routing categories and digests. The host-owned
+        # native call already carries the exact server-rendered message; the
+        # hook validates that call and never stores a second plaintext copy.
+        "native_routing": {
+            key: args.get(key)
+            for key in ("fork_turns", "task_name", "model", "reasoning_effort")
+        },
+        "message_digest": _value_fingerprint(args["message"]),
         "task_name_digest": _value_fingerprint(args["task_name"]),
         "session_digest": session_digest,
         "turn_digest": _value_fingerprint(turn_id),
-        "fork_turns": "none",
         "created_at": time.time_ns(),
     }
     lock = _parent_dispatch_lock(identity, turn_id)
@@ -779,7 +790,7 @@ def _dispatch_records(*, session_id: object, turn_id: object, states: set[str]) 
             return None
         if not isinstance(value, dict) or value.get("session_digest") != session_digest:
             return None
-        if value.get("state") not in {"pending", "delivery_pending", "worker_bound"}:
+        if value.get("state") not in {"pending", "delivery_pending", "worker_candidate", "server_candidate_claimed"}:
             # A crash between settling a receipt and rewriting the index is
             # safely repaired under the caller's session lock.
             continue
@@ -825,8 +836,8 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
     host linkage even when the replacement object is schema-valid.  This hook
     therefore validates and atomically claims the pending server receipt, but
     leaves the accepted native input untouched.  The authoritative worker
-    context is delivered later through the documented ``SubagentStart``
-    context channel, after Codex has registered the real child identity.
+    child audience is bound later at ``SubagentStart``, after Codex has
+    registered the real child identity.
     """
     args = _native_arguments(event.get("tool_input"))
     if args is None:
@@ -869,8 +880,11 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
             # two assignments.
             matched = []
             for candidate_path, candidate in unclaimed:
-                candidate_args = _native_arguments(candidate.get("native_arguments"))
-                if candidate_args is not None and candidate_args.get("task_name") == args.get("task_name"):
+                candidate_routing = candidate.get("native_routing")
+                if (
+                    isinstance(candidate_routing, dict)
+                    and candidate_routing.get("task_name") == args.get("task_name")
+                ):
                     matched.append((candidate_path, candidate))
             if len(matched) != 1:
                 return None
@@ -878,16 +892,30 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         if not unclaimed:
             return None
         path, record = unclaimed[0]
-        authoritative = _native_arguments(record.get("native_arguments"))
-        assignment_ref = record.get("assignment_ref")
-        if (authoritative is None or not isinstance(assignment_ref, str)
-                or record.get("dispatch_digest") != _dispatch_digest(assignment_ref, authoritative)):
+        authoritative = record.get("native_routing")
+        if (
+            not isinstance(authoritative, dict)
+            or set(authoritative) != {
+                "fork_turns", "task_name", "model", "reasoning_effort",
+            }
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(record.get("dispatch_digest", ""))
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(record.get("assignment_ref_digest", ""))
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(record.get("worker_task_ref_digest", ""))
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(record.get("message_digest", ""))
+            ) is None
+        ):
             return None
         # Codex may replace the plaintext message with an opaque encrypted host
         # transport value before PreToolUse.  Correlate the immutable routing
-        # fields exactly; SubagentStart delivers the server-owned plaintext
-        # bootstrap from the receipt, so the encrypted host message is never
-        # treated as assignment authority here.
+        # fields exactly. The hook stores no plaintext bootstrap; the host
+        # message is delivery material but never assignment authority here.
         routing_fields = ("fork_turns", "task_name", "reasoning_effort")
         if any(args.get(key) != authoritative.get(key) for key in routing_fields):
             return None
@@ -918,7 +946,7 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
             "spawn_claim_digest": tool_digest or _value_fingerprint("unobserved-claim:" + path.name),
             "claim_order": claim_order,
             "host_input_digest": _value_fingerprint(_json(args)),
-            "context_digest": _value_fingerprint(authoritative["message"]),
+            "context_digest": record["message_digest"],
         })
         if not _write_dispatch_record(path, claimed):
             return None
@@ -932,7 +960,7 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
 
 
 def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: dict[str, Any], parent_session_id: str) -> tuple[bool, str | None]:
-    """Bind one native agent and return its authoritative server context.
+    """Bind one native agent to one digest-only host audience receipt.
 
     Semantic evidence consumption belongs to the worker model and the public
     MCP handler.  The lifecycle hook only correlates the host child with the
@@ -963,32 +991,59 @@ def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: 
                 return False, None
             if not isinstance(current, dict) or current.get("state") != "delivery_pending":
                 return False, None
-            assignment_ref = current.get("assignment_ref")
-            if not isinstance(assignment_ref, str) or current.get("assignment_ref_digest") != _value_fingerprint(assignment_ref):
+            if (
+                re.fullmatch(
+                    r"[0-9a-f]{64}", str(current.get("assignment_ref_digest", ""))
+                ) is None
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(current.get("worker_task_ref_digest", ""))
+                ) is None
+                or current.get("context_digest") != current.get("message_digest")
+            ):
                 return False, None
-            native = _native_arguments(current.get("native_arguments"))
-            if native is None or current.get("context_digest") != _value_fingerprint(native["message"]):
+            worker_thread_digest = _worker_thread_digest(event)
+            if worker_thread_digest is None:
                 return False, None
-            bound = dict(current)
-            bound.update({
-                "state": "worker_bound",
+            bound = {
+                "version": 2,
+                "state": "worker_candidate",
+                "session_digest": current.get("session_digest"),
+                "assignment_ref_digest": current["assignment_ref_digest"],
+                "worker_task_ref_digest": current["worker_task_ref_digest"],
+                "dispatch_digest": current.get("dispatch_digest"),
+                "spawn_claim_digest": current.get("spawn_claim_digest"),
+                "context_digest": current.get("context_digest"),
                 "worker_bound_at": time.time_ns(),
                 "worker_agent_digest": _value_fingerprint(event.get("agent_id")),
                 "worker_turn_digest": _value_fingerprint(event.get("turn_id")),
-            })
+                "worker_thread_digest": worker_thread_digest,
+            }
+            try:
+                plugin_root = os.environ.get("PLUGIN_ROOT")
+                if isinstance(plugin_root, str) and plugin_root:
+                    scripts = str(Path(plugin_root) / "scripts")
+                    if scripts not in sys.path:
+                        sys.path.insert(0, scripts)
+                from cortex_runtime.audience_attestation import issue_worker_candidate
+
+                plugin_data = os.environ.get("PLUGIN_DATA")
+                if not isinstance(plugin_data, str) or not plugin_data:
+                    return False, None
+                bound = issue_worker_candidate(Path(plugin_data), bound)
+            except Exception:
+                return False, None
             if not _write_dispatch_record(path, bound):
                 return False, None
             correlated = dict(child_state)
             correlated.update({
                 "anchored": False,
                 "assignment_ref_digest": current["assignment_ref_digest"],
-                "worker_task_ref": current.get("worker_task_ref"),
                 "worker_task_ref_digest": current.get("worker_task_ref_digest"),
             })
             _write_state(child_path, correlated)
             if _read_state(child_path).get("assignment_ref_digest") != current["assignment_ref_digest"]:
                 return False, None
-            return True, native["message"]
+            return True, None
         finally:
             _release_dispatch_lock(lock)
     finally:
@@ -1007,7 +1062,7 @@ def _session_has_active_dispatch(session_id: object, turn_id: object = None) -> 
         records = _dispatch_records(
             session_id=session_id,
             turn_id=None if isinstance(session_id, str) and session_id else turn_id,
-            states={"pending", "delivery_pending", "worker_bound"},
+            states={"pending", "delivery_pending", "worker_candidate", "server_candidate_claimed"},
         )
         # Corrupt session-local authority fails closed for that session only.
         return records is None or bool(records)
@@ -1042,7 +1097,10 @@ def _mark_dispatch_consumed(event: dict[str, Any]) -> None:
     if fcntl is not None and lock is None:
         return
     try:
-        records = _dispatch_records(session_id=session_id, turn_id=None, states={"delivery_pending", "worker_bound"})
+        records = _dispatch_records(
+            session_id=session_id, turn_id=None,
+            states={"delivery_pending", "worker_candidate", "server_candidate_claimed"},
+        )
         if records is None:
             return
         matched = [(path, record) for path, record in records if record.get("worker_task_ref_digest") == worker_task_digest]
@@ -1070,6 +1128,21 @@ def _is_publication(tool_name: object) -> bool:
     }
 
 
+def _is_worker_assignment_read(event: dict[str, Any]) -> bool:
+    supplied = event.get("tool_input")
+    return (
+        _is_consume(event.get("tool_name"))
+        and isinstance(supplied, dict)
+        and supplied.get("view") == "assignment"
+    )
+
+
+def _is_worker_semantic_event(event: dict[str, Any]) -> bool:
+    return _is_consume(event.get("tool_name")) or _is_publication(
+        event.get("tool_name")
+    )
+
+
 def _is_successful_consume(event: dict[str, Any]) -> bool:
     response = event.get("tool_response")
     supplied = event.get("tool_input")
@@ -1079,6 +1152,7 @@ def _is_successful_consume(event: dict[str, Any]) -> bool:
     return (isinstance(structured, dict)
             and structured.get("task_ref") == supplied.get("task_ref")
             and structured.get("view") == "assignment"
+            and structured.get("has_more") is False
             and isinstance(structured.get("data"), (dict, list)))
 
 
@@ -1111,6 +1185,16 @@ def main() -> int:
         state = dict(DEFAULT_STATE)
         path = _state_path(turn_id, session_id)
     child = state.get("child_mode") is True
+
+    if (event_name == "SessionStart" and event.get("source") == "compact"
+            and state.get("selected")):
+        additional_context = _compaction_skill_context(child=child)
+        if additional_context is not None:
+            print(_json({"hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": additional_context,
+            }}))
+        return 0
 
     # The host delivery receipt is provisional. Only a successful worker MCP
     # evidence-consumption result proves that the child actually received and
@@ -1205,6 +1289,27 @@ def main() -> int:
                 child_state.update({"selected": True, "anchored": True,
                                     "turn_fingerprint": _fingerprint(turn_id), "child_mode": True})
                 _write_state(path, child_state)
+            else:
+                try:
+                    plugin_root = os.environ.get("PLUGIN_ROOT")
+                    if isinstance(plugin_root, str) and plugin_root:
+                        scripts = str(Path(plugin_root) / "scripts")
+                        if scripts not in sys.path:
+                            sys.path.insert(0, scripts)
+                    from cortex_runtime.audience_attestation import (
+                        revoke_worker_candidate_call,
+                    )
+                    supplied = event.get("tool_input")
+                    plugin_data = os.environ.get("PLUGIN_DATA")
+                    if isinstance(supplied, dict) and isinstance(plugin_data, str) and plugin_data:
+                        revoke_worker_candidate_call(
+                            Path(plugin_data), task_ref=supplied.get("task_ref"),
+                            agent_id=event.get("agent_id"), turn_id=event.get("turn_id"),
+                            session_id=event.get("session_id"),
+                            tool_use_id=event.get("tool_use_id"),
+                        )
+                except Exception:
+                    pass
             return 0
 
     if event_name == "UserPromptSubmit":
@@ -1255,9 +1360,75 @@ def main() -> int:
     if not state["selected"]:
         return 0
 
-    # The catalogue is session-wide, but Codebase Memory is a project-facing
-    # worker capability.  Enforce the audience boundary at the root hook while
-    # allowing a real SubagentStart-bound child to use the same MCP server.
+    if event_name == "PreToolUse" and not child and (
+        _is_worker_assignment_read(event)
+        or _is_publication(event.get("tool_name"))
+    ):
+        _deny(
+            "Coordinator audience cannot invoke worker-owned Cortex operations.",
+            event,
+            reason_code="coordinator_worker_operation",
+        )
+        return 0
+
+    if event_name == "PreToolUse" and child and _is_worker_semantic_event(event):
+        supplied = event.get("tool_input")
+        supplied_ref = supplied.get("task_ref") if isinstance(supplied, dict) else None
+        expected_digest = state.get("worker_task_ref_digest")
+        if (
+            not isinstance(supplied_ref, str)
+            or _value_fingerprint(supplied_ref) != expected_digest
+        ):
+            _deny(
+                "Worker operation does not match the bound assignment lease.",
+                event,
+                reason_code="dispatch_mismatch",
+            )
+            return 0
+        if not state.get("anchored"):
+            if not _is_consume(event.get("tool_name")):
+                _deny(
+                    "Worker publication requires terminal assignment consumption.",
+                    event,
+                    reason_code="worker_bootstrap_required",
+                )
+                return 0
+            try:
+                plugin_root = os.environ.get("PLUGIN_ROOT")
+                if isinstance(plugin_root, str) and plugin_root:
+                    scripts = str(Path(plugin_root) / "scripts")
+                    if scripts not in sys.path:
+                        sys.path.insert(0, scripts)
+                from cortex_runtime.audience_attestation import (
+                    authorize_worker_candidate_call,
+                )
+
+                plugin_data = os.environ.get("PLUGIN_DATA")
+                authorized = (
+                    isinstance(plugin_data, str)
+                    and bool(plugin_data)
+                    and authorize_worker_candidate_call(
+                        Path(plugin_data),
+                        task_ref=supplied_ref,
+                        agent_id=event.get("agent_id"),
+                        turn_id=event.get("turn_id"),
+                        session_id=event.get("session_id"),
+                        tool_use_id=event.get("tool_use_id"),
+                    )
+                )
+            except Exception:
+                authorized = False
+            if not authorized:
+                _deny(
+                    "Worker bootstrap lacks an exact host lifecycle authorization.",
+                    event,
+                    reason_code="dispatch_mismatch",
+                )
+                return 0
+
+    # Codebase Memory is a project-facing worker capability outside Cortex's
+    # own audience-projected catalogue. Enforce that separate boundary at the
+    # root hook while allowing a real SubagentStart-bound native child.
     if event_name == "PreToolUse" and not child and _is_codebase_memory_tool(event.get("tool_name")):
         _deny(
             "Codebase Memory is reserved for project-facing native workers; the Cortex coordinator must not use it.",
@@ -1276,7 +1447,7 @@ def main() -> int:
         if _validate_native_dispatch(event, path):
             print(_json({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "additionalContext": "This native dispatch is correlated to the selected server-issued assignment. Codex owns the spawn input and Cortex did not rewrite it. The authoritative worker context will be attached at SubagentStart. The spawned worker alone performs its assignment bootstrap and publication; the coordinator must wait for that worker's native handoff. Do not interrupt or replace the worker unless explicit terminal, ambiguous, or stale evidence is observed.",
+                "additionalContext": "This native dispatch is correlated to the selected server-issued assignment. Codex owns the spawn input and Cortex did not rewrite it. SubagentStart will bind the exact child audience using sanitized private digests; the server-rendered spawn message remains the sole delivery of the opaque worker locator. The spawned worker alone performs its assignment bootstrap and publication; the coordinator must wait for that worker's native handoff. Do not replace a lost worker unless explicit blocked or aborted evidence is available for an atomically linked successor.",
             }}))
         else:
             _deny("Native dispatch does not match the pending server-issued assignment boundary. The assignment is already committed; do not call the assignment-opening operation again or create a replacement. Preserve the pending receipt and stop this route until the host mismatch is corrected.", event, reason_code="dispatch_mismatch")

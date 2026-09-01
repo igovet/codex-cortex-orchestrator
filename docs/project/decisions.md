@@ -13,11 +13,13 @@ backend owns durable IDs, strict schemas,
 transactions, idempotency, reference integrity, ordered history, bounded report
 assembly/read recovery, and project isolation.
 
-No server-owned waves, scheduler, lifecycle authority, receipt-gated lifecycle,
-repair routes, closure breakers, or recovery escalation remain in the active
-V12 contract. Assignment admission alone requires an assessment and, for
-light/full delivery, the exact current required-plan approval. Worker handoff
-reads may emit immutable delivery receipts, but they are evidence rather than authority.
+No server-owned waves, scheduler, native lifecycle state machine, repair
+ladder, closure breaker, or recovery escalation remains in the active V12
+contract. Assignment admission alone requires an assessment and, for light/full
+delivery, the exact current required-plan approval. Assignment-page receipts
+are ledger evidence; separately, the supported host binds a native child to one
+worker MCP connection through a digest-only audience receipt. That receipt is
+not task completion, report evidence, or authority for a replacement process.
 
 The coordinator maintains and persists only a model-owned DAG of optional
 worker-owned stages through existing task-linked initiative revisions and the
@@ -66,12 +68,14 @@ worktrees, existence/absence or unchanged-state, and `.codex`—are also
 worker-owned, regardless of read-only, plan, report-recovery, or direct user
 framing.
 
-## Uniform fourteen-tool facade
+## Audience-projected fourteen-tool registry
 
-The facade exposes exactly fourteen action-specific tools and one input schema for
-every participant. There is no coordinator/worker projection or audience-based
-field filtering. `tools/list` is the authoritative registry, and runtime
-validation consumes the same schema objects.
+The private registry exposes exactly fourteen action-specific tools and one
+input schema per operation. `tools/list` projects it by immutable connection
+audience: coordinator operations plus `read_task` for coordinators, and only
+`read_task` plus three publications for signed worker-candidates/workers.
+Runtime authorization independently consumes the same schema/handler registry;
+the discovery projection is not trusted as the sole enforcement boundary.
 
 The catalog is intentionally small: six core coordination operations, four
 advisory-governance operations, and the three narrow decision record operations for ordinary-chat
@@ -270,9 +274,11 @@ output, environment state, and session identity are neither stored authority nor
 completion evidence. The server does not reconstruct workers, launch
 replacements, or choose a recovery route.
 
-Worker loss or missing evidence is interpreted by the coordinator, which may
-create a replacement delegation or disclose the limitation. This decision
-requires no backend lifecycle ceremony.
+Worker loss or missing evidence is interpreted by the coordinator. It may
+disclose the limitation immediately; replacing the same delivery owner requires
+an explicit blocked/aborted reason and non-empty evidence, which the backend
+stores immutably with one linked successor. Missing telemetry alone is not
+loss evidence and never recovers the old worker authority.
 
 ## Operator maintenance stays outside MCP
 

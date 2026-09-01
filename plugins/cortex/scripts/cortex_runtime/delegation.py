@@ -96,14 +96,20 @@ def native_dispatch_projection(
     if not isinstance(message, str) or not message or len(message.encode("utf-8")) > NATIVE_DISPATCH_MAX_BYTES:
         raise ValueError("rendered_message exceeds the native dispatch bound")
     selection = validate_model_selection(model, reasoning_effort)
+    # Emit every short routing discriminator before the potentially long
+    # rendered message.  Codex can visually compact long tool results; placing
+    # the explicit effort after the message caused the first native call to
+    # omit that required field even though the durable selection was valid.
+    # Order is therefore part of this host-facing projection's reliability
+    # contract, while the digest remains key-canonical and order-independent.
     native_arguments: dict[str, object] = {
         "fork_turns": "none",
-        "message": message,
         "task_name": task_name,
         "reasoning_effort": selection.reasoning_effort,
     }
     if selection.model != "gpt-5.6-luna":
         native_arguments["model"] = selection.model
+    native_arguments["message"] = message
     return {
         "assignment_ref": assignment_ref,
         "dispatch_digest": _native_dispatch_digest(assignment_ref, native_arguments),

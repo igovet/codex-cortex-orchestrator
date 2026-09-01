@@ -15,6 +15,7 @@ from cortex_runtime.domain_api import (
     record_plan_review, record_steering,
 )
 from cortex_runtime.v12_service import V12ServiceError
+from cortex_runtime.v12_store import V12Store
 
 
 PROVENANCE = {name: "sha256:" + "a" * 64 for name in ("build_digest", "candidate_digest", "source_digest", "catalogue_digest")}
@@ -32,6 +33,23 @@ class DomainPublicApiContractTests(unittest.TestCase):
                                goal=f"Verify {role}.", scope="Read-only bounded scope.", instructions="Inspect and report.",
                                outcomes=[outcome["outcome"]], report_policy="none")
 
+    def _publish_result(self, worker_ref: str, outcome: dict, context: dict) -> dict:
+        return publish_result(
+            task_ref=worker_ref,
+            summary="Recovered worker result.",
+            outcome="The assigned result is complete.",
+            changes=[],
+            verification_facts=[{"state": "executed", "summary": "Focused recovery check passed."}],
+            outcome_coverage=[{
+                "outcome": outcome["outcome"],
+                "status": "complete",
+                "verification": ["Focused recovery check passed."],
+            }],
+            documentation_impact="Recovery behavior is covered by repository documentation.",
+            risks=[], unresolved=[], status="completed",
+            _connection_context=context,
+        )
+
     def test_flat_task_open_and_state_read_expose_only_task_ref_identity(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             task, outcomes = self._task(root)
@@ -41,6 +59,90 @@ class DomainPublicApiContractTests(unittest.TestCase):
             rendered = repr(state)
             for name in ("item_ref", "report_ref", "decision_ref", "digest", "cursor", "handles"):
                 self.assertNotIn(name, rendered)
+
+    def test_state_binds_exact_outcomes_to_post_steering_delivery_assignability(self) -> None:
+        owned = [
+            {"outcome": "Deliver the initial API.", "acceptance": ["The API works."], "constraints": [], "verification": []},
+            {"outcome": "Document the initial API.", "acceptance": ["The API is documented."], "constraints": [], "verification": []},
+        ]
+        added = [
+            {"outcome": "Add the steered export.", "acceptance": ["The export works."], "constraints": [], "verification": []},
+            {"outcome": "Verify the steered export.", "acceptance": ["The export is verified."], "constraints": [], "verification": []},
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, owned)
+            initial = open_assignment(
+                task_ref=task["task_ref"], role="initial owner", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                goal="Deliver the initial outcomes.", scope="Initial revision.",
+                instructions="Complete the immutable initial scope.",
+                outcomes=[item["outcome"] for item in owned], report_policy="none",
+            )
+            initial_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                initial["native_dispatch"]["message"],
+            ).group(1)
+            context: dict = {}
+            read_task(task_ref=initial_ref, view="assignment", _connection_context=context)
+            publish_result(
+                task_ref=initial_ref, summary="Initial outcomes complete.", outcome="Complete.",
+                changes=[],
+                verification_facts=[{"state": "executed", "summary": "Initial checks passed."}],
+                outcome_coverage=[
+                    {"outcome": item["outcome"], "status": "complete", "verification": ["Initial checks passed."]}
+                    for item in owned
+                ],
+                documentation_impact="Documentation is complete.", risks=[], unresolved=[],
+                status="completed", _connection_context=context,
+            )
+
+            open_steering(task_ref=task["task_ref"], prompt="Add the export outcomes?", prompt_language="en")
+            record_steering(
+                task_ref=task["task_ref"], response_original="Add both export outcomes.",
+                user_language="en", add=added, retire=[],
+            )
+            state = read_task(task_ref=task["task_ref"], view="state")
+            dispositions = {
+                item["outcome"]: (
+                    item["ownership"], item["status"], item["delivery_assignability"]
+                )
+                for item in state["data"]["aggregate_coverage"]["items"]
+            }
+            self.assertEqual(
+                dispositions,
+                {
+                    owned[0]["outcome"]: ("owned", "complete", "not_assignable_terminal_owner"),
+                    owned[1]["outcome"]: ("owned", "complete", "not_assignable_terminal_owner"),
+                    added[0]["outcome"]: ("unowned", "missing", "assignable"),
+                    added[1]["outcome"]: ("unowned", "missing", "assignable"),
+                },
+            )
+
+            before_conflict = read_task(task_ref=task["task_ref"], view="state")["data"]["aggregate_coverage"]
+            with self.assertRaises(V12ServiceError) as conflict:
+                open_assignment(
+                    task_ref=task["task_ref"], role="unsafe mixed owner", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                    goal="Incorrectly redeliver every current outcome.", scope="Mixed scope.",
+                    instructions="This request must fail closed.",
+                    outcomes=[item["outcome"] for item in owned + added], report_policy="none",
+                )
+            self.assertEqual(conflict.exception.code, "outcome_assignment_conflict")
+            self.assertEqual(
+                read_task(task_ref=task["task_ref"], view="state")["data"]["aggregate_coverage"],
+                before_conflict,
+            )
+
+            new_only = open_assignment(
+                task_ref=task["task_ref"], role="steered owner", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                goal="Deliver only the new outcomes.", scope="Steered revision only.",
+                instructions="Consume and deliver only the assignable outcomes.",
+                outcomes=[item["outcome"] for item in added], report_policy="none",
+            )
+            self.assertFalse(new_only["replayed"])
 
     def test_assignment_requires_governance_assessment(self) -> None:
         outcome = {"outcome": "Inspect the artifact.", "acceptance": ["Evidence is returned."], "constraints": [], "verification": []}
@@ -142,6 +244,10 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(set(result), {"native_dispatch", "replayed"})
             self.assertNotIn("model", result["native_dispatch"])
             self.assertEqual(result["native_dispatch"]["reasoning_effort"], "high")
+            self.assertEqual(
+                list(result["native_dispatch"]),
+                ["fork_turns", "task_name", "reasoning_effort", "message"],
+            )
             self.assertNotIn("assignment_ref", repr(result))
             self.assertNotIn("continuation_ref", repr(result))
             self.assertRegex(result["native_dispatch"]["message"], r'"task_ref":"t_[0-9a-f]{12}_[0-9a-f]{32}"')
@@ -178,15 +284,226 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertIn("Audit B.", repr(second))
             self.assertNotIn("Audit A.", repr(second["data"]["effective_contract"]))
 
-    def test_restart_reconciles_consumed_assignment_without_model_cursor(self) -> None:
+    def test_consumed_assignment_is_not_bearer_authority_for_a_fresh_context(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
             task, outcomes = self._task(root)
             assignment = self._assignment(task["task_ref"], outcomes[0], "restart")
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', assignment["native_dispatch"]["message"]).group(1)
-            first = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
-            restarted = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
-            self.assertEqual(first["data"]["effective_contract"], restarted["data"]["effective_contract"])
-            self.assertNotIn("cursor", repr(restarted))
+            context: dict = {}
+            first = read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            self.assertIn("effective_contract", first["data"])
+            with self.assertRaises(V12ServiceError) as fresh:
+                read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            self.assertEqual(fresh.exception.code, "connection_lost")
+            with self.assertRaises(V12ServiceError) as terminal_repeat:
+                read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            self.assertEqual(terminal_repeat.exception.code, "assignment_stale")
+
+    def test_fresh_connection_cannot_recover_consumed_worker_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task, outcomes = self._task(root)
+            assignment = self._assignment(task["task_ref"], outcomes[0], "reconnect")
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+
+            with self.assertRaises(V12ServiceError) as unconsumed:
+                self._publish_result(worker_ref, outcomes[0], {})
+            self.assertEqual(unconsumed.exception.code, "assignment_not_consumed")
+
+            original_context: dict = {}
+            read_task(
+                task_ref=worker_ref, view="assignment",
+                _connection_context=original_context,
+            )
+            fresh_context: dict = {}
+            with self.assertRaises(V12ServiceError) as copied_publication:
+                self._publish_result(worker_ref, outcomes[0], fresh_context)
+            self.assertEqual(copied_publication.exception.code, "assignment_not_consumed")
+            with self.assertRaises(V12ServiceError) as copied_read:
+                read_task(
+                    task_ref=worker_ref, view="assignment",
+                    _connection_context=fresh_context,
+                )
+            self.assertEqual(copied_read.exception.code, "connection_lost")
+
+            store = V12Store(Path(root))
+            with store._connection() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM report_operations"
+                    ).fetchone()[0],
+                    0,
+                )
+            published = self._publish_result(
+                worker_ref, outcomes[0], original_context,
+            )
+            self.assertEqual(published["state"], "published")
+            self.assertFalse(published["replayed"])
+
+            evidence = read_task(
+                task_ref=task["task_ref"], view="evidence",
+                report_policy="all_finalized", _connection_context={},
+            )
+            self.assertEqual(len(evidence["data"]["reports"]), 1)
+            self.assertIn("Recovered worker result.", repr(evidence["data"]))
+            with store._connection() as connection:
+                capability = connection.execute(
+                    "SELECT state,continuation_ref FROM worker_capabilities",
+                ).fetchall()
+                operations = connection.execute(
+                    "SELECT COUNT(*) FROM report_operations",
+                ).fetchone()[0]
+            self.assertEqual(len(capability), 1)
+            self.assertEqual(capability[0]["state"], "consumed")
+            self.assertEqual(capability[0]["continuation_ref"], original_context["continuation_ref"])
+            self.assertEqual(operations, 1)
+
+    def test_reconnect_rejects_partial_different_foreign_and_malformed_bindings(self) -> None:
+        outcomes = [
+            {"outcome": "Recover A.", "acceptance": ["A is isolated."], "constraints": [], "verification": []},
+            {"outcome": "Recover B.", "acceptance": ["B is isolated."], "constraints": [], "verification": []},
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, outcomes)
+            assignments = [
+                self._assignment(task["task_ref"], outcome, label)
+                for label, outcome in zip(("a", "b"), outcomes)
+            ]
+            worker_refs = [
+                re.search(
+                    r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                    assignment["native_dispatch"]["message"],
+                ).group(1)
+                for assignment in assignments
+            ]
+            bound_contexts = [{}, {}]
+            for worker_ref, context in zip(worker_refs, bound_contexts):
+                read_task(
+                    task_ref=worker_ref, view="assignment",
+                    _connection_context=context,
+                )
+
+            partial = {"actor": "worker"}
+            with self.assertRaises(V12ServiceError) as partial_error:
+                self._publish_result(worker_refs[0], outcomes[0], partial)
+            self.assertEqual(partial_error.exception.code, "assignment_not_consumed")
+            self.assertEqual(partial, {"actor": "worker"})
+
+            different = dict(bound_contexts[1])
+            with self.assertRaises(V12ServiceError) as different_error:
+                self._publish_result(worker_refs[0], outcomes[0], different)
+            self.assertEqual(different_error.exception.code, "wrong_connection")
+            self.assertEqual(different, bound_contexts[1])
+
+            foreign_task, _ = self._task(tempfile.mkdtemp(dir=root), [{
+                "outcome": "Foreign task.", "acceptance": ["Remain isolated."],
+                "constraints": [], "verification": [],
+            }])
+            foreign_ref = foreign_task["task_ref"] + "_" + worker_refs[0].rsplit("_", 1)[1]
+            for rejected_ref in (foreign_ref, worker_refs[0][:-1] + "z"):
+                with self.subTest(task_ref=rejected_ref), self.assertRaises(V12ServiceError):
+                    self._publish_result(rejected_ref, outcomes[0], {})
+
+            store = V12Store(Path(root))
+            with store._connection() as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM report_operations").fetchone()[0],
+                    0,
+                )
+
+    def test_reconnect_rejects_provenance_dispatch_and_durable_state_drift(self) -> None:
+        def fixture(root: str, label: str) -> tuple[dict, dict, str]:
+            task, outcomes = self._task(root)
+            assignment = self._assignment(task["task_ref"], outcomes[0], label)
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+            read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            return task, outcomes[0], worker_ref
+
+        with patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            with tempfile.TemporaryDirectory() as root:
+                _task, outcome, worker_ref = fixture(root, "provenance drift")
+                changed = dict(PROVENANCE, source_digest="sha256:" + "b" * 64)
+                with patch(
+                    "cortex_runtime.domain_api._worker_capability_provenance",
+                    return_value=changed,
+                ), self.assertRaises(V12ServiceError) as rejected:
+                    self._publish_result(worker_ref, outcome, {})
+                self.assertEqual(rejected.exception.code, "assignment_not_consumed")
+
+            with tempfile.TemporaryDirectory() as root:
+                _task, outcome, worker_ref = fixture(root, "dispatch drift")
+                store = V12Store(Path(root))
+                with store._connection() as connection:
+                    connection.execute(
+                        "UPDATE worker_capabilities SET dispatch_digest=?",
+                        ("sha256:" + "c" * 64,),
+                    )
+                with self.assertRaises(V12ServiceError) as rejected:
+                    self._publish_result(worker_ref, outcome, {})
+                self.assertEqual(rejected.exception.code, "assignment_not_consumed")
+
+            with tempfile.TemporaryDirectory() as root:
+                _task, outcome, worker_ref = fixture(root, "durable stale")
+                store = V12Store(Path(root))
+                with store._connection() as connection:
+                    connection.execute("UPDATE worker_capabilities SET state='stale'")
+                with self.assertRaises(V12ServiceError) as rejected:
+                    self._publish_result(worker_ref, outcome, {})
+                self.assertEqual(rejected.exception.code, "assignment_not_consumed")
+
+    def test_reconnect_keeps_consumed_assignment_revision_after_steering(self) -> None:
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task, outcomes = self._task(root)
+            assignment = self._assignment(task["task_ref"], outcomes[0], "steered reconnect")
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+            worker_context: dict = {}
+            original = read_task(
+                task_ref=worker_ref, view="assignment",
+                _connection_context=worker_context,
+            )
+            self.assertEqual(original["data"]["effective_contract"]["revision"], 1)
+
+            refined = dict(outcomes[0]) | {"acceptance": ["A newer task revision works."]}
+            open_steering(
+                task_ref=task["task_ref"], prompt="Apply the newer task revision?",
+                prompt_language="en",
+            )
+            record_steering(
+                task_ref=task["task_ref"], response_original="Apply it.",
+                user_language="en", add=[refined], retire=[outcomes[0]],
+            )
+            current = read_task(task_ref=task["task_ref"], view="state")
+            self.assertEqual(current["data"]["effective_contract"]["revision"], 2)
+
+            published = self._publish_result(
+                worker_ref, outcomes[0], worker_context,
+            )
+            self.assertEqual(published["state"], "published")
+            evidence = read_task(
+                task_ref=task["task_ref"], view="evidence",
+                report_policy="all_finalized", _connection_context={},
+            )
+            self.assertEqual(len(evidence["data"]["reports"]), 1)
 
     def test_assignment_read_preserves_exact_source_limits_and_negative_requirements(self) -> None:
         """A worker must receive the normalized contract, not an attachment shorthand."""
@@ -558,7 +875,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.14.1")
+        self.assertEqual(SERVER_VERSION, "1.14.9")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

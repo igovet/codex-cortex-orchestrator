@@ -17,6 +17,9 @@ if str(SCRIPTS) not in sys.path:
 
 from cortex import PUBLIC_TOOLS
 from cortex_runtime.domain_api import (
+    _ASSIGNMENT_STRING_FRAGMENT_BYTES,
+    _assignment_fragments,
+    _encoded_bytes,
     _resolve_task_context,
     assess_governance,
     open_assignment,
@@ -159,6 +162,35 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 task["task_ref"], [replacement["outcome"]], role="current",
             )
 
+    def test_exact_record_steering_replays_after_contract_revision(self) -> None:
+        """Compaction may repeat a successful decision after its binding was consumed."""
+        original = self._semantic_outcome("Original outcome.")
+        added = self._semantic_outcome("Outcome added before compaction.")
+        with tempfile.TemporaryDirectory() as root:
+            task = self._task(root, [original])
+            open_steering(
+                task_ref=task["task_ref"], prompt="Add the outcome?",
+                prompt_language="en",
+            )
+            arguments = {
+                "task_ref": task["task_ref"],
+                "response_original": "Add it.", "user_language": "en",
+                "add": [added], "retire": [],
+            }
+            first = record_steering(**arguments)
+            replay = record_steering(**arguments)
+            self.assertFalse(first["replayed"])
+            self.assertTrue(replay["replayed"])
+            state = read_task(task_ref=task["task_ref"], view="state")
+            names = [item["outcome"] for item in state["data"]["effective_contract"]["items"]]
+            self.assertEqual(names.count(added["outcome"]), 1)
+
+            changed = dict(arguments)
+            changed["response_original"] = "A different response."
+            with self.assertRaises(V12ServiceError) as stale:
+                record_steering(**changed)
+            self.assertEqual(stale.exception.code, "clarification_binding_stale")
+
     def test_invalid_public_steering_outcome_reports_exact_path(self) -> None:
         original = self._semantic_outcome("Original outcome.")
         with tempfile.TemporaryDirectory() as root:
@@ -245,7 +277,84 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 "reason": "ownership_conflict",
             })
 
-    def test_restarted_assignment_and_evidence_view_reuse_receipt(self) -> None:
+    def test_lost_owner_replacement_records_terminal_evidence_and_lineage(self) -> None:
+        outcome = self._semantic_outcome("Recover one confirmed lost delivery owner.")
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task = self._task(root, [outcome])
+            _original, original_ref = self._assignment(
+                task["task_ref"], [outcome["outcome"]], role="lost owner",
+                responsibility="delivery",
+            )
+            original_context: dict = {}
+            read_task(
+                task_ref=original_ref, view="assignment",
+                _connection_context=original_context,
+            )
+            with self.assertRaises(V12ServiceError) as unsafe:
+                open_assignment(
+                    task_ref=task["task_ref"], role="unsafe replacement",
+                    profile_name="explorer", model="gpt-5.6-luna",
+                    reasoning_effort="high", responsibility="delivery",
+                    goal="Replace without evidence.", scope="Same outcome.",
+                    instructions="Attempt an unsafe replacement.",
+                    outcomes=[outcome["outcome"]], report_policy="none",
+                )
+            self.assertEqual(unsafe.exception.code, "outcome_assignment_conflict")
+
+            replacement = open_assignment(
+                task_ref=task["task_ref"], role="authorized replacement",
+                profile_name="explorer", model="gpt-5.6-luna",
+                reasoning_effort="high", responsibility="delivery",
+                goal="Continue the confirmed lost delivery.",
+                scope="The exact current owned outcome.",
+                instructions="Consume the successor assignment and complete the work.",
+                outcomes=[outcome["outcome"]], report_policy="none",
+                loss_recovery={
+                    "state": "aborted",
+                    "reason": "The bound native worker exited terminally and cannot resume.",
+                    "evidence": [
+                        "The host observed an explicit terminal native-worker failure after bootstrap."
+                    ],
+                },
+            )
+            replacement_ref = WORKER_REF.search(
+                replacement["native_dispatch"]["message"]
+            ).group(1)
+            store, _task_id, successor_id, _coordinator = _resolve_task_context(replacement_ref)
+            with store._connection() as connection:
+                loss = connection.execute(
+                    "SELECT assignment_id,successor_assignment_id,terminal_state,reason,evidence_json "
+                    "FROM assignment_losses"
+                ).fetchone()
+                predecessor = connection.execute(
+                    "SELECT parent_delegation_id FROM delegations WHERE delegation_id=?",
+                    (successor_id,),
+                ).fetchone()
+                capability_state = connection.execute(
+                    "SELECT state FROM worker_capabilities WHERE assignment_id=?",
+                    (original_context["assignment_id"],),
+                ).fetchone()["state"]
+            self.assertEqual(loss["assignment_id"], original_context["assignment_id"])
+            self.assertEqual(loss["successor_assignment_id"], successor_id)
+            self.assertEqual(loss["terminal_state"], "aborted")
+            self.assertIn("terminally", loss["reason"])
+            self.assertIn("terminal native-worker failure", loss["evidence_json"])
+            self.assertEqual(predecessor["parent_delegation_id"], original_context["assignment_id"])
+            self.assertEqual(capability_state, "stale")
+            with self.assertRaises(V12ServiceError) as old_worker:
+                publish_result(
+                    task_ref=original_ref, summary="Late old result.", outcome="Unsafe.",
+                    changes=[], verification_facts=[{"state": "not_run", "summary": "Superseded."}],
+                    outcome_coverage=[{"outcome": outcome["outcome"], "status": "blocked", "verification": ["Superseded."]}],
+                    documentation_impact="None.", risks=[], unresolved=["Superseded."],
+                    status="blocked", _connection_context=original_context,
+                )
+            self.assertEqual(old_worker.exception.code, "assignment_stale")
+
+    def test_terminal_assignment_receipts_do_not_authorize_a_fresh_context(self) -> None:
         outcome = self._semantic_outcome("Produce predecessor evidence.")
         with tempfile.TemporaryDirectory() as root, patch(
             "cortex_runtime.domain_api._worker_capability_provenance",
@@ -290,11 +399,12 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             self.assertIn("Producer evidence.", repr(evidence))
             self.assertEqual(receipt_rows(), initial_receipts)
 
-            restarted = read_task(
-                task_ref=consumer_ref, view="assignment",
-                _connection_context={},
-            )
-            self.assertEqual(restarted["data"]["evidence"], first["data"]["evidence"])
+            with self.assertRaises(V12ServiceError) as restarted:
+                read_task(
+                    task_ref=consumer_ref, view="assignment",
+                    _connection_context={},
+                )
+            self.assertEqual(restarted.exception.code, "connection_lost")
             self.assertEqual(receipt_rows(), initial_receipts)
 
     def test_large_assignment_evidence_uses_server_owned_continuation(self) -> None:
@@ -321,6 +431,27 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             self.assertTrue(first["has_more"], repr(first["data"]["evidence"]))
             self.assertNotIn("content", first["data"]["evidence"]["reports"][0])
+            first_receipts = _resolve_task_context(consumer_ref)[0]._read(
+                lambda connection: connection.execute(
+                    "SELECT receipt_id,created_sequence FROM assignment_page_receipts "
+                    "ORDER BY receipt_id"
+                ).fetchall()
+            )
+            reconciled = read_task(
+                task_ref=consumer_ref, view="assignment",
+                _connection_context=context,
+            )
+            self.assertEqual(reconciled["data"], first["data"])
+            reconciled_receipts = _resolve_task_context(consumer_ref)[0]._read(
+                lambda connection: connection.execute(
+                    "SELECT receipt_id,created_sequence FROM assignment_page_receipts "
+                    "ORDER BY receipt_id"
+                ).fetchall()
+            )
+            self.assertEqual(
+                [tuple(row) for row in reconciled_receipts],
+                [tuple(row) for row in first_receipts],
+            )
             second = read_task(
                 task_ref=consumer_ref, view="assignment", continue_=True,
                 _connection_context=context,
@@ -333,7 +464,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 )
             self.assertEqual(exhausted.exception.code, "report_cursor_invalid")
 
-    def test_large_assignment_retains_exact_publication_outcome_without_text_duplication(self) -> None:
+    def test_large_assignment_is_self_contained_in_first_text_response(self) -> None:
         long_outcome = {
             "outcome": "Exact terminal publication outcome.",
             "acceptance": [f"Acceptance {index}: " + "a" * 500 for index in range(40)],
@@ -364,14 +495,132 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             rendered = _success_tool_result(read)
             self.assertEqual(
-                rendered["content"][-1]["text"],
-                "Complete Cortex result is available in structuredContent.",
+                json.loads(rendered["content"][-1]["text"]),
+                rendered["structuredContent"],
             )
             self.assertEqual(
                 rendered["structuredContent"]["data"]
                 ["publication_reconciliation"]["required_outcomes"],
                 [long_outcome["outcome"]],
             )
+
+    def test_large_authority_is_paginated_and_restarts_exactly(self) -> None:
+        outcome = self._semantic_outcome("Paginate the complete worker authority.")
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task = self._task(root, [outcome])
+            assignment = open_assignment(
+                task_ref=task["task_ref"], role="large authority worker",
+                profile_name="explorer", model="gpt-5.6-luna",
+                reasoning_effort="high", responsibility="evidence",
+                goal="Consume the complete authority.",
+                scope="The exact selected outcome.",
+                instructions="Consume every page before publication.",
+                outcomes=[outcome["outcome"]],
+                report_policy="none",
+            )
+            worker_ref = WORKER_REF.search(
+                assignment["native_dispatch"]["message"]
+            ).group(1)
+            # Model a durable authority created under a larger historical
+            # ingress budget. The read path must remain bounded even when the
+            # current public writer would admit smaller individual requests.
+            store, _task_id, assignment_id, _coordinator_ref = _resolve_task_context(worker_ref)
+            with store._connection() as connection:
+                connection.execute(
+                    "UPDATE delegations SET objective=?,scope=?,instructions=? WHERE delegation_id=?",
+                    (
+                        "goal-marker:" + "g" * 55_000,
+                        "scope-marker:" + "s" * 55_000,
+                        "instructions-marker:" + "i" * 55_000,
+                        assignment_id,
+                    ),
+                )
+            context: dict = {}
+            pages = []
+            first = read_task(
+                task_ref=worker_ref, view="assignment",
+                _connection_context=context,
+            )
+            self.assertTrue(first["has_more"])
+            self.assertEqual(first["data"]["assignment_page"]["phase"], "authority")
+            self.assertNotIn("next_cursor", repr(first))
+            pages.append(first)
+
+            before = store._read(lambda connection: [
+                tuple(row) for row in connection.execute(
+                    "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
+                    "WHERE assignment_id=? ORDER BY private_position",
+                    (assignment_id,),
+                ).fetchall()
+            ])
+            restarted = read_task(
+                task_ref=worker_ref, view="assignment",
+                _connection_context=context,
+            )
+            self.assertEqual(restarted["data"], first["data"])
+            after = store._read(lambda connection: [
+                tuple(row) for row in connection.execute(
+                    "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
+                    "WHERE assignment_id=? ORDER BY private_position",
+                    (assignment_id,),
+                ).fetchall()
+            ])
+            self.assertEqual(after, before)
+
+            while pages[-1]["has_more"]:
+                pages.append(read_task(
+                    task_ref=worker_ref, view="assignment", continue_=True,
+                    _connection_context=context,
+                ))
+            self.assertGreater(len(pages), 1)
+            self.assertTrue(context["assignment_complete"])
+            self.assertEqual(context["actor"], "worker")
+            fragments = [
+                fragment
+                for page in pages
+                for fragment in page["data"]["assignment_page"].get("fragments", [])
+            ]
+            rendered = repr(fragments)
+            self.assertIn("goal-marker", rendered)
+            self.assertIn("scope-marker", rendered)
+            self.assertIn("instructions-marker", rendered)
+            with self.assertRaises(V12ServiceError) as copied:
+                read_task(
+                    task_ref=worker_ref, view="assignment",
+                    _connection_context={},
+                )
+            self.assertEqual(copied.exception.code, "connection_lost")
+
+    def test_assignment_fragment_boundaries_and_multibyte_integrity(self) -> None:
+        path = ["value"]
+        low, high = 0, _ASSIGNMENT_STRING_FRAGMENT_BYTES
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = {"path": path, "value": "a" * middle}
+            if len(_encoded_bytes(candidate)) <= _ASSIGNMENT_STRING_FRAGMENT_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        boundary = _assignment_fragments({"value": "a" * low})
+        over = _assignment_fragments({"value": "a" * (low + 1)})
+        self.assertEqual(len(boundary), 1)
+        self.assertIn("value", boundary[0])
+        self.assertNotIn("value", over[0])
+        self.assertEqual(over[0]["string_state"], "complete")
+        self.assertEqual(
+            "".join(item.get("value", item.get("text", "")) for item in over),
+            "a" * (low + 1),
+        )
+        multibyte = "🙂é界" * 20_000
+        parts = _assignment_fragments({"value": multibyte})
+        self.assertEqual(
+            "".join(item.get("value", item.get("text", "")) for item in parts),
+            multibyte,
+        )
+        self.assertTrue(all(len(item.get("text", "").encode("utf-8")) <= _ASSIGNMENT_STRING_FRAGMENT_BYTES for item in parts))
 
     def test_aggregate_byte_diagnostic_and_large_success_framing(self) -> None:
         contract = PUBLIC_TOOLS["publish_result"]
@@ -455,12 +704,12 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             MCP_OPERATION_MAX_BYTES,
         )
 
-        large = _success_tool_result({"data": "z" * 100_000})
+        large = _success_tool_result({"data": "z" * 130_000})
         self.assertEqual(
             large["content"][-1]["text"],
             "Complete Cortex result is available in structuredContent.",
         )
-        self.assertEqual(len(large["structuredContent"]["data"]), 100_000)
+        self.assertEqual(len(large["structuredContent"]["data"]), 130_000)
         self.assertLess(
             len(json.dumps(large, separators=(",", ":")).encode("utf-8")),
             MAX_PHYSICAL_JSONL_FRAME_BYTES,

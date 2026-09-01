@@ -68,9 +68,9 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 - Perform only project-facing work owned by this delegation. Do not invent
   authority, spawn policy, host lifecycle semantics, model selection, retries,
   or recovery procedures.
-- Your first action in this fresh worker session is to consume the server-owned
-  assignment evidence with `read_task(view="assignment")` using the exact
-  worker-scoped `task_ref` supplied below. Do not read any other task view or
+- Your first action is to consume the server-owned assignment through the
+  candidate-scoped `read_task` contract with the exact worker reference below.
+  Assignment is its sole advertised view. Do not read any other task view or
   inspect the project before that read succeeds. Its result is the only bootstrap
   authority for continuing this assignment.
 - Derive that finite first read only from the live advertised contract. If a
@@ -121,8 +121,7 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   Product-facing evidence uses the applicable versioned semantic envelope;
   preserve one unchanged source value only where that envelope permits it,
   without language tags or translated/original duplicates. Before project work,
-  consume every declared predecessor evidence item through bounded
-  `read_task(view="assignment")` pages and verify its returned immutable
+  consume every declared predecessor through the same bounded read and verify its immutable
   evidence. State consumed
   evidence in your final publication. If an input is incomplete, mismatched, or
   unreadable, publish an honest blocked/partial outcome and do not claim it was
@@ -212,18 +211,18 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 # evidence from the server-owned immutable snapshot.
 _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
 
-- Before any other action or tool call, consume the server-owned Cortex
-  assignment using the exact worker task reference below.
-- Build that finite first read from the live contract. After a deterministic
-  local-shape rejection, correct it once only when diagnostics are unambiguous;
-  never repeat malformed input or guess authority. Ambiguous transport permits
-  only identical reconciliation.
-- That assignment read is the sole authority for the full common policy,
-  packaged profile, mission, scope, outcomes, decisions, and evidence.
-- You are a worker, not a coordinator. Coordinator-only operations, including
-  governance assessment, are prohibited for every profile. Do no project work
-  before successful consumption. If safe correction fails, stop; never
-  reconstruct, replace, or broaden the assignment.
+- First consume the server-owned assignment through the candidate-scoped `read_task`
+  contract with the worker reference below; assignment is its sole advertised view.
+  `open_assignment` creates
+  assignments for a coordinator; it never reads or consumes a worker assignment.
+- Build that finite first read from the live contract. After a deterministic local-
+  shape rejection, correct it once only when diagnostics are unambiguous. Never
+  repeat malformed input or guess authority; reconcile only ambiguous transport.
+- The assignment read is the sole authority for policy, scope, outcomes, and
+  evidence.
+- You are a worker, not a coordinator. Coordinator-only operations are
+  prohibited. Do no project work before successful consumption. If correction
+  fails, stop; never reconstruct or broaden the assignment.
 """
 
 # The full common policy is retained for continuation/contract documentation,

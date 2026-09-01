@@ -1,16 +1,16 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.1.
+Status: content-addressed production and development release contract for Cortex 1.14.9.
 
 ## Current release identity
 
-- semantic release label: 1.14.1
-- installable identity: `1.14.1+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.9
+- installable identity: `1.14.9+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
 - public facade: exactly fourteen action-specific MCP tools
-- public audience: identical for coordinators and workers
+- public audience: immutable coordinator and four-tool worker projections
 - runtime model contract: bundled `orchestrator` and `cortex-control` skills
 - profiles: advisory role templates
 - governance: model-owned and advisory
@@ -26,7 +26,7 @@ record may prohibit the model from taking the next safe meaningful step.
 
 ## Public contract
 
-`tools/list` must contain exactly these names, in the canonical registry order:
+The complete registry must contain exactly these names, in canonical order:
 
 1. `open_task`
 2. `read_task`
@@ -43,9 +43,14 @@ record may prohibit the model from taking the next safe meaningful step.
 13. `assess_governance`
 14. `close_task`
 
-The catalog is identical for every participant. There is no audience filter,
-capability matrix, host-bound authority, tool-name alias, or action selector. Each input
-schema is closed and is also the runtime validator's source. Every tool advertises a
+`tools/list` projects this registry by immutable connection audience.
+Coordinators receive all coordinator operations plus `read_task`; signed
+worker-candidates and committed workers receive only `read_task` and the three
+publication operations. Authorization remains independently server-side:
+connection roles are monotonic, and worker assignment reads and publications
+require the exact signed host-bound child attestation plus server-side
+assignment authority. Each input schema is closed and is also the runtime
+validator's source. Every tool advertises a
 compact public result projection containing only its closed operation-specific handles, lifecycle states,
 replay/continuation information, and next-action data; its complete successful-result
 schema remains private and is the runtime validator's authoritative contract. Unrelated
@@ -62,10 +67,21 @@ sanitized JSON-RPC internal errors.
 
 Each input schema advertises the 65,536-byte compact UTF-8 aggregate argument
 bound independently of per-field limits. Root aggregate diagnostics disclose
-only bounded numeric sizes and safe advertised-section contributions. Large
-successful structured results are not duplicated into text, so authoritative
-assignment evidence remains within the physical response frame and the host's
-model-visible output budget.
+only bounded numeric sizes and safe advertised-section contributions.
+Successful structured results are duplicated as deterministic JSON text when
+the complete encoded tool result leaves the fixed JSON-RPC envelope reserve.
+This keeps one-shot worker assignment consumption self-contained even when a
+host exposes only `TextContent` to the model. Only a genuinely oversized
+non-duplicable result uses the fixed `structuredContent` notice; worker
+authority is paginated so a valid bootstrap page remains directly visible
+without replaying its consumed link.
+
+Live workload activation uses the real `$cortex:orchestrator` token or host
+skill picker. The host normally supplies the complete activated context; after
+compaction/reset the agent may reload the exact installed skill through the
+host loader or sandboxed read-only access. Initial load and recovery reload
+must never request user approval or elevated execution, and must not substitute
+an MCP resource or project copy. Decorative bracket text is not activation.
 
 The complete catalogue must fit in one `tools/list` JSON-RPC response below
 65,536 bytes. This bounded discovery contract is substantially below the 256
@@ -82,11 +98,18 @@ returns the compact `task_ref` used by every task-anchored operation. The durabl
 compact host-neutral native dispatch; the worker's first `read_task` call consumes the
 server-rendered assignment view and receives the full common policy, profile
 guidance, and task evidence; subsequent worker publications carry that
-worker-scoped `task_ref`. Public decision, governance, and closure calls are also
-task-ref-only. Private assignment, publication, initiative, and decision identity
-never becomes a caller locator. The native worker brief carries the saved root
-only for working-directory context. No root is inferred from MCP metadata, thread
-identity, the plugin process `cwd`, or a lifecycle hook.
+worker-scoped `task_ref` on the same host-bound connection. A fresh or restarted
+connection cannot recover consumed worker authority from that locator, a
+report, bare assignment reference, or durable continuation. Coordinator and
+worker roles are monotonic per connection, and minted, consumed elsewhere,
+foreign, malformed, stale, partial/different-bound, or drifted relations fail
+without mutation. Confirmed loss requires explicit blocked/aborted evidence and
+an atomically linked successor. Public decision, governance, and
+closure calls are also task-ref-only. Private assignment, publication,
+initiative, and decision identity never becomes a caller locator. The native
+worker brief carries the saved root only for working-directory context. No root
+is inferred from MCP metadata, thread identity, the plugin process `cwd`, or a
+lifecycle hook.
 
 `open_task` is an exact, versioned task/result contract. It keeps the exact
 arbitrary-Unicode `user_request_original` and `user_language` beside the
@@ -152,7 +175,9 @@ known reports, synthesize reported evidence, request a real user decision, or
 provide a final answer. A user-requested plan review and any genuine external,
 destructive, scope, acceptance, or product decision remain coordinator-owned
 ordinary-chat holds, not backend gates. It does not fill an evidence gap by
-directly inspecting or testing the project.
+directly inspecting or testing the project. Replacing the same nonterminal
+delivery ownership is narrower: it requires explicit blocked/aborted reason and
+non-empty evidence, committed atomically with the linked successor.
 
 ## Storage contract
 
@@ -359,16 +384,19 @@ failure/recovery outcomes.
 The installable package must include the manifest, MCP configuration,
 fourteen-tool semantic facade and runtime, schema-v1 store, host-private operator
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
-and assets. It must not ship lifecycle hooks or lifecycle hook code.
+assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.14.1,
+The package and repository metadata must consistently identify Cortex 1.14.9,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
-and the exact fourteen-tool semantic catalog. Stale claims about waves, gates, capabilities,
-plan authority, host epochs, receipt-gated lifecycle, required wait/read order,
+and the complete fourteen-tool semantic registry plus its two audience
+projections. Stale claims about waves, gates, capabilities,
+plan authority, host epochs, server-owned receipt-driven scheduling, required wait/read order,
 lifecycle HMAC, repair escrow, closure breakers, resource locks, required
 governance workers, or server-owned recovery are release defects. Worker
-handoff delivery receipts are valid evidence but must not be described as host
-lifecycle authority or proof of physical worktree/workspace isolation.
+assignment-page receipts remain ledger evidence. The separate owner-private
+host audience receipt may attest one supported native child to one worker MCP
+connection, but it is not portable identity, report evidence, completion proof,
+or proof of physical worktree/workspace isolation.
 
 V11 state is a historical compatibility boundary only. V12 must not open,
 migrate, delete, or modify V11 databases. V11 tools and unfinished V11 tasks
@@ -537,10 +565,12 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     profile proof, and a degraded non-durable fallback requires an explicit
     bounded role contract and unavailable-profile disclosure.
 
-Confirm the installed `tools/list` is the same for coordinator and workers,
+Confirm the installed coordinator `tools/list` excludes publications and the
+worker projection contains exactly `read_task` plus three publications,
 Luna is dispatched without a native model override, Terra/Sol are exact
-overrides, no lifecycle hook trust or server recovery route appears, and the
-final answer remains available in every advisory state.
+overrides, only the callbacks declared by the installed package are trusted,
+no fresh-connection worker-authority or server-selected recovery route appears,
+and the final answer remains available in every advisory state.
 
 Closure review is distinct from ordinary clarification. After the current
 result is presented, the user receives exactly two localized choices: revise

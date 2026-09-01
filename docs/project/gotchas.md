@@ -70,7 +70,8 @@
   the backend never makes it a gate.
 - The owning native worker alone calls the applicable `publish_*` operation. The coordinator never
   fills in a missing plan, result, verification, synthesis, or documentation
-  rationale; it follows up, reworks, or creates a parent-linked replacement.
+  rationale; it follows up, reworks, or, after explicit blocked/aborted reason
+  and evidence, creates the atomically linked replacement.
 - Private/internal report storage and replay identity are server-owned. Exact
   ambiguous publication retries replay; changed payloads conflict and require
   recovery/rework. The public facade exposes no report-assembly operations;
@@ -82,7 +83,8 @@
 - Continue a bounded `read_task` only with `continue=true` when its response
   reports `has_more`; the server retains the continuation privately.
 - A worker may end without a report. The coordinator can disclose the evidence
-  gap and create a replacement; there is no backend recovery route.
+  gap; replacing the same delivery owner requires explicit blocked/aborted
+  reason and evidence. The old worker authority is never recovered.
 - Native wait output and worker prose are ordinary model/host context, not
   ledger authority.
 
@@ -221,8 +223,10 @@
   printed isolated target and refreshed cache version. A terminal-permission
   prompt/denial or ordinary-Codex startup failure is failed or unverified from
   the bounded capture, never inferred as success.
-- V12 has no lifecycle hooks or hook-trust flow. A hook prompt is a
-  package/configuration mismatch, not an expected step.
+- V12 ships an activation guard and sanitized lifecycle observer. Review and
+  trust only the callbacks declared by the installed Cortex package. Hook
+  success is defense-in-depth host evidence and never replaces server-side
+  assignment consumption or publication checks.
 - V11 databases are untouched and incompatible. Never migrate or adopt them for
   V12.
 - Every native worker commentary, update, message, final response,

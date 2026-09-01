@@ -28,6 +28,15 @@ evidence, and decomposition impact.
    honest partial or blocked terminal plan rather than a read or governance loop.
 2. For scope, define non-overlapping discovery domains, paths, dependencies,
    acceptance, verification, and a stopping boundary without designing a solution.
+   When a planned or optional path may not exist yet, use an existence-aware
+   bounded read that treats absence as a successful observed state. Never aim a
+   command directly at a possibly missing path merely to discover absence, and
+   never turn expected absence into a nonzero command failure.
+   Before any Git command, establish repository capability with a bounded,
+   failure-normalizing probe that exits cleanly and records supported or
+   unsupported. A canonical project root may be a non-Git directory; treat that
+   as successful evidence and skip Git-dependent inspection instead of invoking
+   Git speculatively or producing a nonzero command failure.
 3. For a plan, close interfaces, data, permissions, failure, observability,
    ownership, ordering, acceptance, and verification.
 4. Preserve every exact source-derived limit, identifier, state, negative

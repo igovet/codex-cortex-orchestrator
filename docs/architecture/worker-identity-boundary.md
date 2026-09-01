@@ -3,6 +3,46 @@
 Development-only analysis. This file is not a runtime contract and must not be
 referenced by skills, prompts, profiles, or installed-plugin documentation.
 
+## Cortex 1.14.9 resolution
+
+The original finding below predates the supported-host audience receipt now
+used by Cortex 1.14.9. The public worker bootstrap carries no bearer token.
+Instead, the unchanged native spawn message delivers only the opaque worker
+locator, `SubagentStart` creates an HMAC-signed one-shot `worker_candidate`
+attestation bound to exact child thread/session/assignment digests. MCP
+initialize uses the presence of fresh signed candidate state only to select
+the restricted catalogue; it does not select an assignment or grant worker authority. The
+child's exact first `PreToolUse(read_task)` then signs a one-shot authorization
+bound to its agent, turn, session, assignment, and tool-use digests. The MCP
+server atomically consumes that authorization only for the same assignment and
+connection. The shared parent session is excluded from claim eligibility.
+Hook processes address the package data directory via
+`PLUGIN_DATA`; Codex MCP processes, which do not receive that hook-only value,
+derive the same exact installed-package directory from `CODEX_HOME`.
+
+The actual candidate `tools/list` response exposes a separate closed first-read
+schema: the exact server-rendered worker reference and sole assignment view are
+required, while bounded continuation is optional. Coordinator state/evidence
+choices and arbitrary fields are not advertised.
+The hook signs the exact lifecycle call but never rewrites its input; schema
+validation and one-shot claim consumption remain server-owned.
+
+This resolves the supported Codex path without treating locator possession as
+authority. Before the terminal assignment read the connection remains
+`worker_candidate`; any failed bootstrap leaves its role unchanged. The first
+successful terminal assignment read commits a monotonic worker role for that
+MCP connection. A coordinator connection, direct client,
+unbound harness, copied locator, or replacement process without a fresh
+host-bound child receipt fails closed. Consumed authority never transfers to a
+new process: confirmed worker loss requires explicit blocked or aborted
+evidence and an atomically lineage-linked successor.
+
+The remaining boundary is intentionally narrow: the lifecycle receipt is a
+supported-host local attestation, not a portable cryptographic identity for an
+arbitrary MCP client. Server-side role, provenance, revision, consumption, and
+publication checks therefore remain independently authoritative. The original
+forensic text is retained below as historical evidence, not current guidance.
+
 ## Final8 follow-up-turn correction
 
 The final8 live event stream exposed a distinct lifecycle error after the
@@ -44,7 +84,7 @@ publication, receives a coordinator follow-up, resumes under the same
 first MCP attempt. Unit tests alone are insufficient; the exact sequence must
 pass in ordinary Codex live-dev.
 
-## Finding
+## Historical finding
 
 The live raw diagnostic stream proves that the first implementation-worker
 bootstrap call was made with a reconstructed argument shape (`anchor` and
@@ -65,7 +105,7 @@ unavailable/ambiguous. Consequently a hook-written `session -> assignment`
 file cannot be safely resolved by the MCP process: the MCP process has no
 authenticated session key with which to select that row.
 
-## Security conclusion
+## Historical security conclusion
 
 Removing the bootstrap token from the public request and resolving the only
 minted capability by `assignment_ref` would make the first call easier, but it
@@ -80,7 +120,7 @@ skill. The hard architectural defect is the missing authenticated caller
 identity/connection binding between native worker creation and its MCP
 connection.
 
-## Required architecture before removing the opaque bootstrap input
+## Historical architecture considered before the 1.14.4 host receipt
 
 The host integration must provide one of these authenticated boundaries:
 
@@ -113,10 +153,10 @@ of the same continuation. A second worker, coordinator, stale session, or
 ambiguous transport must fail closed; it must never mint a replacement
 binding automatically.
 
-## Gate
+## Superseded gate
 
-Until the host exposes one of the authenticated boundaries above, retain the
-current opaque bootstrap capability in the public contract and classify any
-first-call reconstruction as a live failure. Do not weaken isolation merely
-to hide the validation error. The run3k successful retry is evidence of
-schema recoverability, not evidence that worker identity is solved.
+The pre-1.14.4 gate retained the opaque bootstrap capability until a supported
+host boundary existed. Cortex 1.14.4 removes that bearer input and implements
+the digest-only host audience receipt described above. First-call
+reconstruction remains a live failure, and the server still rejects locator-
+only or replacement-process authority.

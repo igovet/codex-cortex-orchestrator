@@ -59,6 +59,32 @@ def test_planner_remains_the_only_plan_owner_and_publishes_once():
     assert "never publish a supplementary result" in planner
 
 
+def test_expected_missing_paths_are_observed_without_failed_commands():
+    orchestrator = _text(ORCHESTRATOR)
+    planner = _text(PLANNER)
+
+    for text in (orchestrator, planner):
+        assert "existence-aware" in text
+        assert "absence" in text
+        assert "possibly missing path" in text
+    assert "successful evidence rather than a failed command" in orchestrator
+    assert "never turn expected absence into a nonzero command failure" in planner
+
+
+def test_non_git_project_is_detected_without_a_failed_git_command():
+    orchestrator = _text(ORCHESTRATOR)
+    planner = _text(PLANNER)
+
+    for text in (orchestrator, planner):
+        assert "before" in text.lower() and "Git command" in text
+        assert "failure-normalizing" in text
+        assert "exits cleanly" in text
+        assert "non-Git" in text
+        assert "successful" in text
+        assert "skip" in text
+        assert "nonzero command failure" in text
+
+
 def test_governance_is_root_coordinator_only_across_replanning_paths():
     orchestrator = _text(ORCHESTRATOR)
     adaptive = _text(ADAPTIVE)

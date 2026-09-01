@@ -74,6 +74,17 @@ def property_names(value):
 
 
 class PublicMcpFirstCallConformanceTests(unittest.TestCase):
+    def test_open_task_project_root_cannot_be_described_as_an_output_directory(self) -> None:
+        """The first-call contract separates existing host root from planned work."""
+        description = PUBLIC_TOOLS["open_task"]["inputSchema"]["properties"]["project_root"]["description"].lower()
+        for phrase in (
+            "absolute existing canonical project directory",
+            "supplied by the host or current workspace",
+            "not a planned output",
+            "never append or create path segments",
+        ):
+            self.assertIn(phrase, description)
+
     def test_every_public_input_contract_is_required_and_closed(self) -> None:
         """The advertised boundary, not a handler convenience, is the API."""
         self.assertEqual(set(PUBLIC_TOOLS), set(EXPECTED_REQUIRED))
@@ -104,14 +115,20 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         """Descriptions prevent a worker from guessing lifecycle ownership."""
         semantic_tokens = {
             "open_task": ("coordinator-only", "first project execution"),
-            "read_task": ("fresh worker", "first cortex operation", "assignment"),
+            "read_task": (
+                "fresh worker", "first cortex operation", "assignment",
+                "only operation", "never use open_assignment",
+            ),
             "open_clarification": ("coordinator-only", "decision opening"),
             "record_clarification": ("coordinator-only", "direct user answer"),
             "open_plan_review": ("coordinator-only", "current finalized active plan"),
             "record_plan_review": ("coordinator-only", "direct user decision"),
             "open_steering": ("coordinator-only", "decision opening"),
             "record_steering": ("coordinator-only", "atomic", "direct user steering"),
-            "open_assignment": ("coordinator-only", "exactly one", "private worker assignment"),
+            "open_assignment": (
+                "coordinator-only", "exactly one", "private worker assignment",
+                "never reads or consumes", "must never call open_assignment",
+            ),
             "publish_plan": ("worker-only", "atomic", "complete"),
             "publish_result": ("worker-only", "atomic", "complete"),
             "publish_documentation": ("worker-only", "atomic", "complete"),
@@ -195,7 +212,15 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}) + "\n")
                 process.stdin.flush()
                 catalogue = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-                self.assertEqual(len(catalogue["result"]["tools"]), 14)
+                names = [item["name"] for item in catalogue["result"]["tools"]]
+                self.assertEqual(len(names), 11)
+                by_name = {item["name"]: item for item in catalogue["result"]["tools"]}
+                close_description = by_name["close_task"]["description"]
+                self.assertIn("open_clarification", close_description)
+                self.assertIn("record_clarification", close_description)
+                self.assertTrue(set(names).isdisjoint({
+                    "publish_plan", "publish_result", "publish_documentation",
+                }))
                 opened = call({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "open_task", "arguments": {"project_root": project, "request_original": "Conformance", "user_language": "en", "outcomes": [{"outcome": "Check the contract.", "acceptance": ["The contract is durable."], "constraints": [], "verification": ["Read the created task."]}], "constraints": ["No additional constraints."]}}})
                 self.assertNotIn("error", opened)
                 self.assertFalse(opened["result"].get("isError"), opened)
@@ -211,14 +236,8 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 incomplete_result = call({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "publish_result", "arguments": {"task_ref": task_ref}}})
                 self.assertTrue(incomplete_result["result"]["isError"])
                 publication_error = incomplete_result["result"]["structuredContent"]["error"]
-                self.assertEqual(publication_error["code"], "validation_error")
-                expected_missing = [
-                    field for field in PUBLIC_TOOLS["publish_result"]["inputSchema"]["required"]
-                    if field != "task_ref"
-                ]
-                self.assertEqual(publication_error["details"]["missing_fields"], expected_missing)
-                self.assertIn("summary", publication_error["action"])
-                self.assertIn("status", publication_error["action"])
+                self.assertEqual(publication_error["code"], "wrong_connection")
+                self.assertNotIn("details", publication_error)
                 missing_mode = call({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"task_ref": task_ref}}})
                 self.assertTrue(missing_mode["result"]["isError"])
                 self.assertEqual(missing_mode["result"]["structuredContent"]["error"]["code"], "validation_error")
@@ -260,6 +279,19 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertIn("stages", PUBLIC_TOOLS["publish_plan"]["inputSchema"]["properties"])
         self.assertIn("changes", PUBLIC_TOOLS["publish_result"]["inputSchema"]["properties"])
         self.assertIn("findings", PUBLIC_TOOLS["publish_documentation"]["inputSchema"]["properties"])
+
+    def test_publication_terminal_discriminators_precede_long_evidence(self) -> None:
+        """Required short fields remain visible before host-compacted arrays."""
+        expected_prefixes = {
+            "publish_plan": ["task_ref", "status", "summary", "scope", "review_policy"],
+            "publish_result": ["task_ref", "status", "summary", "outcome", "documentation_impact"],
+            "publish_documentation": ["task_ref", "status", "summary", "documentation_impact"],
+        }
+        for name, prefix in expected_prefixes.items():
+            with self.subTest(tool=name):
+                schema = PUBLIC_TOOLS[name]["inputSchema"]
+                self.assertEqual(list(schema["properties"])[:len(prefix)], prefix)
+                self.assertEqual(schema["required"][:len(prefix)], prefix)
 
     def test_publish_plan_advertises_required_empty_evidence_arrays(self) -> None:
         contract = PUBLIC_TOOLS["publish_plan"]

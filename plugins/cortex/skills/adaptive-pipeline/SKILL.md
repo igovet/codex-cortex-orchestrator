@@ -223,8 +223,12 @@ answer. Record the exact original response, together with the neutral question
 and language, against the immutable subject/digest
 before using it; do not generate or accept translated or duplicate language-specific fields. Follow
 up the same native child only when its live handle and ownership are known and
-ordinary host follow-up is safe; otherwise create a parent-linked replacement.
-Cortex does not guarantee same-child continuation.
+ordinary host follow-up is safe. Replace the same nonterminal delivery owner
+only after confirming loss with explicit blocked/aborted reason and non-empty
+evidence; use the advertised lost-worker successor field so Cortex commits the
+immutable loss and lineage atomically. Timeout, silence, reconnect, or missing
+telemetry alone is insufficient. Cortex does not guarantee same-child
+continuation and never recovers worker authority on a fresh connection.
 
 For plan review, `approve` applies only to the exact plan report and digest and
 requires the current ready approval view plus opaque approval handle. Plan

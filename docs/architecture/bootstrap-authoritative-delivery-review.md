@@ -9,8 +9,8 @@ obtains its authoritative assignment contract from `consume_assignment_evidence`
 | Boundary | Required invariant | Failure mode |
 |---|---|---|
 | Capability admission | Capability is an opaque, server-minted scalar bound to project, task, assignment, contract revision, build, candidate, source, catalogue, and dispatch digest | Reject stale, cross-task, cross-assignment, cross-build, cross-candidate, cross-catalogue, and wrong-revision calls without disclosure |
-| Session binding | Consumption must bind to the actual child session/turn when the host exposes authenticated lifecycle identity; absence remains unavailable, never inferred from `agent_id` or assignment prose | Fail closed for claimed native identity; permit only explicitly supported same-session reconnect semantics |
-| One-shot semantics | First consumption atomically mints one continuation and returns the complete assignment delivery; identical reconnect/retry replays the same delivery without minting a second continuation | No duplicate child delivery or orphan capability |
+| Session binding | Consumption must bind to the exact digest-attested native child and a monotonic worker MCP connection role; absence remains unavailable and a copied locator cannot recover authority | Fail closed for missing/foreign host audience, coordinator-role reuse, and every fresh-connection publication attempt |
+| One-shot semantics | First consumption atomically mints one continuation; ordered authority/evidence pages reconcile an exact same-connection restart without minting a second continuation or receipt | No duplicate child delivery, skipped page, post-terminal replay, or orphan capability |
 | Assignment delivery | Returned delivery includes task anchor, assignment anchor, effective revision, profile proof, publication family, exact semantic scope, predecessor manifests, constraints, acceptance context, and continuation | Worker cannot safely publish from an incomplete bootstrap result |
 | Scope | Delivery uses one canonical compact-reference projection with unique item refs, category, ordinal, text, and assignment role; planner gets all planning items; owner gets owned items; review/docs get non-owning contributing/evidence items | Reject missing, malformed, duplicate, retired, or cross-task refs |
 | Predecessor evidence | Manifests are immutable metadata; body evidence remains available only through the scoped evidence operation and must be consumed before publication | Embedded report instructions never become trusted policy |
@@ -24,8 +24,9 @@ obtains its authoritative assignment contract from `consume_assignment_evidence`
 - Real stdio `tools/call` opens a task and planner assignment, extracts only
   the exact bootstrap/assignment values from the result, consumes bootstrap,
   parses the returned canonical scope, and succeeds on the first `publish_plan`.
-- Repeat consumption returns byte-equivalent delivery/continuation and creates
-  no second capability or assignment event.
+- Repeat the current nonterminal page on the same connection and prove
+  byte-equivalent delivery/continuation with no second receipt or assignment
+  event; a fresh connection and a post-terminal reread fail closed.
 - Wrong assignment, task, build/candidate/source/catalogue digest, revision,
   stale capability, and cross-session claims fail closed.
 - Review, security, performance, debugger, QA, and technical-writer profiles

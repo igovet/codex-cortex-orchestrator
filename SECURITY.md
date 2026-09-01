@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.1 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.9 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -36,7 +36,10 @@ backend gates. Required plan review and a genuine user decision are owned by
 the coordinator in ordinary chat: a stored decision records the evidence but
 does not authenticate the user, grant authority, or authorize a later action.
 
-Coordinators and workers receive the same exact fourteen-tool semantic catalog.
+The complete semantic registry contains fourteen tools, but every MCP
+connection receives an immutable audience projection. Coordinators receive
+coordinator operations plus `read_task`; a signed worker-candidate or committed
+worker receives only `read_task` and the three worker publication operations.
 The worker spawn receives one compact closed native dispatch; it is neither the
 full worker policy nor ledger authority. The mandatory first assignment read
 supplies the full common policy, profile guidance, and task evidence. IDs are
@@ -82,6 +85,12 @@ worker-owned, including Git, manifests, caches, worktrees, existence/absence or
 unchanged-state, and project-local `.codex`. The boundary does not change for a
 read-only check, plan preparation, report recovery, or a user request addressed
 to the coordinator.
+
+The canonical project root does not attest Git-worktree capability. Workers
+must establish that capability with a bounded, failure-normalizing probe before
+any Git command. An unsupported or non-Git root is recorded as a clean observed
+state and causes Git-dependent inspection to be skipped, not speculatively
+executed with a nonzero failure.
 
 For structural project-code discovery, every worker starts with the enabled
 Codebase Memory MCP bound to the canonical project root. Missing, disabled, or
@@ -169,13 +178,36 @@ history, timestamps, and content-hash filename order are never routing
 authority; malformed or ambiguous active state fails closed for that session.
 Settled diagnostic history is independently capped at 64 receipts per session
 and cleanup is never a precondition for routing correctness.
-Normal spawning consumes
-that receipt directly; recovery uses `read_task` continuation data only
-after host reconciliation. Continuations never attest lifecycle, and native
-commentary alone is never durable progression: a recovered child needs a
-finalized report, explicit blocked/partial handoff, or parent-linked
-replacement. `close_task` records a task-scoped advisory closure from durable
-evidence and does not gate safe work or a truthful user-facing answer.
+Normal spawning consumes that receipt directly. Assignment continuations never
+attest lifecycle and cannot transfer worker authority to another connection.
+Native commentary alone is never durable progression: a lost child requires
+explicit blocked/aborted evidence and an atomically linked successor, while a
+completed child requires a finalized report. `close_task` records a task-scoped
+advisory closure from durable evidence and does not gate safe work or a truthful
+user-facing answer.
+
+Worker publication authority is established only after terminal consumption of
+the exact server-owned assignment view on one signed, host-bound MCP
+worker-candidate connection. `SubagentStart` signs a one-shot attestation bound
+to the exact child thread/session/assignment, and the server claims it only at
+MCP initialize by matching `CODEX_THREAD_ID`. Coordinator and worker roles are
+monotonic per connection. A fresh process,
+reconnect, copied worker locator, report reference, bare assignment reference,
+or durable continuation cannot rehydrate or transfer consumed publication
+authority. The host audience receipt is owner-only and digest-only: it carries
+no task/worker locator, native message, assignment body, or bearer secret.
+Unconsumed, consumed-on-another-connection, foreign, stale, partial, or
+mismatched relations all fail closed without a report mutation or role change.
+Worker failures are explicit: `assignment_not_consumed`, `wrong_connection`,
+`connection_lost`, `assignment_stale`, and `publication_conflict` each carry a
+bounded action specific to that state.
+
+Confirmed loss uses an explicit successor workflow, never authority recovery.
+The coordinator must record a `blocked` or `aborted` reason with non-empty
+evidence. Cortex derives one unique current predecessor from the exact selected
+outcomes and atomically stores immutable loss evidence, stales the old worker
+lease, creates the successor, and links the lineage. Timeout, lease expiry,
+silence, reconnect, or missing lifecycle telemetry is not loss evidence.
 
 Closure review is distinct from ordinary clarification. After the current
 result is presented, exactly two localized choices are offered: revise the
@@ -290,6 +322,16 @@ stale, or contradictory evidence. A user steering decision revises only the
 named active items; it does not rewrite unrelated evidence. This evidence and
 the linked conformance projection guide model reasoning but never become a
 backend authorization or lifecycle gate.
+
+The public aggregate projection binds each row to the exact semantic outcome
+and supplies explicit `ownership` plus `delivery_assignability`. `assignable`
+means an ordinary delivery owner may claim the currently unowned outcome;
+`loss_recovery_only` identifies a nonterminal current owner and does not itself
+prove loss; `not_assignable_terminal_owner` preserves finalized ownership and
+cannot be reassigned. These values are a safe routing projection, not an
+authorization grant: the transactional admission check remains authoritative
+and rejects mixed, stale, retired, duplicate, or otherwise conflicting scope
+without mutation.
 
 The current V3 specialist envelope is admitted before terminal finalization.
 It requires an exact one-to-one disposition for every independent outcome in
@@ -526,7 +568,8 @@ delegation returns one exact compact closed native dispatch, which Codex forward
 once to exactly one matching active host spawn and then awaits that worker's own
 report. The ledger does not launch or bind native agents. An
 ambiguous spawn is reconciled by exact host handle, never blindly duplicated; a
-reportless result may lead to an explicitly parent-linked replacement.
+reportless result alone never authorizes replacement of the same delivery
+scope. A successor requires explicit blocked/aborted reason and evidence.
 
 ## Bundled skill and plugin integrity
 
@@ -584,8 +627,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.1+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.1` is
+`1.14.9+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.9` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a
@@ -619,8 +662,9 @@ A useful report includes:
 
 ## Release safety checklist
 
-1. Verify the manifest is V12, the public registry has exactly fourteen tools, and
-   coordinator and worker catalogs are identical.
+1. Verify the manifest is V12, the complete registry has exactly fourteen
+   tools, and coordinator/worker `tools/list` projections are disjoint except
+   for `read_task`.
 2. Verify the bundled skills make the root coordinator orchestration-only and
    delegate every source/code/config read, analysis, edit, command, test,
    verification, and conditional documentation update to workers, while

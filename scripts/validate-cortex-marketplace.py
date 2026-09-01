@@ -29,8 +29,8 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_BASE_VERSION = "1.14.1"
-VERSION_PATTERN = re.compile(r"^1\.14\.1\+codex\.sha256\.[0-9a-f]{16}$")
+EXPECTED_BASE_VERSION = "1.14.9"
+VERSION_PATTERN = re.compile(r"^1\.14\.9\+codex\.sha256\.[0-9a-f]{16}$")
 EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
@@ -133,7 +133,7 @@ def validate_hooks(plugin: Path) -> None:
     allowed_events = {"PreToolUse", "PostToolUse", "Stop", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"}
     if set(hooks["hooks"]) != allowed_events:
         fail("plugin hooks must declare exactly the activation events")
-    activation_events = {"PreToolUse", "PostToolUse", "Stop"}
+    activation_events = {"PreToolUse", "PostToolUse", "Stop", "SessionStart"}
     lifecycle_command = '/usr/bin/python3 -B "$PLUGIN_ROOT/hooks/cortex_lifecycle_observer.py"'
     expected_command = '/usr/bin/python3 "$PLUGIN_ROOT/hooks/cortex_activation.py"'
     for event_name, groups in hooks["hooks"].items():
@@ -147,14 +147,17 @@ def validate_hooks(plugin: Path) -> None:
                     fail(f"plugin hook {event_name} handler has an invalid shape")
                 expected = expected_command if event_name in activation_events and group.get("matcher") != "^Agent$" else lifecycle_command
                 allowed = {expected}
-                if event_name == "SubagentStart":
+                if event_name in {"SessionStart", "SubagentStart"}:
                     allowed.add(expected_command)
+                    allowed.add(lifecycle_command)
                 if handler.get("type") != "command" or handler.get("command") not in allowed:
                     fail(f"plugin hook {event_name} must use the trusted in-plugin command")
                 if not isinstance(handler.get("timeout"), int) or handler["timeout"] < 1:
                     fail(f"plugin hook {event_name} must declare a positive timeout")
                 if event_name == "SessionEnd" and handler["timeout"] > 3:
                     fail("plugin SessionEnd hook timeout exceeds the Codex 3-second limit")
+                if "additionalContextLimit" in handler and event_name not in {"PreToolUse", "PostToolUse", "SessionStart", "SubagentStart"}:
+                    fail(f"plugin hook {event_name} cannot emit additionalContext")
     regular_file(plugin / "hooks/cortex_activation.py", "activation hook script")
     regular_file(plugin / "hooks/cortex_lifecycle_observer.py", "lifecycle observer hook script")
     source = (plugin / "hooks/cortex_activation.py").read_text(encoding="utf-8")
@@ -226,9 +229,9 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
     version = manifest.get("version")
     valid_version = VERSION_PATTERN.fullmatch(version) if isinstance(version, str) else None
     if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not valid_version:
-        fail("installable plugin manifest must use a content-addressed 1.14.1 version")
+        fail("installable plugin manifest must use a content-addressed 1.14.9 version")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
-        fail("plugin manifest semantic version must be 1.14.1")
+        fail("plugin manifest semantic version must be 1.14.9")
     provenance_path = plugin / "scripts/cortex_runtime/provenance.py"
     spec = importlib.util.spec_from_file_location("cortex_marketplace_provenance", provenance_path)
     if spec is None or spec.loader is None:

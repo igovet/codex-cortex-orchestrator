@@ -213,6 +213,7 @@ class EventJournal:
         mutation: str | None,
         task_anchor: object = None,
         assignment_anchor: object = None,
+        connection_role: object = None,
         publication_type: object = None,
         publication_status: object = None,
         dispatch_correlation_marker: object = None,
@@ -252,6 +253,13 @@ class EventJournal:
                         event["fault"] = fault
                     task = _fingerprint(task_anchor)
                     assignment = _fingerprint(assignment_anchor)
+                    if connection_role == "worker" and assignment is None:
+                        # Worker-scoped task references are public selectors,
+                        # but the committed connection role is the audience
+                        # proof. Attribute that digest to assignment scope so
+                        # live verification can distinguish the worker's read
+                        # and publication from coordinator queries.
+                        assignment = _fingerprint(task_anchor)
                     if task is not None:
                         event["task"] = task
                     if assignment is not None:
@@ -259,6 +267,8 @@ class EventJournal:
                         event["scope"] = "assignment"
                     else:
                         event["scope"] = "coordinator"
+                    if connection_role in {"coordinator", "worker"}:
+                        event["role"] = connection_role
                     dispatch_correlation = _fingerprint(dispatch_correlation_marker)
                     if dispatch_correlation is not None:
                         event["dispatch_correlation"] = dispatch_correlation

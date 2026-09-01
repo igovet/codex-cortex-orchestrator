@@ -9,12 +9,18 @@ Preserve only the exact `task_ref`, current LLM intent, recorded user-visible de
 
 After compaction:
 
-1. Use `read_task` with the exact preserved `task_ref` to recover current semantic state.
-2. Use the evidence view only when evidence is needed for the LLM's next decision.
-3. A worker restarts its assignment view from the beginning with its exact worker-scoped `task_ref`; server receipts reconcile prior consumption.
-4. Request continuation only with the advertised boolean continuation flag.
-5. Reconcile known live native children through ordinary host coordination before overlapping their mutation scopes.
-6. Let the LLM reconstruct its dynamic DAG from semantic outcomes, decisions, and evidence; the backend does not choose future work.
+1. Accept the complete exact orchestrator/control repeat injected by the
+   `SessionStart(source=compact)` host hook with `additionalContextLimit=0`, or repeat it through the
+   standard host skill loader. Repeated loading remains permitted whenever
+   context is lost. Never substitute `cat`, shell/filesystem inspection, an
+   MCP resource, project copy, elevated execution, or a user approval question.
+   Stop safely if exact host reload is unavailable.
+2. Use `read_task` with the exact preserved `task_ref` to recover current semantic state.
+3. Use the evidence view only when evidence is needed for the LLM's next decision.
+4. A worker restarts its assignment view from the beginning with its exact worker-scoped `task_ref`; server receipts reconcile prior consumption.
+5. Request continuation only with the advertised boolean continuation flag.
+6. Reconcile known live native children through ordinary host coordination before overlapping their mutation scopes.
+7. Let the LLM reconstruct its dynamic DAG from semantic outcomes, decisions, and evidence; the backend does not choose future work.
 
 The coordinator remains coordination-only. Delegate missing project discovery, implementation, verification, Git state, manifests, caches, or documentation work. Do not recreate a task because context was compacted, and never reconstruct private identity from prose, paths, timestamps, suffixes, or earlier tool output.
 

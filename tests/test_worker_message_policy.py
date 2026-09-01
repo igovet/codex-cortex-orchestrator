@@ -30,13 +30,17 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert policy is not None
     normalized = " ".join(policy["common_policy"].split())
 
-    assert "Before any other action or tool call" in message
+    assert "First consume the server-owned assignment" in message
+    assert "candidate-scoped `read_task`" in message
+    assert "assignment is its sole advertised view" in normalized_message.lower()
+    assert "`open_assignment` creates assignments for a" in normalized_message
+    assert "never reads or consumes a worker assignment" in normalized_message
     assert "assignment read is the sole authority" in message
     assert "Codebase Memory as the mandatory first evidence route" not in message
     assert len(message.encode("utf-8")) < 1_024
     assert "finite first read from the live contract" in message
     assert "correct it once only when diagnostics are unambiguous" in message
-    assert "never repeat malformed input or guess authority" in message
+    assert "never repeat malformed input or guess authority" in normalized_message.lower()
     assert "Coordinator-only operations" in message
     assert "Do no project work before successful consumption" in normalized_message
     assert "Codebase Memory as the mandatory first evidence route" in normalized
@@ -81,8 +85,10 @@ def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_aut
     # first Cortex action, before project work or any coordinator lifecycle
     # operation.  Keep the assertion semantic rather than prescribing a
     # public MCP argument shape.
-    first_action = message.index("Before any other action or tool call")
-    assert message.index("server-owned Cortex", first_action) > first_action
+    first_action = message.index("First consume the server-owned assignment")
+    assert message.index("candidate-scoped `read_task`", first_action) > first_action
+    assert "assignment is its sole advertised view" in " ".join(message.split()).lower()
+    assert "`open_assignment` creates assignments" in " ".join(message.split())
     assert "You are a worker, not a coordinator" in message
 
 

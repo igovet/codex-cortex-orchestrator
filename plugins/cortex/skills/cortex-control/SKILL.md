@@ -1,6 +1,6 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.14.1 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.14.9 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel
@@ -28,8 +28,10 @@ After task creation, make and record one explicit governance-depth decision befo
 Closure is a user decision boundary, not an automatic finalization step. Before
 every `close_task` attempt, the coordinator must present the reconciled,
 verified result and its impact in the latest meaningful user language, then
-open one closure-review hold with exactly two choices: revise the current task
-or close the task. The coordinator must wait for and record the explicit answer;
+use the advertised `open_clarification` operation to open one closure-review
+hold with exactly two choices: revise the current task or close the task. The
+coordinator must wait for the explicit answer and record it through the
+advertised `record_clarification` operation;
 silence, prior approval, worker completion, or a ready-looking ledger state is
 not permission to close. A request made before the result existed to close
 automatically afterward is not the required current review. Never probe the
