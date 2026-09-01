@@ -232,7 +232,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
     def test_active_assignment_snapshot_survives_linked_revision_and_old_item_is_stale(self) -> None:
         self.store.record_user_decision(
             task_id=self.task, subject_type="task", subject_id=self.task, decision_type="steer", prompt="Add a separate check.",
-            response_original="Add a separate check.", user_language="en", steering_delta={"add": [{"category": "verification", "text": "Run a new independent check."}]},
+            response_original="Add a separate check.", user_language="en", steering_delta={"add": [{"category": "verification", "text": "Run a new independent check.", "outcome_ref": self.item}]},
             idempotency_key="unrelated-steer",
         )
         self._submit(key="survives-revision", coverage_status="complete", verification=["Still assigned after revision."])
@@ -257,7 +257,7 @@ class EffectiveContractCoverageTests(unittest.TestCase):
     def test_simultaneous_distinct_active_owner_attempts_allow_exactly_one(self) -> None:
         self.store.record_user_decision(
             task_id=self.task, subject_type="task", subject_id=self.task, decision_type="steer", prompt="Add a raced item.",
-            response_original="Add a raced item.", user_language="en", steering_delta={"add": [{"category": "verification", "text": "Race active ownership."}]},
+            response_original="Add a raced item.", user_language="en", steering_delta={"add": [{"category": "verification", "text": "Race active ownership.", "outcome_ref": self.item}]},
             idempotency_key="race-steer",
         )
         effective_items = self.store.inspect_task(task_id=self.task, after_sequence=0)["effective_contract"]["items"]

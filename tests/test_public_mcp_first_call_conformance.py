@@ -13,7 +13,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from cortex import PUBLIC_TOOLS
-from cortex_runtime.mcp_api import _validate_schema
+from cortex_runtime.mcp_api import _validation_failure, _validate_schema
 
 
 EXPECTED_TOOLS = (
@@ -29,8 +29,8 @@ EXPECTED_TOOLS = (
 EXPECTED_REQUIRED = {
     "open_task": {"project_root", "request_original", "user_language", "outcomes", "constraints"},
     "read_task": {"task_ref", "view"},
-    "open_clarification": {"task_ref", "prompt", "prompt_language"},
-    "record_clarification": {"task_ref", "response_original", "user_language"},
+    "open_clarification": {"task_ref", "prompt", "prompt_language", "purpose", "options"},
+    "record_clarification": {"task_ref", "response_original", "user_language", "outcome"},
     "open_plan_review": {"task_ref", "prompt", "prompt_language"},
     "record_plan_review": {"task_ref", "response_original", "user_language", "outcome"},
     "open_steering": {"task_ref", "prompt", "prompt_language"},
@@ -116,13 +116,60 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             "publish_result": ("worker-only", "atomic", "complete"),
             "publish_documentation": ("worker-only", "atomic", "complete"),
             "assess_governance": ("coordinator-only", "before the first worker", "explicit"),
-            "close_task": ("coordinator-only", "ledger", "unresolved evidence"),
+            "close_task": (
+                "coordinator-only", "ledger", "unresolved evidence",
+                "post-result review", "readiness probe",
+            ),
         }
         for name, tokens in semantic_tokens.items():
             with self.subTest(tool=name):
                 description = PUBLIC_TOOLS[name]["description"].lower()
                 for token in tokens:
                     self.assertIn(token, description)
+
+    def test_public_descriptions_publish_the_exact_required_set(self) -> None:
+        """The callable description must expose the same required set as its schema.
+
+        This is deliberately derived from ``inputSchema`` rather than keeping a
+        second hand-written field list in the test.  A model should be able to
+        validate a publication call before sending it, and the description must
+        not silently drift when a contract gains or removes a required field.
+        """
+        for name, contract in PUBLIC_TOOLS.items():
+            with self.subTest(tool=name):
+                schema = contract["inputSchema"]
+                required = ", ".join(schema.get("required", []))
+                description = contract["description"]
+                self.assertIn(
+                    f"Required properties for this call: {required}.",
+                    description,
+                )
+                self.assertIn(
+                    "Before invoking, verify every required property is present",
+                    description,
+                )
+
+    def test_publish_result_validation_reports_all_missing_required_fields(self) -> None:
+        """One malformed publication must not force serial field-by-field retries."""
+        schema = PUBLIC_TOOLS["publish_result"]["inputSchema"]
+        try:
+            _validate_schema(schema, {"task_ref": "t_0123456789ab_" + "a" * 32})
+        except ValueError as error:
+            missing = tuple(getattr(error, "missing_fields", ()))
+            self.assertEqual(
+                missing,
+                tuple(field for field in schema["required"] if field != "task_ref"),
+            )
+            failure = _validation_failure(
+                error,
+                tool_name="publish_result",
+                arguments={"task_ref": "t_0123456789ab_" + "a" * 32},
+                input_schema=schema,
+            )
+            details = failure["details"]
+            self.assertEqual(details["missing_fields"], list(missing))
+        else:
+            self.fail("publish_result accepted a payload missing its required properties")
 
     def test_representative_first_calls_cross_real_stdio_boundary(self) -> None:
         """Exercise catalogue discovery plus task-opening and governance calls in stdio."""
@@ -155,10 +202,27 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 task_ref = opened["result"]["structuredContent"]["task_ref"]
                 read = call({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "read_task", "arguments": {"task_ref": task_ref, "view": "state"}}})
                 self.assertNotIn("error", read)
-                missing_mode = call({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"task_ref": task_ref}}})
+                unreviewed_close = call({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "close_task", "arguments": {"task_ref": task_ref, "verdict": "ready"}}})
+                self.assertTrue(unreviewed_close["result"]["isError"])
+                self.assertEqual(
+                    unreviewed_close["result"]["structuredContent"]["error"]["code"],
+                    "closure_review_required",
+                )
+                incomplete_result = call({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "publish_result", "arguments": {"task_ref": task_ref}}})
+                self.assertTrue(incomplete_result["result"]["isError"])
+                publication_error = incomplete_result["result"]["structuredContent"]["error"]
+                self.assertEqual(publication_error["code"], "validation_error")
+                expected_missing = [
+                    field for field in PUBLIC_TOOLS["publish_result"]["inputSchema"]["required"]
+                    if field != "task_ref"
+                ]
+                self.assertEqual(publication_error["details"]["missing_fields"], expected_missing)
+                self.assertIn("summary", publication_error["action"])
+                self.assertIn("status", publication_error["action"])
+                missing_mode = call({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"task_ref": task_ref}}})
                 self.assertTrue(missing_mode["result"]["isError"])
                 self.assertEqual(missing_mode["result"]["structuredContent"]["error"]["code"], "validation_error")
-                assessed = call({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"task_ref": task_ref, "mode": "light"}}})
+                assessed = call({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"task_ref": task_ref, "mode": "light"}}})
                 self.assertNotIn("error", assessed)
             finally:
                 if process.stdin is not None:

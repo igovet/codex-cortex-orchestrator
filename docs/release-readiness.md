@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.13.2.
+Status: content-addressed production and development release contract for Cortex 1.14.1.
 
 ## Current release identity
 
-- semantic release label: 1.13.2
-- installable identity: `1.13.2+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.1
+- installable identity: `1.14.1+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
@@ -51,9 +51,21 @@ replay/continuation information, and next-action data; its complete successful-r
 schema remains private and is the runtime validator's authoritative contract. Unrelated
 canonical handles are filtered before a
 success is transported as JSON text plus `structuredContent` with
-`isError=false`. Caller-correctable errors are bounded sanitized text-only
-`isError=true` results with no `structuredContent`; server-state failures are
+`isError=false`. Each advertised tool description mechanically lists the exact
+required input properties derived from its closed `inputSchema`; that schema
+remains the authoritative call contract. Caller-correctable errors are bounded
+sanitized `isError=true` results with text and a matching `structuredContent.error`.
+When multiple required properties are absent, safe error details and the
+recovery action include the complete bounded `missing_fields` list so the
+caller can correct the request in one call. Server-state failures are
 sanitized JSON-RPC internal errors.
+
+Each input schema advertises the 65,536-byte compact UTF-8 aggregate argument
+bound independently of per-field limits. Root aggregate diagnostics disclose
+only bounded numeric sizes and safe advertised-section contributions. Large
+successful structured results are not duplicated into text, so authoritative
+assignment evidence remains within the physical response frame and the host's
+model-visible output budget.
 
 The complete catalogue must fit in one `tools/list` JSON-RPC response below
 65,536 bytes. This bounded discovery contract is substantially below the 256
@@ -67,8 +79,9 @@ Only `open_task` accepts the exact resolved `project_root` and stores the
 canonical project association; it is the sole public project-root boundary. It
 returns the compact `task_ref` used by every task-anchored operation. The durable
 `task_id` in results is non-callable evidence. `open_assignment` returns only a
-host-neutral native dispatch; the worker's first `read_task` call consumes the
-server-rendered assignment view, and subsequent worker publications carry that
+compact host-neutral native dispatch; the worker's first `read_task` call consumes the
+server-rendered assignment view and receives the full common policy, profile
+guidance, and task evidence; subsequent worker publications carry that
 worker-scoped `task_ref`. Public decision, governance, and closure calls are also
 task-ref-only. Private assignment, publication, initiative, and decision identity
 never becomes a caller locator. The native worker brief carries the saved root
@@ -87,11 +100,11 @@ overrides the root. `open_assignment.scope` is required non-empty text
 (maximum 65,536 characters) describing the concise worker-ownership boundary;
 detailed execution belongs in `instructions`, and object-shaped scope is
 invalid. `open_assignment` also separates exact packaged `profile_name` from
-the human-readable `role`, requires loaded renderer proof, and returns a
-host-neutral `dispatch_brief`. Codex maps that semantic brief to one matching
-active host spawn; Cortex does not prescribe static host arguments or lifecycle
-behavior. `read_task` assignment view retains the server-rendered brief and bounded chronology for
-recovery and is not required on the healthy path.
+the human-readable `role`, requires loaded renderer proof, and returns one
+compact closed native dispatch plus replay state. The projection preserves exact
+effort, omits the model only for default Luna, and is forwarded unchanged to one matching active host
+spawn. The mandatory first `read_task` assignment view supplies the complete
+policy/profile/task context on healthy and recovery paths.
 The three narrow decision record operations use their matching closed advertised
 contract and task-scoped server binding; callers provide only the task reference,
 neutral prompt/response fields, and (for steering) outcome changes. Private
@@ -196,11 +209,20 @@ Release evidence must prove:
   `evidence` views with server-owned continuation through `continue=true`; a
   fresh worker's first call consumes the assignment view and is its only
   authoritative route to declared predecessor bodies;
+- the compact assignment reconciliation header retains exact public outcome
+  names before the larger policy body, continuation occurs only immediately
+  after `has_more=true`, and restarted identical terminal reads reuse existing
+  consumption receipts without new timeline events;
+- `publish_result` aggregate-size tests cover below/exact/above boundaries,
+  Unicode byte accounting, safe actual/maximum diagnostics, section redaction,
+  one materially corrected complete retry, and rejection of unchanged,
+  incomplete, still-oversize, or second corrections before mutation;
 - effective-contract item references remain stable across requirements,
   constraints, acceptance criteria, and verification expectations; current
   ownership is non-overlapping, finalized report coverage detects missing,
-  partial, unverified, stale, and contradictory evidence, and user steering
-  revises only affected items;
+  partial, unverified, stale, and contradictory evidence, complete unpaired
+  steering additions create independent outcomes, and one retire plus one add
+  atomically replaces only the selected outcome;
 - failed or partial QA, failed executed checks, and required unrun checks create
   bounded corrective ownership for source or release/verification infrastructure
   and require an independent rerun of failed and affected gates before closure;
@@ -208,6 +230,9 @@ Release evidence must prove:
   classes; first-attempt routing keeps bounded no-plan C1 owner work minimal,
   requires approved planner evidence for light/full owner work, and treats any
   planning-predecessor rejection as a failed orchestration run even after retry;
+- broad server-side report selection preserves multi-author evidence without
+  inventing one predecessor, and no public assignment failure names private
+  report, decision, or parent-reference input fields;
 - advisory conformance review relates the active effective-contract revision,
   user decisions, finalized report manifests, completed coordinator-read
   digests, and aggregate coverage without becoming a lifecycle gate;
@@ -293,14 +318,13 @@ Canonical recommendations are:
 | `gpt-5.6-terra` | `high` | Genuinely complex non-security work |
 | `gpt-5.6-sol` | `high` | Security work and security-focused review |
 
-Every model supports `low`, `medium`, `high`, `xhigh`, and `max`. Native
-projection uses `fork_turns="none"` and preserves the effort. Logical Luna
-omits the native `model` argument because it is the configured default; Terra
-and Sol carry their exact model overrides. The server must have no automatic
-model replacement or Luna → Terra → Sol recovery ladder. Each successful
-durable delegation returns one host-neutral `dispatch_brief` with semantic
-fields that Codex maps to exactly one matching active host spawn; the ledger
-does not prescribe static host argument names or lifecycle. No ad-hoc prompt,
+Every model supports `low`, `medium`, `high`, `xhigh`, and `max`. The native
+projection preserves isolated history and exact effort. Luna omits the model
+override so the configured default is used; Terra and Sol carry their exact
+overrides. The server must have no automatic model replacement or
+Luna → Terra → Sol recovery ladder. Each successful durable delegation returns
+one compact closed native dispatch that Codex forwards unchanged to exactly one
+matching active host spawn. No ad-hoc prompt,
 shared worker, missing spawn, or duplicate spawn is acceptable.
 
 ## Operator maintenance contract
@@ -337,7 +361,7 @@ fourteen-tool semantic facade and runtime, schema-v1 store, host-private operato
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 and assets. It must not ship lifecycle hooks or lifecycle hook code.
 
-The package and repository metadata must consistently identify Cortex 1.13.2,
+The package and repository metadata must consistently identify Cortex 1.14.1,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the exact fourteen-tool semantic catalog. Stale claims about waves, gates, capabilities,
 plan authority, host epochs, receipt-gated lifecycle, required wait/read order,
@@ -355,7 +379,7 @@ are incompatible with V12 and cannot serve as fallback authority.
 Run the isolated release/protocol test:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_marketplace_release_gate.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
 ```
 
 The test must build the explicit source candidate, compile bundled Python,
@@ -501,11 +525,12 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     `skill://` MCP attempt, plus exact byte-for-byte reuse of every returned
     public `task_ref` and server-rendered dispatch/evidence value in the
     appropriate context; private IDs and digests are never reconstructed.
-15. Four durable delegations produce four matching host spawns mapped exactly
-    once from their returned host-neutral `dispatch_brief` values, with the
-    required `fork_turns="none"`, model/effort semantics, renderer/profile
-    evidence, and worker-owned reports. Physical worktree/workspace isolation is
-    not asserted here: the semantic brief has no host workspace selector and
+15. Four durable delegations produce four matching host spawns forwarded exactly
+    once from their returned compact closed native dispatches, with isolated
+    history, exact effort, default-Luna model omission or exact Terra/Sol
+    override, full policy/profile from the mandatory first
+    assignment read, and worker-owned reports. Physical worktree/workspace isolation is
+    not asserted here: the native dispatch has no host workspace selector and
     that capability remains unconfirmed outside the ledger.
 16. Ordinary delegations select exact packaged `profile_name` values and
     produce loaded proof/digests; the separate human-readable `role` is not
@@ -516,6 +541,14 @@ Confirm the installed `tools/list` is the same for coordinator and workers,
 Luna is dispatched without a native model override, Terra/Sol are exact
 overrides, no lifecycle hook trust or server recovery route appears, and the
 final answer remains available in every advisory state.
+
+Closure review is distinct from ordinary clarification. After the current
+result is presented, the user receives exactly two localized choices: revise
+the same task or close it. Revision preserves the same `task_ref`; any later
+assignment, report, or decision stales a previously consumed close choice. The
+public `close_task` path atomically requires the current consumed close choice,
+while internal advisory storage may remain policy-neutral. This public rule
+does not make closure a scheduler or block safe work.
 
 Audit the coordinator's actual tool chronology: aside from Cortex ledger calls,
 native agent coordination, user interaction, and the bounded orchestrator-owned

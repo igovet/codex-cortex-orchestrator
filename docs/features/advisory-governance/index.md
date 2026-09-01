@@ -159,6 +159,14 @@ when the user did not request one and an explicit rationale is recorded.
 
 ## Advisory closure
 
+Closure review is separate from ordinary clarification. After the current
+result is presented, exactly two localized choices are offered: revise the
+same task or close it. Revision preserves the same `task_ref`; any later
+assignment, report, or decision stales a previously consumed close choice.
+The public `close_task` path atomically requires the current consumed close
+choice. Internal advisory storage may remain policy-neutral because this
+stale-choice rule is enforced at the public close boundary.
+
 `close_task` appends a model-authored task statement. Its public shape is
 task-anchored: it accepts the exact `task_ref`, one `verdict`, and bounded
 opaque JSON `evidence` plus optional risk/follow-up/completion notes; Cortex

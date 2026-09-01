@@ -52,14 +52,18 @@ def validate_native_dispatch_projection(
         raise ValueError("native dispatch assignment mismatch")
     if not isinstance(native_arguments, Mapping):
         raise ValueError("native dispatch arguments are missing")
-    # Model and reasoning are deliberately not part of the native projection.
-    # ``open_assignment`` currently does not accept a coordinator selection;
-    # putting server defaults into host arguments would silently invent
-    # routing and could contradict the active host policy.  The host may use
-    # its own coordinator-owned selection/defaults.
-    required = ("fork_turns", "message", "task_name")
+    # open_assignment records an explicit coordinator-owned model/effort pair.
+    # Preserve that pair in the one literal-callable host projection; otherwise
+    # the durable assignment and actual child can silently use different
+    # routing even when the message and task name match.
+    required = ("fork_turns", "message", "task_name", "reasoning_effort")
     if any(key not in native_arguments for key in required):
         raise ValueError("native dispatch arguments are incomplete")
+    if set(native_arguments) not in (
+        set(required),
+        set(required) | {"model"},
+    ):
+        raise ValueError("native dispatch arguments are not closed")
     if native_arguments.get("fork_turns") != "none":
         raise ValueError("native dispatch must use isolated history")
     message = native_arguments.get("message")
@@ -68,6 +72,10 @@ def validate_native_dispatch_projection(
     task_name = native_arguments.get("task_name")
     if not isinstance(task_name, str) or not task_name:
         raise ValueError("native dispatch task name is invalid")
+    routed_model = native_arguments.get("model", "gpt-5.6-luna")
+    validate_model_selection(routed_model, native_arguments.get("reasoning_effort"))
+    if native_arguments.get("model") == "gpt-5.6-luna":
+        raise ValueError("native Luna dispatch must use the configured default model")
     if bound_projection:
         digest = projection.get("dispatch_digest")
         expected = _native_dispatch_digest(assignment_ref, dict(native_arguments))
@@ -87,11 +95,15 @@ def native_dispatch_projection(
     """Build one closed, digest-bound projection for the native host adapter."""
     if not isinstance(message, str) or not message or len(message.encode("utf-8")) > NATIVE_DISPATCH_MAX_BYTES:
         raise ValueError("rendered_message exceeds the native dispatch bound")
+    selection = validate_model_selection(model, reasoning_effort)
     native_arguments: dict[str, object] = {
         "fork_turns": "none",
         "message": message,
         "task_name": task_name,
+        "reasoning_effort": selection.reasoning_effort,
     }
+    if selection.model != "gpt-5.6-luna":
+        native_arguments["model"] = selection.model
     return {
         "assignment_ref": assignment_ref,
         "dispatch_digest": _native_dispatch_digest(assignment_ref, native_arguments),

@@ -140,6 +140,8 @@ class DomainPublicApiContractTests(unittest.TestCase):
             task, outcomes = self._task(root)
             result = self._assignment(task["task_ref"], outcomes[0], "audit")
             self.assertEqual(set(result), {"native_dispatch", "replayed"})
+            self.assertNotIn("model", result["native_dispatch"])
+            self.assertEqual(result["native_dispatch"]["reasoning_effort"], "high")
             self.assertNotIn("assignment_ref", repr(result))
             self.assertNotIn("continuation_ref", repr(result))
             self.assertRegex(result["native_dispatch"]["message"], r'"task_ref":"t_[0-9a-f]{12}_[0-9a-f]{32}"')
@@ -147,7 +149,14 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertNotIn("Build the artifact.", message)
             self.assertNotIn("Verify audit.", message)
             self.assertNotIn("Read-only bounded scope.", message)
-            self.assertLess(len(message.encode("utf-8")), 6_000)
+            self.assertNotIn("Codebase Memory as the mandatory first evidence route", message)
+            self.assertLess(len(message.encode("utf-8")), 1_024)
+            worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', message).group(1)
+            assignment = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            context = assignment["data"]["assignment_context"]
+            self.assertIn("Codebase Memory as the mandatory first evidence route", context["common_policy"])
+            self.assertEqual(context["profile_name"], "explorer")
+            self.assertTrue(context["profile_instructions"])
 
     def test_parallel_workers_bind_distinct_assignments_even_when_read_in_reverse_order(self) -> None:
         outcomes = [
@@ -233,6 +242,80 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(second["task_ref"], worker_refs[1])
             self.assertEqual(first["task_ref"], worker_refs[0])
             self.assertNotEqual(contexts[0]["assignment_id"], contexts[1]["assignment_id"])
+
+    def test_all_finalized_evidence_from_multiple_authors_keeps_assignment_public(self) -> None:
+        outcome = {
+            "outcome": "Verify the bounded change.",
+            "acceptance": ["The verification evidence is durable."],
+            "constraints": [],
+            "verification": [],
+        }
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, [outcome])
+            for label in ("first reviewer", "second reviewer"):
+                assignment = self._assignment(task["task_ref"], outcome, label)
+                worker_ref = re.search(
+                    r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                    assignment["native_dispatch"]["message"],
+                ).group(1)
+                context: dict = {}
+                read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+                publish_result(
+                    task_ref=worker_ref,
+                    summary=f"{label} completed.",
+                    outcome="Verification passed.",
+                    changes=[],
+                    verification_facts=[{"state": "executed", "summary": f"{label} check passed."}],
+                    outcome_coverage=[{
+                        "outcome": outcome["outcome"],
+                        "status": "complete",
+                        "verification": [f"{label} check passed."],
+                    }],
+                    documentation_impact="No documentation change.",
+                    risks=[], unresolved=[], status="completed",
+                    _connection_context=context,
+                )
+
+            # ``all_finalized`` intentionally selects both reports.  Their
+            # authors are distinct, so there is no single predecessor to
+            # infer; the server must preserve both inputs and leave that
+            # optional relation unset instead of exposing an internal field.
+            assignment = open_assignment(
+                task_ref=task["task_ref"], role="aggregate reviewer", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="evidence",
+                goal="Review all finalized evidence.", scope="The bounded verification outcome.",
+                instructions="Consume every finalized evidence report and publish the aggregate result.",
+                outcomes=[outcome["outcome"]], report_policy="all_finalized",
+            )
+            self.assertIn("native_dispatch", assignment)
+
+    def test_open_assignment_never_exposes_private_lineage_error_fields(self) -> None:
+        outcome = {
+            "outcome": "Inspect the assignment boundary.",
+            "acceptance": ["The public error is sanitized."],
+            "constraints": [],
+            "verification": [],
+        }
+        private_fields = ("input_report_refs", "input_decision_refs", "parent_assignment_ref")
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, [outcome])
+            for private_field in private_fields:
+                with self.subTest(private_field=private_field), patch(
+                    "cortex_runtime.domain_api.ledger.create_delegation",
+                    side_effect=V12ServiceError(
+                        "internal lineage failure", code="invalid_argument",
+                        details={"field": private_field},
+                    ),
+                ):
+                    with self.assertRaises(V12ServiceError) as rejected:
+                        self._assignment(task["task_ref"], outcome, f"sanitization {private_field}")
+                    self.assertEqual(rejected.exception.code, "ledger_error")
+                    self.assertNotIn(private_field, repr(rejected.exception.details))
+                    self.assertNotIn(private_field, str(rejected.exception))
 
     def test_partial_plan_is_accepted_once_and_is_immediately_active_evidence(self) -> None:
         """Regression for the real planner failure observed in live orchestration.
@@ -461,12 +544,21 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(publish_result(summary="Implemented.", outcome="Complete.", changes=[], documentation_impact="Checked.", **common)["state"], "published")
             self.assertEqual(publish_documentation(summary="Documentation assessed.", findings=[], recommendations=[], documentation_impact="No update required.", **common)["state"], "published")
 
+            open_clarification(
+                task_ref=task["task_ref"],
+                prompt="Review the current result: revise this task or close it?",
+                prompt_language="en", purpose="closure_review", options=["revise", "close"],
+            )
+            record_clarification(
+                task_ref=task["task_ref"], response_original="Close the task.",
+                user_language="en", outcome="close",
+            )
             self.assertEqual(close_task(task_ref=task["task_ref"], verdict="ready")["state"], "closed")
             closed = read_task(task_ref=task["task_ref"], view="state")
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.13.2")
+        self.assertEqual(SERVER_VERSION, "1.14.1")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

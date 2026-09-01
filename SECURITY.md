@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.13.2 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.1 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -36,11 +36,10 @@ backend gates. Required plan review and a genuine user decision are owned by
 the coordinator in ordinary chat: a stored decision records the evidence but
 does not authenticate the user, grant authority, or authorize a later action.
 
-Coordinators and workers receive the same exact fourteen-tool semantic catalog. There is no
-audience filtering, opaque coordinator or worker capability, host epoch, native
-child binding or lifecycle attestation, profile capability matrix, or session
-or environment identity. The worker brief does carry renderer/profile proof and
-a stateless host-neutral `dispatch_brief` projection; neither is host authority. IDs are
+Coordinators and workers receive the same exact fourteen-tool semantic catalog.
+The worker spawn receives one compact closed native dispatch; it is neither the
+full worker policy nor ledger authority. The mandatory first assignment read
+supplies the full common policy, profile guidance, and task evidence. IDs are
 references, not bearer credentials.
 
 Native subagent creation, waiting, permissions, filesystem edits, shell
@@ -158,8 +157,9 @@ required together and retained exactly. `profile_name` is an exact packaged
 enum distinct from the bounded human-readable `role`; it selects expertise, not
 ownership. The public mission's explicit `responsibility` selects planning,
 delivery ownership, or non-owning evidence, while exact `item_refs` bind the
-scope that must be reconciled. Renderer proof must be loaded. The returned `dispatch_brief` preserves the exact rendered
-message and selection for one matching host spawn. This semantic delegation
+scope that must be reconciled. Renderer proof must be loaded. The returned
+closed native dispatch preserves the compact bootstrap and exact selected
+model/effort for one matching host spawn. This semantic delegation
 receipt proves packaged profile and semantic dispatch data, not host lifecycle.
 Host-side one-shot dispatch correlation is isolated below a digest-named
 coordinator-session directory. A mode-0600 atomic active index contains only
@@ -176,6 +176,15 @@ commentary alone is never durable progression: a recovered child needs a
 finalized report, explicit blocked/partial handoff, or parent-linked
 replacement. `close_task` records a task-scoped advisory closure from durable
 evidence and does not gate safe work or a truthful user-facing answer.
+
+Closure review is distinct from ordinary clarification. After the current
+result is presented, exactly two localized choices are offered: revise the
+same task or close it. Revision preserves the same `task_ref`; any later
+assignment, report, or decision makes an earlier close choice stale. The
+public `close_task` boundary atomically requires the current consumed close
+choice and rejects missing, reused, or stale choices. Internal advisory storage
+may remain policy-neutral; this public rule protects the close boundary without
+turning closure into a work scheduler.
 
 The narrow decision operations are the durable record of ordinary-chat
 decisions. `record_clarification`, `record_plan_review`, and
@@ -199,6 +208,15 @@ to a sanitized ledger or validation error.
 For example, an unsupported publication field returns bounded structural
 diagnostics naming the field and expected advertised value without echoing the
 supplied value. Any schema validation failure leaves the ledger unchanged.
+
+Aggregate encoded-size diagnostics are likewise value-blind. They may expose
+the root path, bounded numeric actual/maximum byte counts, and sizes of known
+advertised top-level sections, but never caller text, arbitrary keys, task
+content, filesystem paths, handles, revisions, digests, or private ownership
+identity. A root failure never invents a named field. Publication correction is
+limited to one materially changed complete request on the same worker
+connection; unchanged, incomplete, still-oversize, second, and ambiguous
+attempts fail closed before durable mutation.
 
 The stdio transport bounds one JSON frame at 256 KiB. An oversized frame is
 fully drained and returns a sanitized parse error so the next valid
@@ -488,23 +506,23 @@ Canonical recommendations use `high` for all three: Luna for default bounded
 work, Terra for genuinely complex non-security work, and Sol for security work
 and security-focused review.
 
-Native dispatch serialization must preserve the exact selected effort and use
-`fork_turns="none"`. Because Luna is the configured host default, a logical
-Luna dispatch omits the native `model` argument. Terra and Sol pass their exact
-model override. The backend validates this transport boundary but never chooses
-or silently replaces a pair. Cortex has no server-owned model escalation or
-recovery ladder.
+Native dispatch serialization must preserve isolated history and the exact
+selected effort. Luna omits the model override so the configured default is
+used; Terra and Sol carry their exact model override. The backend validates
+this transport boundary but never chooses or silently replaces a pair. Cortex
+has no server-owned model escalation or recovery ladder.
 
 ## Lifecycle and hooks
 
-Cortex V12 has no native lifecycle hooks and ships no lifecycle hook code. Hook
-output, hook trust, host metadata, `SubagentStop`, coordinator stop,
-session resume, and compaction events are not authorization or completion
-evidence.
+Cortex V12 ships bounded activation and lifecycle-observation hooks. They
+correlate the exact server-issued native dispatch, enforce bootstrap ordering,
+and emit sanitized observations; they do not grant ledger authority or prove
+completion. Hook output, hook trust, host metadata, `SubagentStop`, coordinator
+stop, session resume, and compaction events are not completion evidence.
 
 There is no mandatory server-owned spawn/wait/read/continue lifecycle. A native
 wait is an ordinary model/host coordination action. Each successful durable
-delegation returns one exact host-neutral `dispatch_brief`, which Codex maps
+delegation returns one exact compact closed native dispatch, which Codex forwards
 once to exactly one matching active host spawn and then awaits that worker's own
 report. The ledger does not launch or bind native agents. An
 ambiguous spawn is reconciled by exact host handle, never blindly duplicated; a
@@ -521,7 +539,8 @@ to be omitted.
 
 The orchestrator alone owns the exact knowledge-route paths and six-part
 contract template. The coordinator embeds the compiled contract in
-`instructions` and the native brief. Profiles consume that supplied contract,
+`instructions`; the native brief is only compact bootstrap context. Profiles
+consume the full supplied contract after the mandatory assignment read,
 do not repeat the routing definition, and inspect additional documentation only
 when its further-discovery boundary explicitly authorizes the purpose, scope,
 and stopping condition.
@@ -565,8 +584,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.13.2+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.13.2` is
+`1.14.1+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.1` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a
@@ -631,9 +650,9 @@ A useful report includes:
    restore acknowledgement, preserves canonical data during projection/backup
    cleanup, and writes neither project nor V11 state.
 8. Confirm one durable delegation maps to one exact returned host spawn; the
-   healthy `open_assignment` response carries a host-neutral `dispatch_brief`
-   and renderer/profile proof. Confirm that
-   Codex maps the semantic brief to its active spawn operation without treating
+   healthy `open_assignment` response carries one compact closed native
+   dispatch and replay state. Confirm that Codex forwards the projection to its
+   active spawn operation without treating
    host argument names, lifecycle, model availability, or sandbox state as
    Cortex authority.
 9. Run package validation, release-candidate validation, `git diff --check`, and

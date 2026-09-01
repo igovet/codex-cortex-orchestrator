@@ -39,8 +39,8 @@ graph evidence is recorded; silent or chained fallback is invalid.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) owns bounded V12 task/report constants and canonical report digests.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 persistence.
 - [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) materializes derived host-private plan/report Markdown views.
-- [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the direct worker message from bundled policy and coordinator-authored delegation data.
-- [delegation.py](../../../plugins/cortex/scripts/cortex_runtime/delegation.py) projects coordinator-owned model metadata into the host-neutral `dispatch_brief`.
+- [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the compact native bootstrap and full assignment-read policy/profile package.
+- [delegation.py](../../../plugins/cortex/scripts/cortex_runtime/delegation.py) projects coordinator-owned model metadata into the closed native dispatch.
 - [model_routing.py](../../../plugins/cortex/scripts/cortex_runtime/model_routing.py) validates exact native model/effort support.
 
 ## Data flow
@@ -55,12 +55,15 @@ open_task
     │       ├── discovery / implementation / review / verification / security
     │       └── evidence may add/remove/reorder/retry/rework later nodes
     │
-    ├── open_assignment ──► dispatch_brief + renderer proof ──► native worker
-    │                                                │
-    │                                                ▼
-    │                                          publish_*
-    │                                                │
-    ├────────────── read_task / bounded worker evidence ◄────┘
+    ├── open_assignment ──► compact native dispatch ──► native worker
+    │                                                   │
+    │                         mandatory assignment read ▼
+    │                                  full policy/profile/task evidence
+    │                                                   │
+    │                                                   ▼
+    │                                             publish_*
+    │                                                   │
+    ├──────────────── read_task / bounded worker evidence ◄──┘
     │
     ├── plan report ──► verified review links ──► open_plan_review → record_plan_review
     │
@@ -150,6 +153,15 @@ The closure mutation never upgrades a request. It normalizes an overstated
 verdict downward to the current conformance projection and returns the requested
 and recorded values without choosing the next orchestration stage.
 
+The ordinary clarification pair (`open_clarification` and
+`record_clarification`) records a direct product or requirement answer; it is
+not closure review. Once the current result is presented, closure review has
+exactly two localized choices: revise the same task or close it. Revision keeps
+the same `task_ref`. A later assignment, report, or decision stales a prior
+close choice, and the public `close_task` path atomically requires the current
+consumed choice. Internal advisory storage can remain policy-neutral because
+this requirement is enforced at the public close boundary.
+
 `read_task` also returns `advisory_closure`, whose `record_status` is
 `recorded` or `not_recorded` and whose `latest_record` is the latest closure
 object or `null`. The `close_task` result adds
@@ -168,15 +180,16 @@ mistaken for evidence readiness.
 ## Delegations and report handoff
 
 The coordinator creates a delegation before starting a native worker. The
-delegation's worker brief combines untrusted task context with exact
-coordinator-authored instructions and bundled role policy; it is not a
-capability or lifecycle token.
+native worker brief is compact bootstrap context, not the full policy/profile
+delivery and not a capability or lifecycle token. The mandatory first
+assignment read returns the complete coordinator-authored instructions,
+bundled role policy, and task evidence.
 
-The native brief contains the canonical saved project root for working-directory
-context. The coordinator also embeds the delegation-specific six-part knowledge
-contract compiled through the bounded route defined only by the orchestrator
-skill. Profiles consume that contract and do not reconstruct documentation
-routing.
+The mandatory assignment read contains the canonical saved project root only
+for working-directory context. The delegation-specific six-part knowledge contract
+is compiled through the bounded route defined only by the orchestrator skill and
+is consumed from the full assignment read. Profiles consume that contract after
+the first read and do not reconstruct documentation routing.
 
 `scope` is a concise text boundary of worker ownership, not a structured work
 plan. It is required, must contain at least one character, and is limited to
@@ -185,6 +198,12 @@ scope is rejected by the closed schema.
 Every assignment also selects a non-empty exact set of current outcome-item
 references. The selection is required even for planning and single-outcome
 work, so prose labels cannot silently widen or replace durable scope.
+The public assignment projection places exact semantic outcome names in a
+compact reconciliation header before the larger policy and contract body.
+Medium and large structured responses are not duplicated into text. Evidence
+pages continue only through immediate server-owned continuation, and an exact
+restarted terminal page reuses the existing consumption receipt without a new
+timeline event.
 
 Workers publish immutable plan, result, or documentation evidence
 and return a concise native `Summary` plus exact `Report ref` in the completion
@@ -199,7 +218,16 @@ assignment's declared inputs and preserves the bounded evidence contract;
 coordinator reads are explicitly classified and cannot be mistaken
 for downstream consumption. The server-owned assignment and evidence data
 remains authoritative; coordinator prose and native-worker handoffs are routing
-context, not semantic evidence.
+context, not semantic evidence. Multiple independently authored reports chosen
+by a broad report policy remain valid inputs without implying a unique parent;
+private report-reference fields never cross the public error boundary.
+
+Complete unpaired steering additions create independent current outcomes.
+Exactly one retire plus one add replaces one outcome atomically; unrelated
+outcomes and their coverage remain current. Delivery ownership is
+transactionally singular per outcome, so distinct outcomes may progress in
+parallel while same, stale, overlapping, or ambiguous ownership remains
+fail-closed.
 
 Canonical product-facing reports support the fixed
 `cortex/report/{progress,result,synthesis,plan}/v1` schemas and additive
@@ -269,10 +297,18 @@ specialist dispositions, and aggregate coverage. It
 guides model-owned rework, verification, and closure review; it cannot alter
 report/delegation lifecycle or block safe coordination.
 
+Closure is never probed speculatively. Even when the initial request asks to
+close automatically after future work, the coordinator first presents the
+finished current result and records the required post-result closure review;
+only that current explicit close choice permits the first `close_task` call.
+
 Private/internal report storage may retain immutable assembly metadata and
 chunking limits, but the public facade has no `begin`/`append`/`finalize`/`abort`
 operations. Public workers submit one complete plan, result, or documentation
-payload through the corresponding publication operation.
+payload through the corresponding publication operation. A confirmed terminal
+publication success ends that worker's tool activity immediately; identical
+reconciliation is reserved for an actually ambiguous transport result and is
+never a post-success confirmation call.
 
 Worker evidence reads are exposed through the bounded `read_task` evidence
 view. The public caller supplies no publication/assignment reference or cursor;
@@ -432,9 +468,12 @@ and uses those definitions to validate inputs and successful results. A
 successful call returns canonical JSON as text content and `structuredContent`,
 with `isError=false`. A
 caller-correctable error returns `isError=true` with one bounded sanitized text
-message, stable code, and recovery action, but no `structuredContent`—an error
-is not a successful-output-schema variant. Sanitized JSON-RPC internal errors
-cover server-state faults. None of these transport paths may expose private
+message plus a matching sanitized `structuredContent.error` containing the
+stable code, safe details, and recovery action. If multiple required input
+properties are absent, safe details include the complete bounded
+`missing_fields` list. This error object is not a successful-output-schema
+variant. Sanitized JSON-RPC internal errors cover server-state faults. None of
+these transport paths may expose private
 task/report content, secrets, raw diagnostics, filesystem state, or ledger rows.
 
 ## Historical compatibility boundary

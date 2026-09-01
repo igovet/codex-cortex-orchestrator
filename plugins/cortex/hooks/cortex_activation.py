@@ -36,8 +36,7 @@ ASSIGNMENT_OPEN_TOOLS = {"mcp__cortex__open_assignment", "mcp__cortex__create_de
 NATIVE_SPAWN_TOOLS = {"agent", "collaboration.spawn_agent", "collaborationspawn_agent", "spawn_agent"}
 DISPATCH_STATE_PREFIX = "dispatch-"
 COMPLETED_DISPATCH_HISTORY_LIMIT = 64
-CANONICAL_NATIVE_FIELDS = frozenset(("fork_turns", "message", "task_name"))
-HOST_NATIVE_METADATA_FIELDS = frozenset(("model", "reasoning_effort"))
+CANONICAL_NATIVE_FIELDS = frozenset(("fork_turns", "message", "task_name", "reasoning_effort"))
 SUPPORTED_NATIVE_MODELS = frozenset(("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
 SUPPORTED_REASONING_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max"))
 CODEBASE_MEMORY_TOOL_PREFIXES = ("mcp__codebase_memory__", "mcp__codebase-memory__")
@@ -613,13 +612,9 @@ def _native_arguments(value: object) -> dict[str, Any] | None:
     if not CANONICAL_NATIVE_FIELDS <= set(candidate):
         return None
     # The native adapter accepts exactly the server's closed projection. Do
-    # not silently discard host-supplied routing fields while validating.
-    supplied_metadata = set(candidate) - CANONICAL_NATIVE_FIELDS
-    # Codex 0.151.0 exposes model and reasoning_effort as one optional atomic
-    # routing pair on collaboration.spawn_agent.  It does not expose the old
-    # host-level role field.  Requiring that retired three-field envelope made
-    # every correctly formed current-host spawn fail as dispatch_mismatch.
-    if supplied_metadata not in (set(), set(HOST_NATIVE_METADATA_FIELDS)):
+    # not silently discard or default the coordinator-selected routing pair.
+    supplied_fields = set(candidate)
+    if supplied_fields not in (set(CANONICAL_NATIVE_FIELDS), set(CANONICAL_NATIVE_FIELDS) | {"model"}):
         return None
     if (candidate.get("fork_turns") != "none"
             or not isinstance(candidate.get("message"), str)
@@ -630,7 +625,7 @@ def _native_arguments(value: object) -> dict[str, Any] | None:
             or ("model" in candidate and candidate.get("model") not in SUPPORTED_NATIVE_MODELS)
             or ("reasoning_effort" in candidate and candidate.get("reasoning_effort") not in SUPPORTED_REASONING_EFFORTS)):
         return None
-    return {key: candidate[key] for key in CANONICAL_NATIVE_FIELDS}
+    return {key: candidate[key] for key in supplied_fields}
 
 
 def _record_pending_dispatch(event: dict[str, Any]) -> None:
@@ -841,7 +836,15 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
     if fcntl is not None and lock is None:
         return None
     try:
-        candidates = _dispatch_records(session_id=session_id, turn_id=turn_id, states={"pending", "delivery_pending"})
+        # A native tool call may be emitted in a later host turn than the MCP
+        # result that minted its receipt. Session identity is the durable
+        # parent boundary; requiring the original transient turn identifier
+        # leaves a valid receipt pending and falsely reports dispatch_mismatch.
+        candidates = _dispatch_records(
+            session_id=session_id,
+            turn_id=None if isinstance(session_id, str) and session_id else turn_id,
+            states={"pending", "delivery_pending"},
+        )
         if candidates is None:
             return None
         tool_use_id = event.get("tool_use_id")
@@ -880,11 +883,25 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         if (authoritative is None or not isinstance(assignment_ref, str)
                 or record.get("dispatch_digest") != _dispatch_digest(assignment_ref, authoritative)):
             return None
-        supplied = event.get("tool_input")
-        if isinstance(supplied, dict):
-            metadata = set(supplied) & HOST_NATIVE_METADATA_FIELDS
-            if metadata and metadata != set(HOST_NATIVE_METADATA_FIELDS):
+        # Codex may replace the plaintext message with an opaque encrypted host
+        # transport value before PreToolUse.  Correlate the immutable routing
+        # fields exactly; SubagentStart delivers the server-owned plaintext
+        # bootstrap from the receipt, so the encrypted host message is never
+        # treated as assignment authority here.
+        routing_fields = ("fork_turns", "task_name", "reasoning_effort")
+        if any(args.get(key) != authoritative.get(key) for key in routing_fields):
+            return None
+        # The server omits the model only for Luna so the configured native
+        # default is used. Current hosts may materialize that same default in
+        # PreToolUse. Treat absent server model and explicit Luna as one routing
+        # choice; every non-Luna model still requires exact equality.
+        authoritative_model = authoritative.get("model")
+        host_model = args.get("model")
+        if authoritative_model is None:
+            if host_model not in {None, "gpt-5.6-luna"}:
                 return None
+        elif host_model != authoritative_model:
+            return None
         identity = session_id if isinstance(session_id, str) and session_id else turn_id
         session_digest = _value_fingerprint(identity)
         session_root = _dispatch_session_root(session_id, turn_id)

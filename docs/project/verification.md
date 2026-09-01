@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.13.2 source, package, installed-host, and
+This page describes Cortex 1.14.1 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -13,7 +13,7 @@ release/protocol gate:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-prompt-lint.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_marketplace_release_gate.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
 git diff --check
 ```
 
@@ -41,13 +41,20 @@ The V12 protocol evidence must prove:
   registry and validates successful results against each complete private
   runtime result schema; the advertised `outputSchema` is a compact public
   projection limited to essential handles, lifecycle states, replay/continuation,
-  and next-action data. Successful calls carry matching JSON text content plus
-  `structuredContent` with `isError=false`, while caller-correctable errors use
-  `isError=true` bounded sanitized text only (no `structuredContent`);
+  and next-action data. Each tool description mechanically lists the exact
+  required input properties derived from its advertised `inputSchema` and tells
+  the caller to verify them before invocation. Successful calls carry matching
+  JSON text content plus `structuredContent` with `isError=false`, while
+  caller-correctable errors use `isError=true` bounded sanitized text plus a
+  matching sanitized `structuredContent.error`; when several required fields
+  are absent, its `details.missing_fields` and recovery action report the full
+  bounded list in one response;
 - only `open_task` accepts explicit `project_root`; task-anchored
   tools use the returned compact `task_ref`, while `open_assignment` returns
-  the server-rendered worker bootstrap and `publish_*` uses the assignment
-  continuation; no separate report-read operation exists
+  the compact server-rendered worker bootstrap and `publish_*` uses the
+  assignment continuation; the worker's mandatory first assignment read then
+  supplies full common policy, profile guidance, and task evidence; no separate
+  report-read operation exists
   references. No public tool accepts a durable `task_id` or another direct-ID
   alternate; the task/result contract separately preserves exact
   `user_request_original`, `user_language`, English `objective`, contract
@@ -63,10 +70,22 @@ The V12 protocol evidence must prove:
   `instructions`;
 - `open_assignment` requires a human-readable `role`, exact packaged
   `profile_name`, and exact model/effort together; its successful response is
-  host-neutral with a `dispatch_brief` and renderer/profile proof; Codex maps
-  that semantic brief to one active host spawn. The worker's first task read is
-  the server-rendered `read_task` assignment view, which retains bounded task
-  evidence for recovery after host reconciliation;
+  one compact closed native dispatch plus replay state; it preserves exact
+  effort, omits the model only for default Luna, and is forwarded unchanged to
+  one active host spawn. The worker's first task read is
+  the server-rendered `read_task` assignment view, which supplies full common
+  policy, profile guidance, and bounded task evidence on healthy and recovery
+  paths;
+- `open_clarification` and `record_clarification` record an ordinary direct
+  product/requirement answer and are distinct from closure review;
+- after presenting the current result, closure review renders exactly two
+  localized choices: revise the same task or close it. Revision preserves the
+  same `task_ref`; a later assignment, report, or decision stales any earlier
+  close choice;
+- the public `close_task` path atomically requires the current consumed close
+  choice and rejects missing, reused, or stale choices. Internal advisory
+  storage may remain policy-neutral; this public boundary does not schedule or
+  gate safe work;
 - `close_task` requires the exact task reference, one advisory verdict, and
   bounded closure evidence; durable task IDs are evidence only;
 - after sufficient finalized worker evidence, coordinator policy selects only
@@ -104,17 +123,24 @@ The V12 protocol evidence must prove:
   work/verification, and an incomplete mapping stays assembling for a
   corrective immutable append rather than producing a terminal semantic-invalid
   plan or requiring a second planner delegation;
+- every advertised input schema exposes the complete compact UTF-8 aggregate
+  bound. Verify below, exact, and above-bound payloads, multibyte Unicode,
+  dominant and aggregate sections, value-blind actual/maximum diagnostics, no
+  invented root field, no irrelevant handle guidance, one complete materially
+  corrected `publish_result`, unchanged/incomplete/second-attempt rejection,
+  and separation from domain, report, and physical-frame failures;
 - worker bootstrap returns an ordered pre-publication reconciliation template
-  for the exact immutable assignment scope; verify its count, ordered refs, and
+  for the exact immutable assignment scope; verify its count, exact public
+  outcome names, and
   disposition-free rows agree with the planner or assigned item collection and
   are preserved through a clean first publication call;
 - `read_task` exposes the revisioned effective contract and aggregate
   coverage. Verify one stable active item per independent user outcome, linked
   acceptance/verification without duplicates, exact source fragments, one current owner per item,
   allowed contributing/evidence-producing roles, completed/partial/unverified/
-  stale/contradictory coverage classification, and a user-steer revision that
-  replaces only its named outcome with merged source-grounded metadata while
-  preserving unaffected coverage and never adding a parallel item;
+  stale/contradictory coverage classification, independent unpaired steering
+  additions, an atomic one-retire/one-add replacement, and preservation of
+  unaffected coverage;
 - advisory conformance evidence links the current contract revision, decisions,
   finalized report manifest digests, completed coordinator-report consumption,
   and aggregate coverage without becoming a dispatch, reporting, or closure
@@ -125,6 +151,10 @@ The V12 protocol evidence must prove:
 - `read_task` returns bounded server-produced task state, assignment, or evidence
   data; workers start with the assignment view and resume only with its
   server-owned continuation;
+- large assignment tests verify the exact publication outcome appears in the
+  compact reconciliation header, the structured response is not duplicated in
+  text, continuation follows only `has_more=true`, and a restarted terminal
+  read reuses rather than duplicates its consumption receipt;
 - report-read request/response aggregation is preflighted before body
   materialization (including report/chunk counts and the 224 KiB response cap),
   and projection rendering preflights its aggregate 512-file/32 MiB output
@@ -271,15 +301,11 @@ For every supported model, verify `low`, `medium`, `high`, `xhigh`, and `max`.
 Native projection must retain `fork_turns="none"` and the exact effort.
 
 For each durable delegation, verify the successful `open_assignment` response
-has a host-neutral `dispatch_brief` and renderer/profile proof, with logical
-model/effort recommendations. The active host maps the brief exactly once to
-its spawn operation with the required first `read_task` assignment read. A
+has one compact closed native dispatch plus replay state, preserves exact
+effort, and omits the model only for default Luna. The active host forwards the projection exactly once to
+its spawn operation, followed by the required first assignment read. A
 missing/duplicate spawn, ad-hoc message, shared worker across delegations, or
-claim that Cortex fixes host argument names or model availability is a failure.
-
-- logical `gpt-5.6-luna` omits the native `model` argument;
-- `gpt-5.6-terra` passes its exact model override;
-- `gpt-5.6-sol` passes its exact model override;
+model/effort mismatch is a failure.
 - invalid models and efforts are rejected;
 - no backend profile, governance mode, or recovery policy rewrites the pair.
 
@@ -329,7 +355,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.13.2+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.14.1+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -378,7 +404,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.13.2` with
+successful `initialize`, report semantic version `1.14.1` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -551,7 +577,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.13.2/schema-v1 identifiers;
+- V12/1.14.1/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional

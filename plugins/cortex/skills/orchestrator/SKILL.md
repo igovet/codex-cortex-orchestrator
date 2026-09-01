@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.13.2 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
+description: Explicit opt-in Cortex v1.14.1 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. After activation, read this skill completely before task-specific commentary, questions, plans, or results. The first project operation is open_task.
 ---
 
-# Cortex Orchestrator v1.13.2
+# Cortex Orchestrator v1.14.1
 
 ## Activation and language
 
@@ -47,17 +47,29 @@ The coordinator stores only `task_ref`. It never stores, copies, reconstructs, o
 
 `read_task` is the only task read surface. Coordinator state reads expose current semantic outcomes and neutral facts; coordinator evidence reads use a semantic report policy. A fresh worker's exact first Cortex call is the assignment view using the worker-scoped `task_ref` from the server-rendered native dispatch. Continuation uses only the advertised boolean; the server owns position. After restart, start the read again and let the server reconcile consumption receipts. A worker never first reads general state, infers an assignment, or uses another worker's `task_ref`.
 
+The fresh worker derives that finite first read only from the live advertised contract and the exact server-rendered authority. A deterministic caller-shape rejection permits one materially corrected attempt only when bounded diagnostics make the correction unambiguous. The worker never repeats the unchanged malformed request, guesses identity or authority, or begins project work before successful consumption. A second deterministic failure, incomplete diagnostics, or a correction that would require guessing ends the assignment honestly. An ambiguous transport outcome permits only identical reconciliation, never a replacement assignment or a changed request.
+
+Continue an assignment read only when the immediately preceding otherwise-identical read explicitly reports that more data remains, and continue immediately. Once the terminal page reports completion, do not read that assignment again. Transition to bounded role work and one terminal publication; unresolved or conflicting evidence produces an honest partial or blocked publication instead of a read loop.
+
 ## Delegation
 
 The coordinator chooses the packaged profile, model, reasoning effort, responsibility, semantic outcomes, report policy, goal, scope, and instructions from current evidence. Planning remains optional for genuinely minimal work. Light or full governance requires a planner-owned immutable plan and explicit approval of that exact current plan before any delivery assignment; planning and evidence assignments remain available to build and verify that relation. Parallel assignments are valid whenever ownership and mutation scopes are safe.
 
+Pre-planner analysis is conditional, not a mandatory stage. Use read-only evidence assignments before planning only when distinct repository facts, cross-domain dependencies, material uncertainty, or conflicting evidence would otherwise make the planner speculate or repeat broad discovery. Give each analysis worker a non-overlapping question and stopping boundary. Use Luna for this bounded evidence work and explicitly select an effort from its entire currently advertised range in proportion to that scope; the highest available effort is reserved for genuinely demanding analysis rather than used as a fixed default.
+
+There is no finite total cap on justified evidence assignments. Active work is limited by currently available native-agent slots: dispatch only the ready non-overlapping assignments that fit, keep the remaining justified work queued in the model-owned DAG, and dispatch the next queued assignment when a slot becomes free. Stop expanding the queue when finalized evidence answers the planning questions, no distinct non-duplicative domain remains, or the expected incremental value no longer justifies latency and cost. Never fan out overlapping prompts merely to occupy slots.
+
+After the selected evidence set settles, create one planning assignment that consumes the relevant finalized reports. The planner remains the sole owner of the project solution plan, reconciles contradictions, performs bounded independent discovery for genuine gaps, and publishes exactly one plan. Evidence workers never publish or revise the plan.
+
 Every assignment must be scoped from the complete effective contract. Assignment instructions may explain ownership and stopping boundaries, but may not be the sole carrier of a source-derived requirement and may not replace exact outcome acceptance, constraints, verification, or context with "see the attachment" or equivalent shorthand. Before native spawn, confirm that each assigned outcome's exact contract details are present in the server-owned assignment evidence that `read_task` will return.
 
-After task creation and before the first assignment, make and record one explicit, evidence-backed advisory governance assessment and governance-depth decision from the user request and complete semantic contract. Select the depth before invoking the assessment operation; rationale or risk notes alone are not an assessment. Bounded low-risk work is normally minimal; multi-step or cross-surface user-visible work is normally light; authentication, authorization, security, privacy, credentials, money or stored value, destructive action, production-critical behavior, or comparable cross-domain risk is full. Reassess when material evidence changes the risk. The assessment remains advisory and never expands coordinator project access.
+Immediately before every assignment, read current task state and select the complete exact unique semantic outcome names from that current effective contract. Do not reuse a pre-steering snapshot, paraphrase, merge, or invent an outcome. An explicit stale-current-outcome rejection permits at most one fresh-state read and one rebuilt assignment when the intended scope maps unambiguously to the current contract. Never retry the unchanged request or reconstruct a retired outcome; stop honestly when remapping is ambiguous. A corrected successful non-replayed dispatch still spawns exactly once and immediately, while replayed or ambiguous mutation evidence never creates a duplicate worker.
+
+After task creation and before the first assignment, make and record one explicit, evidence-backed advisory governance assessment and governance-depth decision from the user request and complete semantic contract. Select the depth before invoking the assessment operation; rationale or risk notes alone are not an assessment. Bounded low-risk work is normally minimal; multi-step or cross-surface user-visible work is normally light; authentication, authorization, security, privacy, credentials, money or stored value, destructive action, production-critical behavior, or comparable cross-domain risk is full. Only the root coordinator owns this operation. Reassess only when material new evidence changes risk and only after the coordinator deliberately selects a current depth; worker completion, repeated planning, or plan revision alone is not a reassessment trigger. No native worker or packaged profile may assess governance. The assessment remains advisory and never expands coordinator project access.
 
 For light or full work, create a planning assignment and tell the planner that its immutable plan requires user review. The backend rejects a delivery assignment until that current finalized required-review plan has an explicit approval bound to its exact report identity and digest. Minimal work may use an informational plan only when no material product, scope, external, destructive, security, privacy, or risk decision remains. Never describe a plan as informational merely to bypass a review hold or downgrade governance after planning begins.
 
-The available model routes are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`; the live schema advertises valid effort values. The coordinator makes the task-specific choice, including `high` effort when evidence warrants it.
+The available model routes are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`; the live schema advertises valid effort values. The coordinator makes the task-specific model and effort choice from the full advertised range; no fixed effort is a universal default.
 
 `open_assignment` creates private lineage and returns `native_dispatch`. Forward it exactly to native spawn. Native spawn is the immediate next action: add no commentary, read, planning step, or other tool call between the successful assignment result and spawn. Do not rewrite its message, task name, model, effort, or fork behavior. PreToolUse/SubagentStart correlates the actual child session with the private assignment; never choose a “latest assignment” or reconstruct the worker message.
 
@@ -85,7 +97,30 @@ When verified behavior changes project documentation, create a bounded documenta
 
 Governance evidence never authorizes privileged action, schedules workers, or blocks an already bound worker. It does enforce two pre-dispatch integrity invariants: an assessment must exist before the first assignment, and light/full delivery requires the exact current required-review plan approval. Planning and evidence assignments remain available to establish those relations. Ordinary Codex/user approval still governs external, destructive, or scope-expanding actions.
 
-The coordinator chooses the closure verdict. `close_task` derives evidence and coverage from the ledger; the model supplies no report links or private identity. Closure records an advisory conclusion and never chooses future work. A closure storage failure is disclosed rather than erasing verified results.
+Before every closure attempt, the coordinator must reconcile the latest verified
+result, its user-visible impact, decisive checks, documentation impact, residual
+risks, and unrun checks, then present that result to the user in the user's
+language. The coordinator must open one localized closure-review question with
+exactly two choices: revise the current task, or close the task. Never infer a
+choice from silence, an earlier message, a worker report, or the absence of
+objections. An initial request to close automatically after future work is not
+a current post-result review and cannot authorize closure. Never call the
+closure operation as a readiness probe; open and record the current review
+first. Do not attempt closure while that review is unanswered.
+
+If the user chooses to revise, keep the same task open and continue from its
+current semantic contract and evidence. Ask for the missing requirement or
+desired correction when the user's answer does not identify a bounded change,
+then create only the necessary parent-linked rework/replacement assignment.
+Reconcile the new evidence and present the updated result through a fresh
+closure review before any later closure attempt. A revision never requires a
+new task merely because the current one needs more work.
+
+Only an explicit close choice permits the coordinator to choose the closure
+verdict and invoke `close_task`. That operation derives evidence and coverage
+from the ledger; the model supplies no report links or private identity.
+Closure records an advisory conclusion and never chooses future work. A
+closure storage failure is disclosed rather than erasing verified results.
 
 The final answer leads with the user-visible outcome, decisive checks, documentation impact, residual risks, and unrun gates. Never expose private ledger identity, raw worker output, secrets, hidden diagnostics, or unsupported claims.
 

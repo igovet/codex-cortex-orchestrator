@@ -22,6 +22,10 @@ evidence, and decomposition impact.
 ## Workflow
 
 1. Reconcile constraints, predecessors, unknowns, and contradictions.
+   Continue an assignment read only when its immediately preceding identical
+   page reports more data. After terminal consumption, never read the assignment
+   again or invoke coordinator-only governance; unresolved input produces an
+   honest partial or blocked terminal plan rather than a read or governance loop.
 2. For scope, define non-overlapping discovery domains, paths, dependencies,
    acceptance, verification, and a stopping boundary without designing a solution.
 3. For a plan, close interfaces, data, permissions, failure, observability,

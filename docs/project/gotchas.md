@@ -45,18 +45,20 @@
 ## Delegations and reports
 
 - `open_assignment` records work; it does not spawn a native worker or create
-  host authority. Its successful response returns a host-neutral `dispatch_brief`
-  and renderer/profile proof. Codex maps that semantic brief to the active host
-  spawn operation. Do not create an ad-hoc prompt, use
+  host authority. Its successful response returns one compact closed native
+  dispatch plus replay state. Codex forwards that projection unchanged to the
+  active host spawn operation. Do not create an ad-hoc prompt, use
   fewer workers than durable delegations, reuse one worker across delegations,
   or silently inherit model/effort/fork settings.
 - Delegation `scope` is required non-empty text (maximum 65,536 characters) and
   should concisely name the worker's ownership boundary. Put execution detail
   in `instructions`; an object-shaped scope is a schema error.
-- The server-rendered assignment bootstrap is the worker's authoritative brief and
-  bounded chronology after host reconciliation. It is not needed after a
-  healthy `open_assignment`, creates no receipt, and creates no predecessor
-  barrier.
+- The native server-rendered dispatch is only a compact bootstrap after host
+  reconciliation. Every fresh worker must perform the first assignment read;
+  that read is authoritative for full common policy, profile guidance, task
+  evidence, and assignment scope before project work. It is required on the
+  healthy path as well as recovery and is not replaced by the `open_assignment`
+  receipt.
 - Before delegation creation and native spawn, the six knowledge sections must
   appear exactly once, in order, and contain delegation-specific values. Missing,
   empty, TODO/TBD/unknown, or generic placeholder sections are invalid.

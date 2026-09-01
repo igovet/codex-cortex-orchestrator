@@ -3999,11 +3999,22 @@ class V12Store:
                 if matches:
                     active_authors[author] = report
             if len(active_authors) > 1:
-                raise V12StoreError(
-                    "assignment predecessor evidence is ambiguous",
-                    code="invalid_argument",
-                    details={"field": "input_report_refs"},
-                )
+                # A broad server-owned report policy may intentionally supply
+                # evidence from several independent authors.  Those reports
+                # remain valid assignment inputs, but they do not imply one
+                # unique parent.  Preserve all evidence and leave the optional
+                # predecessor relation unset instead of blaming a private
+                # internal field the public caller cannot provide or repair.
+                if explicit_parent_delegation_id is None:
+                    return None
+                matched = active_authors.get(explicit_parent_delegation_id)
+                if matched is None:
+                    raise V12StoreError(
+                        "assignment parent conflicts with predecessor evidence",
+                        code="invalid_argument",
+                        details={"field": "parent_assignment_ref"},
+                    )
+                return matched
             predecessor = next(iter(active_authors.values()), None)
             if predecessor is not None and explicit_parent_delegation_id is not None:
                 if predecessor.get("delegation_id") != explicit_parent_delegation_id:
@@ -4522,38 +4533,10 @@ class V12Store:
             # A host dispatch can commit and then lose its response before
             # SubagentStart is observed.  Mutation-digest replay covers
             # byte-identical requests, but a resend may contain incidental
-            # wording changes.  Reconcile by stable execution boundary before
-            # deriving ownership or minting another active assignment.
+            # wording changes.  Reconcile by stable execution boundary only
+            # after deriving the exact requested outcome scope: role/profile
+            # similarity must never replay an assignment for another outcome.
             current_revision = self._effective_contract(connection, str(task["task_id"]))["revision"]
-            logical_match = connection.execute(
-                "SELECT d.* FROM delegations d JOIN worker_capabilities c ON c.assignment_id=d.delegation_id "
-                "WHERE d.task_id=? AND d.project_hash=? AND c.contract_revision=? AND c.state='minted' "
-                "AND d.role=? AND d.profile_name=? AND d.scope=? AND d.parent_delegation_id IS ? "
-                "AND d.input_report_ids_json=? AND d.input_decision_ids_json=? "
-                "ORDER BY d.created_sequence,d.delegation_id LIMIT 1",
-                (task["task_id"], self.project_hash, current_revision, payload["role"],
-                 payload["profile_name"], payload["scope"], payload["parent_delegation_id"],
-                 _canonical_json(payload["input_report_ids"], label="input_report_ids"),
-                 _canonical_json(payload["input_decision_ids"], label="input_decision_ids")),
-            ).fetchone()
-            if logical_match is not None:
-                existing_roles = {
-                    str(row[0]) for row in connection.execute(
-                        "SELECT DISTINCT assignment_role FROM delegation_outcome_assignments WHERE delegation_id=?",
-                        (str(logical_match["delegation_id"]),),
-                    ).fetchall()
-                }
-                has_planning_scope = connection.execute(
-                    "SELECT 1 FROM assignment_scope_snapshots WHERE assignment_id=? AND assignment_role='planning' LIMIT 1",
-                    (str(logical_match["delegation_id"]),),
-                ).fetchone() is not None
-                existing_policy = "planning" if has_planning_scope else "owner" if "owned" in existing_roles else "review" if existing_roles & {"contributing", "evidence"} else None
-                if existing_policy != payload["assignment_policy"]:
-                    logical_match = None
-            if logical_match is not None:
-                existing = self._delegation(connection, str(logical_match["delegation_id"]), task_id=task["task_id"])
-                brief = self._worker_brief(connection, task, existing)
-                return {"delegation": existing, "dispatch_brief": brief["dispatch_brief"], "renderer": brief["renderer"], "replayed": True}
             assignment_ids = {kind: [self._outcome_item_id(connection, str(task["task_id"]), item) for item in values] for kind, values in payload["outcome_assignments"].items()}
             parent_owned: set[str] = set()
             if payload["parent_delegation_id"] is not None:
@@ -4627,6 +4610,44 @@ class V12Store:
                 assignment_ids["owned"] = sorted(scoped_items) if assignment_policy == "owner" else []
                 assignment_ids["contributing"] = [] if assignment_policy == "owner" else sorted(scoped_items)
                 assignment_ids["evidence_producing"] = sorted(scoped_items) if assignment_policy == "review" else []
+            logical_candidates = connection.execute(
+                "SELECT d.* FROM delegations d JOIN worker_capabilities c ON c.assignment_id=d.delegation_id "
+                "WHERE d.task_id=? AND d.project_hash=? AND c.contract_revision=? AND c.state='minted' "
+                "AND d.role=? AND d.profile_name=? AND d.scope=? AND d.parent_delegation_id IS ? "
+                "AND d.input_report_ids_json=? AND d.input_decision_ids_json=? "
+                "ORDER BY d.created_sequence,d.delegation_id",
+                (task["task_id"], self.project_hash, current_revision, payload["role"],
+                 payload["profile_name"], payload["scope"], payload["parent_delegation_id"],
+                 _canonical_json(payload["input_report_ids"], label="input_report_ids"),
+                 _canonical_json(payload["input_decision_ids"], label="input_decision_ids")),
+            ).fetchall()
+            logical_match = None
+            for candidate in logical_candidates:
+                existing_by_role: dict[str, set[str]] = {"owned": set(), "contributing": set(), "evidence": set()}
+                for row in connection.execute(
+                    "SELECT item_id,assignment_role FROM delegation_outcome_assignments WHERE delegation_id=?",
+                    (str(candidate["delegation_id"]),),
+                ).fetchall():
+                    existing_by_role.setdefault(str(row["assignment_role"]), set()).add(str(row["item_id"]))
+                planning_scope = {
+                    str(row[0]) for row in connection.execute(
+                        "SELECT item_id FROM assignment_scope_snapshots WHERE assignment_id=? AND assignment_role='planning'",
+                        (str(candidate["delegation_id"]),),
+                    ).fetchall()
+                }
+                expected_by_role = {
+                    "owned": set(assignment_ids["owned"]),
+                    "contributing": set(assignment_ids["contributing"]),
+                    "evidence": set(assignment_ids["evidence_producing"]),
+                }
+                expected_planning = expected_by_role["contributing"] if assignment_policy == "planning" else set()
+                if existing_by_role == expected_by_role and planning_scope == expected_planning:
+                    logical_match = candidate
+                    break
+            if logical_match is not None:
+                existing = self._delegation(connection, str(logical_match["delegation_id"]), task_id=task["task_id"])
+                brief = self._worker_brief(connection, task, existing)
+                return {"delegation": existing, "dispatch_brief": brief["dispatch_brief"], "renderer": brief["renderer"], "replayed": True}
             for item_id in assignment_ids["owned"]:
                 current_owner = connection.execute(
                     "SELECT delegation_id FROM delegation_outcome_assignments WHERE item_id=? AND assignment_role='owned' AND superseded_by_delegation_id IS NULL",
@@ -4635,7 +4656,11 @@ class V12Store:
                 if current_owner is not None and (
                     payload["parent_delegation_id"] is None or str(current_owner["delegation_id"]) != str(payload["parent_delegation_id"])
                 ):
-                    raise V12StoreError("outcome item already has an active owner", code="outcome_assignment_conflict")
+                    raise V12StoreError(
+                        "outcome item already has an active owner",
+                        code="outcome_assignment_conflict",
+                        details={"path": "$.outcomes", "expected": "non_overlapping_outcome_scope", "reason": "ownership_conflict"},
+                    )
             identifier = str(payload["delegation_id"] or new_sharded_id("delegation", self.project_hash))
             if connection.execute("SELECT 1 FROM delegations WHERE delegation_id=?", (identifier,)).fetchone() is not None:
                 raise V12StoreError("delegation_id already exists", code="delegation_exists")
@@ -4673,7 +4698,11 @@ class V12Store:
                     try:
                         connection.execute("INSERT INTO delegation_outcome_assignments(delegation_id,item_id,assignment_role,revision) VALUES (?, ?, ?, ?)", (identifier, item_id, role_name, revision))
                     except sqlite3.IntegrityError as exc:
-                        raise V12StoreError("outcome item already has an owner", code="outcome_assignment_conflict") from exc
+                        raise V12StoreError(
+                            "outcome item already has an owner",
+                            code="outcome_assignment_conflict",
+                            details={"path": "$.outcomes", "expected": "non_overlapping_outcome_scope", "reason": "ownership_conflict"},
+                        ) from exc
             if assignment_policy == "planning":
                 for item_id in sorted(set(assignment_ids["contributing"])):
                     connection.execute(
@@ -5857,6 +5886,70 @@ class V12Store:
                 details={"decision_type": str(pending["decision_type"])},
             )
 
+    def _require_current_closure_review(
+        self, connection: sqlite3.Connection, *, task_id: str,
+    ) -> None:
+        """Require an explicit current user choice before task closure.
+
+        The review is bound to the task timeline position at which the
+        question was opened.  Reads and advisory governance do not invalidate
+        it, while any later assignment, worker activity, publication, user
+        decision, or decision opening means the result changed and must be
+        shown again before another closure attempt.
+        """
+        review = connection.execute(
+            "SELECT b.issue_sequence,b.consumed_decision_id,d.decision_type AS outcome "
+            "FROM clarification_bindings b "
+            "LEFT JOIN user_decisions d ON d.decision_id=b.consumed_decision_id "
+            "WHERE b.project_hash=? AND b.task_id=? AND b.decision_type='closure_review' "
+            "ORDER BY b.issue_sequence DESC LIMIT 1",
+            (self.project_hash, task_id),
+        ).fetchone()
+        if review is None or review["consumed_decision_id"] is None:
+            raise V12StoreError(
+                "a current user closure review is required",
+                code="closure_review_required",
+            )
+        outcome = str(review["outcome"] or "")
+        if outcome == "request_revision":
+            raise V12StoreError(
+                "the user requested revision of the current task",
+                code="closure_revision_requested",
+            )
+        if outcome != "approve":
+            raise V12StoreError(
+                "the closure review decision is invalid",
+                code="closure_review_required",
+            )
+        invalidating_events = (
+            "clarification_binding_issued",
+            "delegation_created",
+            "outcome_ownership_transferred",
+            "worker_bootstrap_minted",
+            "worker_bootstrap_consumed",
+            "report_started",
+            "report_chunk_appended",
+            "report_submitted",
+            "report_aborted",
+            "user_decision_recorded",
+        )
+        placeholders = ",".join("?" for _ in invalidating_events)
+        changed = connection.execute(
+            f"SELECT sequence FROM timeline WHERE task_id=? AND sequence>? "
+            f"AND event_type IN ({placeholders}) "
+            "AND NOT (event_type='user_decision_recorded' AND decision_id=?) "
+            "ORDER BY sequence LIMIT 1",
+            (
+                task_id, int(review["issue_sequence"]), *invalidating_events,
+                str(review["consumed_decision_id"]),
+            ),
+        ).fetchone()
+        if changed is not None:
+            raise V12StoreError(
+                "the accepted closure review is stale after later task activity",
+                code="closure_review_stale",
+            )
+
     def read_decision_binding(self, *, task_id: Any, binding_ref: Any) -> dict[str, Any]:
         """Read current state for an already-issued exact binding."""
         anchor = self._task_identifier(task_id)
@@ -5881,12 +5974,26 @@ class V12Store:
         dtype = _required_text(decision_type, label="decision_type", maximum=32).lower()
         subject = anchor if subject_id is None and kind == "task" else self._record_identifier(subject_id, label="subject_id")
         assignment = None if assignment_id is None else self._record_identifier(assignment_id, label="assignment_id")
-        request_digest = _sha256_prefixed({"task_id": anchor, "subject_type": kind, "subject_id": subject, "decision_type": dtype, "prompt": text, "prompt_language": language}, label="clarification request")
-        prompt_digest = _sha256_prefixed(text, label="clarification prompt")
-
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, anchor)
             revision = int(self._effective_contract(connection, anchor)["revision"])
+            closure_generation = None
+            if dtype == "closure_review":
+                generation_row = connection.execute(
+                    "SELECT COALESCE(MAX(sequence),0) AS sequence FROM timeline WHERE task_id=?",
+                    (anchor,),
+                ).fetchone()
+                closure_generation = int(generation_row["sequence"] if generation_row is not None else 0)
+            prompt_identity: object = text if closure_generation is None else {
+                "prompt": text, "task_sequence": closure_generation,
+            }
+            request_identity = {
+                "task_id": anchor, "subject_type": kind, "subject_id": subject,
+                "decision_type": dtype, "prompt": text, "prompt_language": language,
+                **({"task_sequence": closure_generation} if closure_generation is not None else {}),
+            }
+            request_digest = _sha256_prefixed(request_identity, label="clarification request")
+            prompt_digest = _sha256_prefixed(prompt_identity, label="clarification prompt")
             existing = connection.execute("SELECT * FROM clarification_bindings WHERE task_id=? AND subject_type=? AND subject_id=? AND decision_type=? AND prompt_digest=? AND effective_contract_revision=?", (anchor, kind, subject, dtype, prompt_digest, revision)).fetchone()
             if existing is not None:
                 return {"binding": self._decision_binding_projection(existing, task_id=anchor), "replayed": True}
@@ -5941,7 +6048,11 @@ class V12Store:
             "WHERE clarification_binding=? AND project_hash=?",
             (binding_ref, self.project_hash),
         ).fetchone()
-        if binding is None or str(binding["task_id"]) != task_id or str(binding["decision_type"]) != "clarification":
+        if (
+            binding is None
+            or str(binding["task_id"]) != task_id
+            or str(binding["decision_type"]) not in {"clarification", "closure_review"}
+        ):
             raise V12StoreError("clarification binding was not found", code="clarification_binding_not_found")
         bound_assignment = None if binding["assignment_id"] is None else str(binding["assignment_id"])
         if bound_assignment != assignment_id:
@@ -6232,14 +6343,28 @@ class V12Store:
             if any(not isinstance(value, str) for value in retired) or len({value for value in retired if isinstance(value, str)}) != len(retired):
                 raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
             for addition in additions:
-                if (
-                    not isinstance(addition, Mapping)
-                    or set(addition) - {"outcome_ref", "category", "text"}
-                    or not {"category", "text"}.issubset(addition)
-                    or addition.get("category") not in {"requirement", "constraint", "acceptance", "verification"}
+                if not isinstance(addition, Mapping):
+                    raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+                category = addition.get("category")
+                if category == "outcome":
+                    if (
+                        set(addition) != {"category", "text", "acceptance", "constraints", "verification"}
+                        or not isinstance(addition.get("text"), str)
+                        or not addition["text"].strip()
+                        or any(
+                            not isinstance(addition.get(field), list)
+                            or any(not isinstance(item, str) or not item.strip() for item in addition[field])
+                            for field in ("acceptance", "constraints", "verification")
+                        )
+                    ):
+                        raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+                elif (
+                    set(addition) - {"outcome_ref", "category", "text"}
+                    or not {"category", "text", "outcome_ref"}.issubset(addition)
+                    or category not in {"requirement", "constraint", "acceptance", "verification"}
                     or not isinstance(addition.get("text"), str)
                     or not addition["text"].strip()
-                    or ("outcome_ref" in addition and not isinstance(addition.get("outcome_ref"), str))
+                    or not isinstance(addition.get("outcome_ref"), str)
                 ):
                     raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
         elif steering_delta is not None:
@@ -6260,12 +6385,23 @@ class V12Store:
                 clarification_row = connection.execute("SELECT * FROM clarification_bindings WHERE clarification_binding=? AND project_hash=?", (payload["clarification_binding"], self.project_hash)).fetchone()
                 if clarification_row is None:
                     raise V12StoreError("clarification binding was not found", code="clarification_binding_not_found")
-                expected_prompt_digest = _sha256_prefixed(payload["prompt"], label="clarification prompt")
                 binding_decision_type = str(clarification_row["decision_type"])
+                expected_prompt_digest = _sha256_prefixed(payload["prompt"], label="clarification prompt")
+                prompt_matches = (
+                    str(clarification_row["prompt"]) == payload["prompt"]
+                    and (
+                        binding_decision_type == "closure_review"
+                        or str(clarification_row["prompt_digest"]) == expected_prompt_digest
+                    )
+                )
                 # A plan-review binding represents a family; its consumed
                 # outcome is one of the legal plan decisions.
-                decision_matches = binding_decision_type == decision or (binding_decision_type == "plan_review" and kind == "plan" and decision in {"approve", "request_revision", "cancel"})
-                if (str(clarification_row["task_id"]) != anchor or str(clarification_row["subject_type"]) != kind or str(clarification_row["subject_id"]) != subject or not decision_matches or str(clarification_row["prompt_digest"]) != expected_prompt_digest or str(clarification_row["prompt"]) != payload["prompt"] or str(clarification_row["prompt_language"]) != payload["user_language"]):
+                decision_matches = (
+                    binding_decision_type == decision
+                    or (binding_decision_type == "plan_review" and kind == "plan" and decision in {"approve", "request_revision", "cancel"})
+                    or (binding_decision_type == "closure_review" and kind == "task" and decision in {"approve", "request_revision"})
+                )
+                if (str(clarification_row["task_id"]) != anchor or str(clarification_row["subject_type"]) != kind or str(clarification_row["subject_id"]) != subject or not decision_matches or not prompt_matches or str(clarification_row["prompt_language"]) != payload["user_language"]):
                     raise V12StoreError("clarification binding does not match the decision", code="clarification_binding_mismatch")
                 if int(clarification_row["effective_contract_revision"]) != int(self._effective_contract(connection, anchor)["revision"]):
                     raise V12StoreError("clarification binding is stale", code="clarification_binding_stale")
@@ -6332,6 +6468,7 @@ class V12Store:
                     raise V12StoreError("superseded decision has a different subject", code="cross_project_reference")
             retired_item_ids: list[str] = []
             steering_targets: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
+            new_outcomes: list[tuple[int, Mapping[str, Any]]] = []
             active_contract_rows: dict[str, dict[str, Any]] = {}
             if has_contract_delta:
                 delta = payload["steering_delta"]
@@ -6347,15 +6484,14 @@ class V12Store:
                     str(row["item_id"]): (_row(row) or {}) for row in active_rows
                 }
                 retired_set = set(retired_item_ids)
-                available = [item_id for item_id in active_contract_rows if item_id not in retired_set]
                 for addition_index, addition in enumerate(delta.get("add", [])):
+                    if addition.get("category") == "outcome":
+                        new_outcomes.append((addition_index, addition))
+                        continue
                     supplied_ref = addition.get("outcome_ref")
                     if supplied_ref is None:
-                        if len(available) != 1:
-                            raise V12StoreError("steering addition requires an exact outcome_ref", code="invalid_argument", details={"field": "steering_delta.add.outcome_ref"})
-                        target_id = available[0]
-                    else:
-                        target_id = self._outcome_item_id(connection, anchor, supplied_ref)
+                        raise V12StoreError("steering addition requires an exact outcome_ref", code="invalid_argument", details={"field": "steering_delta.add.outcome_ref"})
+                    target_id = self._outcome_item_id(connection, anchor, supplied_ref)
                     if target_id not in active_contract_rows or target_id in retired_set:
                         raise V12StoreError("steering addition target is not active", code="outcome_item_not_found", details={"field": "steering_delta.add.outcome_ref"})
                     steering_targets.setdefault(target_id, []).append((addition_index, addition))
@@ -6367,7 +6503,7 @@ class V12Store:
             # field is part of the public contract or compact projections.
             connection.execute("INSERT INTO user_decisions(decision_id,project_hash,task_id,subject_type,subject_id,subject_digest,decision_type,prompt_en,response_original,response_en,user_language,attribution,supersedes_decision_id,created_at,created_sequence,steering_delta_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, anchor, kind, subject, bound_digest, decision, payload["prompt"], payload["response_original"], "", payload["user_language"], DECISION_ATTRIBUTION, payload["supersedes_decision_id"], _now(), sequence, _canonical_json(payload["steering_delta"], label="steering_delta") if has_contract_delta else None))
             if has_contract_delta:
-                if retired_item_ids or steering_targets:
+                if retired_item_ids or steering_targets or new_outcomes:
                     revision = self._effective_contract(connection, anchor)["revision"] + 1
                     for item_id in {*retired_item_ids, *steering_targets}:
                         connection.execute("UPDATE effective_contract_items SET retired_revision=? WHERE item_id=? AND retired_revision IS NULL", (revision, item_id))
@@ -6384,6 +6520,7 @@ class V12Store:
                             "source_fragments": list(details.get("source_fragments", [])),
                             "supersedes_item_ref": self._outcome_ref(prior_item_id),
                         }
+                        replacement_text = str(prior["text"])
                         for addition_index, addition in additions:
                             category, text = str(addition["category"]), str(addition["text"])
                             if category == "acceptance":
@@ -6397,8 +6534,8 @@ class V12Store:
                             elif category == "constraint":
                                 if text not in merged["constraints"]:
                                     merged["constraints"].append(text)
-                            elif text != str(prior["text"]) and text not in merged["requirement_extensions"]:
-                                merged["requirement_extensions"].append(text)
+                            elif category == "requirement":
+                                replacement_text = text
                             merged["source_fragments"].append({
                                 "source_type": "user_steer",
                                 "path": f"steer.add[{addition_index}].text",
@@ -6408,12 +6545,58 @@ class V12Store:
                         replacement_id = "outcome-" + uuid.uuid4().hex
                         connection.execute(
                             "INSERT INTO effective_contract_items(item_id,project_hash,task_id,category,ordinal,text,created_revision,retired_revision) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
-                            (replacement_id, self.project_hash, anchor, prior["category"], prior["ordinal"], prior["text"], revision),
+                            (replacement_id, self.project_hash, anchor, prior["category"], prior["ordinal"], replacement_text, revision),
                         )
                         connection.execute(
                             "INSERT INTO effective_contract_item_details(item_id,details_json,source_decision_id) VALUES (?, ?, ?)",
                             (replacement_id, _canonical_json(merged, label="effective contract item details"), identifier),
                         )
+                    next_ordinal_row = connection.execute(
+                        "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM effective_contract_items WHERE task_id=? AND category='outcome'",
+                        (anchor,),
+                    ).fetchone()
+                    next_ordinal = int(next_ordinal_row[0]) if next_ordinal_row is not None else 0
+                    for addition_index, addition in new_outcomes:
+                        outcome_text = str(addition["text"])
+                        acceptance = list(addition["acceptance"])
+                        constraints = list(addition["constraints"])
+                        verification = [
+                            value for value in addition["verification"] if value not in acceptance
+                        ]
+                        fragments = [{
+                            "source_type": "user_steer",
+                            "path": f"steer.add[{addition_index}].text",
+                            "text": outcome_text,
+                            "decision_ref": record_ref(identifier),
+                        }]
+                        for field, values in (
+                            ("acceptance", acceptance),
+                            ("constraints", constraints),
+                            ("verification", verification),
+                        ):
+                            fragments.extend({
+                                "source_type": "user_steer",
+                                "path": f"steer.add[{addition_index}].{field}[{value_index}]",
+                                "text": value,
+                                "decision_ref": record_ref(identifier),
+                            } for value_index, value in enumerate(values))
+                        details = {
+                            "acceptance_criteria": acceptance,
+                            "verification_criteria": verification,
+                            "constraints": constraints,
+                            "requirement_extensions": [],
+                            "source_fragments": fragments,
+                        }
+                        item_id = "outcome-" + uuid.uuid4().hex
+                        connection.execute(
+                            "INSERT INTO effective_contract_items(item_id,project_hash,task_id,category,ordinal,text,created_revision,retired_revision) VALUES (?, ?, ?, 'outcome', ?, ?, ?, NULL)",
+                            (item_id, self.project_hash, anchor, next_ordinal, outcome_text, revision),
+                        )
+                        connection.execute(
+                            "INSERT INTO effective_contract_item_details(item_id,details_json,source_decision_id) VALUES (?, ?, ?)",
+                            (item_id, _canonical_json(details, label="effective contract item details"), identifier),
+                        )
+                        next_ordinal += 1
                     connection.execute("INSERT INTO effective_contract_revisions(task_id,revision,decision_id,created_sequence) VALUES (?, ?, ?, ?)", (anchor, revision, identifier, sequence))
             if approval_handle is not None:
                 cursor = connection.execute("UPDATE approval_handles SET consumed_decision_id=? WHERE approval_handle=? AND consumed_decision_id IS NULL", (identifier, payload["approval_handle"]))
@@ -6568,7 +6751,7 @@ class V12Store:
                 warnings = [f"unresolved_{relationship}"] if not resolved else ([f"cyclic_{relationship}"] if path(target, source) else [])
                 connection.execute("UPDATE initiative_links SET is_resolved=?,warnings_json=? WHERE link_id=?", (int(resolved), _canonical_json(warnings, label="link warnings"), int(row["link_id"])))
 
-    def submit_governance_closure(self, *, task_id: Any, subject_type: Any, subject_id: Any, verdict: Any, evidence: Any, unresolved_risks: Any, follow_ups: Any, initiative_status: Any, completion_notes: Any, idempotency_key: Any) -> tuple[dict[str, Any], bool]:
+    def submit_governance_closure(self, *, task_id: Any, subject_type: Any, subject_id: Any, verdict: Any, evidence: Any, unresolved_risks: Any, follow_ups: Any, initiative_status: Any, completion_notes: Any, idempotency_key: Any, require_closure_review: Any = False) -> tuple[dict[str, Any], bool]:
         anchor = self._task_identifier(task_id)
         kind, decision = _required_text(subject_type, label="subject_type", maximum=16).lower(), _required_text(verdict, label="verdict", maximum=32).lower()
         if kind not in CLOSURE_SUBJECTS or decision not in CLOSURE_VERDICTS:
@@ -6581,7 +6764,9 @@ class V12Store:
             raise V12StoreError("initiative status is invalid", code="invalid_initiative_status")
         if kind != "initiative" and status_value is not None:
             raise V12StoreError("initiative_status requires an initiative closure", code="invalid_closure_subject")
-        payload = {"task_id": anchor, "subject_type": kind, "subject_id": subject, "verdict": decision, "evidence": _strict_json(evidence, label="evidence"), "unresolved_risks": _text_list(unresolved_risks, label="unresolved_risks"), "follow_ups": _text_list(follow_ups, label="follow_ups"), "initiative_status": status_value, "completion_notes": None if completion_notes is None else _strict_json(completion_notes, label="completion_notes")}
+        if not isinstance(require_closure_review, bool):
+            raise V12StoreError("closure review requirement is invalid", code="invalid_argument")
+        payload = {"task_id": anchor, "subject_type": kind, "subject_id": subject, "verdict": decision, "evidence": _strict_json(evidence, label="evidence"), "unresolved_risks": _text_list(unresolved_risks, label="unresolved_risks"), "follow_ups": _text_list(follow_ups, label="follow_ups"), "initiative_status": status_value, "completion_notes": None if completion_notes is None else _strict_json(completion_notes, label="completion_notes"), "require_closure_review": require_closure_review}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             self._task(connection, anchor)
             if kind == "task":
@@ -6597,6 +6782,8 @@ class V12Store:
                         "conformance_review": self._conformance_review(connection, anchor),
                         "verdict_adjustment": {"requested": decision, "recorded": recorded},
                     }
+                if payload["require_closure_review"]:
+                    self._require_current_closure_review(connection, task_id=anchor)
             initiative: dict[str, Any] | None = None
             conformance = self._conformance_review(connection, anchor)
             # Conformance is ledger evidence, not a workflow decision.  Keep
@@ -6830,7 +7017,12 @@ class V12Store:
 
         self._read(read)
 
-    def read_reports(self, *, report_ids: Any, sections: Any = None, cursor: Any = None, max_bytes: Any = REPORT_READ_MAX_BYTES, consumer_delegation_id: Any = None, task_id: Any = None) -> dict[str, Any]:
+    def read_reports(
+        self, *, report_ids: Any, sections: Any = None, cursor: Any = None,
+        max_bytes: Any = REPORT_READ_MAX_BYTES,
+        response_max_bytes: Any = REPORT_RESPONSE_MAX_BYTES,
+        consumer_delegation_id: Any = None, task_id: Any = None,
+    ) -> dict[str, Any]:
         """Return bounded chunks and append structural evidence of that read.
 
         Report bodies require the exact consuming delegation.  Calls without a
@@ -6851,6 +7043,15 @@ class V12Store:
             selected_sections = list(sections)
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 0 <= max_bytes <= REPORT_READ_MAX_BYTES:
             raise V12StoreError("max_bytes is invalid", code="invalid_argument", details={"field": "max_bytes"})
+        if (
+            not isinstance(response_max_bytes, int)
+            or isinstance(response_max_bytes, bool)
+            or not REPORT_CHUNK_MAX_BYTES + 4_096 <= response_max_bytes <= REPORT_RESPONSE_MAX_BYTES
+        ):
+            raise V12StoreError(
+                "response_max_bytes is invalid", code="invalid_argument",
+                details={"field": "response_max_bytes"},
+            )
         consumer = None if consumer_delegation_id is None else self._record_identifier(consumer_delegation_id, label="consumer_delegation_id")
         if consumer is None and max_bytes != 0 and task_id is None:
             raise V12StoreError("coordinator report bodies require an anchored task", code="invalid_argument", details={"field": "task_id"})
@@ -6926,11 +7127,75 @@ class V12Store:
             result_reports = [self._compact_report(item) | {"chunks": []} for item in report_rows]
 
             def receipt_result(returned_bytes: int, next_cursor: str | None, more: bool) -> dict[str, Any]:
-                receipts: list[dict[str, Any]] = []
+                consumer_id = None if consuming is None else consuming["delegation_id"]
+                sections_json = _canonical_json(selected_sections, label="report read sections")
+                candidates: list[tuple[Mapping[str, Any], list[int], int, str]] = []
                 for report, compact in zip(report_rows, result_reports):
                     chunks = compact["chunks"]
                     indexes = [int(chunk["chunk_index"]) for chunk in chunks]
                     bytes_value = sum(int(chunk["content_bytes"]) for chunk in chunks)
+                    indexes_json = _canonical_json(indexes, label="report receipt chunks")
+                    candidates.append((report, indexes, bytes_value, indexes_json))
+
+                # A restarted worker may repeat an already completed exact
+                # assignment read without a model-owned cursor. Reconstruct
+                # the deterministic page first, then reconcile every existing
+                # receipt atomically. Never append another receipt or timeline
+                # event for the same immutable report page.
+                existing_rows: list[sqlite3.Row] = []
+                for report, _indexes, bytes_value, indexes_json in candidates:
+                    existing = connection.execute(
+                        "SELECT * FROM report_consumption_receipts "
+                        "WHERE project_hash=? AND task_id=? "
+                        "AND consumer_delegation_id IS ? AND reader_kind=? "
+                        "AND report_id=? AND observed_content_digest=? "
+                        "AND sections_json=? AND input_cursor IS ? AND output_cursor IS ? "
+                        "AND chunk_indexes_json=? AND returned_content_bytes=? AND has_more=? "
+                        "ORDER BY receipt_id LIMIT 1",
+                        (
+                            self.project_hash, anchor, consumer_id, kind,
+                            report["report_id"], report["content_digest"],
+                            sections_json, cursor, next_cursor, indexes_json,
+                            bytes_value, int(more),
+                        ),
+                    ).fetchone()
+                    if existing is None:
+                        existing_rows = []
+                        break
+                    existing_rows.append(existing)
+
+                def project_receipt(
+                    row: Mapping[str, Any], indexes: list[int],
+                ) -> dict[str, Any]:
+                    return {
+                        "receipt_id": int(row["receipt_id"]),
+                        "report_id": row["report_id"],
+                        "consumer_delegation_id": row["consumer_delegation_id"],
+                        "reader_kind": row["reader_kind"],
+                        "observed_content_digest": row["observed_content_digest"],
+                        "chunk_indexes": indexes,
+                        "input_cursor": row["input_cursor"],
+                        "output_cursor": row["output_cursor"],
+                        "returned_content_bytes": int(row["returned_content_bytes"]),
+                        "has_more": bool(row["has_more"]),
+                        "created_sequence": int(row["created_sequence"]),
+                    }
+
+                if len(existing_rows) == len(candidates):
+                    receipts = [
+                        project_receipt(row, candidate[1])
+                        for row, candidate in zip(existing_rows, candidates)
+                    ]
+                    return {
+                        "reports": result_reports,
+                        "returned_content_bytes": returned_bytes,
+                        "next_cursor": next_cursor,
+                        "has_more": more,
+                        "consumption_receipts": receipts,
+                    }
+
+                receipts: list[dict[str, Any]] = []
+                for report, indexes, bytes_value, indexes_json in candidates:
                     sequence = self._timeline(
                         connection,
                         event_type="report_read",
@@ -6938,7 +7203,7 @@ class V12Store:
                         entity_id=str(report["report_id"]),
                         payload={
                             "report_id": report["report_id"],
-                            "consumer_delegation_id": None if consuming is None else consuming["delegation_id"],
+                            "consumer_delegation_id": consumer_id,
                             "reader_kind": kind,
                             "observed_content_digest": report["content_digest"],
                             "read_scope_digest": scope,
@@ -6947,14 +7212,14 @@ class V12Store:
                             "has_more": more,
                         },
                         task_id=anchor,
-                        delegation_id=None if consuming is None else consuming["delegation_id"],
+                        delegation_id=consumer_id,
                         report_id=str(report["report_id"]),
                     )
                     cursor_value = connection.execute(
                         "INSERT INTO report_consumption_receipts(project_hash,task_id,consumer_delegation_id,reader_kind,report_id,observed_content_digest,sections_json,input_cursor,output_cursor,chunk_indexes_json,returned_content_bytes,has_more,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (self.project_hash, anchor, None if consuming is None else consuming["delegation_id"], kind, report["report_id"], report["content_digest"], _canonical_json(selected_sections, label="report read sections"), cursor, next_cursor, _canonical_json(indexes, label="report receipt chunks"), bytes_value, int(more), _now(), sequence),
+                        (self.project_hash, anchor, consumer_id, kind, report["report_id"], report["content_digest"], sections_json, cursor, next_cursor, indexes_json, bytes_value, int(more), _now(), sequence),
                     )
-                    receipts.append({"receipt_id": int(cursor_value.lastrowid), "report_id": report["report_id"], "consumer_delegation_id": None if consuming is None else consuming["delegation_id"], "reader_kind": kind, "observed_content_digest": report["content_digest"], "chunk_indexes": indexes, "input_cursor": cursor, "output_cursor": next_cursor, "returned_content_bytes": bytes_value, "has_more": more, "created_sequence": sequence})
+                    receipts.append({"receipt_id": int(cursor_value.lastrowid), "report_id": report["report_id"], "consumer_delegation_id": consumer_id, "reader_kind": kind, "observed_content_digest": report["content_digest"], "chunk_indexes": indexes, "input_cursor": cursor, "output_cursor": next_cursor, "returned_content_bytes": bytes_value, "has_more": more, "created_sequence": sequence})
                 return {"reports": result_reports, "returned_content_bytes": returned_bytes, "next_cursor": next_cursor, "has_more": more, "consumption_receipts": receipts}
             if max_bytes == 0:
                 # Metadata-only inspection is deliberately not a complete
@@ -6981,7 +7246,7 @@ class V12Store:
                     # caller asks for the full allowed content budget.
                     trial = {"reports": result_reports, "returned_content_bytes": returned + size, "next_cursor": None, "has_more": True}
                     result_reports[position]["chunks"].append(candidate)
-                    if len(_canonical_json(trial, label="report response").encode("utf-8")) > REPORT_RESPONSE_MAX_BYTES:
+                    if len(_canonical_json(trial, label="report response").encode("utf-8")) > response_max_bytes:
                         result_reports[position]["chunks"].pop()
                         more = True
                         break
@@ -6995,12 +7260,6 @@ class V12Store:
                 next_cursor = encode_cursor(position, current_index, snapshot)
             else:
                 next_cursor = None
-            # Legacy convenience only for the complete, small, one-chunk
-            # response; all larger content remains chunk-addressable.
-            if not more and cursor is None and selected_sections is None:
-                for report, compact in zip(report_rows, result_reports):
-                    if report["assembly_state"] == "finalized" and int(report["total_chunks"]) == 1 and len(compact["chunks"]) == 1:
-                        compact["content"] = compact["chunks"][0]["content"]
             return receipt_result(returned, next_cursor, more)
         result = self._write(read)
         self.materialize_human_views(anchor)
