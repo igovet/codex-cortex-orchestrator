@@ -101,6 +101,45 @@ def test_noncompact_session_start_does_not_repeat_skills(tmp_path: Path) -> None
         assert result is None
 
 
+def test_activation_session_start_does_not_overwrite_lifecycle_owned_live_binding(tmp_path: Path) -> None:
+    """The lifecycle observer is the sole writer of the exact resume identity."""
+    codex_home = tmp_path / "home/.codex"
+    hook = codex_home / "plugins/cache/cortex/cortex/1.14.9/hooks/cortex_activation.py"
+    hook.parent.mkdir(parents=True)
+    hook.write_bytes(HOOK.read_bytes())
+    launch = codex_home / ".cortex-live-launch.json"
+    launch.write_text(json.dumps({"cwd": "/project", "session_nonce": "n" * 64}) + "\n")
+    launch.chmod(0o600)
+    binding = codex_home / ".cortex-live-binding.json"
+    original = {
+        "session_id": "root-session",
+        "source": "cli",
+        "cwd": "/project",
+        "session_nonce": "n" * 64,
+        "workdir_fingerprint": "workdir",
+        "isolated_codex_fingerprint": "profile",
+    }
+    binding.write_text(json.dumps(original, sort_keys=True) + "\n")
+    binding.chmod(0o600)
+    environment = os.environ.copy()
+    environment.update({
+        "CODEX_HOME": str(codex_home),
+        "CORTEX_LIVE_BINDING_PATH": str(binding),
+        "PLUGIN_DATA": str(tmp_path / "plugin-data"),
+        "PLUGIN_ROOT": str(ROOT / "plugins/cortex"),
+    })
+    completed = subprocess.run(
+        [sys.executable, "-B", str(hook)],
+        input=json.dumps({
+            "hook_event_name": "SessionStart", "source": "startup",
+            "session_id": "root-session", "cwd": "/project",
+        }),
+        text=True, capture_output=True, env=environment, check=False,
+    )
+    assert completed.returncode == 0
+    assert json.loads(binding.read_text()) == original
+
+
 def test_open_assignment_receipt_is_correlated_without_public_assignment_identity(tmp_path: Path) -> None:
     session, turn = "root", "turn"
     worker_ref = "t_0123456789ab_" + "a" * 32
@@ -167,6 +206,20 @@ def test_host_explicit_luna_matches_server_omitted_default_model(tmp_path: Path)
     assert result["hookSpecificOutput"]["additionalContext"]
 
 
+def test_host_may_omit_optional_non_luna_routing_from_protected_spawn_view(tmp_path: Path) -> None:
+    session, turn = "root", "turn"
+    worker_ref = "t_0123456789ab_" + "a" * 32
+    invoke(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": session, "turn_id": turn, "prompt": "$cortex:orchestrator"})
+    native = native_dispatch(worker_ref, "worker")
+    native.update({"model": "gpt-5.6-terra", "reasoning_effort": "medium"})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": turn, "tool_name": "mcp__cortex__open_assignment", "tool_input": {"task_ref": "t_0123456789ab"}, "tool_response": {"isError": False, "structuredContent": {"native_dispatch": native, "replayed": False}}})
+    protected = {key: native[key] for key in ("fork_turns", "message", "task_name")}
+    protected["message"] = "gAAAA-host-protected-native-message"
+    code, result = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": turn, "tool_use_id": "spawn", "tool_name": "collaboration.spawn_agent", "tool_input": protected})
+    assert code == 0
+    assert result["hookSpecificOutput"]["additionalContext"]
+
+
 def test_spawn_routing_must_equal_the_server_projection(tmp_path: Path) -> None:
     session, turn = "root", "turn"
     worker_ref = "t_0123456789ab_" + "a" * 32
@@ -191,14 +244,14 @@ def test_hook_requires_terminal_worker_bootstrap_before_publication(tmp_path: Pa
     code, result = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_name": "mcp__cortex__publish_result", "tool_input": {"task_ref": ref}})
     assert code == 0
     assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-    code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_use_id": "worker-read", "tool_name": "mcp__cortex__read_task", "tool_input": {"task_ref": ref, "view": "assignment"}})
+    code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_use_id": "worker-read", "tool_name": "mcp__cortex__read_task", "tool_input": {"task_ref": ref}})
     assert code == 0 and allowed is None
     receipt = next((tmp_path / "plugin-data/activation/sessions").glob("*/dispatch/dispatch-*.json"))
     authorized = json.loads(receipt.read_text())
     assert authorized["state"] == "worker_call_authorized"
     assert authorized["authorized_tool_use_digest"] == hashlib.sha256(b"worker-read").hexdigest()
 
-    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_name": "mcp__cortex__read_task", "tool_input": {"task_ref": ref, "view": "assignment"}, "tool_response": {"isError": False, "structuredContent": {"task_ref": ref, "view": "assignment", "data": {}, "has_more": False}}})
+    invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_name": "mcp__cortex__read_task", "tool_input": {"task_ref": ref}, "tool_response": {"isError": False, "structuredContent": {"task_ref": ref, "view": "assignment", "data": {}, "has_more": False}}})
     code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_name": "mcp__cortex__publish_result", "tool_input": {"task_ref": ref}})
     assert code == 0 and allowed is None
 

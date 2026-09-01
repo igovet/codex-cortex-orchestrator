@@ -27,10 +27,10 @@ EXPECTED_TOOLS = (
 # implementation details.  It catches omissions in any one of the fourteen
 # advertised operations while allowing genuinely optional fields to evolve.
 EXPECTED_REQUIRED = {
-    "open_task": {"project_root", "request_original", "user_language", "outcomes", "constraints"},
+    "open_task": {"outcomes", "project_root", "request_original", "user_language", "constraints"},
     "read_task": {"task_ref", "view"},
-    "open_clarification": {"task_ref", "prompt", "prompt_language", "purpose", "options"},
-    "record_clarification": {"task_ref", "response_original", "user_language", "outcome"},
+    "open_clarification": {"task_ref", "prompt", "prompt_language"},
+    "record_clarification": {"task_ref", "response_original", "user_language"},
     "open_plan_review": {"task_ref", "prompt", "prompt_language"},
     "record_plan_review": {"task_ref", "response_original", "user_language", "outcome"},
     "open_steering": {"task_ref", "prompt", "prompt_language"},
@@ -74,6 +74,14 @@ def property_names(value):
 
 
 class PublicMcpFirstCallConformanceTests(unittest.TestCase):
+    def test_open_task_leads_with_its_primary_semantic_outcomes(self) -> None:
+        """The initial catalogue makes the non-derivable contract impossible to bury."""
+        contract = PUBLIC_TOOLS["open_task"]
+        schema = contract["inputSchema"]
+        self.assertEqual(next(iter(schema["properties"])), "outcomes")
+        self.assertEqual(schema["required"][0], "outcomes")
+        self.assertIn("primary semantic contract", contract["description"].lower())
+
     def test_open_task_project_root_cannot_be_described_as_an_output_directory(self) -> None:
         """The first-call contract separates existing host root from planned work."""
         description = PUBLIC_TOOLS["open_task"]["inputSchema"]["properties"]["project_root"]["description"].lower()

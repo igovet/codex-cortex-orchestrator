@@ -38,7 +38,11 @@ The V12 protocol evidence must prove:
 - coordinator `tools/list` excludes all worker publications; signed
   worker-candidate/worker `tools/list` contains exactly `read_task` and the
   three publications and excludes assignment creation, governance, decisions,
-  and closure;
+  and closure; candidate `read_task` requires its closed worker-reference field
+  and permits only an optional `view.const=assignment` expression (the server
+  fixes `assignment` whether omitted or expressed), while only the exact signed
+  SubagentStart/PreToolUse child identity can authorize and consume the
+  referenced candidate on one connection;
 - runtime validation uses the same closed input schemas advertised by the
   registry and validates successful results against each complete private
   runtime result schema; the advertised `outputSchema` is a compact public
@@ -79,7 +83,9 @@ The V12 protocol evidence must prove:
   policy, profile guidance, and bounded task evidence on healthy and recovery
   paths;
 - `open_clarification` and `record_clarification` record an ordinary direct
-  product/requirement answer and are distinct from closure review;
+  product/requirement answer without a caller-supplied outcome because the
+  pending binding already fixes that semantic state; closure review alone
+  requires the caller's `revise` or `close` choice;
 - after presenting the current result, closure review renders exactly two
   localized choices: revise the same task or close it. Revision preserves the
   same `task_ref`; a later assignment, report, or decision stales any earlier

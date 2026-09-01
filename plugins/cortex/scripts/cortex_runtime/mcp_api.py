@@ -94,7 +94,7 @@ def _plugin_data_root() -> Path | None:
 
 
 def _host_worker_candidate_available() -> bool:
-    """Select the candidate catalogue from fresh signed host lifecycle state."""
+    """Select a fail-closed candidate catalogue from signed host lifecycle state."""
     plugin_data = _plugin_data_root()
     if plugin_data is None:
         return False
@@ -102,7 +102,7 @@ def _host_worker_candidate_available() -> bool:
 
 
 def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]:
-    """Advertise the only model-selected fields valid before worker bootstrap."""
+    """Advertise only fields the worker candidate must actually select."""
     source = contract.get("inputSchema")
     properties = source.get("properties") if isinstance(source, Mapping) else None
     if not isinstance(properties, Mapping) or not isinstance(properties.get("task_ref"), Mapping):
@@ -113,9 +113,15 @@ def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]
     if not isinstance(properties.get("view"), Mapping):
         raise RuntimeError("read_task candidate view schema is unavailable")
     candidate_properties["view"] = {
-        **dict(properties["view"]),
-        "enum": ["assignment"],
-        "description": "Required worker-candidate view; assignment is the only permitted value.",
+        **{
+            key: value for key, value in dict(properties["view"]).items()
+            if key not in {"enum", "default"}
+        },
+        "const": "assignment",
+        "description": (
+            "Optional exact expression of the server-fixed candidate view. "
+            "If supplied it must be assignment; omission has identical semantics."
+        ),
     }
     if isinstance(properties.get("continue"), Mapping):
         candidate_properties["continue"] = dict(properties["continue"])
@@ -123,11 +129,12 @@ def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]
         "type": "object",
         "description": (
             "Worker-candidate assignment bootstrap. Supply only the exact server-rendered "
-            "worker-scoped task_ref and the sole advertised assignment view. After a page "
+            "worker-scoped task_ref. The server fixes the view to assignment; an optional "
+            "view field may only express that same value. After a page "
             "returns has_more=true, repeat with continue=true; otherwise omit continue."
         ),
         "properties": candidate_properties,
-        "required": ["task_ref", "view"],
+        "required": ["task_ref"],
         "additionalProperties": False,
     }
 
@@ -1659,6 +1666,10 @@ def serve_stdio(
                     # pre-dispatch boundary. Durable publication idempotency,
                     # not the validation retry guard, owns any later replay.
                     corrections.pop(name, None)
+                if audience == "worker_candidate" and name == "read_task":
+                    # Assignment is server-owned candidate state, not a model-selected
+                    # compatibility default and not a hook rewrite.
+                    resolved_arguments["view"] = "assignment"
                 properties = input_schema.get("properties") if isinstance(input_schema, Mapping) else None
                 if (
                     name != "open_task"
@@ -1676,9 +1687,7 @@ def serve_stdio(
                 if audience == "worker_candidate" and name == "read_task":
                     plugin_data = _plugin_data_root()
                     host_worker_claim = connection_context.get("_host_worker_claim")
-                    if not claim_matches_task(
-                        host_worker_claim, resolved_arguments.get("task_ref")
-                    ):
+                    if not claim_matches_task(host_worker_claim, resolved_arguments.get("task_ref")):
                         host_worker_claim = (
                             claim_worker_candidate(
                                 plugin_data,

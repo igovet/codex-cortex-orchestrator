@@ -91,7 +91,8 @@ including when the user asks the coordinator to perform one.
 
 The sidecar enforces strict schemas, reference existence, project isolation,
 idempotency, transactions, uniqueness, SQLite integrity, monotonic connection
-audiences, exact host-bound worker bootstrap, ordered assignment-page receipts,
+audiences, exact SubagentStart/PreToolUse-bound worker bootstrap with an
+assignment-only candidate catalogue, ordered assignment-page receipts,
 and immutable lost-assignment successor lineage. It does not enforce waves,
 model-owned gates, profile-based capability admission, governance promotion, or
 a server-selected recovery ladder. Exact packaged `profile_name` validation is

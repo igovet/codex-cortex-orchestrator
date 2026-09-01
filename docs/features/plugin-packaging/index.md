@@ -149,8 +149,10 @@ The installable package contains the bounded activation guard and sanitized
 lifecycle observer declared by its hook manifest. Installation requires review
 and trust of only those declared callbacks. Hook processes store owner-private
 digests and routing categories in `PLUGIN_DATA`; the MCP process resolves the
-same exact package data directory from `CODEX_HOME` when claiming a real
-SubagentStart-bound worker audience. Native subagent dispatch remains outside
+same exact package data directory from `CODEX_HOME`, advertises a fail-closed
+candidate catalogue while a signed SubagentStart child is active, and consumes
+only the exact child-bound PreToolUse authorization on the first assignment
+read. Native subagent dispatch remains outside
 the MCP server, and hooks never replace server-side ledger authority.
 
 The SQLite database remains schema v1 under the V12 project namespace, with

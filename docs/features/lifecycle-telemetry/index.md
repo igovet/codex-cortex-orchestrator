@@ -12,10 +12,14 @@ binds the real child audience with owner-only digests and does not repeat the
 message as additional context.
 The server projection always carries `fork_turns`, `task_name`, and the exact
 `reasoning_effort` before its potentially long `message`; `model` is present
-for Terra or Sol and omitted for default Luna. The hook rejects a missing or
-different required routing discriminator and the retired host-level `role`
-field. This keeps routing validation aligned with the live host schema while
-leaving the server-rendered bootstrap authoritative.
+for Terra or Sol and omitted for default Luna. The protected PreToolUse view
+may omit the optional `model` and `reasoning_effort` fields even when they were
+present in the server projection. The hook therefore requires exact
+`fork_turns` and `task_name`, rejects any visible optional value that differs
+from the server receipt, and rejects the retired host-level `role` field. The
+ordered dispatch lease, later exact child binding, and server-authorized first
+assignment read remain authoritative when optional transport metadata is not
+visible.
 Each coordinator session owns a private receipt directory and an atomic active
 index whose receipt state progresses through `pending`, `delivery_pending`,
 `worker_bound`, and `server_claimed`. Add, claim, bind, server-claim, and

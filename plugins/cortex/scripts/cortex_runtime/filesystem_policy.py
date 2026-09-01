@@ -58,7 +58,6 @@ _CAPABILITIES = {
     "observation_generation.write_ready_receipt": "candidate-observation-ready-registration",
     "observation_generation.revoke_session": "candidate-observation-lease-revoke",
     "raw_diagnostic.append": "isolated-raw-diagnostic-bounded-append",
-    "mcp_api._host_worker_candidate_available": "owner-private-worker-candidate-claim",
     "audience_attestation.issue_worker_candidate": "owner-private-worker-candidate-attestation",
     "audience_attestation.fresh_worker_candidate_available": "owner-private-worker-candidate-catalogue",
     "audience_attestation.authorize_worker_candidate_call": "owner-private-worker-call-authorization",

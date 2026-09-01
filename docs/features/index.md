@@ -19,8 +19,11 @@ project-local artifact/state check remain worker-owned.
 - [Coordinator communication](coordinator-communication/index.md)
 - [Knowledge-route contract](knowledge-route-contract/index.md)
 
-Lifecycle telemetry is not an active V12 feature. The package ships no native
-lifecycle hooks, and host start/stop observations are not coordination
-authority.
+Lifecycle hooks provide host-owned activation, compaction recovery, native
+dispatch correlation, and child-thread attestation. They do not replace the
+server boundary: MCP initialize independently matches the exact host-supplied
+child thread, reserves one signed candidate, and advertises only that
+connection's closed worker schema. Start/stop observations alone are not
+assignment or publication authority.
 
 <!-- GENERATED:END -->

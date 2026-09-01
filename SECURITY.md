@@ -188,9 +188,17 @@ user-facing answer.
 
 Worker publication authority is established only after terminal consumption of
 the exact server-owned assignment view on one signed, host-bound MCP
-worker-candidate connection. `SubagentStart` signs a one-shot attestation bound
-to the exact child thread/session/assignment, and the server claims it only at
-MCP initialize by matching `CODEX_THREAD_ID`. Coordinator and worker roles are
+worker-candidate connection. `SubagentStart` signs a one-shot digest-only
+attestation bound to the exact child agent/session/assignment. A fresh MCP
+process receives only the fail-closed worker-candidate catalogue while any
+such signed candidate is active; inherited root environment is not treated as
+child identity. `PreToolUse` authorizes the exact first call without rewriting
+it. The candidate schema exposes no selectable view: an optional view field is
+limited to `const=assignment`, and the server fixes that value even when it is
+omitted. It atomically consumes only the matching child, turn, session,
+assignment, and tool-use authorization on the calling connection. Worker role
+is committed only after successful terminal assignment consumption.
+Coordinator and worker roles are
 monotonic per connection. A fresh process,
 reconnect, copied worker locator, report reference, bare assignment reference,
 or durable continuation cannot rehydrate or transfer consumed publication
@@ -210,6 +218,9 @@ lease, creates the successor, and links the lineage. Timeout, lease expiry,
 silence, reconnect, or missing lifecycle telemetry is not loss evidence.
 
 Closure review is distinct from ordinary clarification. After the current
+ordinary clarification is opened, its matching record omits outcome because
+the pending binding already identifies an answer; supplying `revise` or
+`close` against that binding is rejected without mutation. After the current
 result is presented, exactly two localized choices are offered: revise the
 same task or close it. Revision preserves the same `task_ref`; any later
 assignment, report, or decision makes an earlier close choice stale. The

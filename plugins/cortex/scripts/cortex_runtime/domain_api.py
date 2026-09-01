@@ -1436,7 +1436,7 @@ def open_clarification(*, task_ref: str, prompt: str, prompt_language: str,
                 subject_type="task", subject_id=canonical, assignment_id=None,
             )
             return _decision_receipt(task_ref, "pending_closure_review", issued)
-        if purpose != "clarification" or options not in (None, ["answer"]):
+        if purpose != "clarification" or options is not None:
             raise V12ServiceError(
                 "ordinary clarification does not accept closure review options",
                 code="invalid_argument", details={"field": "purpose" if purpose != "clarification" else "options"},
@@ -1470,7 +1470,7 @@ def record_clarification(*, task_ref: str, response_original: str,
                 steering_delta=None,
             )
             return _decision_receipt(task_ref, "closure_review_recorded", issued)
-        if decision_type != "clarification" or outcome not in (None, "answer"):
+        if decision_type != "clarification" or outcome is not None:
             raise V12ServiceError(
                 "ordinary clarification does not accept a closure outcome",
                 code="clarification_binding_mismatch", details={"field": "outcome"},

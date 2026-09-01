@@ -39,7 +39,8 @@ ASSIGNMENT_OPEN_TOOLS = {"mcp__cortex__open_assignment", "mcp__cortex__create_de
 NATIVE_SPAWN_TOOLS = {"agent", "collaboration.spawn_agent", "collaborationspawn_agent", "spawn_agent"}
 DISPATCH_STATE_PREFIX = "dispatch-"
 COMPLETED_DISPATCH_HISTORY_LIMIT = 64
-CANONICAL_NATIVE_FIELDS = frozenset(("fork_turns", "message", "task_name", "reasoning_effort"))
+CANONICAL_NATIVE_FIELDS = frozenset(("fork_turns", "message", "task_name"))
+OPTIONAL_NATIVE_FIELDS = frozenset(("model", "reasoning_effort"))
 SUPPORTED_NATIVE_MODELS = frozenset(("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
 SUPPORTED_REASONING_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max"))
 CODEBASE_MEMORY_TOOL_PREFIXES = ("mcp__codebase_memory__", "mcp__codebase-memory__")
@@ -51,7 +52,6 @@ def _event() -> dict[str, Any]:
     except (json.JSONDecodeError, OSError):
         return {}
     event = value if isinstance(value, dict) else {}
-    _record_live_session_binding(event)
     try:
         plugin_root = os.environ.get("PLUGIN_ROOT")
         if isinstance(plugin_root, str) and plugin_root:
@@ -109,60 +109,6 @@ def _capture_live_prompt_binding(event: dict[str, Any]) -> bool:
         return True
     except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError):
         return False
-
-
-def _record_live_session_binding(event: dict[str, Any]) -> None:
-    """Persist the real coordinator SessionStart for exact live resume."""
-    if event.get("hook_event_name") != "SessionStart" or event.get("source") != "startup":
-        return
-    session_id = event.get("session_id")
-    cwd = event.get("cwd")
-    resolved = Path(__file__).resolve()
-    try:
-        candidate_root = resolved.parent.parent
-        derived_root = candidate_root.parents[4]
-        valid_layout = (resolved.parent.name == "hooks" and candidate_root.parent.name == "cortex"
-                        and candidate_root.parent.parent.name == "cortex"
-                        and candidate_root.parent.parent.parent.name == "cache"
-                        and derived_root.name == ".codex")
-        code_home = str(derived_root) if valid_layout else None
-    except (IndexError, OSError):
-        code_home = None
-    advertised_home = os.environ.get("CODEX_HOME")
-    if isinstance(advertised_home, str) and advertised_home and code_home and Path(advertised_home).resolve() != Path(code_home):
-        return
-    binding_path = os.environ.get("CORTEX_LIVE_BINDING_PATH") or (str(Path(code_home) / ".cortex-live-binding.json") if isinstance(code_home, str) and code_home else "")
-    if (not isinstance(session_id, str) or not session_id or not isinstance(cwd, str)
-            or not cwd or not isinstance(binding_path, str) or not binding_path
-            or not isinstance(code_home, str) or not code_home
-            or any(event.get(key) for key in ("agent_id", "parent_session_id"))):
-        return
-    try:
-        path = Path(binding_path)
-        root = path.parent
-        launch = root / ".cortex-live-launch.json"
-        launch_stat = launch.stat()
-        if launch.is_symlink() or launch_stat.st_mode & 0o777 != 0o600:
-            return
-        launch_value = json.loads(launch.read_text(encoding="utf-8"))
-        if (not isinstance(launch_value, dict) or launch_value.get("cwd") != cwd
-                or not isinstance(launch_value.get("session_nonce"), str)
-                or len(launch_value["session_nonce"]) != 64):
-            return
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if path.is_symlink() or (path.exists() and path.stat().st_mode & 0o777 != 0o600):
-            return
-        record = {"session_id": session_id, "source": "startup", "cwd": cwd,
-                  "workdir_fingerprint": hashlib.sha256(cwd.encode()).hexdigest(),
-                  "isolated_codex_fingerprint": hashlib.sha256(str(Path(code_home).resolve()).encode()).hexdigest(),
-                  "session_nonce": launch_value["session_nonce"]}
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(_json(record), encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    except OSError:
-        return
 
 
 def _diagnose(event: dict[str, Any]) -> None:
@@ -628,7 +574,7 @@ def _native_arguments(value: object) -> dict[str, Any] | None:
     # The native adapter accepts exactly the server's closed projection. Do
     # not silently discard or default the coordinator-selected routing pair.
     supplied_fields = set(candidate)
-    if supplied_fields not in (set(CANONICAL_NATIVE_FIELDS), set(CANONICAL_NATIVE_FIELDS) | {"model"}):
+    if supplied_fields - (set(CANONICAL_NATIVE_FIELDS) | set(OPTIONAL_NATIVE_FIELDS)):
         return None
     if (candidate.get("fork_turns") != "none"
             or not isinstance(candidate.get("message"), str)
@@ -790,7 +736,10 @@ def _dispatch_records(*, session_id: object, turn_id: object, states: set[str]) 
             return None
         if not isinstance(value, dict) or value.get("session_digest") != session_digest:
             return None
-        if value.get("state") not in {"pending", "delivery_pending", "worker_candidate", "server_candidate_claimed"}:
+        if value.get("state") not in {
+            "pending", "delivery_pending", "worker_candidate", "worker_call_authorized",
+            "server_candidate_claimed",
+        }:
             # A crash between settling a receipt and rewriting the index is
             # safely repaired under the caller's session lock.
             continue
@@ -916,19 +865,27 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         # transport value before PreToolUse.  Correlate the immutable routing
         # fields exactly. The hook stores no plaintext bootstrap; the host
         # message is delivery material but never assignment authority here.
-        routing_fields = ("fork_turns", "task_name", "reasoning_effort")
+        routing_fields = ("fork_turns", "task_name")
         if any(args.get(key) != authoritative.get(key) for key in routing_fields):
             return None
+        # Supported native hosts may omit optional model and reasoning-effort
+        # fields from the encrypted PreToolUse projection. If present each must
+        # match exactly. Absence is transport metadata loss, not assignment
+        # identity, and cannot authorize a different task because the exact
+        # task name, ordered lease, child thread and first read remain bound.
+        host_effort = args.get("reasoning_effort")
+        if host_effort is not None and host_effort != authoritative.get("reasoning_effort"):
+            return None
         # The server omits the model only for Luna so the configured native
-        # default is used. Current hosts may materialize that same default in
-        # PreToolUse. Treat absent server model and explicit Luna as one routing
-        # choice; every non-Luna model still requires exact equality.
+        # default is used. A host may materialize that default, preserve an
+        # explicit route, or omit this optional field from its protected view.
+        # A visible value remains authoritative and must match.
         authoritative_model = authoritative.get("model")
         host_model = args.get("model")
-        if authoritative_model is None:
-            if host_model not in {None, "gpt-5.6-luna"}:
-                return None
-        elif host_model != authoritative_model:
+        if host_model is not None and (
+            host_model != authoritative_model
+            and not (authoritative_model is None and host_model == "gpt-5.6-luna")
+        ):
             return None
         identity = session_id if isinstance(session_id, str) and session_id else turn_id
         session_digest = _value_fingerprint(identity)
@@ -1062,7 +1019,10 @@ def _session_has_active_dispatch(session_id: object, turn_id: object = None) -> 
         records = _dispatch_records(
             session_id=session_id,
             turn_id=None if isinstance(session_id, str) and session_id else turn_id,
-            states={"pending", "delivery_pending", "worker_candidate", "server_candidate_claimed"},
+            states={
+                "pending", "delivery_pending", "worker_candidate", "worker_call_authorized",
+                "server_candidate_claimed",
+            },
         )
         # Corrupt session-local authority fails closed for that session only.
         return records is None or bool(records)
@@ -1099,7 +1059,10 @@ def _mark_dispatch_consumed(event: dict[str, Any]) -> None:
     try:
         records = _dispatch_records(
             session_id=session_id, turn_id=None,
-            states={"delivery_pending", "worker_candidate", "server_candidate_claimed"},
+            states={
+                "delivery_pending", "worker_candidate", "worker_call_authorized",
+                "server_candidate_claimed",
+            },
         )
         if records is None:
             return
@@ -1133,7 +1096,7 @@ def _is_worker_assignment_read(event: dict[str, Any]) -> bool:
     return (
         _is_consume(event.get("tool_name"))
         and isinstance(supplied, dict)
-        and supplied.get("view") == "assignment"
+        and supplied.get("view") in {None, "assignment"}
     )
 
 

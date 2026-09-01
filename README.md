@@ -1353,20 +1353,23 @@ packaged `profile_name` and projects one compact closed native dispatch
 statelessly, but never spawns or authorizes the native worker. Native spawn
 input remains host-owned and is never rewritten through `PreToolUse.updatedInput`.
 `SubagentStart` signs a one-shot worker-candidate attestation bound to the exact
-child thread/session/assignment using sanitized private digests. MCP initialize
-may expose the restricted candidate catalogue only while fresh signed
-candidate state exists; it does not select or claim an assignment. The child's exact
-first `PreToolUse(read_task)` lifecycle event then signs a one-shot call
+child agent/session/assignment using sanitized private digests. A new MCP
+connection sees the fail-closed worker-candidate catalogue whenever such a
+fresh signed child exists; it cannot infer an exact child from inherited root
+environment. The catalogue exposes a closed `read_task` schema with the sole
+`view.const` assignment view. The child's exact first
+`PreToolUse(read_task)` lifecycle event then signs a one-shot call
 authorization bound to child agent, turn, session, assignment, and tool-use
-digests. The server independently consumes that authorization for the same
-assignment and connection. A direct MCP client cannot mint this host signature,
-and the shared parent session is never eligible for a worker claim.
-The candidate-specific `tools/list` projection advertises a separate closed
-`read_task` input contract containing only the server-rendered worker reference,
-the sole assignment view, and bounded continuation. General coordinator
+digests. The server independently and atomically claims that exact authorized
+assignment for the calling connection, then commits worker role only after the
+terminal assignment read succeeds. A direct MCP client cannot mint the host
+signature, and locator possession alone never establishes worker authority.
+The candidate `tools/list` projection advertises a separate closed `read_task`
+input contract containing only a worker-reference field, the sole assignment
+view, and bounded continuation. General coordinator
 state/evidence selector values and unknown fields
 are absent from this candidate schema and are rejected without mutation.
-the server-rendered spawn message remains the sole delivery of the opaque
+The server-rendered spawn message remains the sole delivery of the opaque
 worker locator. The child's first assignment read supplies the authoritative
 full policy, profile, task contract, and predecessor evidence.
 

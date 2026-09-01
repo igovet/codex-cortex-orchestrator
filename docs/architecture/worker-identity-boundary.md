@@ -9,20 +9,27 @@ The original finding below predates the supported-host audience receipt now
 used by Cortex 1.14.9. The public worker bootstrap carries no bearer token.
 Instead, the unchanged native spawn message delivers only the opaque worker
 locator, `SubagentStart` creates an HMAC-signed one-shot `worker_candidate`
-attestation bound to exact child thread/session/assignment digests. MCP
-initialize uses the presence of fresh signed candidate state only to select
-the restricted catalogue; it does not select an assignment or grant worker authority. The
-child's exact first `PreToolUse(read_task)` then signs a one-shot authorization
+attestation bound to exact child agent/session/assignment digests. MCP
+initialize cannot derive the child from inherited root environment, so any new
+connection created while a fresh signed child exists receives only the
+fail-closed worker-candidate catalogue. Its closed first-read schema advertises
+only a worker-reference field, an optional `view.const=assignment` expression,
+and bounded continuation. The server fixes the candidate view to `assignment`;
+the optional field cannot select another view.
+The host candidate receipt remains owner-only and digest-only.
+The child's exact first `PreToolUse(read_task)` then signs a one-shot authorization
 bound to its agent, turn, session, assignment, and tool-use digests. The MCP
-server atomically consumes that authorization only for the same assignment and
-connection. The shared parent session is excluded from claim eligibility.
+server atomically consumes only that exact authorization for the calling
+connection; a copied reference without the matching host event is ineligible.
 Hook processes address the package data directory via
 `PLUGIN_DATA`; Codex MCP processes, which do not receive that hook-only value,
 derive the same exact installed-package directory from `CODEX_HOME`.
 
 The actual candidate `tools/list` response exposes a separate closed first-read
-schema: the exact server-rendered worker reference and sole assignment view are
-required, while bounded continuation is optional. Coordinator state/evidence
+schema: only a worker reference is required, while bounded continuation and an
+exact `view.const=assignment` expression are optional. Omission and that exact
+value have identical server-owned semantics.
+Coordinator state/evidence
 choices and arbitrary fields are not advertised.
 The hook signs the exact lifecycle call but never rewrites its input; schema
 validation and one-shot claim consumption remain server-owned.

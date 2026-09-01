@@ -127,14 +127,15 @@ def _source_stdio_tool_call(home: str, tool_name: str, arguments: dict) -> dict:
 
 
 def _write_host_worker_receipt(
-    plugin_data: str, worker_ref: str, *, authorize: bool = True,
-) -> str:
+    plugin_data: str, worker_ref: str, *, authorize: bool = False,
+    agent_id: str = "source-worker-a", turn_id: str = "source-worker-turn",
+    session_id: str = "source-session",
+) -> None:
     """Create one sanitized SubagentStart-equivalent host lease fixture."""
     import hashlib
     from cortex_runtime.audience_attestation import (
         authorize_worker_candidate_call,
         issue_worker_candidate,
-        thread_digest,
     )
 
     dispatch = Path(plugin_data) / "activation" / "sessions" / "fixture" / "dispatch"
@@ -144,34 +145,37 @@ def _write_host_worker_receipt(
         Path(plugin_data) / "activation" / "sessions", dispatch.parent, dispatch,
     ):
         os.chmod(directory, 0o700)
-    thread_id = "12345678-1234-4123-8123-123456789abc"
     record = {
-        "session_digest": hashlib.sha256(b"source-session").hexdigest(),
+        "session_digest": hashlib.sha256(session_id.encode("utf-8")).hexdigest(),
         "assignment_ref_digest": hashlib.sha256(
             ("d_" + worker_ref[-12:]).encode("utf-8")
         ).hexdigest(),
         "worker_task_ref_digest": hashlib.sha256(
             worker_ref.encode("utf-8")
         ).hexdigest(),
-        "worker_agent_digest": hashlib.sha256(b"source-worker-a").hexdigest(),
-        "worker_turn_digest": hashlib.sha256(b"source-worker-turn").hexdigest(),
-        "worker_thread_digest": thread_digest(thread_id),
+        "worker_agent_digest": hashlib.sha256(agent_id.encode("utf-8")).hexdigest(),
+        "worker_turn_digest": hashlib.sha256(turn_id.encode("utf-8")).hexdigest(),
+        "worker_thread_digest": hashlib.sha256(agent_id.encode("utf-8")).hexdigest(),
     }
     record = issue_worker_candidate(Path(plugin_data), record)
-    path = dispatch / ("dispatch-" + "a" * 64 + ".json")
-    path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    path = dispatch / ("dispatch-" + hashlib.sha256(worker_ref.encode("utf-8")).hexdigest() + ".json")
+    path.write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+        encoding="utf-8",
+    )
     os.chmod(path, 0o600)
     if authorize:
         assert authorize_worker_candidate_call(
             Path(plugin_data), task_ref=worker_ref,
-            agent_id="source-worker-a", turn_id="source-worker-turn",
-            session_id="source-session", tool_use_id="source-read-call",
+            agent_id=agent_id, turn_id=turn_id,
+            session_id=session_id, tool_use_id="source-read-call",
         )
-    return thread_id
 
 
 @contextmanager
-def _source_stdio_session(home: str, *, thread_id: str | None = None):
+def _source_stdio_session(
+    home: str, *, host_identity: tuple[str, str, str] | None = None,
+):
     """Keep one real source MCP connection alive across multiple calls."""
     env = dict(os.environ) | {
         "CODEX_HOME": home,
@@ -217,7 +221,31 @@ def _source_stdio_session(home: str, *, thread_id: str | None = None):
     process.stdin.flush()
 
     def call(tool_name: str, arguments: dict) -> dict:
-        return rpc("tools/call", {"name": tool_name, "arguments": arguments})
+        tool_use_id = f"source-call-{request_id + 1}"
+        host_authorized = False
+        plugin_data = env.get("PLUGIN_DATA") or str(Path(home) / "plugins" / "data" / "cortex-cortex")
+        if (
+            host_identity is not None
+            and tool_name == "read_task"
+            and arguments.get("view") in {None, "assignment"}
+        ):
+            from cortex_runtime.audience_attestation import authorize_worker_candidate_call
+            agent_id, turn_id, session_id = host_identity
+            host_authorized = authorize_worker_candidate_call(
+                Path(plugin_data), task_ref=arguments.get("task_ref"),
+                agent_id=agent_id, turn_id=turn_id,
+                session_id=session_id, tool_use_id=tool_use_id,
+            )
+        result = rpc("tools/call", {"name": tool_name, "arguments": arguments})
+        if host_authorized and result.get("result", {}).get("isError"):
+            from cortex_runtime.audience_attestation import revoke_worker_candidate_call
+            agent_id, turn_id, session_id = host_identity
+            revoke_worker_candidate_call(
+                Path(plugin_data), task_ref=arguments.get("task_ref"),
+                agent_id=agent_id, turn_id=turn_id,
+                session_id=session_id, tool_use_id=tool_use_id,
+            )
+        return result
 
     call.rpc = rpc  # type: ignore[attr-defined]
 
@@ -330,9 +358,9 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 }))
 
             worker_ref = "t_0123456789ab_" + "a" * 32
-            worker_thread_id = _write_host_worker_receipt(plugin_data, worker_ref)
+            _write_host_worker_receipt(plugin_data, worker_ref)
             with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
-                home, thread_id=worker_thread_id,
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
             ) as worker:
                 listed = worker.rpc("tools/list", {})  # type: ignore[attr-defined]
                 names = {item["name"] for item in listed["result"]["tools"]}
@@ -348,29 +376,58 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     set(worker_read["inputSchema"]["properties"]),
                     {"task_ref", "view", "continue"},
                 )
-                self.assertEqual(worker_read["inputSchema"]["required"], ["task_ref", "view"])
+                self.assertEqual(worker_read["inputSchema"]["required"], ["task_ref"])
                 self.assertEqual(
-                    worker_read["inputSchema"]["properties"]["view"]["enum"],
-                    ["assignment"],
+                    worker_read["inputSchema"]["properties"]["view"]["const"],
+                    "assignment",
                 )
+                self.assertNotIn("const", worker_read["inputSchema"]["properties"]["task_ref"])
                 self.assertFalse(worker_read["inputSchema"]["additionalProperties"])
                 self.assertNotIn("worker_label", json.dumps(worker_read, sort_keys=True))
+
+    def test_parallel_candidate_connections_bind_only_after_exact_host_authorization(self) -> None:
+        """Two candidate connections cannot consume each other's host-bound assignment."""
+        with tempfile.TemporaryDirectory(prefix="cortex-exact-thread-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-exact-thread-data-",
+        ) as plugin_data:
+            first_ref = "t_0123456789ab_" + "a" * 32
+            second_ref = "t_0123456789ab_" + "b" * 32
+            first_agent = "12345678-1234-4123-8123-123456789abc"
+            second_agent = "22345678-1234-4123-8123-123456789abc"
+            _write_host_worker_receipt(plugin_data, first_ref, agent_id=first_agent, turn_id="first-turn")
+            _write_host_worker_receipt(plugin_data, second_ref, agent_id=second_agent, turn_id="second-turn")
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}):
+                with _source_stdio_session(
+                    home, host_identity=(first_agent, "first-turn", "source-session"),
+                ) as first, _source_stdio_session(
+                    home, host_identity=(second_agent, "second-turn", "source-session"),
+                ) as second:
+                    for connection in (first, second):
+                        listed = connection.rpc("tools/list", {})  # type: ignore[attr-defined]
+                        names = {item["name"] for item in listed["result"]["tools"]}
+                        self.assertEqual(names, {"read_task", "publish_plan", "publish_result", "publish_documentation"})
+                    wrong = first("read_task", {"task_ref": second_ref})
+                    self.assertEqual(wrong["result"]["structuredContent"]["error"]["code"], "wrong_connection")
+                    first_read = first("read_task", {"task_ref": first_ref})
+                    second_read = second("read_task", {"task_ref": second_ref})
+                    self.assertNotEqual(first_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
+                    self.assertNotEqual(second_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
 
     def test_failed_candidate_bootstrap_does_not_change_role_or_consume_assignment(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cortex-candidate-error-home-") as home, tempfile.TemporaryDirectory(
             prefix="cortex-candidate-error-data-",
         ) as plugin_data:
             worker_ref = "t_0123456789ab_" + "a" * 32
-            worker_thread_id = _write_host_worker_receipt(plugin_data, worker_ref)
+            _write_host_worker_receipt(plugin_data, worker_ref)
             with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
-                home, thread_id=worker_thread_id,
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
             ) as worker:
                 receipt = next(Path(plugin_data).glob(
                     "activation/sessions/*/dispatch/dispatch-*.json"
                 ))
                 before = receipt.read_bytes()
                 malformed = worker("read_task", {
-                    "task_ref": worker_ref, "view": "assignment",
+                    "task_ref": worker_ref,
                     "worker_label": "invented",
                 })
                 self.assertEqual(
@@ -378,9 +435,16 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     "validation_error",
                 )
                 self.assertEqual(receipt.read_bytes(), before)
+                wrong_server_field = worker("read_task", {
+                    "task_ref": worker_ref, "view": "state",
+                })
+                self.assertEqual(
+                    wrong_server_field["result"]["structuredContent"]["error"]["code"],
+                    "validation_error",
+                )
+                self.assertEqual(receipt.read_bytes(), before)
                 rejected = worker("read_task", {
                     "task_ref": "t_0123456789ab_" + "b" * 32,
-                    "view": "assignment",
                 })
                 self.assertEqual(
                     rejected["result"]["structuredContent"]["error"]["code"],
@@ -543,12 +607,15 @@ class CommandReceiptTests(unittest.TestCase):
                     r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
                     original["result"]["structuredContent"]["native_dispatch"]["message"],
                 ).group(1)
-                original_thread = _write_host_worker_receipt(plugin_data, original_ref)
-                with _source_stdio_session(home, thread_id=original_thread) as dead_worker:
+                _write_host_worker_receipt(plugin_data, original_ref)
+                with _source_stdio_session(
+                    home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+                ) as dead_worker:
                     consumed = dead_worker("read_task", {
-                        "task_ref": original_ref, "view": "assignment",
+                        "task_ref": original_ref,
                     })
                     self.assertFalse(consumed["result"].get("isError"), consumed)
+                    self.assertEqual(consumed["result"]["structuredContent"]["view"], "assignment")
 
                 lost = _source_stdio_tool_call(home, "read_task", {
                     "task_ref": original_ref, "view": "assignment",
@@ -586,8 +653,10 @@ class CommandReceiptTests(unittest.TestCase):
                     r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
                     replacement["result"]["structuredContent"]["native_dispatch"]["message"],
                 ).group(1)
-                replacement_thread = _write_host_worker_receipt(plugin_data, replacement_ref)
-                with _source_stdio_session(home, thread_id=replacement_thread) as successor:
+                _write_host_worker_receipt(plugin_data, replacement_ref)
+                with _source_stdio_session(
+                    home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+                ) as successor:
                     consumed = successor("read_task", {
                         "task_ref": replacement_ref, "view": "assignment",
                     })
@@ -1060,7 +1129,7 @@ class CommandReceiptTests(unittest.TestCase):
             context = get_context("fork")
             ready, results, start = context.Queue(), context.Queue(), context.Event()
             prompt = "Confirm shared admission."
-            open_arguments = {"task_ref": task["task_ref"], "prompt": prompt, "prompt_language": "en", "purpose": "clarification", "options": ["answer"]}
+            open_arguments = {"task_ref": task["task_ref"], "prompt": prompt, "prompt_language": "en", "purpose": "clarification"}
             workers = [context.Process(target=_stdio_tool_call, args=(home, "open_clarification", open_arguments, ready, start, results)) for _ in range(2)]
             for worker in workers: worker.start()
             self.assertEqual([ready.get(timeout=10) for _ in workers], [True, True])
@@ -1091,11 +1160,11 @@ class CommandReceiptTests(unittest.TestCase):
             self.assertEqual({item["task_ref"] for item in values}, {task["task_ref"]}, observed)
             self.assertEqual({item["state"] for item in values}, {"pending_clarification"}, observed)
             recorded = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "response_original": "Continue.", "user_language": "en", "outcome": "answer",
+                "task_ref": task["task_ref"], "response_original": "Continue.", "user_language": "en",
             })
             self.assertFalse(recorded["result"].get("isError"))
             changed = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "response_original": "Change the answer.", "user_language": "en", "outcome": "answer",
+                "task_ref": task["task_ref"], "response_original": "Change the answer.", "user_language": "en",
             })
             self.assertTrue(changed["result"].get("isError"))
             self.assertEqual(changed["result"]["structuredContent"]["error"]["code"], "clarification_binding_stale")
@@ -1176,7 +1245,7 @@ class CommandReceiptTests(unittest.TestCase):
                 direct["result"]["structuredContent"]["error"]["code"],
                 "wrong_connection",
             )
-            worker_thread_id = _write_host_worker_receipt(plugin_data, worker_ref)
+            _write_host_worker_receipt(plugin_data, worker_ref)
 
             publication_arguments = {
                 "task_ref": worker_ref,
@@ -1197,12 +1266,14 @@ class CommandReceiptTests(unittest.TestCase):
                 "unresolved": [],
                 "status": "completed",
             }
-            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(home, thread_id=worker_thread_id) as worker_a:
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as worker_a:
                 consumed = worker_a("read_task", {
                     "task_ref": worker_ref,
-                    "view": "assignment",
                 })
                 self.assertFalse(consumed["result"].get("isError"), consumed)
+                self.assertEqual(consumed["result"]["structuredContent"]["view"], "assignment")
                 # Supported hosts may expose only TextContent to the worker
                 # model while retaining structuredContent in lifecycle events.
                 # The first successful one-shot bootstrap must therefore carry
@@ -1217,9 +1288,7 @@ class CommandReceiptTests(unittest.TestCase):
                     1,
                 )
 
-                with _source_stdio_session(
-                    home, thread_id=worker_thread_id,
-                ) as worker_b:
+                with _source_stdio_session(home) as worker_b:
                     copied_read = worker_b("read_task", {
                         "task_ref": worker_ref, "view": "assignment",
                     })
@@ -1341,7 +1410,7 @@ class CommandReceiptTests(unittest.TestCase):
                     r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
                     assigned["result"]["structuredContent"]["native_dispatch"]["message"],
                 ).group(1)
-                worker_thread_id = _write_host_worker_receipt(plugin_data, worker_ref)
+                _write_host_worker_receipt(plugin_data, worker_ref)
                 rejected = coordinator("read_task", {
                     "task_ref": worker_ref, "view": "assignment",
                 })
@@ -1351,9 +1420,11 @@ class CommandReceiptTests(unittest.TestCase):
                     "wrong_connection",
                 )
 
-            with _source_stdio_session(home, thread_id=worker_thread_id) as worker:
+            with _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as worker:
                 consumed = worker("read_task", {
-                    "task_ref": worker_ref, "view": "assignment",
+                    "task_ref": worker_ref,
                 })
                 self.assertFalse(consumed["result"].get("isError"), consumed)
                 self.assertFalse(consumed["result"]["structuredContent"]["has_more"])
@@ -1454,7 +1525,7 @@ os.close = _observed_close
                         ready, results, start = context.Queue(), context.Queue(), context.Event()
                         arguments = {
                             "task_ref": task["task_ref"], "prompt": "Confirm shared sidecar admission.",
-                            "prompt_language": "en", "purpose": "clarification", "options": ["answer"],
+                            "prompt_language": "en", "purpose": "clarification",
                         }
                         workers = [context.Process(
                             target=_stdio_tool_call,

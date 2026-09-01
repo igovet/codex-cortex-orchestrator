@@ -111,7 +111,7 @@ def issue_worker_candidate(plugin_data: Path, record: Mapping[str, Any]) -> dict
         if _DIGEST_RE.fullmatch(str(value.get(name, ""))) is None:
             raise AudienceAttestationError("worker candidate identity is invalid")
     value.update({
-        "version": 3,
+        "version": 4,
         "state": "worker_candidate",
         "audience": "worker_candidate",
         "attestation_nonce": secrets.token_hex(32),
@@ -132,7 +132,7 @@ def _verified_candidate(
     if not isinstance(signature, str) or not hmac.compare_digest(signature, _sign(record, key)):
         return None
     if (
-        record.get("version") != 3
+        record.get("version") != 4
         or record.get("state") not in states
         or record.get("audience") != "worker_candidate"
         or not isinstance(record.get("attested_at"), int)
