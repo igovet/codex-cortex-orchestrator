@@ -248,6 +248,12 @@ def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_re
         elif policy == "latest_for_scope":
             # Coverage identity stays private. Choose the latest finalized
             # report touching any selected semantic outcome.
+            if not item_refs:
+                raise V12StoreError(
+                    "latest-for-scope evidence requires an assignment outcome scope",
+                    code="invalid_argument",
+                    details={"field": "report_policy"},
+                )
             internal = [store._outcome_item_id(connection, task_id, ref_value) for ref_value in item_refs]
             placeholders = ",".join("?" for _ in internal)
             rows = connection.execute(

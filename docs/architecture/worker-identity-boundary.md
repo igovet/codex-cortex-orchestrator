@@ -8,11 +8,14 @@ referenced by skills, prompts, profiles, or installed-plugin documentation.
 The original finding below predates the supported-host audience receipt now
 used by Cortex 1.14.9. The public worker bootstrap carries no bearer token.
 Instead, the unchanged native spawn message delivers only the opaque worker
-locator, `SubagentStart` creates an HMAC-signed one-shot `worker_candidate`
-attestation bound to exact child agent/session/assignment digests. MCP
-initialize cannot derive the child from inherited root environment, so any new
-connection created while a fresh signed child exists receives only the
-fail-closed worker-candidate catalogue. Its closed first-read schema advertises
+locator. The validated pre-spawn call creates an HMAC-signed catalogue-only
+pending hint before Desktop starts the child's MCP process; this hint grants no
+call or ledger authority. `SubagentStart` replaces it with an HMAC-signed
+one-shot `worker_candidate` attestation bound to exact child
+agent/session/assignment digests. MCP initialize cannot derive the child from
+inherited root environment, so the signed pre-spawn hint selects only the
+fail-closed worker-candidate catalogue during the observed Desktop ordering
+`initialize -> SubagentStart -> PreToolUse`. Its closed first-read schema advertises
 only a worker-reference field, an optional `view.const=assignment` expression,
 and bounded continuation. The server fixes the candidate view to `assignment`;
 the optional field cannot select another view.
@@ -20,7 +23,11 @@ The host candidate receipt remains owner-only and digest-only.
 The child's exact first `PreToolUse(read_task)` then signs a one-shot authorization
 bound to its agent, turn, session, assignment, and tool-use digests. The MCP
 server atomically consumes only that exact authorization for the calling
-connection; a copied reference without the matching host event is ineligible.
+connection. If that connection initialized before `SubagentStart`, it may
+transition from unattributed/coordinator-shaped discovery to
+`worker_candidate` only while its committed role is still unknown and only by
+claiming the signed authorization. A copied reference without the matching
+host event is ineligible, and a confirmed coordinator role is irreversible.
 Hook processes address the package data directory via
 `PLUGIN_DATA`; Codex MCP processes, which do not receive that hook-only value,
 derive the same exact installed-package directory from `CODEX_HOME`.

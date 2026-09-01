@@ -737,7 +737,7 @@ def _dispatch_records(*, session_id: object, turn_id: object, states: set[str]) 
         if not isinstance(value, dict) or value.get("session_digest") != session_digest:
             return None
         if value.get("state") not in {
-            "pending", "delivery_pending", "worker_candidate", "worker_call_authorized",
+            "pending", "worker_catalogue_pending", "worker_candidate", "worker_call_authorized",
             "server_candidate_claimed",
         }:
             # A crash between settling a receipt and rewriting the index is
@@ -765,7 +765,7 @@ def _pending_worker_dispatch(parent_session_id: str) -> tuple[Path, dict[str, An
     bind the same claim or reorder the private queue.  This is a bounded
     host adapter, not a global unique-active-lease heuristic.
     """
-    matches = _dispatch_records(session_id=parent_session_id, turn_id=None, states={"delivery_pending"})
+    matches = _dispatch_records(session_id=parent_session_id, turn_id=None, states={"worker_catalogue_pending"})
     if matches is None:
         return None
     eligible = [(path, value) for path, value in matches if value.get("spawn_claim_digest")]
@@ -803,7 +803,7 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         candidates = _dispatch_records(
             session_id=session_id,
             turn_id=None if isinstance(session_id, str) and session_id else turn_id,
-            states={"pending", "delivery_pending"},
+            states={"pending", "worker_catalogue_pending"},
         )
         if candidates is None:
             return None
@@ -898,13 +898,27 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         claim_order = index["next_claim_order"]
         claimed = dict(record)
         claimed.update({
-            "state": "delivery_pending",
-            "delivery_pending_at": time.time_ns(),
+            "state": "worker_catalogue_pending",
+            "catalogue_pending_at": time.time_ns(),
             "spawn_claim_digest": tool_digest or _value_fingerprint("unobserved-claim:" + path.name),
             "claim_order": claim_order,
             "host_input_digest": _value_fingerprint(_json(args)),
             "context_digest": record["message_digest"],
         })
+        try:
+            plugin_root = os.environ.get("PLUGIN_ROOT")
+            if isinstance(plugin_root, str) and plugin_root:
+                scripts = str(Path(plugin_root) / "scripts")
+                if scripts not in sys.path:
+                    sys.path.insert(0, scripts)
+            from cortex_runtime.audience_attestation import issue_worker_catalogue_pending
+
+            plugin_data = os.environ.get("PLUGIN_DATA")
+            if not isinstance(plugin_data, str) or not plugin_data:
+                return None
+            claimed = issue_worker_catalogue_pending(Path(plugin_data), claimed)
+        except Exception:
+            return None
         if not _write_dispatch_record(path, claimed):
             return None
         advanced = dict(index)
@@ -946,7 +960,24 @@ def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: 
                 current = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 return False, None
-            if not isinstance(current, dict) or current.get("state") != "delivery_pending":
+            if not isinstance(current, dict) or current.get("state") != "worker_catalogue_pending":
+                return False, None
+            try:
+                plugin_root = os.environ.get("PLUGIN_ROOT")
+                if isinstance(plugin_root, str) and plugin_root:
+                    scripts = str(Path(plugin_root) / "scripts")
+                    if scripts not in sys.path:
+                        sys.path.insert(0, scripts)
+                from cortex_runtime.audience_attestation import verify_worker_catalogue_pending
+
+                plugin_data = os.environ.get("PLUGIN_DATA")
+                if (
+                    not isinstance(plugin_data, str)
+                    or not plugin_data
+                    or not verify_worker_catalogue_pending(Path(plugin_data), current)
+                ):
+                    return False, None
+            except Exception:
                 return False, None
             if (
                 re.fullmatch(
@@ -1020,7 +1051,7 @@ def _session_has_active_dispatch(session_id: object, turn_id: object = None) -> 
             session_id=session_id,
             turn_id=None if isinstance(session_id, str) and session_id else turn_id,
             states={
-                "pending", "delivery_pending", "worker_candidate", "worker_call_authorized",
+                "pending", "worker_catalogue_pending", "worker_candidate", "worker_call_authorized",
                 "server_candidate_claimed",
             },
         )
@@ -1060,7 +1091,7 @@ def _mark_dispatch_consumed(event: dict[str, Any]) -> None:
         records = _dispatch_records(
             session_id=session_id, turn_id=None,
             states={
-                "delivery_pending", "worker_candidate", "worker_call_authorized",
+                "worker_catalogue_pending", "worker_candidate", "worker_call_authorized",
                 "server_candidate_claimed",
             },
         )

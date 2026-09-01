@@ -180,6 +180,45 @@ def test_assignment_receipt_and_spawn_may_use_different_turns(tmp_path: Path) ->
     assert code == 0 and result["hookSpecificOutput"]["additionalContext"]
 
 
+def test_native_spawn_issues_signed_catalogue_hint_without_call_authority(tmp_path: Path) -> None:
+    from cortex_runtime.audience_attestation import (
+        claim_worker_candidate,
+        verify_worker_catalogue_pending,
+    )
+
+    session, turn = "root", "turn"
+    worker_ref = "t_0123456789ab_" + "a" * 32
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": turn, "prompt": "$cortex:orchestrator",
+    })
+    native = native_dispatch(worker_ref, "worker")
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": turn, "tool_name": "mcp__cortex__open_assignment",
+        "tool_input": {"task_ref": "t_0123456789ab"},
+        "tool_response": {"isError": False, "structuredContent": {
+            "native_dispatch": native, "replayed": False,
+        }},
+    })
+    code, result = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": turn, "tool_use_id": "spawn",
+        "tool_name": "collaboration.spawn_agent", "tool_input": native,
+    })
+    assert code == 0 and result["hookSpecificOutput"]["additionalContext"]
+    receipt = next((tmp_path / "plugin-data/activation/sessions").glob(
+        "*/dispatch/dispatch-*.json"
+    ))
+    record = json.loads(receipt.read_text())
+    assert record["state"] == "worker_catalogue_pending"
+    assert verify_worker_catalogue_pending(tmp_path / "plugin-data", record)
+    assert claim_worker_candidate(
+        tmp_path / "plugin-data", task_ref=worker_ref,
+        connection_nonce="catalogue-hint-has-no-call-authority",
+    ) is None
+
+
 def test_host_protected_message_preserves_server_dispatch_correlation(tmp_path: Path) -> None:
     session, turn = "root", "turn"
     worker_ref = "t_0123456789ab_" + "a" * 32

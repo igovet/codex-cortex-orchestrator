@@ -147,10 +147,14 @@ The V12 protocol evidence must prove:
   non-mutating, skipped/stale continuations fail closed, UTF-8 fragmentation is
   lossless at the byte boundary, and publication is unavailable until the
   terminal page;
-- real persistent source-stdio tests prove the original host-bound connection
-  can consume and publish once, a copied locator on another initialized process
-  cannot read or publish, a coordinator connection cannot switch to worker
-  audience, and no failed copy creates a report operation;
+- real persistent source-stdio tests reproduce Desktop ordering by initializing
+  the worker MCP process before `SubagentStart`/call attestation, prove the
+  signed pre-spawn hint advertises only the worker catalogue without granting
+  authority, and then prove the original host-bound connection can consume and
+  publish once; a copied locator on another initialized process cannot read or
+  publish, a coordinator connection cannot switch to worker audience, malformed
+  late bootstrap restores the unknown role without state mutation, and no
+  failed copy creates a report operation;
 - lost-worker tests require explicit blocked/aborted reason and non-empty
   evidence, atomically stale the old lease and link one successor, reject
   unrecorded consumed or expired leases, and preserve immutable evidence;

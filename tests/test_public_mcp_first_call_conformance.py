@@ -93,6 +93,17 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         ):
             self.assertIn(phrase, description)
 
+    def test_report_policy_is_scoped_to_the_operation_that_supplies_scope(self) -> None:
+        read_policy = PUBLIC_TOOLS["read_task"]["inputSchema"]["properties"]["report_policy"]
+        assignment_policy = PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"]["report_policy"]
+        self.assertEqual(read_policy["enum"], ["none", "active_plan", "all_finalized"])
+        self.assertEqual(
+            assignment_policy["enum"],
+            ["none", "active_plan", "latest_for_scope", "all_finalized"],
+        )
+        self.assertNotIn("latest_for_scope", read_policy["enum"])
+        self.assertIn("no caller-supplied outcome scope", read_policy["description"])
+
     def test_every_public_input_contract_is_required_and_closed(self) -> None:
         """The advertised boundary, not a handler convenience, is the API."""
         self.assertEqual(set(PUBLIC_TOOLS), set(EXPECTED_REQUIRED))

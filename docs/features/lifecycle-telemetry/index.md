@@ -21,8 +21,12 @@ ordered dispatch lease, later exact child binding, and server-authorized first
 assignment read remain authoritative when optional transport metadata is not
 visible.
 Each coordinator session owns a private receipt directory and an atomic active
-index whose receipt state progresses through `pending`, `delivery_pending`,
-`worker_bound`, and `server_claimed`. Add, claim, bind, server-claim, and
+index whose receipt state progresses through `pending`,
+`worker_catalogue_pending`, `worker_candidate`,
+`worker_call_authorized`, and `server_candidate_claimed`. The pre-spawn
+`worker_catalogue_pending` record is signed and catalogue-only: it lets a
+Desktop child initialize with the worker projection before `SubagentStart`, but
+cannot authorize a call. Add, claim, bind, server-claim, and
 consume transitions are owner-only and lock-protected; terminal assignment
 consumption removes the receipt from the active index immediately. Hook
 processes locate this directory through `PLUGIN_DATA`; the plugin MCP process

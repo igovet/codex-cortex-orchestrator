@@ -73,6 +73,8 @@ After the selected evidence set settles, create one planning assignment that con
 
 Every assignment must be scoped from the complete effective contract. Assignment instructions may explain ownership and stopping boundaries, but may not be the sole carrier of a source-derived requirement and may not replace exact outcome acceptance, constraints, verification, or context with "see the attachment" or equivalent shorthand. Before native spawn, confirm that each assigned outcome's exact contract details are present in the server-owned assignment evidence that `read_task` will return.
 
+Assignment instructions describe semantic work and stopping behavior only. Never copy MCP parameter names, request shapes, required or optional field lists, enum values, or sample payloads into an assignment, worker prompt, or live workload. The worker derives every call from its live audience-specific advertised contract; needing an argument hint elsewhere is a contract defect and ends that qualification run until the schema or property description is corrected.
+
 Workers must treat the expected absence of planned, optional, or not-yet-created
 paths as successful evidence rather than a failed command. A bounded filesystem
 probe must be existence-aware before addressing such a path, emit a clear

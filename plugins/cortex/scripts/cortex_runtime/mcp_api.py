@@ -1382,6 +1382,7 @@ def serve_stdio(
         "_connection_nonce": os.urandom(32).hex(),
         "_audience": "unattributed",
         "_host_worker_claim": None,
+        "_pre_candidate_audience": None,
     }
 
     def release_failed_candidate() -> None:
@@ -1399,6 +1400,49 @@ def serve_stdio(
                 connection_nonce=str(connection_context["_connection_nonce"]),
             )
         connection_context["_host_worker_claim"] = None
+        prior_audience = connection_context.pop("_pre_candidate_audience", None)
+        if isinstance(prior_audience, str) and prior_audience:
+            connection_context["_audience"] = prior_audience
+
+    def adopt_late_host_worker_candidate(
+        name: str, arguments: Mapping[str, Any], contract: Mapping[str, Any],
+    ) -> None:
+        """Adopt a child attestation issued after MCP initialize.
+
+        Codex Desktop starts a native child's MCP stdio process before it emits
+        ``SubagentStart``. Consequently the signed, child-bound candidate does
+        not exist during ``initialize``; it is issued before the child's first
+        ``PreToolUse`` instead. Absence at initialize is therefore not proof of
+        a coordinator audience.
+
+        Promotion remains server-authoritative and host-bound: only an
+        otherwise-uncommitted connection can atomically consume the exact
+        one-shot authorization signed by ``SubagentStart`` + ``PreToolUse``.
+        The candidate schema is then enforced independently; malformed input
+        releases the provisional server claim without changing the role or
+        durable assignment state. Request content alone can never cause the
+        transition, and a confirmed coordinator role is irreversible.
+        """
+        if (
+            connection_context.get("_role") != "unknown"
+            or connection_context.get("_audience") in {"worker_candidate", "worker"}
+            or name != "read_task"
+        ):
+            return
+        plugin_data = _plugin_data_root()
+        claim = (
+            claim_worker_candidate(
+                plugin_data,
+                task_ref=arguments.get("task_ref"),
+                connection_nonce=str(connection_context["_connection_nonce"]),
+            )
+            if plugin_data is not None else None
+        )
+        if not claim_matches_task(claim, arguments.get("task_ref")):
+            return
+        connection_context["_pre_candidate_audience"] = connection_context.get("_audience")
+        connection_context["_host_worker_claim"] = claim
+        connection_context["_audience"] = "worker_candidate"
 
     while True:
         line, frame_rejected = _read_physical_jsonl_frame(sys.stdin)
@@ -1574,6 +1618,7 @@ def serve_stdio(
                 continue
             contract = public_tools[name]
             resolved_arguments = dict(arguments)
+            adopt_late_host_worker_candidate(name, arguments, contract)
             audience = connection_context.get("_audience")
             role = connection_context.get("_role")
             input_schema = (
@@ -1715,6 +1760,7 @@ def serve_stdio(
                         continue
                     connection_context["_host_worker_claim"] = host_worker_claim
             except _SchemaError as error:
+                release_failed_candidate()
                 if (
                     correcting_aggregate
                     and error.correction_state is None

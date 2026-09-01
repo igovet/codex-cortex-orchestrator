@@ -122,6 +122,28 @@ def issue_worker_candidate(plugin_data: Path, record: Mapping[str, Any]) -> dict
     return value
 
 
+def issue_worker_catalogue_pending(
+    plugin_data: Path, record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Sign a pre-child catalogue hint without granting worker authority."""
+    value = dict(record)
+    for name in (
+        "session_digest", "assignment_ref_digest", "worker_task_ref_digest",
+    ):
+        if _DIGEST_RE.fullmatch(str(value.get(name, ""))) is None:
+            raise AudienceAttestationError("worker catalogue identity is invalid")
+    value.update({
+        "version": 4,
+        "state": "worker_catalogue_pending",
+        "audience": "worker_candidate",
+        "attestation_nonce": secrets.token_hex(32),
+        "attested_at": time.time_ns(),
+    })
+    key = _key(plugin_data, create=True)
+    value["signature"] = _sign(value, key)
+    return value
+
+
 def _verified_candidate(
     value: object, key: bytes, *, states: frozenset[str],
 ) -> dict[str, Any] | None:
@@ -149,6 +171,41 @@ def _verified_candidate(
     return record
 
 
+def _verified_catalogue_pending(value: object, key: bytes) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    record = dict(value)
+    signature = record.get("signature")
+    if not isinstance(signature, str) or not hmac.compare_digest(signature, _sign(record, key)):
+        return None
+    if (
+        record.get("version") != 4
+        or record.get("state") != "worker_catalogue_pending"
+        or record.get("audience") != "worker_candidate"
+        or not isinstance(record.get("attested_at"), int)
+        or isinstance(record.get("attested_at"), bool)
+    ):
+        return None
+    for name in (
+        "session_digest", "assignment_ref_digest", "worker_task_ref_digest",
+        "attestation_nonce",
+    ):
+        if _DIGEST_RE.fullmatch(str(record.get(name, ""))) is None:
+            return None
+    return record
+
+
+def verify_worker_catalogue_pending(
+    plugin_data: Path, value: object,
+) -> bool:
+    """Verify a fresh signed pre-child catalogue hint."""
+    try:
+        record = _verified_catalogue_pending(value, _key(plugin_data, create=False))
+        return record is not None and _fresh(record)
+    except (AudienceAttestationError, OSError, UnicodeError, ValueError, TypeError):
+        return False
+
+
 def _fresh(record: Mapping[str, Any]) -> bool:
     attested_at = record.get("attested_at")
     return (
@@ -166,11 +223,15 @@ def fresh_worker_candidate_available(plugin_data: Path) -> bool:
         _private_directory(sessions)
         for path in sessions.glob("*/dispatch/dispatch-*.json"):
             _private_file(path)
+            value = json.loads(path.read_text(encoding="utf-8"))
             record = _verified_candidate(
-                json.loads(path.read_text(encoding="utf-8")), key,
+                value, key,
                 states=frozenset({"worker_candidate", "worker_call_authorized"}),
             )
             if record is not None and _fresh(record):
+                return True
+            pending = _verified_catalogue_pending(value, key)
+            if pending is not None and _fresh(pending):
                 return True
         return False
     except (AudienceAttestationError, OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):

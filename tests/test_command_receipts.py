@@ -385,6 +385,46 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 self.assertFalse(worker_read["inputSchema"]["additionalProperties"])
                 self.assertNotIn("worker_label", json.dumps(worker_read, sort_keys=True))
 
+    def test_pre_spawn_signed_hint_projects_worker_catalogue_without_authority(self) -> None:
+        from cortex_runtime.audience_attestation import issue_worker_catalogue_pending
+
+        with tempfile.TemporaryDirectory(prefix="cortex-prespawn-list-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-prespawn-list-data-",
+        ) as plugin_data:
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            dispatch = Path(plugin_data) / "activation" / "sessions" / "fixture" / "dispatch"
+            dispatch.mkdir(mode=0o700, parents=True)
+            for directory in (
+                Path(plugin_data), Path(plugin_data) / "activation",
+                Path(plugin_data) / "activation" / "sessions", dispatch.parent, dispatch,
+            ):
+                os.chmod(directory, 0o700)
+            record = issue_worker_catalogue_pending(Path(plugin_data), {
+                "session_digest": hashlib.sha256(b"source-session").hexdigest(),
+                "assignment_ref_digest": hashlib.sha256(b"source-assignment").hexdigest(),
+                "worker_task_ref_digest": hashlib.sha256(worker_ref.encode()).hexdigest(),
+            })
+            receipt = dispatch / "dispatch-prespawn.json"
+            receipt.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+            os.chmod(receipt, 0o600)
+
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(home) as candidate:
+                listed = candidate.rpc("tools/list", {})  # type: ignore[attr-defined]
+                names = {item["name"] for item in listed["result"]["tools"]}
+                self.assertEqual(names, {
+                    "read_task", "publish_plan", "publish_result",
+                    "publish_documentation",
+                })
+                rejected = candidate("read_task", {"task_ref": worker_ref})
+                self.assertEqual(
+                    rejected["result"]["structuredContent"]["error"]["code"],
+                    "wrong_connection",
+                )
+                self.assertEqual(
+                    json.loads(receipt.read_text(encoding="utf-8"))["state"],
+                    "worker_catalogue_pending",
+                )
+
     def test_parallel_candidate_connections_bind_only_after_exact_host_authorization(self) -> None:
         """Two candidate connections cannot consume each other's host-bound assignment."""
         with tempfile.TemporaryDirectory(prefix="cortex-exact-thread-home-") as home, tempfile.TemporaryDirectory(
@@ -461,6 +501,36 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     premature["result"]["structuredContent"]["error"]["code"],
                     "assignment_not_consumed",
                 )
+
+    def test_late_desktop_candidate_malformed_bootstrap_restores_unknown_connection(self) -> None:
+        """A post-initialize host attestation does not survive a malformed read."""
+        with tempfile.TemporaryDirectory(prefix="cortex-late-candidate-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-late-candidate-data-",
+        ) as plugin_data:
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as connection:
+                # The MCP process is already initialized here, matching the
+                # Desktop lifecycle ordering observed in production.
+                _write_host_worker_receipt(plugin_data, worker_ref)
+                receipt = next(Path(plugin_data).glob(
+                    "activation/sessions/*/dispatch/dispatch-*.json"
+                ))
+                before = receipt.read_bytes()
+                malformed = connection("read_task", {
+                    "task_ref": worker_ref,
+                    "worker_label": "invented",
+                })
+                self.assertEqual(
+                    malformed["result"]["structuredContent"]["error"]["code"],
+                    "validation_error",
+                )
+                self.assertEqual(receipt.read_bytes(), before)
+                listed = connection.rpc("tools/list", {})  # type: ignore[attr-defined]
+                names = {item["name"] for item in listed["result"]["tools"]}
+                self.assertIn("open_assignment", names)
+                self.assertNotIn("publish_result", names)
 
     def test_open_assignment_first_stdio_call_uses_one_complete_instruction_field(self) -> None:
         """A complete advertised assignment crosses validation without invented fields."""
@@ -1245,8 +1315,6 @@ class CommandReceiptTests(unittest.TestCase):
                 direct["result"]["structuredContent"]["error"]["code"],
                 "wrong_connection",
             )
-            _write_host_worker_receipt(plugin_data, worker_ref)
-
             publication_arguments = {
                 "task_ref": worker_ref,
                 "summary": "Source same-connection publication completed.",
@@ -1269,6 +1337,16 @@ class CommandReceiptTests(unittest.TestCase):
             with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
                 home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
             ) as worker_a:
+                # Codex Desktop starts the child's MCP stdio process before
+                # SubagentStart issues its signed candidate.  The initial
+                # catalogue is therefore coordinator-shaped, but absence of a
+                # candidate at initialize must not commit a coordinator role.
+                before_attestation = worker_a.rpc("tools/list", {})  # type: ignore[attr-defined]
+                self.assertIn(
+                    "open_assignment",
+                    {item["name"] for item in before_attestation["result"]["tools"]},
+                )
+                _write_host_worker_receipt(plugin_data, worker_ref)
                 consumed = worker_a("read_task", {
                     "task_ref": worker_ref,
                 })

@@ -188,12 +188,18 @@ user-facing answer.
 
 Worker publication authority is established only after terminal consumption of
 the exact server-owned assignment view on one signed, host-bound MCP
-worker-candidate connection. `SubagentStart` signs a one-shot digest-only
-attestation bound to the exact child agent/session/assignment. A fresh MCP
-process receives only the fail-closed worker-candidate catalogue while any
-such signed candidate is active; inherited root environment is not treated as
-child identity. `PreToolUse` authorizes the exact first call without rewriting
-it. The candidate schema exposes no selectable view: an optional view field is
+worker-candidate connection. Before native spawn, the validated unchanged host
+call creates a signed, non-authoritative catalogue hint, so a Desktop child
+whose MCP process initializes before `SubagentStart` still receives only the
+fail-closed worker-candidate catalogue. `SubagentStart` then replaces that hint
+with a one-shot digest-only attestation bound to the exact child
+agent/session/assignment; inherited root environment is not treated as child
+identity. The hint grants no call or ledger authority. `PreToolUse` authorizes
+the exact first call without rewriting it. A connection that initialized before
+the child attestation may adopt it only while its role is still unknown and only
+by atomically claiming that signed exact-call authorization; a confirmed
+coordinator can never pivot. The candidate schema exposes no selectable view:
+an optional view field is
 limited to `const=assignment`, and the server fixes that value even when it is
 omitted. It atomically consumes only the matching child, turn, session,
 assignment, and tool-use authorization on the calling connection. Worker role

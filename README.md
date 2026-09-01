@@ -244,11 +244,14 @@ user's configured approval policy.
 
 The activation guard enforces host-side ordering around task anchoring and
 native worker dispatch. It never rewrites a native spawn call: the unchanged
-host call carries the exact server-rendered bootstrap while `SubagentStart`
-binds the real child audience to a digest-only one-shot receipt. The worker MCP
-process atomically claims that receipt from the same owner-only plugin data
-directory before its first assignment read; the hook never repeats or stores
-bootstrap plaintext. Receipt routing is isolated by coordinator session
+host call carries the exact server-rendered bootstrap. Its validated pre-spawn
+boundary signs a catalogue-only hint before Desktop creates the child MCP
+process; the hint exposes no call or ledger authority. `SubagentStart` replaces
+that hint with the real child-bound digest-only one-shot receipt. The worker MCP
+process atomically claims the later exact-call authorization from the same
+owner-only plugin data directory before its first assignment read, including
+when its stdio connection initialized before `SubagentStart`; the hook never
+repeats or stores bootstrap plaintext. Receipt routing is isolated by coordinator session
 through an atomic active index; completed and foreign history is never scanned
 or selected. The lifecycle observer records bounded structural markers needed
 to verify real coordinator and worker sessions. Neither hook grants ledger
@@ -1352,11 +1355,16 @@ observation; they do not grant ledger authority or authorize project work. The s
 packaged `profile_name` and projects one compact closed native dispatch
 statelessly, but never spawns or authorizes the native worker. Native spawn
 input remains host-owned and is never rewritten through `PreToolUse.updatedInput`.
-`SubagentStart` signs a one-shot worker-candidate attestation bound to the exact
-child agent/session/assignment using sanitized private digests. A new MCP
-connection sees the fail-closed worker-candidate catalogue whenever such a
-fresh signed child exists; it cannot infer an exact child from inherited root
-environment. The catalogue exposes a closed `read_task` schema with the sole
+The validated unchanged native spawn first signs a catalogue-only pending hint,
+allowing a Desktop child that initializes MCP before `SubagentStart` to see the
+fail-closed worker catalogue without receiving worker authority. `SubagentStart`
+replaces it with a one-shot worker-candidate attestation bound to the exact
+child agent/session/assignment using sanitized private digests. A connection
+that initialized before this child attestation may adopt it only while its role
+is still unknown and only after the exact `PreToolUse` authorization is signed;
+request content alone cannot change its audience, and a committed coordinator
+role is irreversible. Inherited root environment is never treated as exact
+child identity. The catalogue exposes a closed `read_task` schema with the sole
 `view.const` assignment view. The child's exact first
 `PreToolUse(read_task)` lifecycle event then signs a one-shot call
 authorization bound to child agent, turn, session, assignment, and tool-use
