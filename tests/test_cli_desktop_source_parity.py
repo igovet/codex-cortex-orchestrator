@@ -18,15 +18,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_desktop_first_turn_requires_the_complete_non_deferred_cortex_catalogue() -> None:
-    """Fail closed before a Desktop turn instead of hiding Cortex in deferred discovery."""
+def test_desktop_first_turn_requires_the_complete_direct_only_cortex_catalogue() -> None:
+    """Keep Cortex out of every indirect host tool-routing surface."""
     companion = json.loads(
         (ROOT / "plugins/cortex/.mcp.json").read_text(encoding="utf-8")
     )
     server = companion["mcpServers"]["cortex"]
     assert server["required"] is True
-    assert server["omit_tools_from"] == ["deferred"]
-    assert "code_mode" not in server["omit_tools_from"]
+    assert server["omit_tools_from"] == ["code_mode", "deferred"]
+    assert set(server["omit_tools_from"]) == {"code_mode", "deferred"}
 
 
 def _load_test_support(name: str, filename: str):
@@ -624,7 +624,15 @@ def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_en
                     **({"tool_response": {"isError": False}} if event_name == "PostToolUse" else {}),
                 })
 
-            read_input = {"task_ref": worker_ref, "view": "assignment"}
+            # Reproduce the observed Desktop failure exactly. The early neutral
+            # catalogue can lead the model to copy open_assignment's scoped
+            # policy onto the first worker read. It is compatibility-only here:
+            # the server-owned assignment policy remains authoritative.
+            read_input = {
+                "task_ref": worker_ref,
+                "view": "assignment",
+                "report_policy": "latest_for_scope",
+            }
             assert hook({
                 "hook_event_name": "PreToolUse", "session_id": root_session,
                 "turn_id": worker_turn, "agent_id": worker_agent,

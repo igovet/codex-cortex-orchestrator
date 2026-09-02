@@ -18,11 +18,11 @@ from cortex_runtime.observation_generation import claim_generation, consume_inte
 def _fixture(tmp_path: Path) -> tuple[dict[str, str], Path]:
     home = tmp_path / "home"; home.mkdir(mode=0o700)
     codex = home / ".codex"; codex.mkdir(mode=0o700)
-    candidate = codex / "plugins/cache/cortex/cortex/1.14.14"; candidate.mkdir(parents=True, mode=0o700)
+    candidate = codex / "plugins/cache/cortex/cortex/1.14.15"; candidate.mkdir(parents=True, mode=0o700)
     nonce = "a" * 64; build = "sha256:" + "b" * 64
-    request_generation(code_home=codex, build_id=build, candidate_version="1.14.14", catalogue_count=15, catalogue_digest="c" * 64, session_nonce=nonce)
-    consume_intent(code_home=codex, package_root=candidate, build_id=build, candidate_version="1.14.14", catalogue_count=15, catalogue_digest="c" * 64, session_nonce=nonce)
-    claim_generation(package_root=candidate, build_id=build, candidate_version="1.14.14", catalogue_count=15, catalogue_digest="c" * 64, session_nonce=nonce)
+    request_generation(code_home=codex, build_id=build, candidate_version="1.14.15", catalogue_count=15, catalogue_digest="c" * 64, session_nonce=nonce)
+    consume_intent(code_home=codex, package_root=candidate, build_id=build, candidate_version="1.14.15", catalogue_count=15, catalogue_digest="c" * 64, session_nonce=nonce)
+    claim_generation(package_root=candidate, build_id=build, candidate_version="1.14.15", catalogue_count=15, catalogue_digest="c" * 64, session_nonce=nonce)
     env = {"PLUGIN_ROOT": str(ROOT / "plugins/cortex"), "CODEX_HOME": str(codex), "CORTEX_CANDIDATE_PATH": str(candidate), "CORTEX_BUILD_ID": build}
     generation = codex / ".cortex-mcp-observations/generations"
     return env, generation

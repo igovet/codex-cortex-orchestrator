@@ -13,7 +13,12 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from cortex import PUBLIC_TOOLS
-from cortex_runtime.mcp_api import _validation_failure, _validate_schema
+from cortex_runtime.mcp_api import (
+    _SchemaError,
+    _validation_failure,
+    _validate_schema,
+    _worker_candidate_read_schema,
+)
 
 
 EXPECTED_TOOLS = (
@@ -292,8 +297,10 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 missing_mode = call({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"task_ref": task_ref}}})
                 self.assertTrue(missing_mode["result"]["isError"])
                 self.assertEqual(missing_mode["result"]["structuredContent"]["error"]["code"], "validation_error")
-                assessed = call({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"task_ref": task_ref, "mode": "light"}}})
+                assessed = call({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "assess_governance", "arguments": {"mode": "light"}}})
                 self.assertNotIn("error", assessed)
+                self.assertFalse(assessed["result"].get("isError"), assessed)
+                self.assertEqual(assessed["result"]["structuredContent"]["task_ref"], task_ref)
             finally:
                 if process.stdin is not None:
                     process.stdin.close()
@@ -302,6 +309,21 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                     process.stdout.close()
                 if process.stderr is not None:
                     process.stderr.close()
+
+    def test_worker_candidate_report_policy_is_bounded_before_it_is_ignored(self) -> None:
+        schema = _worker_candidate_read_schema(PUBLIC_TOOLS["read_task"])
+        worker_ref = "t_0123456789ab_" + "a" * 32
+        _validate_schema(schema, {
+            "task_ref": worker_ref,
+            "view": "assignment",
+            "report_policy": "latest_for_scope",
+        })
+        with self.assertRaises(_SchemaError):
+            _validate_schema(schema, {
+                "task_ref": worker_ref,
+                "view": "assignment",
+                "report_policy": "invented_policy",
+            })
 
     def test_catalogue_is_flat_task_ref_only(self) -> None:
         self.assertEqual(tuple(PUBLIC_TOOLS), EXPECTED_TOOLS)

@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.14.15] - 2026-09-02
+
+### Fixed
+
+- Restricted the bundled Cortex catalogue to direct model-visible calls by
+  excluding it from both programmatic code mode and deferred discovery. Native
+  Desktop workers can no longer receive `read_task` only inside
+  `functions.exec`/`ALL_TOOLS` while another worker in the same host receives
+  the proper direct MCP tool.
+- Made the first late-adopted Desktop worker assignment read tolerate and
+  ignore a copied `report_policy`, including `latest_for_scope`. The immutable
+  assignment evidence policy remains server-owned, while the harmless field no
+  longer causes a bootstrap `validation_error` before the exact receipt is
+  consumed.
+- Applied the existing same-connection active-task fallback before input-schema
+  validation. Task-anchored coordinator calls may therefore omit a repeated
+  `task_ref` after `open_task` without a false missing-field error; the public
+  schema remains complete and required, and connections without an active task
+  still fail closed.
+
 ## [1.14.14] - 2026-09-02
 
 ### Fixed

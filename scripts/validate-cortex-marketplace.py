@@ -29,8 +29,8 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_BASE_VERSION = "1.14.14"
-VERSION_PATTERN = re.compile(r"^1\.14\.14\+codex\.sha256\.[0-9a-f]{16}$")
+EXPECTED_BASE_VERSION = "1.14.15"
+VERSION_PATTERN = re.compile(r"^1\.14\.15\+codex\.sha256\.[0-9a-f]{16}$")
 EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
@@ -229,9 +229,9 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
     version = manifest.get("version")
     valid_version = VERSION_PATTERN.fullmatch(version) if isinstance(version, str) else None
     if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not valid_version:
-        fail("installable plugin manifest must use a content-addressed 1.14.14 version")
+        fail("installable plugin manifest must use a content-addressed 1.14.15 version")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
-        fail("plugin manifest semantic version must be 1.14.14")
+        fail("plugin manifest semantic version must be 1.14.15")
     provenance_path = plugin / "scripts/cortex_runtime/provenance.py"
     spec = importlib.util.spec_from_file_location("cortex_marketplace_provenance", provenance_path)
     if spec is None or spec.loader is None:
@@ -259,7 +259,7 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
         "args": ["-B", "./scripts/cortex.py"],
         "cwd": ".",
         "required": True,
-        "omit_tools_from": ["deferred"],
+        "omit_tools_from": ["code_mode", "deferred"],
         "env_vars": ["CORTEX_SESSION_NONCE", "CORTEX_RAW_DIAGNOSTIC"],
     }
     if mcp != {"mcpServers": {"cortex": expected_server}}:

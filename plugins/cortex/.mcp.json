@@ -5,7 +5,7 @@
       "args": ["-B", "./scripts/cortex.py"],
       "cwd": ".",
       "required": true,
-      "omit_tools_from": ["deferred"],
+      "omit_tools_from": ["code_mode", "deferred"],
       "env_vars": ["CORTEX_SESSION_NONCE", "CORTEX_RAW_DIAGNOSTIC"]
     }
   }

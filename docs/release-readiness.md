@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.14.
+Status: content-addressed production and development release contract for Cortex 1.14.15.
 
 ## Current release identity
 
-- semantic release label: 1.14.14
-- installable identity: `1.14.14+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.15
+- installable identity: `1.14.15+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - source-to-installed synchronization reuses that same canonical plugin
   manifest and digest contract on Linux and macOS; it does not maintain a
@@ -96,7 +96,8 @@ The complete catalogue must fit in one `tools/list` JSON-RPC response below
 65,536 bytes. This bounded discovery contract is substantially below the 256
 KiB physical JSONL frame bound and does not use continuation pages, so every
 participant receives all fourteen operation definitions together. The bundled
-MCP is required and excluded from deferred discovery, so Desktop must expose
+MCP is required and excluded from programmatic code mode and deferred discovery,
+leaving direct model calls as its only valid host surface. Desktop must expose
 that intact catalogue before its first model turn. Missing or truncated
 declarations fail session initialization; no mutation contract may be guessed
 from names, descriptions, or partial output.
@@ -413,7 +414,7 @@ fourteen-tool semantic facade and runtime, schema-v1 store, host-private operato
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.14.14,
+The package and repository metadata must consistently identify Cortex 1.14.15,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the complete fourteen-tool semantic registry plus its two audience
 projections. Stale claims about waves, gates, capabilities,

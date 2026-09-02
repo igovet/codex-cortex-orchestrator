@@ -130,6 +130,26 @@ def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]
     }
     if isinstance(properties.get("continue"), Mapping):
         candidate_properties["continue"] = dict(properties["continue"])
+    if isinstance(properties.get("report_policy"), Mapping):
+        # Desktop may initialize the child MCP before SubagentStart and show
+        # the neutral coordinator/worker read schema to the model. A model can
+        # therefore copy the similarly named open_assignment policy onto its
+        # first assignment read. The assignment's evidence policy is already
+        # immutable server state, so accept this bounded compatibility field
+        # and discard it instead of turning a harmless host-ordering artifact
+        # into a failed worker bootstrap.
+        report_policy = dict(properties["report_policy"])
+        advertised_values = report_policy.get("enum")
+        values = list(advertised_values) if isinstance(advertised_values, list) else []
+        if "latest_for_scope" not in values:
+            values.append("latest_for_scope")
+        report_policy["enum"] = values
+        report_policy["description"] = (
+            "Compatibility-only field for an early Desktop assignment read. "
+            "If supplied, it is validated and ignored because the assignment's "
+            "evidence policy is immutable server-owned state. Workers should omit it."
+        )
+        candidate_properties["report_policy"] = report_policy
     return {
         "type": "object",
         "description": (
@@ -1673,9 +1693,17 @@ def serve_stdio(
             adopt_late_host_worker_candidate(name, arguments, contract)
             audience = connection_context.get("_audience")
             role = connection_context.get("_role")
+            worker_assignment_read = (
+                name == "read_task"
+                and audience in {"worker_candidate", "worker"}
+                and (
+                    audience == "worker_candidate"
+                    or arguments.get("view") == "assignment"
+                )
+            )
             input_schema = (
                 _worker_candidate_read_schema(contract)
-                if audience == "worker_candidate" and name == "read_task"
+                if worker_assignment_read
                 else contract.get("_runtimeInputSchema", contract["inputSchema"])
             )
             allowed = (
@@ -1757,16 +1785,6 @@ def serve_stdio(
                         max_bytes=MCP_OPERATION_MAX_BYTES,
                         correction_state=correction_state,
                     )
-                _validate_schema(input_schema, arguments)
-                if correcting_aggregate and isinstance(corrections, dict):
-                    # A complete schema-valid correction has crossed the
-                    # pre-dispatch boundary. Durable publication idempotency,
-                    # not the validation retry guard, owns any later replay.
-                    corrections.pop(name, None)
-                if audience == "worker_candidate" and name == "read_task":
-                    # Assignment is server-owned candidate state, not a model-selected
-                    # compatibility default and not a hook rewrite.
-                    resolved_arguments["view"] = "assignment"
                 properties = input_schema.get("properties") if isinstance(input_schema, Mapping) else None
                 if (
                     name != "open_task"
@@ -1780,6 +1798,20 @@ def serve_stdio(
                             "missing required property 'task_ref' because this MCP connection has no active task context",
                         )
                     resolved_arguments["task_ref"] = active_task_ref
+                _validate_schema(input_schema, resolved_arguments)
+                if worker_assignment_read:
+                    # Assignment is server-owned candidate state, not a model-selected
+                    # compatibility default and not a hook rewrite. Its report policy
+                    # was fixed by open_assignment and cannot be changed by this read.
+                    # Validate the optional compatibility value above before discarding
+                    # it so unknown or malformed values remain fail-closed.
+                    resolved_arguments["view"] = "assignment"
+                    resolved_arguments.pop("report_policy", None)
+                if correcting_aggregate and isinstance(corrections, dict):
+                    # A complete schema-valid correction has crossed the
+                    # pre-dispatch boundary. Durable publication idempotency,
+                    # not the validation retry guard, owns any later replay.
+                    corrections.pop(name, None)
                 _validate_public_call_shape(name, resolved_arguments)
                 if audience == "worker_candidate" and name == "read_task":
                     plugin_data = _plugin_data_root(package_root)
