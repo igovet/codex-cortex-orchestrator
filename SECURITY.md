@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.15 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.16 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -212,8 +212,9 @@ assignment read without rewriting it. Only that otherwise-uncommitted
 connection may atomically claim the authorization. The server validates the
 read against its worker-candidate schema, fixes the assignment view, and
 commits worker role only after successful terminal assignment consumption.
-It then emits the standard `notifications/tools/list_changed` notification;
-a supporting client refresh receives only `read_task` and the three worker
+It deliberately emits no mid-turn catalogue notification because Desktop can
+replay the already-successful assignment read while applying that refresh. An
+explicit later catalogue read receives only `read_task` and the three worker
 publication tools. A client that retains the neutral catalogue remains
 fail-closed because committed server role checks reject every coordinator-only
 worker call without mutation. A confirmed coordinator can never pivot. Pre-consumption
@@ -699,10 +700,17 @@ non-regular entries. Direct `./scripts/sync-cortex.sh` use remains an explicitly
 authorized local-source operation; source-mode checks do not prove an installed
 cache or interactive host behavior.
 
+Real Desktop live development uses `./scripts/cortex-desktop-dev`. It prepares
+the same isolated candidate, launches the actual Desktop binary with a
+disposable Electron profile, and does not write the stable Codex profile or
+stable Cortex plugin. CLI/Desktop parity evidence is valid only for consecutive
+real-host runs of one unchanged cache-stamped payload; a payload edit
+invalidates both live results.
+
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.15+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.15` is
+`1.14.16+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.16` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a

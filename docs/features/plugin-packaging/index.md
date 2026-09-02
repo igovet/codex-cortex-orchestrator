@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.15 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.14.16 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -157,8 +157,9 @@ identity, every connection starts with a neutral complete
 catalogue and foreign pending state cannot select its role. That catalogue
 grants no authority. The process consumes only
 the exact child-bound PreToolUse authorization on the first assignment read,
-then advertises the worker projection through `tools/list_changed`; clients
-that retain the neutral catalogue remain constrained by authoritative server
+then commits worker authority without a mid-turn refresh that could replay the
+Desktop bootstrap. An explicit catalogue read returns the worker projection;
+clients that retain the neutral catalogue remain constrained by authoritative server
 role checks. Native subagent dispatch remains outside
 the MCP server, and hooks never replace server-side ledger authority.
 
@@ -184,11 +185,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.14.15+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.14.16+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.14.15` manifest is source-mode only and the
+in provenance strength. A plain `1.14.16` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -218,7 +219,7 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.14.15 and a suffix matching the complete normalized plugin payload;
+  1.14.16 and a suffix matching the complete normalized plugin payload;
 - exact fourteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private

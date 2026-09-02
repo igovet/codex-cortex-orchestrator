@@ -403,7 +403,6 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
     bootstrap = {
         "assignment context": {
             "task_ref": worker_task_ref,
-            "worker label": delegation.get("native_task_name"),
         },
     }
     message = "\n\n".join((

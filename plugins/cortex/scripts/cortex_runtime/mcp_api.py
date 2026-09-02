@@ -1975,13 +1975,16 @@ def serve_stdio(
                     _success_tool_result(dict(result)), success=True,
                     public_result=observation_result,
                 )
-                if wire_success and role_committed_now:
+                if wire_success and role_committed_now and committed_role != "worker":
                     # Audience narrowing becomes available only after a
-                    # successful semantic role commitment. Supporting clients
-                    # refresh to the authoritative coordinator/worker
-                    # projection; clients that retain the initial neutral
-                    # catalogue remain safe because every call is still
-                    # checked against the committed server role.
+                    # successful semantic role commitment. Do not notify on
+                    # late worker adoption: current Desktop can replay the
+                    # already-successful assignment bootstrap while applying
+                    # that mid-turn refresh. A later explicit tools/list still
+                    # returns the authoritative worker projection, and clients
+                    # retaining the initial neutral catalogue remain safe
+                    # because every call is checked against the committed
+                    # server role. Coordinator commitment is not affected.
                     write({
                         "jsonrpc": "2.0",
                         "method": "notifications/tools/list_changed",

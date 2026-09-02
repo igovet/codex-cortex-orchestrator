@@ -140,6 +140,22 @@ def _publicize(value: Any) -> Any:
     return result
 
 
+def _public_read_data(value: Any) -> Any:
+    """Project read data without duplicating the transport pagination marker."""
+    def strip_markers(item: Any) -> Any:
+        if isinstance(item, list):
+            return [strip_markers(entry) for entry in item]
+        if not isinstance(item, Mapping):
+            return item
+        return {
+            str(key): strip_markers(entry)
+            for key, entry in item.items()
+            if str(key) not in {"has_more", "task_ref"}
+        }
+
+    return strip_markers(_publicize(value))
+
+
 def _reject_private_fields(value: Any, *, path: str = "evidence") -> None:
     if isinstance(value, list):
         for index, item in enumerate(value):
@@ -355,7 +371,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.14.15",
+        "1.14.16",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -474,7 +490,7 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
         # that can disagree with the callable top-level continuation contract.
         public_raw.pop("has_more", None)
         public_raw.pop("next_sequence", None)
-        data = _publicize(public_raw)
+        data = _public_read_data(public_raw)
         context.update({
             "read_key": page_key,
             "cursor": next_sequence if has_more else None,
@@ -576,7 +592,12 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
                     "state": "consumed",
                     "pages": list(pages) if isinstance(pages, list) else [],
                 }
-        result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
+        result = {
+            "task_ref": task_ref,
+            "view": view,
+            "data": _public_read_data(raw),
+            "has_more": has_more,
+        }
     elif view == "evidence":
         if assignment_id is not None:
             if context.get("assignment_id") != assignment_id:
@@ -594,7 +615,12 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
             raw = store.read_reports(task_id=canonical, report_ids=report_ids, cursor=cursor, max_bytes=65_536, consumer_delegation_id=None) if report_ids else {"reports": [], "has_more": False, "next_cursor": None}
         has_more = bool(raw.get("has_more"))
         context.update({"read_key": page_key, "cursor": raw.get("next_cursor"), "has_more": has_more})
-        result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
+        result = {
+            "task_ref": task_ref,
+            "view": view,
+            "data": _public_read_data(raw),
+            "has_more": has_more,
+        }
     else:
         raise V12ServiceError("task view is invalid", code="invalid_argument", details={"field": "view"})
     return result
@@ -1076,7 +1102,7 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
             next_cursor: Mapping[str, Any] | None, has_more: bool,
         ) -> dict[str, Any]:
             rendered = {**page, "next_cursor": next_cursor, "has_more": has_more}
-            public_page = _publicize(rendered)
+            public_page = _public_read_data(rendered)
             encoded = _encoded_bytes(public_page)
             if len(encoded) > REPORT_RESPONSE_MAX_BYTES:
                 raise V12ServiceError(
