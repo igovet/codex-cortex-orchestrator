@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.14.14] - 2026-09-02
+
+### Fixed
+
+- Made the bundled Cortex MCP required at host session startup and excluded
+  its complete fourteen-operation catalogue from deferred discovery. A new
+  Desktop task therefore cannot receive the selected orchestrator skill while
+  silently omitting `open_task`; the host must expose the intact direct
+  catalogue before the first turn or fail session initialization explicitly.
+
 ## [1.14.13] - 2026-09-02
 
 ### Fixed

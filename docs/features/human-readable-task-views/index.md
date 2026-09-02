@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 1.14.13 projects selected host-private plan and finalized-report evidence
+Cortex 1.14.14 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read

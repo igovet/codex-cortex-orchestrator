@@ -85,7 +85,7 @@ def test_isolated_candidate_receipt_is_stamped_deterministic_and_owner_only(tmp_
     assert receipt_path.read_bytes() == original
     assert first["candidate_version"] == version
     assert first["candidate_path"] == str(installed)
-    assert first["base_version"] == "1.14.13"
+    assert first["base_version"] == "1.14.14"
     assert receipt_path.stat().st_mode & 0o077 == 0
     receipt_path.chmod(0o644)
     with pytest.raises(CandidateReceiptError, match="group or other"):
@@ -106,7 +106,7 @@ def test_candidate_receipt_rejects_missing_tampered_cross_target_and_symlink_pat
         source_root=ROOT, owner_home=owner, isolated_home=home,
         isolated_codex_home=codex_home, candidate_version=version,
     )
-    receipt_path.write_bytes(receipt_path.read_bytes().replace(b'"base_version":"1.14.13"', b'"base_version":"9.9.9"'))
+    receipt_path.write_bytes(receipt_path.read_bytes().replace(b'"base_version":"1.14.14"', b'"base_version":"9.9.9"'))
     with pytest.raises(CandidateReceiptError, match="receipt"):
         read_verified_receipt(source_root=ROOT, owner_home=owner, isolated_home=home, isolated_codex_home=codex_home)
     write_receipt(
@@ -286,7 +286,7 @@ def test_managed_ancestor_chain_rejects_symlinked_cache_and_nested_ancestors(tmp
     linked_cache = home / ".cortex-candidates"
     linked_cache.symlink_to(real_cache, target_is_directory=True)
     with pytest.raises(RuntimePayloadError, match="symlink"):
-        validated_managed_directory(linked_cache / "1.14.13+codex.sha256.abc", "candidate version root", allow_missing=True)
+        validated_managed_directory(linked_cache / "1.14.14+codex.sha256.abc", "candidate version root", allow_missing=True)
     linked_cache.unlink()
     linked_cache.mkdir()
     real_version_parent = linked_cache / "versions-real"
@@ -298,7 +298,7 @@ def test_managed_ancestor_chain_rejects_symlinked_cache_and_nested_ancestors(tmp
 
 
 def test_missing_managed_ancestors_are_created_only_after_safe_validation(tmp_path: Path) -> None:
-    target = tmp_path / "codex-home" / ".cortex-candidates" / "1.14.13+codex.sha256.abc"
+    target = tmp_path / "codex-home" / ".cortex-candidates" / "1.14.14+codex.sha256.abc"
     created = ensure_managed_directory(target, "candidate version root")
     assert created == target.absolute()
     assert target.is_dir()
@@ -515,7 +515,7 @@ def test_content_addressed_installed_release_stdio_initializes_without_source_mo
     lines = [json.loads(line) for line in process.stdout if line.strip()]
     assert process.wait(timeout=10) == 0, process.stderr.read() if process.stderr else ""
     info = next(item for item in lines if item.get("id") == 1)["result"]["serverInfo"]
-    assert info["version"] == "1.14.13"
+    assert info["version"] == "1.14.14"
     assert info["runtimeMode"] == "content_addressed"
     assert info["parityVerified"] is True
     assert info["buildId"] == "sha256:" + info["sourceDigest"]
@@ -528,24 +528,24 @@ def test_runtime_rejects_spoofed_expectation_and_manifest_suffix(tmp_path: Path)
     candidate = tmp_path / "candidate"
     manifest = build_source_candidate(ROOT, candidate)
     package = candidate / "plugins/cortex"
-    verify_runtime(package, "1.14.13")
+    verify_runtime(package, "1.14.14")
     try:
-        verify_runtime(package, "1.14.13", {"CORTEX_BUILD_ID": "sha256:" + "0" * 64})
+        verify_runtime(package, "1.14.14", {"CORTEX_BUILD_ID": "sha256:" + "0" * 64})
     except RuntimeError as exc:
         assert "disagrees" in str(exc)
     else:
         raise AssertionError("spoofed launcher identity must be rejected")
     plugin_manifest = package / ".codex-plugin/plugin.json"
     value = json.loads(plugin_manifest.read_text(encoding="utf-8"))
-    value["version"] = "1.14.13+codex.sha256." + "0" * 16
+    value["version"] = "1.14.14+codex.sha256." + "0" * 16
     plugin_manifest.write_text(json.dumps(value), encoding="utf-8")
     try:
-        verify_runtime(package, "1.14.13")
+        verify_runtime(package, "1.14.14")
     except RuntimeError as exc:
         assert "suffix" in str(exc)
     else:
         raise AssertionError("wrong build suffix must be rejected")
-    source = verify_runtime(package, "1.14.13", allow_source_mode=True)
+    source = verify_runtime(package, "1.14.14", allow_source_mode=True)
     assert source["runtime_mode"] == "source"
     assert source["parity_verified"] == "false"
 

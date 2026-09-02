@@ -18,6 +18,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_desktop_first_turn_requires_the_complete_non_deferred_cortex_catalogue() -> None:
+    """Fail closed before a Desktop turn instead of hiding Cortex in deferred discovery."""
+    companion = json.loads(
+        (ROOT / "plugins/cortex/.mcp.json").read_text(encoding="utf-8")
+    )
+    server = companion["mcpServers"]["cortex"]
+    assert server["required"] is True
+    assert server["omit_tools_from"] == ["deferred"]
+    assert "code_mode" not in server["omit_tools_from"]
+
+
 def _load_test_support(name: str, filename: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / "tests" / filename)
     assert spec is not None and spec.loader is not None

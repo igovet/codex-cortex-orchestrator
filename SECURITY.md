@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.13 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.14 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -314,7 +314,10 @@ The complete fourteen-tool catalogue is additionally constrained to 65,536
 bytes. It advertises the authoritative closed input contracts while keeping
 optional successful-result schemas inside the runtime validation boundary, so
 bounded host discovery receives every complete operation without pagination or
-truncation. Cortex never splits or truncates a definition to fit a frame.
+truncation. The bundled MCP is required at host session startup and excluded
+from deferred discovery, so a Desktop turn cannot proceed with the selected
+skill but without the direct Cortex catalogue. Cortex never splits or truncates
+a definition to fit a frame.
 
 ## Data handling
 
@@ -697,8 +700,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.13+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.13` is
+`1.14.14+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.14` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a
