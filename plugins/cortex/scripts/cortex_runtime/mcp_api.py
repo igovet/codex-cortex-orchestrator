@@ -81,15 +81,29 @@ _SAFE_VALIDATION_REASONS = frozenset({
 })
 
 
-def _plugin_data_root() -> Path | None:
-    """Resolve the exact shared owner-private plugin data directory."""
+def _plugin_data_root(package_root: Path | None = None) -> Path | None:
+    """Resolve the exact shared owner-private plugin data directory.
+
+    Plugin ``env_vars`` forward values that already exist in the Codex host
+    environment; ordinary Desktop launches do not necessarily define
+    ``CODEX_HOME``.  Installed MCP processes can still derive the same
+    package-data root used by hooks from the verified cache topology.  Source
+    mode has no such installed topology and therefore still requires an
+    explicit test/development environment value.
+    """
     data_root = os.environ.get("PLUGIN_DATA")
     if isinstance(data_root, str) and data_root:
         return Path(data_root)
     codex_home = os.environ.get("CODEX_HOME")
-    if not isinstance(codex_home, str) or not codex_home:
+    if isinstance(codex_home, str) and codex_home:
+        return Path(codex_home) / "plugins" / "data" / "cortex-cortex"
+    if package_root is None:
         return None
-    return Path(codex_home) / "plugins" / "data" / "cortex-cortex"
+    try:
+        derived_home = candidate_codex_home(package_root)
+    except ObservationGenerationError:
+        return None
+    return derived_home / "plugins" / "data" / "cortex-cortex"
 
 
 def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -1401,7 +1415,7 @@ def serve_stdio(
         ):
             return
         claim = connection_context.get("_host_worker_claim")
-        plugin_data = _plugin_data_root()
+        plugin_data = _plugin_data_root(package_root)
         if plugin_data is not None and isinstance(claim, Mapping):
             release_worker_candidate_claim(
                 plugin_data, claim=claim,
@@ -1437,7 +1451,7 @@ def serve_stdio(
             or name != "read_task"
         ):
             return
-        plugin_data = _plugin_data_root()
+        plugin_data = _plugin_data_root(package_root)
         claim = (
             claim_worker_candidate(
                 plugin_data,
@@ -1743,7 +1757,7 @@ def serve_stdio(
                     resolved_arguments["task_ref"] = active_task_ref
                 _validate_public_call_shape(name, resolved_arguments)
                 if audience == "worker_candidate" and name == "read_task":
-                    plugin_data = _plugin_data_root()
+                    plugin_data = _plugin_data_root(package_root)
                     host_worker_claim = connection_context.get("_host_worker_claim")
                     if not claim_matches_task(host_worker_claim, resolved_arguments.get("task_ref")):
                         host_worker_claim = (

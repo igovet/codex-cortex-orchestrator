@@ -104,7 +104,7 @@ def test_noncompact_session_start_does_not_repeat_skills(tmp_path: Path) -> None
 def test_activation_session_start_does_not_overwrite_lifecycle_owned_live_binding(tmp_path: Path) -> None:
     """The lifecycle observer is the sole writer of the exact resume identity."""
     codex_home = tmp_path / "home/.codex"
-    hook = codex_home / "plugins/cache/cortex/cortex/1.14.9/hooks/cortex_activation.py"
+    hook = codex_home / "plugins/cache/cortex/cortex/1.14.10/hooks/cortex_activation.py"
     hook.parent.mkdir(parents=True)
     hook.write_bytes(HOOK.read_bytes())
     launch = codex_home / ".cortex-live-launch.json"

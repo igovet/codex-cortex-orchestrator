@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.9 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.10 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -217,6 +217,13 @@ worker call without mutation. A confirmed coordinator can never pivot. Pre-consu
 catalogue hiding cannot be authenticated until the host supplies identity at
 initialize; server authorization and the activation hook remain authoritative
 during that unavoidable discovery window.
+Hook processes address the owner-only package data root through `PLUGIN_DATA`.
+An installed MCP process uses an explicit `PLUGIN_DATA` or `CODEX_HOME` when
+available; ordinary Desktop may forward neither, so the process otherwise
+derives the same fixed data root from the already verified content-addressed
+cache topology. Source mode has no installed topology and must supply its
+isolated data root explicitly. A missing GUI environment variable therefore
+cannot silently disable the host-attested worker claim.
 Coordinator and worker roles are
 monotonic per connection. A fresh process,
 reconnect, copied worker locator, report reference, bare assignment reference,
@@ -662,8 +669,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.9+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.9` is
+`1.14.10+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.10` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a

@@ -1,6 +1,6 @@
 # Official Codex activation-kernel design
 
-Status: **implemented and qualified for the Cortex 1.14.9 supported-host
+Status: **implemented and qualified for the Cortex 1.14.10 supported-host
 boundary**
 
 The original activation kernel has since grown a bounded native-worker
@@ -67,8 +67,9 @@ The hook never calls the task-opening operation. The model must make that call
 using the live advertised schema. Coordinator activation state is stored below
 `PLUGIN_DATA` under digest-named session/turn paths. Native dispatch receipts
 progress atomically through bounded digest-only lifecycle states; the worker
-MCP process resolves the same owner-only package data root through `CODEX_HOME`
-when the hook-only `PLUGIN_DATA` variable is absent. Prompt text, locators,
+MCP process resolves the same owner-only package data root through explicit
+`PLUGIN_DATA`/`CODEX_HOME` or the verified installed cache topology when both
+variables are absent. Prompt text, locators,
 native message plaintext, assignment bodies, reports, credentials, call
 arguments, and raw tool output are never stored.
 

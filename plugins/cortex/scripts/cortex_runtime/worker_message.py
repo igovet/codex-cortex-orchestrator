@@ -209,18 +209,18 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 # evidence from the server-owned immutable snapshot.
 _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
 
-- First consume the server-owned assignment through the live advertised `read_task`
-  contract with the worker reference below and select assignment evidence.
-  `open_assignment` creates
-  assignments for a coordinator; it never reads or consumes a worker assignment.
-- Build that finite first read from the live contract. After a deterministic local-
-  shape rejection, correct it once only when diagnostics are unambiguous. Never
-  repeat malformed input or guess authority; reconcile only ambiguous transport.
+- First consume the server-owned assignment through the live advertised `read_task`;
+  use the exact worker reference below and select assignment
+  evidence. `open_assignment` creates assignments for a coordinator; it never
+  reads or consumes a worker assignment.
+- Build that finite first read from the live contract; correct it once only when diagnostics are unambiguous.
+  Never repeat malformed input or guess authority.
 - The assignment read is the sole authority for policy, scope, outcomes, and
-  evidence.
+  evidence. Do not load coordinator/orchestrator skills first; it returns the
+  exact worker policy and packaged profile.
 - You are a worker, not a coordinator. Coordinator-only operations are
   prohibited. Do no project work before successful consumption. If correction
-  fails, stop; never reconstruct or broaden the assignment.
+  fails, stop without broadening the assignment.
 """
 
 # The full common policy is retained for continuation/contract documentation,

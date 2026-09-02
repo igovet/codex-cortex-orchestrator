@@ -3,10 +3,10 @@
 Development-only analysis. This file is not a runtime contract and must not be
 referenced by skills, prompts, profiles, or installed-plugin documentation.
 
-## Cortex 1.14.9 resolution
+## Cortex 1.14.10 resolution
 
 The original finding below predates the supported-host audience receipt now
-used by Cortex 1.14.9. The public worker bootstrap carries no bearer token.
+used by Cortex 1.14.10. The public worker bootstrap carries no bearer token.
 Instead, the unchanged native spawn message delivers only the opaque worker
 locator. The validated pre-spawn call creates session-isolated pending
 correlation before Desktop starts the child's MCP process; it never selects an
@@ -32,7 +32,10 @@ claiming the signed authorization. A copied reference without the matching
 host event is ineligible, and a confirmed coordinator role is irreversible.
 Hook processes address the package data directory via
 `PLUGIN_DATA`; Codex MCP processes, which do not receive that hook-only value,
-derive the same exact installed-package directory from `CODEX_HOME`.
+use `CODEX_HOME` when it is forwarded and otherwise derive the same exact
+directory from the verified installed cache topology. Ordinary Desktop can
+omit both environment variables, so the topology fallback is part of the
+supported worker identity path rather than a live-dev convenience.
 
 The server still validates the adopted first call through a closed candidate
 schema and fixes its semantic view to assignment. The pre-consumption catalogue

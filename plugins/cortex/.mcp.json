@@ -4,7 +4,7 @@
       "command": "python3",
       "args": ["-B", "./scripts/cortex.py"],
       "cwd": ".",
-      "env_vars": ["CODEX_HOME", "CORTEX_SESSION_NONCE", "CORTEX_RAW_DIAGNOSTIC"]
+      "env_vars": ["CORTEX_SESSION_NONCE", "CORTEX_RAW_DIAGNOSTIC"]
     }
   }
 }

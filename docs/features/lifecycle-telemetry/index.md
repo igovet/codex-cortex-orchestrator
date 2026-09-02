@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.14.9 ships two bounded native hook components: an activation guard and
+Cortex 1.14.10 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without
@@ -31,8 +31,10 @@ consume transitions are owner-only and lock-protected; terminal assignment
 consumption removes the receipt from the active index immediately and triggers
 one `tools/list_changed` notification for a worker-catalogue refresh. Hook
 processes locate this directory through `PLUGIN_DATA`; the plugin MCP process
-resolves the same exact installed-package data directory through `CODEX_HOME`
-when `PLUGIN_DATA` is not in its environment. Historical or foreign-session
+uses explicit `PLUGIN_DATA`/`CODEX_HOME` when present and otherwise derives the
+same exact directory from its verified installed package topology. This
+fallback is required because ordinary Desktop may supply neither variable.
+Historical or foreign-session
 files, content-hash filename order, and timestamps never participate in
 routing. Settled diagnostics are separately capped at the last 64 consumed
 receipts per session; that cleanup is not required for correct active lookup.

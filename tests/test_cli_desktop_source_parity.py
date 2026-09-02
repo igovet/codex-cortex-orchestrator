@@ -6,7 +6,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -36,6 +39,100 @@ def _hook(tmp_path: Path, event: dict) -> dict | None:
     returncode, result = HOOKS.invoke(tmp_path, event)
     assert returncode == 0, result
     return result
+
+
+@contextmanager
+def _desktop_packaged_stdio_session(package_root: Path, home: Path):
+    """Run an installed-topology MCP exactly without Desktop-missing env vars."""
+    environment = dict(os.environ)
+    environment.update({
+        "HOME": str(home),
+        "CORTEX_SOURCE_MODE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    for name in (
+        "CODEX_HOME", "PLUGIN_DATA", "CORTEX_SESSION_NONCE", "PYTHONPATH",
+        "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+    ):
+        environment.pop(name, None)
+    process = subprocess.Popen(
+        [sys.executable, "-B", str(package_root / "scripts/cortex.py")],
+        cwd=package_root, env=environment, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    request_id = 0
+    notifications: list[dict] = []
+
+    def rpc(method: str, params: dict) -> dict:
+        nonlocal request_id
+        request_id += 1
+        assert process.stdin is not None and process.stdout is not None
+        process.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": request_id,
+            "method": method, "params": params,
+        }) + "\n")
+        process.stdin.flush()
+        while True:
+            line = process.stdout.readline()
+            if not line.strip():
+                diagnostic = process.stderr.read(512) if process.stderr is not None else ""
+                raise AssertionError(
+                    "packaged Desktop MCP closed before replying"
+                    + (f": {diagnostic}" if diagnostic else "")
+                )
+            payload = json.loads(line)
+            if "id" not in payload and payload.get("method") == "notifications/tools/list_changed":
+                notifications.append(payload)
+                continue
+            return payload
+
+    initialized = rpc("initialize", {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "desktop-no-codex-home", "version": "1"},
+    })
+    assert process.stdin is not None
+    process.stdin.write(json.dumps({
+        "jsonrpc": "2.0", "method": "notifications/initialized", "params": {},
+    }) + "\n")
+    process.stdin.flush()
+
+    def call(tool_name: str, arguments: dict) -> dict:
+        return rpc("tools/call", {"name": tool_name, "arguments": arguments})
+
+    call.rpc = rpc  # type: ignore[attr-defined]
+    call.notifications = notifications  # type: ignore[attr-defined]
+    call.initialize_result = initialized  # type: ignore[attr-defined]
+    try:
+        yield call
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        process.wait(timeout=10)
+        stderr_text = process.stderr.read(512) if process.stderr is not None else ""
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        assert process.returncode == 0, stderr_text
+
+
+def _installed_hook(
+    package_root: Path, plugin_data: Path, home: Path, event: dict,
+) -> dict | None:
+    environment = dict(os.environ)
+    environment.update({
+        "HOME": str(home), "PLUGIN_DATA": str(plugin_data),
+        "PLUGIN_ROOT": str(package_root), "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    environment.pop("CODEX_HOME", None)
+    completed = subprocess.run(
+        [sys.executable, "-B", str(package_root / "hooks/cortex_activation.py")],
+        input=json.dumps(event), text=True, capture_output=True,
+        env=environment, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    output = completed.stdout.strip()
+    return json.loads(output) if output else None
 
 
 @pytest.mark.parametrize("surface", ["cli", "desktop"])
@@ -231,3 +328,155 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
             reports = evidence["result"]["structuredContent"]["data"]["reports"]
             assert len(reports) == 1
             assert f"{surface.capitalize()} parity fixture completed." in json.dumps(reports)
+
+
+def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_env(
+    tmp_path: Path,
+) -> None:
+    """Ordinary Desktop supplies HOME but may omit CODEX_HOME and PLUGIN_DATA."""
+    home = tmp_path / "profile"
+    codex_home = home / ".codex"
+    version = json.loads(
+        (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    package_root = codex_home / "plugins/cache/cortex/cortex" / version
+    package_root.parent.mkdir(parents=True)
+    shutil.copytree(ROOT / "plugins/cortex", package_root)
+    home.chmod(0o700)
+    codex_home.chmod(0o700)
+    plugin_data = codex_home / "plugins/data/cortex-cortex"
+    project = tmp_path / "project"
+    project.mkdir()
+    root_session = "desktop-real-root-session"
+    root_turn = "desktop-real-root-turn"
+    worker_turn = "desktop-real-worker-turn"
+    worker_agent = "desktop-real-worker-agent"
+    outcome = {
+        "outcome": "Complete the ordinary Desktop worker bootstrap fixture.",
+        "acceptance": ["The first worker assignment read succeeds without CODEX_HOME."],
+        "constraints": ["Use installed package topology and the real activation hook."],
+        "verification": ["One worker result is published through the same connection."],
+    }
+
+    with _desktop_packaged_stdio_session(package_root, home) as coordinator:
+        opened = coordinator("open_task", {
+            "project_root": str(project),
+            "request_original": "Exercise ordinary Desktop worker startup.",
+            "user_language": "en", "outcomes": [outcome],
+            "constraints": ["Do not inject CODEX_HOME into the MCP process."],
+        })
+        assert not opened["result"].get("isError"), opened
+        task_ref = opened["result"]["structuredContent"]["task_ref"]
+        assessed = coordinator("assess_governance", {
+            "task_ref": task_ref, "mode": "minimal",
+            "rationale": "Single Desktop environment regression.", "risk_factors": [],
+        })
+        assert not assessed["result"].get("isError"), assessed
+        assigned = coordinator("open_assignment", {
+            "task_ref": task_ref, "role": "Desktop environment parity worker",
+            "profile_name": "backend_dev", "model": "gpt-5.6-luna",
+            "reasoning_effort": "high", "responsibility": "delivery",
+            "goal": "Consume and publish once without MCP environment injection.",
+            "scope": outcome["outcome"],
+            "instructions": "Consume the exact assignment, then publish one result.",
+            "report_policy": "none",
+        })
+        assert not assigned["result"].get("isError"), assigned
+        native_dispatch = assigned["result"]["structuredContent"]["native_dispatch"]
+        worker_ref = re.search(
+            r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+            native_dispatch["message"],
+        ).group(1)
+
+        def hook(event: dict) -> dict | None:
+            return _installed_hook(package_root, plugin_data, home, event)
+
+        hook({
+            "hook_event_name": "UserPromptSubmit", "session_id": root_session,
+            "turn_id": root_turn, "prompt": "$cortex:orchestrator run the fixture",
+        })
+        hook({
+            "hook_event_name": "PostToolUse", "session_id": root_session,
+            "turn_id": root_turn, "tool_name": "mcp__cortex__open_task",
+            "tool_input": {"project_root": str(project)},
+            "tool_response": opened["result"],
+        })
+        hook({
+            "hook_event_name": "PostToolUse", "session_id": root_session,
+            "turn_id": root_turn, "tool_name": "mcp__cortex__open_assignment",
+            "tool_input": {"task_ref": task_ref},
+            "tool_response": assigned["result"],
+        })
+        spawn = hook({
+            "hook_event_name": "PreToolUse", "session_id": root_session,
+            "turn_id": root_turn, "tool_use_id": "desktop-real-spawn",
+            "tool_name": "collaboration.spawn_agent", "tool_input": native_dispatch,
+        })
+        assert spawn is not None
+        assert spawn["hookSpecificOutput"].get("permissionDecision") != "deny"
+
+        with _desktop_packaged_stdio_session(package_root, home) as worker:
+            listed = worker.rpc("tools/list", {})
+            assert {tool["name"] for tool in listed["result"]["tools"]} >= {
+                "open_task", "read_task", "publish_result",
+            }
+            hook({
+                "hook_event_name": "SubagentStart", "session_id": root_session,
+                "turn_id": worker_turn, "agent_id": worker_agent,
+                "transcript_path": (
+                    "/tmp/rollout-01a0612d-0a96-7b01-823f-9128e1142472.jsonl"
+                ),
+            })
+            # Mirror the real failed Desktop trace: an unrelated shell tool ran
+            # before the first Cortex read. It must neither consume nor revoke
+            # the worker lease.
+            for event_name in ("PreToolUse", "PostToolUse"):
+                hook({
+                    "hook_event_name": event_name, "session_id": root_session,
+                    "turn_id": worker_turn, "agent_id": worker_agent,
+                    "tool_use_id": "desktop-real-intervening-shell",
+                    "tool_name": "functions.exec_command",
+                    "tool_input": {"cmd": "true"},
+                    **({"tool_response": {"isError": False}} if event_name == "PostToolUse" else {}),
+                })
+
+            read_input = {"task_ref": worker_ref, "view": "assignment"}
+            assert hook({
+                "hook_event_name": "PreToolUse", "session_id": root_session,
+                "turn_id": worker_turn, "agent_id": worker_agent,
+                "tool_use_id": "desktop-real-worker-read",
+                "tool_name": "mcp__cortex__read_task", "tool_input": read_input,
+            }) is None
+            consumed = worker("read_task", read_input)
+            assert not consumed["result"].get("isError"), consumed
+            assert consumed["result"]["structuredContent"]["view"] == "assignment"
+            assert hook({
+                "hook_event_name": "PostToolUse", "session_id": root_session,
+                "turn_id": worker_turn, "agent_id": worker_agent,
+                "tool_use_id": "desktop-real-worker-read",
+                "tool_name": "mcp__cortex__read_task", "tool_input": read_input,
+                "tool_response": consumed["result"],
+            }) is None
+
+            publication = {
+                "task_ref": worker_ref, "summary": "Desktop env fallback verified.",
+                "outcome": "The host authorization was consumed without CODEX_HOME.",
+                "changes": [],
+                "verification_facts": [{
+                    "state": "executed",
+                    "summary": "Packaged MCP claimed the real hook authorization.",
+                }],
+                "outcome_coverage": [{
+                    "outcome": outcome["outcome"], "status": "complete",
+                    "verification": ["The exact first read and publication succeeded."],
+                }],
+                "documentation_impact": "Regression-only fixture.",
+                "risks": [], "unresolved": [], "status": "completed",
+            }
+            published = worker("publish_result", publication)
+            assert not published["result"].get("isError"), published
+            assert published["result"]["structuredContent"]["replayed"] is False
+
+        evidence = coordinator("read_task", {"task_ref": task_ref, "view": "evidence"})
+        assert not evidence["result"].get("isError"), evidence
+        assert len(evidence["result"]["structuredContent"]["data"]["reports"]) == 1

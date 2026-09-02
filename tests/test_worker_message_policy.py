@@ -36,6 +36,8 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "`open_assignment` creates assignments for a" in normalized_message
     assert "never reads or consumes a worker assignment" in normalized_message
     assert "assignment read is the sole authority" in message
+    assert "Do not load coordinator/orchestrator skills first" in message
+    assert "exact worker policy and packaged profile" in normalized_message
     assert "Codebase Memory as the mandatory first evidence route" not in message
     assert len(message.encode("utf-8")) < 1_024
     assert "finite first read from the live contract" in message

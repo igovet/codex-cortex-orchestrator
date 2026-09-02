@@ -41,7 +41,7 @@ from cortex_runtime.domain_api import (
 )
 
 
-SERVER_VERSION = "1.14.9"
+SERVER_VERSION = "1.14.10"
 SERVER_INSTRUCTIONS = (
     "Cortex v12 is a durable coordination ledger with a complete "
     f"{len(OPERATION_NAMES)}-operation registry and immutable host-attested audience projections. "

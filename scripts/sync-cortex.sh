@@ -353,7 +353,7 @@ import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
 PY
 )"
-  [[ "${candidate_version}" =~ ^1\.14\.9\+codex\.sha256\.[0-9a-f]{16}$ ]] || {
+  [[ "${candidate_version}" =~ ^1\.14\.10\+codex\.sha256\.[0-9a-f]{16}$ ]] || {
     rm -rf -- "${temporary}"
     echo "error: staged candidate has invalid content-addressed version" >&2
     return 1
@@ -433,8 +433,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != base_version or base_version != "1.14.9":
-    raise SystemExit("plugin/server semantic version must match the 1.14.9 release manifest")
+if module.SERVER_VERSION != base_version or base_version != "1.14.10":
+    raise SystemExit("plugin/server semantic version must match the 1.14.10 release manifest")
 PY
 }
 

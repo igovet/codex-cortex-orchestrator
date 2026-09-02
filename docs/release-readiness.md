@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.9.
+Status: content-addressed production and development release contract for Cortex 1.14.10.
 
 ## Current release identity
 
-- semantic release label: 1.14.9
-- installable identity: `1.14.9+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.10
+- installable identity: `1.14.10+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
@@ -394,7 +394,7 @@ fourteen-tool semantic facade and runtime, schema-v1 store, host-private operato
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.14.9,
+The package and repository metadata must consistently identify Cortex 1.14.10,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the complete fourteen-tool semantic registry plus its two audience
 projections. Stale claims about waves, gates, capabilities,

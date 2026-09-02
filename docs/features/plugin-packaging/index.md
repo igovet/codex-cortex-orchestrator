@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.9 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.14.10 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -149,8 +149,10 @@ The installable package contains the bounded activation guard and sanitized
 lifecycle observer declared by its hook manifest. Installation requires review
 and trust of only those declared callbacks. Hook processes store owner-private
 digests and routing categories in `PLUGIN_DATA`; the MCP process resolves the
-same exact package data directory from `CODEX_HOME`. Because Desktop initialize
-does not carry child identity, every connection starts with a neutral complete
+same exact package data directory from explicit `PLUGIN_DATA`/`CODEX_HOME` or,
+when ordinary Desktop supplies neither, from its verified content-addressed
+installed cache topology. Because Desktop initialize does not carry child
+identity, every connection starts with a neutral complete
 catalogue and foreign pending state cannot select its role. That catalogue
 grants no authority. The process consumes only
 the exact child-bound PreToolUse authorization on the first assignment read,
@@ -181,11 +183,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.14.9+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.14.10+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.14.9` manifest is source-mode only and the
+in provenance strength. A plain `1.14.10` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -215,7 +217,7 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.14.9 and a suffix matching the complete normalized plugin payload;
+  1.14.10 and a suffix matching the complete normalized plugin payload;
 - exact fourteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private

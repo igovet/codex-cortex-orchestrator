@@ -98,7 +98,16 @@ def main() -> int:
     args = parse_args()
     root = args.root.resolve()
     try:
-        with tempfile.TemporaryDirectory(prefix="cortex-release-") as directory:
+        # macOS exposes its system temporary directory through the stable
+        # ``/var -> /private/var`` alias. Candidate topology validation is
+        # intentionally lexical and rejects symlink traversal, so create the
+        # workspace below the physical temp root rather than below that alias.
+        # Every candidate component created after this normalization is still
+        # checked with lstat and remains fail-closed for symlinks.
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        with tempfile.TemporaryDirectory(
+            prefix="cortex-release-", dir=temporary_root,
+        ) as directory:
             workspace = Path(directory)
             count, label = (
                 validate_source(root, workspace)
