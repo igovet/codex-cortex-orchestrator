@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.14.11 ships two bounded native hook components: an activation guard and
+Cortex 1.14.12 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without
@@ -54,8 +54,9 @@ idempotency, publication, reconciliation, and closure. A spawn result or a
 server-side evidence consumption and terminal publication.
 Host hooks see directly surfaced tool calls. They do not decompose an outer
 programmatic-tool or `exec` call into separately authorized nested Cortex
-operations. The packaged recovery policy therefore requires the recovery read
-and later mutation to be separate direct calls; steering also consumes a
+operations. The activation guard therefore rejects an outer `exec` containing
+any Cortex invocation for coordinators and workers; every Cortex operation is
+a separate direct model-visible call. Steering also consumes a
 same-connection post-opening state-read marker at the MCP boundary.
 After an explicit successful assignment result, a host dispatch denial is not
 an ambiguous MCP outcome and never authorizes reopening or replacing that

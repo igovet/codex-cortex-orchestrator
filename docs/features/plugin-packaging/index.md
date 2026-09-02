@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.11 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.14.12 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -36,10 +36,9 @@ and release-facing documentation must describe the same V12 contract.
 
 The package exposes exactly fourteen semantic tools with identical coordinator and worker
 schemas. `tools/list` advertises the canonical registry's closed input schemas and
-compact public result projections in one response below 65,536 bytes. The compact
-projections contain only the essential result-navigation handles, lifecycle states,
-replay/continuation information, and next-action data needed for discovery. The
-complete family result schemas remain private runtime contracts and are used to
+complete descriptions in one response below 65,536 bytes. Optional MCP
+`outputSchema` declarations are omitted from discovery. The complete family
+result schemas remain private runtime contracts and are used to
 validate every successful result before transport. Success returns canonical JSON as text plus
 `structuredContent` with `isError=false`.
 Every advertised tool description mechanically includes the exact required
@@ -183,11 +182,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.14.11+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.14.12+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.14.11` manifest is source-mode only and the
+in provenance strength. A plain `1.14.12` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -217,7 +216,7 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.14.11 and a suffix matching the complete normalized plugin payload;
+  1.14.12 and a suffix matching the complete normalized plugin payload;
 - exact fourteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private

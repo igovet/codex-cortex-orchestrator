@@ -44,6 +44,13 @@ OPTIONAL_NATIVE_FIELDS = frozenset(("model", "reasoning_effort"))
 SUPPORTED_NATIVE_MODELS = frozenset(("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
 SUPPORTED_REASONING_EFFORTS = frozenset(("low", "medium", "high", "xhigh", "max"))
 CODEBASE_MEMORY_TOOL_PREFIXES = ("mcp__codebase_memory__", "mcp__codebase-memory__")
+PROGRAMMATIC_CORTEX_CALL = re.compile(
+    r"\btools\s*(?:\.\s*mcp__cortex__[a-z0-9_]*|\[\s*['\"]mcp__cortex__[a-z0-9_]*['\"]\s*\])",
+    re.IGNORECASE,
+)
+PROGRAMMATIC_SCAN_MAX_DEPTH = 8
+PROGRAMMATIC_SCAN_MAX_NODES = 256
+PROGRAMMATIC_SCAN_MAX_TEXT = 262_144
 
 
 def _event() -> dict[str, Any]:
@@ -332,6 +339,46 @@ def _is_open_task(tool_name: object) -> bool:
     normalized = tool_name.strip().lower()
     leaf = re.split(r"(?:__|[.:/])", normalized)[-1]
     return normalized == "open_task" or normalized.endswith(OPEN_TASK_SUFFIX) or leaf == "open_task"
+
+
+def _is_programmatic_exec(tool_name: object) -> bool:
+    """Recognize only the host's programmatic composition tool."""
+    if not isinstance(tool_name, str):
+        return False
+    normalized = tool_name.strip().lower()
+    return normalized == "exec" or normalized.endswith(".exec")
+
+
+def _contains_programmatic_cortex_call(value: object) -> bool:
+    """Detect nested Cortex calls without interpreting or retaining their input.
+
+    An abnormally large or deep programmatic envelope fails closed because the
+    bounded guard could not prove that the envelope contains no hidden Cortex
+    invocation.
+    """
+    pending: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    text_size = 0
+    while pending:
+        if nodes >= PROGRAMMATIC_SCAN_MAX_NODES:
+            return True
+        current, depth = pending.pop()
+        nodes += 1
+        if isinstance(current, str):
+            text_size += len(current)
+            if text_size > PROGRAMMATIC_SCAN_MAX_TEXT:
+                return True
+            if PROGRAMMATIC_CORTEX_CALL.search(current):
+                return True
+        elif isinstance(current, dict):
+            if depth >= PROGRAMMATIC_SCAN_MAX_DEPTH:
+                return True
+            pending.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, (list, tuple)):
+            if depth >= PROGRAMMATIC_SCAN_MAX_DEPTH:
+                return True
+            pending.extend((item, depth + 1) for item in current)
+    return False
 
 
 def _is_successful_open(response: object) -> bool:
@@ -1415,6 +1462,16 @@ def main() -> int:
         _deny("Native dispatch does not match the pending server-issued assignment boundary.", event, reason_code="dispatch_mismatch")
         return 0
     if not state["selected"]:
+        return 0
+
+    if (event_name == "PreToolUse"
+            and _is_programmatic_exec(event.get("tool_name"))
+            and _contains_programmatic_cortex_call(event.get("tool_input"))):
+        _deny(
+            "Cortex operations must be invoked as separate direct tool calls so each complete advertised input schema and result remains model-visible; do not call Cortex from programmatic exec.",
+            event,
+            reason_code="nested_cortex_call",
+        )
         return 0
 
     if (event_name == "PreToolUse" and state.get("recovery_read_required")

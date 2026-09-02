@@ -1,9 +1,16 @@
 # Changelog
 
-## [1.14.11] - 2026-09-02
+## [1.14.12] - 2026-09-02
 
 ### Fixed
 
+- Kept every Cortex operation as a separate direct model-visible call for both
+  coordinators and workers. The activation guard now rejects only Cortex calls
+  hidden inside programmatic `exec`, while ordinary non-Cortex composition is
+  unchanged. The wire catalogue omits optional `outputSchema` declarations but
+  delivers the complete description and closed `inputSchema` for all fourteen
+  operations in one exact response; complete result schemas remain enforced
+  privately by the server.
 - Made coordinator recovery discard pre-compaction state before constructing
   exact decision mutations, so steering outcome replacements are copied from a
   fresh current-state read instead of reconstructed from a summary. Directly

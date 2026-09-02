@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.11 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.12 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -236,13 +236,14 @@ already-bound worker connection may reread only its same immutable assignment,
 with exact page-receipt reconciliation and publication gated until that read is
 terminal again. This read-only recovery grants no new identity or authority;
 every fresh or copied connection remains rejected. After a compact lifecycle
-event, the activation guard rejects directly surfaced coordinator mutations
-until a fresh current state read succeeds and rejects directly surfaced worker
-publications until the same bound connection completes its terminal assignment
-reread. Host hooks observe an outer programmatic-tool or `exec` call rather
-than authorizing nested Cortex calls individually, so the packaged recovery
-contract requires recovery reads and later mutations to use separate direct
-calls. Steering also has server-side, same-connection admission: its successful
+event, the activation guard rejects coordinator mutations until a fresh
+current state read succeeds and rejects worker publications until the same
+bound connection completes its terminal assignment reread. The guard also
+rejects any Cortex invocation hidden inside programmatic `exec`, for both
+coordinator and worker routes, because host hooks cannot authorize or observe
+those nested calls individually. Every Cortex operation must therefore remain
+one separate direct model-visible call. Steering also has server-side,
+same-connection admission: its successful
 opening invalidates earlier state-read evidence and its record consumes one
 later state read. The host audience receipt
 is owner-only and digest-only: it carries
@@ -693,8 +694,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.11+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.11` is
+`1.14.12+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.12` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a

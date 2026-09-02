@@ -9,6 +9,10 @@ def test_activation_kernels_define_task_ref_only_llm_owned_orchestration() -> No
     control = (ROOT / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8").lower()
     combined = orchestrator + control
     assert "first execution operation is `open_task`" in orchestrator
+    assert "exactly one complete direct cortex call" in orchestrator
+    assert "never place task opening inside programmatic tool calling" in orchestrator
+    assert "invoke every cortex operation as its own direct tool call" in control
+    assert "this restriction does not apply to non-cortex tools" in control
     assert "stores only `task_ref`" in orchestrator
     assert "dynamic dag" in combined
     assert "never schedules" in combined

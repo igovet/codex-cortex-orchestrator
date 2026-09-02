@@ -51,6 +51,72 @@ def test_open_task_anchors_from_direct_task_ref_receipt(tmp_path: Path) -> None:
     assert json.loads(state_file(tmp_path, session).read_text())["anchored"] is True
 
 
+def test_selected_coordinator_denies_nested_cortex_calls_but_allows_direct_calls(tmp_path: Path) -> None:
+    session, turn = "root", "turn"
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": turn, "prompt": "$cortex:orchestrator",
+    })
+    code, denied = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": turn, "tool_name": "functions.exec",
+        "tool_input": {
+            "code": "const result = await tools.mcp__cortex__open_task({}); text(result);",
+        },
+    })
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "separate direct tool calls" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": turn, "tool_name": "mcp__cortex__open_task",
+        "tool_input": {
+            "outcomes": [], "project_root": "/project", "request_original": "x",
+            "user_language": "en", "constraints": [],
+        },
+    })
+    assert code == 0 and allowed is None
+
+
+def test_programmatic_guard_does_not_block_ordinary_exec(tmp_path: Path) -> None:
+    session, turn = "root", "turn"
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": turn, "prompt": "$cortex:orchestrator",
+    })
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": turn, "tool_name": "functions.exec",
+        "tool_input": {
+            "code": "const result = await tools.exec_command({cmd: 'pwd'}); text(result.output);",
+        },
+    })
+    assert code == 0 and allowed is None
+
+
+def test_native_worker_also_denies_nested_cortex_calls(tmp_path: Path) -> None:
+    session = "root"
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": "root-turn", "prompt": "$cortex:orchestrator",
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "SubagentStart", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+    })
+    code, denied = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "exec",
+        "tool_input": {
+            "source": "const report = await tools['mcp__cortex__publish_result']({}); text(report);",
+        },
+    })
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_compact_session_start_reloads_exact_skills_repeatedly_without_shell_or_approval(tmp_path: Path) -> None:
     session, turn = "root", "turn"
     invoke(tmp_path, {
@@ -159,7 +225,7 @@ def test_noncompact_session_start_does_not_repeat_skills(tmp_path: Path) -> None
 def test_activation_session_start_does_not_overwrite_lifecycle_owned_live_binding(tmp_path: Path) -> None:
     """The lifecycle observer is the sole writer of the exact resume identity."""
     codex_home = tmp_path / "home/.codex"
-    hook = codex_home / "plugins/cache/cortex/cortex/1.14.11/hooks/cortex_activation.py"
+    hook = codex_home / "plugins/cache/cortex/cortex/1.14.12/hooks/cortex_activation.py"
     hook.parent.mkdir(parents=True)
     hook.write_bytes(HOOK.read_bytes())
     launch = codex_home / ".cortex-live-launch.json"

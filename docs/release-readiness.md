@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.11.
+Status: content-addressed production and development release contract for Cortex 1.14.12.
 
 ## Current release identity
 
-- semantic release label: 1.14.11
-- installable identity: `1.14.11+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.12
+- installable identity: `1.14.12+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - source-to-installed synchronization reuses that same canonical plugin
   manifest and digest contract on Linux and macOS; it does not maintain a
@@ -53,10 +53,9 @@ publication operations. Authorization remains independently server-side:
 connection roles are monotonic, and worker assignment reads and publications
 require the exact signed host-bound child attestation plus server-side
 assignment authority. Each input schema is closed and is also the runtime
-validator's source. Every tool advertises a
-compact public result projection containing only its closed operation-specific handles, lifecycle states,
-replay/continuation information, and next-action data; its complete successful-result
-schema remains private and is the runtime validator's authoritative contract. Unrelated
+validator's source. Optional MCP `outputSchema` declarations are omitted from
+discovery; every complete successful-result schema remains private and is the
+runtime validator's authoritative contract. Unrelated
 canonical handles are filtered before a
 success is transported as JSON text plus `structuredContent` with
 `isError=false`. Each advertised tool description mechanically lists the exact
@@ -404,7 +403,7 @@ fourteen-tool semantic facade and runtime, schema-v1 store, host-private operato
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.14.11,
+The package and repository metadata must consistently identify Cortex 1.14.12,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the complete fourteen-tool semantic registry plus its two audience
 projections. Stale claims about waves, gates, capabilities,

@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.14.11 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. Read this skill completely before task-specific output; after compaction or reset, accept its complete exact repeat through host-supplied context or the host skill loader without requesting user approval. The first task-specific output or action must be open_task: render no activation acknowledgement, commentary, question, plan, or result before its success.
+description: Explicit opt-in Cortex v1.14.12 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. Read this skill completely before task-specific output; after compaction or reset, accept its complete exact repeat through host-supplied context or the host skill loader without requesting user approval. The first task-specific output or action must be open_task: render no activation acknowledgement, commentary, question, plan, or result before its success.
 ---
 
-# Cortex Orchestrator v1.14.11
+# Cortex Orchestrator v1.14.12
 
 ## Activation and language
 
@@ -23,7 +23,7 @@ Worker communication, commentary, reports, and durable ledger prose are English.
 
 ## First boundary
 
-For project work, the first execution operation is `open_task`. Before it, compose the complete semantic outcomes, acceptance conditions, constraints, language, and bounded context without project inspection or task-specific user commentary. Success establishes the sole coordinator identifier, `task_ref`; retain exactly that value. After an ambiguous transport, retry the identical call so the server can reconcile it. Never create a replacement task. If no task can be opened, stop the Cortex route honestly.
+For project work, the first execution operation is `open_task`. Before it, compose the complete semantic outcomes, acceptance conditions, constraints, language, and bounded context without project inspection or task-specific user commentary. Make exactly one complete direct Cortex call: never place task opening inside programmatic tool calling, `exec`, a batch, parallel calls, or speculative partial calls. Success establishes the sole coordinator identifier, `task_ref`; retain exactly that value. After an ambiguous transport, retry the identical direct call so the server can reconcile it. Never create a replacement task. If no task can be opened, stop the Cortex route honestly.
 
 User-supplied attachments, pasted specifications, and referenced source material are part of the request boundary, not project inspection. Read every available user-supplied source needed to understand the request before opening the task. Normalize every decision-bearing detail into the semantic contract: exact numeric limits, identifiers, named handlers and fields, states, negative requirements, external-provider boundaries, edge cases, and verification expectations. A phrase such as "strict policy", "as specified", or "from the attachment" never substitutes for those details. Preserve the user's exact request as original text, but do not duplicate an entire source artifact into generic context when its requirements can be represented safely and completely as outcomes, acceptance, constraints, and verification evidence.
 

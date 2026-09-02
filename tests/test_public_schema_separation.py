@@ -26,7 +26,7 @@ def test_all_public_tools_have_compact_and_closed_runtime_schemas() -> None:
 
 def test_compact_catalogue_is_bounded_and_runtime_rejects_extra_fields() -> None:
     payload = json.dumps(
-        {"tools": [{"name": name, "inputSchema": c["inputSchema"], "outputSchema": c["outputSchema"]}
+        {"tools": [{"name": name, "description": c["description"], "inputSchema": c["inputSchema"]}
                     for name, c in PUBLIC_TOOLS.items()]},
         separators=(",", ":"),
     ).encode()

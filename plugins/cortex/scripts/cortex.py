@@ -41,10 +41,11 @@ from cortex_runtime.domain_api import (
 )
 
 
-SERVER_VERSION = "1.14.11"
+SERVER_VERSION = "1.14.12"
 SERVER_INSTRUCTIONS = (
     "Cortex v12 is a durable coordination ledger with a complete "
     f"{len(OPERATION_NAMES)}-operation registry and immutable host-attested audience projections. "
+    "Every Cortex operation is one separate direct MCP call and is never eligible for programmatic tool calling, exec, batching, parallelism, or speculative partial calls; this keeps each complete advertised input contract and result visible to the model. "
     "Use only the tools advertised to this connection. The model owns delegation, model/effort selection, governance, "
     "rework, verification depth, and final-answer decisions. Governance records are "
     "advisory and never block safe coordination or a user-facing answer."

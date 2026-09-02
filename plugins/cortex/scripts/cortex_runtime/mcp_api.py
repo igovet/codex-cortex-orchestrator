@@ -145,12 +145,11 @@ def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]
 
 
 def catalogue_identity(public_tools: Mapping[str, Mapping[str, Any]]) -> dict[str, object]:
-    """Return safe, deterministic registration identity without exposing a list."""
+    """Return identity for the complete catalogue actually advertised on wire."""
     catalogue = tuple(
         {
             "name": name, "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
-            "outputSchema": dict(contract["outputSchema"]),
         }
         for name, contract in public_tools.items()
     )
@@ -1173,7 +1172,6 @@ def serve_stdio(
             "name": name,
             "description": str(contract["description"]),
             "inputSchema": dict(contract["inputSchema"]),
-            "outputSchema": dict(contract["outputSchema"]),
         }
         for name, contract in public_tools.items()
     }

@@ -1,11 +1,13 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.14.11 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.14.12 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel
 
 This companion applies only after explicit `cortex:orchestrator` selection. The live MCP catalogue is authoritative for every request. Worker text and durable evidence are English; coordinator communication follows the latest meaningful user language.
+
+Coordinator and worker invoke every Cortex operation as its own direct tool call. Cortex operations never run inside programmatic tool calling, `exec`, a batch, or a parallel composition; this preserves the complete live declaration and each individual result as model-visible boundaries. This restriction does not apply to non-Cortex tools.
 
 ## Mode boundary
 

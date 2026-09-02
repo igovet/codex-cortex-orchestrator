@@ -74,13 +74,25 @@ def property_names(value):
 
 
 class PublicMcpFirstCallConformanceTests(unittest.TestCase):
-    def test_open_task_leads_with_its_primary_semantic_outcomes(self) -> None:
-        """The initial catalogue makes the non-derivable contract impossible to bury."""
+    def test_open_task_retains_the_complete_original_semantic_contract(self) -> None:
+        """Direct-call enforcement must not depend on sacrificing or reordering fields."""
         contract = PUBLIC_TOOLS["open_task"]
         schema = contract["inputSchema"]
         self.assertEqual(next(iter(schema["properties"])), "outcomes")
         self.assertEqual(schema["required"][0], "outcomes")
-        self.assertIn("primary semantic contract", contract["description"].lower())
+        outcome = schema["properties"]["outcomes"]["items"]
+        self.assertEqual(
+            list(outcome["properties"]),
+            ["outcome", "acceptance", "constraints", "verification"],
+        )
+        self.assertEqual(
+            outcome["required"],
+            ["outcome", "acceptance", "constraints", "verification"],
+        )
+        description = contract["description"].lower()
+        self.assertIn("primary semantic contract", description)
+        self.assertIn("exactly one direct mcp call", description)
+        self.assertIn("never invoke open_task through programmatic tool calling", description)
 
     def test_open_task_project_root_cannot_be_described_as_an_output_directory(self) -> None:
         """The first-call contract separates existing host root from planned work."""
@@ -241,6 +253,13 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 names = [item["name"] for item in catalogue["result"]["tools"]]
                 self.assertEqual(len(names), 14)
                 by_name = {item["name"]: item for item in catalogue["result"]["tools"]}
+                expected_catalogue = [{
+                    "name": name,
+                    "description": contract["description"],
+                    "inputSchema": contract["inputSchema"],
+                } for name, contract in PUBLIC_TOOLS.items()]
+                self.assertEqual(catalogue["result"]["tools"], expected_catalogue)
+                self.assertTrue(all("outputSchema" not in item for item in expected_catalogue))
                 close_description = by_name["close_task"]["description"]
                 self.assertIn("open_clarification", close_description)
                 self.assertIn("record_clarification", close_description)

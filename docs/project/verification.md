@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.14.11 source, package, installed-host, and
+This page describes Cortex 1.14.12 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -47,9 +47,8 @@ The V12 protocol evidence must prove:
   cannot execute coordinator-only operations;
 - runtime validation uses the same closed input schemas advertised by the
   registry and validates successful results against each complete private
-  runtime result schema; the advertised `outputSchema` is a compact public
-  projection limited to essential handles, lifecycle states, replay/continuation,
-  and next-action data. Each tool description mechanically lists the exact
+  runtime result schema; optional MCP `outputSchema` declarations are omitted
+  from discovery rather than duplicating result contracts. Each tool description mechanically lists the exact
   required input properties derived from its advertised `inputSchema` and tells
   the caller to verify them before invocation. Successful calls carry matching
   JSON text content plus `structuredContent` with `isError=false`, while
@@ -400,7 +399,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.14.11+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.14.12+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -452,7 +451,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.14.11` with
+successful `initialize`, report semantic version `1.14.12` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -648,7 +647,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.14.11/schema-v1 identifiers;
+- V12/1.14.12/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional
