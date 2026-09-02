@@ -22,6 +22,18 @@ PROVENANCE = {name: "sha256:" + "a" * 64 for name in ("build_digest", "candidate
 
 
 class DomainPublicApiContractTests(unittest.TestCase):
+    def assert_no_nested_transport_markers(self, value: object) -> None:
+        if isinstance(value, dict):
+            self.assertNotIn("has_more", value)
+            self.assertNotIn("task_ref", value)
+            for key in value:
+                self.assertNotIn("cursor", str(key).lower())
+            for item in value.values():
+                self.assert_no_nested_transport_markers(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.assert_no_nested_transport_markers(item)
+
     def _task(self, root: str, outcomes: list[dict] | None = None) -> tuple[dict, list[dict]]:
         outcomes = outcomes or [{"outcome": "Build the artifact.", "acceptance": ["The artifact works."], "constraints": [], "verification": []}]
         task = open_task(project_root=root, request_original="Build it.", user_language="en", outcomes=outcomes, constraints=["Keep public identity minimal."])
@@ -75,7 +87,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 _connection_context=context,
             )
             self.assertTrue(page["has_more"])
-            self.assertNotIn("has_more", page["data"])
+            self.assert_no_nested_transport_markers(page["data"])
             self.assertNotIn("next_sequence", page["data"])
             self.assertNotIn("steering_state_read_task_ref", context)
 
@@ -85,7 +97,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     task_ref=task["task_ref"], view="state", continue_=True,
                     _connection_context=context,
                 )
-                self.assertNotIn("has_more", page["data"])
+                self.assert_no_nested_transport_markers(page["data"])
                 self.assertNotIn("next_sequence", page["data"])
                 timeline.extend(page["data"]["timeline"])
 
@@ -100,6 +112,26 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     _connection_context=context,
                 )
             self.assertEqual(rejected.exception.code, "report_cursor_invalid")
+
+    def test_assignment_read_has_only_the_top_level_pagination_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task, outcomes = self._task(root)
+            assignment = self._assignment(task["task_ref"], outcomes[0], "marker audit")
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+            page = read_task(
+                task_ref=worker_ref,
+                view="assignment",
+                _connection_context={},
+            )
+            self.assertFalse(page["has_more"])
+            self.assert_no_nested_transport_markers(page["data"])
+            self.assertEqual(repr(page).count("task_ref"), 1)
 
     def test_state_binds_exact_outcomes_to_post_steering_delivery_assignability(self) -> None:
         owned = [
@@ -1187,7 +1219,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.14.15")
+        self.assertEqual(SERVER_VERSION, "1.14.16")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

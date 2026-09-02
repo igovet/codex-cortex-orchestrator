@@ -1,6 +1,8 @@
 """Focused checks for the policy actually delivered to fresh workers."""
 
 import hashlib
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -74,6 +76,22 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
             worker_message._MANDATORY_PROJECT_POLICY.encode("utf-8")
         ).hexdigest()
     )
+
+    bootstrap_match = re.search(
+        r"## Server-bound worker context\n\n```json\n(\{.*\})\n```",
+        message,
+    )
+    assert bootstrap_match is not None
+    bootstrap = json.loads(bootstrap_match.group(1))
+    assert bootstrap == {
+        "assignment context": {
+            "task_ref": worker_message._worker_task_ref(
+                _task()["task_id"], _delegation()["delegation_id"],
+            ),
+        },
+    }
+    assert "worker label" not in bootstrap_match.group(1)
+    assert len(re.findall(r"t_[0-9a-f]{12}_[0-9a-f]{32}", message)) == 1
 
 
 def test_common_policy_is_exposed_by_the_assignment_policy_boundary():

@@ -29,6 +29,83 @@ def test_desktop_first_turn_requires_the_complete_direct_only_cortex_catalogue()
     assert set(server["omit_tools_from"]) == {"code_mode", "deferred"}
 
 
+def test_desktop_packaged_first_turn_blocks_placeholder_governance_before_stdio(
+    tmp_path: Path,
+) -> None:
+    """Desktop host guard keeps a model's wrong first choice out of MCP."""
+    home = tmp_path / "profile"
+    codex_home = home / ".codex"
+    version = json.loads(
+        (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    package_root = codex_home / "plugins/cache/cortex/cortex" / version
+    package_root.parent.mkdir(parents=True)
+    shutil.copytree(ROOT / "plugins/cortex", package_root)
+    home.chmod(0o700)
+    codex_home.chmod(0o700)
+    plugin_data = codex_home / "plugins/data/cortex-cortex"
+    project = tmp_path / "project"
+    project.mkdir()
+    session, turn = "desktop-root-session", "desktop-root-turn"
+
+    def hook(event: dict) -> dict | None:
+        return _installed_hook(package_root, plugin_data, home, event)
+
+    hook({
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": turn,
+        "prompt": "$cortex:orchestrator execute a long constrained product task",
+    })
+    denied = hook({
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": turn, "tool_use_id": "desktop-placeholder-governance",
+        "tool_name": "mcp__cortex__assess_governance",
+        "tool_input": {"task_ref": "invalid", "mode": "full"},
+    })
+    assert denied is not None
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "open_task" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+    with _desktop_packaged_stdio_session(package_root, home) as coordinator:
+        assert hook({
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": turn, "tool_use_id": "desktop-open-task",
+            "tool_name": "mcp__cortex__open_task",
+            "tool_input": {"project_root": str(project)},
+        }) is None
+        opened = coordinator("open_task", {
+            "project_root": str(project),
+            "request_original": "Exercise Desktop first-operation ordering.",
+            "user_language": "en",
+            "outcomes": [{
+                "outcome": "Open the Desktop task before governance.",
+                "acceptance": ["The host blocks placeholder governance."],
+                "constraints": ["Do not mutate the fixture project."],
+                "verification": ["Governance succeeds only after task opening."],
+            }],
+            "constraints": ["Keep the regression bounded."],
+        })
+        assert not opened["result"].get("isError"), opened
+        task_ref = opened["result"]["structuredContent"]["task_ref"]
+        hook({
+            "hook_event_name": "PostToolUse", "session_id": session,
+            "turn_id": turn, "tool_use_id": "desktop-open-task",
+            "tool_name": "mcp__cortex__open_task",
+            "tool_input": {"project_root": str(project)},
+            "tool_response": opened["result"],
+        })
+        assert hook({
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": turn, "tool_use_id": "desktop-valid-governance",
+            "tool_name": "mcp__cortex__assess_governance",
+            "tool_input": {"task_ref": task_ref, "mode": "full"},
+        }) is None
+        assessed = coordinator("assess_governance", {
+            "task_ref": task_ref, "mode": "full",
+        })
+        assert not assessed["result"].get("isError"), assessed
+
+
 def _load_test_support(name: str, filename: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / "tests" / filename)
     assert spec is not None and spec.loader is not None
@@ -356,7 +433,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     assert not consumed["result"].get("isError"), consumed
                     structured = consumed["result"]["structuredContent"]
                     assert structured["view"] == "assignment"
-                    assert _hook(tmp_path, {
+                    post_read = _hook(tmp_path, {
                         "hook_event_name": "PostToolUse",
                         "session_id": root_session,
                         "turn_id": worker_turn,
@@ -365,7 +442,14 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         "tool_name": "mcp__cortex__read_task",
                         "tool_input": read_input,
                         "tool_response": consumed["result"],
-                    }) is None
+                    })
+                    if structured["has_more"]:
+                        assert post_read is None
+                    else:
+                        assert post_read is not None
+                        assert "Do not read the task again" in (
+                            post_read["hookSpecificOutput"]["additionalContext"]
+                        )
                     if not structured["has_more"]:
                         break
                     read_input = {
@@ -381,11 +465,10 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     "read_task", "publish_plan", "publish_result",
                     "publish_documentation",
                 }
-                assert worker.notifications == [{
-                    "jsonrpc": "2.0",
-                    "method": "notifications/tools/list_changed",
-                    "params": {},
-                }]
+                # Desktop adopts worker identity only after the terminal
+                # assignment page. A mid-turn catalogue notification here can
+                # make the host replay that already-successful bootstrap.
+                assert worker.notifications == []
 
                 _hook(tmp_path, {
                     "hook_event_name": "SessionStart",
@@ -413,7 +496,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     recovered = worker("read_task", recovery_input)
                     assert not recovered["result"].get("isError"), recovered
                     recovered_page = recovered["result"]["structuredContent"]
-                    assert _hook(tmp_path, {
+                    recovery_context = _hook(tmp_path, {
                         "hook_event_name": "PostToolUse",
                         "session_id": root_session,
                         "turn_id": worker_turn,
@@ -422,7 +505,14 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         "tool_name": "mcp__cortex__read_task",
                         "tool_input": recovery_input,
                         "tool_response": recovered["result"],
-                    }) is None
+                    })
+                    if recovered_page["has_more"]:
+                        assert recovery_context is None
+                    else:
+                        assert recovery_context is not None
+                        assert "Do not read the task again" in (
+                            recovery_context["hookSpecificOutput"]["additionalContext"]
+                        )
                     if not recovered_page["has_more"]:
                         break
                     recovery_input = {
@@ -431,11 +521,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         "continue": True,
                     }
                 assert recovery_pages == page_count
-                assert worker.notifications == [{
-                    "jsonrpc": "2.0",
-                    "method": "notifications/tools/list_changed",
-                    "params": {},
-                }]
+                assert worker.notifications == []
 
                 publication_input = {
                     "task_ref": worker_ref,
@@ -642,13 +728,17 @@ def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_en
             consumed = worker("read_task", read_input)
             assert not consumed["result"].get("isError"), consumed
             assert consumed["result"]["structuredContent"]["view"] == "assignment"
-            assert hook({
+            terminal_context = hook({
                 "hook_event_name": "PostToolUse", "session_id": root_session,
                 "turn_id": worker_turn, "agent_id": worker_agent,
                 "tool_use_id": "desktop-real-worker-read",
                 "tool_name": "mcp__cortex__read_task", "tool_input": read_input,
                 "tool_response": consumed["result"],
-            }) is None
+            })
+            assert terminal_context is not None
+            assert "Do not read the task again" in (
+                terminal_context["hookSpecificOutput"]["additionalContext"]
+            )
 
             publication = {
                 "task_ref": worker_ref, "summary": "Desktop env fallback verified.",

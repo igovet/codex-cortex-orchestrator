@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.14.15 source, package, installed-host, and
+This page describes Cortex 1.14.16 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -39,9 +39,9 @@ The V12 protocol evidence must prove:
   complete catalogue even when a fresh foreign pending/candidate receipt
   exists, without committing either role or granting call authority. Only the exact
   signed SubagentStart/PreToolUse child identity plus successful terminal
-  assignment consumption commits worker role. The server then emits
-  `notifications/tools/list_changed`, and the refreshed worker `tools/list`
-  contains exactly `read_task` and the three publications while excluding
+  assignment consumption commits worker role without a mid-turn catalogue
+  notification. An explicit worker `tools/list` then contains exactly
+  `read_task` and the three publications while excluding
   assignment creation, governance, decisions, and closure. A client that
   retains the initial catalogue can still publish after worker commitment but
   cannot execute coordinator-only operations;
@@ -405,7 +405,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.14.15+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.14.16+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -453,15 +453,24 @@ read-only and must be run in the environment whose candidate is being checked.
 Never install, reinstall, update, or synchronize the user's real installed
 plugin for repository live development.
 
+Real Desktop verification uses `./scripts/cortex-desktop-dev`. Start it with an
+existing disposable Git project, an ordinary prompt file, and explicit
+model/effort when the scenario requires them. The helper prepares the same
+candidate, launches the actual Desktop binary with a disposable Electron
+profile, and leaves the stable Codex profile and installed Cortex plugin
+untouched. A parity result requires one CLI and one Desktop scenario to finish
+consecutively on the same cache-stamped payload, in either order. Any payload
+edit invalidates both earlier live results and requires the pair again.
+
 Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.14.15` with
+successful `initialize`, report semantic version `1.14.16` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
-## Interactive tmux live-dev workflow
+## Interactive CLI tmux live-dev workflow
 
 visibly confirm that the interactive composer is rendered before sending.
 
@@ -653,7 +662,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.14.15/schema-v1 identifiers;
+- V12/1.14.16/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional

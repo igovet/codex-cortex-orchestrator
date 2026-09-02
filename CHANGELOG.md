@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.14.16] - 2026-09-02
+
+### Fixed
+
+- Enforced the documented coordinator bootstrap order at the host boundary.
+  After an explicit Cortex route selection, the activation guard now permits
+  `open_task` as the only pre-anchor coordinator Cortex operation; an attempted
+  placeholder governance/task call is denied before it reaches MCP schema
+  validation or the ledger. Native worker assignment bootstrap is unchanged.
+- Made the MCP session instructions and governance tool contract state the
+  fresh-connection precondition adjacent to model tool selection: coordinators
+  call `open_task` first and must never invent a placeholder `task_ref`.
+
 ## [1.14.15] - 2026-09-02
 
 ### Fixed

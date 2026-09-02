@@ -51,6 +51,12 @@ PROGRAMMATIC_CORTEX_CALL = re.compile(
 PROGRAMMATIC_SCAN_MAX_DEPTH = 8
 PROGRAMMATIC_SCAN_MAX_NODES = 256
 PROGRAMMATIC_SCAN_MAX_TEXT = 262_144
+WORKER_TERMINAL_CONTEXT = (
+    "Worker assignment consumption is complete. Continue with the bounded "
+    "role work and exactly one matching terminal publication. Do not read the "
+    "task again in this uninterrupted context; only a later host-declared "
+    "compaction recovery may require a fresh assignment read."
+)
 
 
 def _event() -> dict[str, Any]:
@@ -1284,6 +1290,12 @@ def main() -> int:
             state = dict(state)
             state["recovery_read_required"] = False
             _write_state(path, state)
+            if child:
+                print(_json({"hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": WORKER_TERMINAL_CONTEXT,
+                }}))
+                return 0
 
     # The host delivery receipt is provisional. Only a successful worker MCP
     # evidence-consumption result proves that the child actually received and
@@ -1379,6 +1391,10 @@ def main() -> int:
                                     "bootstrap_in_progress": False,
                                     "turn_fingerprint": _fingerprint(turn_id), "child_mode": True})
                 _write_state(path, child_state)
+                print(_json({"hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": WORKER_TERMINAL_CONTEXT,
+                }}))
             elif _is_successful_assignment_page(event):
                 # The worker has consumed a valid non-terminal page.  The MCP
                 # process retains the exact server claim and private cursor;
@@ -1462,6 +1478,21 @@ def main() -> int:
         _deny("Native dispatch does not match the pending server-issued assignment boundary.", event, reason_code="dispatch_mismatch")
         return 0
     if not state["selected"]:
+        return 0
+
+    if (
+        event_name == "PreToolUse"
+        and not child
+        and not state.get("anchored")
+        and isinstance(event.get("tool_name"), str)
+        and event["tool_name"].strip().lower().startswith("mcp__cortex__")
+        and not _is_open_task(event.get("tool_name"))
+    ):
+        _deny(
+            "A fresh Cortex coordinator must call open_task successfully before any other Cortex operation. Call open_task next with one complete payload; never invent or copy a placeholder task_ref.",
+            event,
+            reason_code="route_not_anchored",
+        )
         return 0
 
     if (event_name == "PreToolUse"

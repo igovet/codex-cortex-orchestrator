@@ -17,8 +17,8 @@ inherited root environment and carries no identifying `_meta`; therefore every
 connection begins with a neutral complete catalogue and an uncommitted role. A global fresh
 hint is forbidden because another root connection could consume its catalogue
 effect. After exact host-bound terminal assignment consumption, the server
-commits worker role, emits `notifications/tools/list_changed`, and a refreshed
-catalogue contains only worker read/publication operations. A Desktop client
+commits worker role without a mid-turn catalogue notification; an explicit
+later catalogue read contains only worker read/publication operations. A Desktop client
 that retains the neutral catalogue remains constrained by authoritative server
 role checks and can publish only after worker commitment.
 The host candidate receipt remains owner-only and digest-only.

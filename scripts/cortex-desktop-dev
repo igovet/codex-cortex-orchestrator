@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""Launch a real, isolated Codex Desktop against the repository candidate."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+import urllib.parse
+from pathlib import Path
+
+
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+STATE_ROOT = Path(tempfile.gettempdir()) / f"cortex-desktop-dev-{os.getuid()}"
+STATE_PATH = STATE_ROOT / "session.json"
+LOG_PATH = STATE_ROOT / "desktop.log"
+SAFE_DESKTOP_SCALARS = (
+    "model_provider",
+    "model",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "model_verbosity",
+    "personality",
+    "service_tier",
+)
+
+
+class DesktopDevError(RuntimeError):
+    pass
+
+
+def _owner_home() -> Path:
+    raw = os.environ.get("HOME", "")
+    if not raw:
+        raise DesktopDevError("HOME is required")
+    home = Path(raw).resolve(strict=True)
+    if home.is_symlink() or not home.is_dir():
+        raise DesktopDevError("HOME must be a regular directory")
+    return home
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise DesktopDevError(f"private runtime path is invalid: {path}")
+    path.chmod(0o700)
+
+
+def _json_toml_scalar(value: object) -> str:
+    if isinstance(value, (str, bool, int, float)) and not isinstance(value, complex):
+        return json.dumps(value, ensure_ascii=False)
+    raise DesktopDevError("stable Desktop model configuration contains a non-scalar value")
+
+
+def _project_desktop_model_config(
+    owner_home: Path,
+    codex_home: Path,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
+    source = owner_home / ".codex" / "config.toml"
+    target = codex_home / "config.toml"
+    for path, label in ((source, "stable config"), (target, "isolated config")):
+        if path.is_symlink() or not path.is_file():
+            raise DesktopDevError(f"{label} must be a regular non-symlink file")
+    source_payload = tomllib.loads(source.read_text(encoding="utf-8"))
+    target_text = target.read_text(encoding="utf-8")
+    selected = {
+        key: source_payload[key]
+        for key in SAFE_DESKTOP_SCALARS
+        if key in source_payload
+    }
+    if "model" not in selected or "model_reasoning_effort" not in selected:
+        raise DesktopDevError("stable Desktop model and reasoning effort must be configured")
+    if model is not None:
+        selected["model"] = model
+    if reasoning_effort is not None:
+        selected["model_reasoning_effort"] = reasoning_effort
+
+    kept: list[str] = []
+    inside_table = False
+    for line in target_text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            inside_table = True
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+        if not inside_table and key in SAFE_DESKTOP_SCALARS:
+            continue
+        kept.append(line)
+    prefix = "".join(
+        f"{key} = {_json_toml_scalar(selected[key])}\n"
+        for key in SAFE_DESKTOP_SCALARS
+        if key in selected
+    )
+    if kept and kept[0].strip():
+        prefix += "\n"
+    rendered = prefix + "".join(kept)
+    tomllib.loads(rendered)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(rendered, encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _candidate_identity(owner_home: Path, codex_home: Path) -> dict[str, object]:
+    command = [
+        "python3",
+        "-B",
+        str(SOURCE_ROOT / "scripts" / "cortex_candidate_receipt.py"),
+        "verify",
+        "--source-root",
+        str(SOURCE_ROOT),
+        "--owner-home",
+        str(owner_home),
+        "--isolated-home",
+        str(owner_home / ".cortex-dev"),
+        "--isolated-codex-home",
+        str(codex_home),
+    ]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(result.stdout)
+    required = {
+        "base_version",
+        "build_id",
+        "source_digest",
+        "candidate_digest",
+        "candidate_path",
+        "candidate_version",
+    }
+    if not required.issubset(payload):
+        raise DesktopDevError("candidate receipt is incomplete")
+    return payload
+
+
+def _read_state() -> dict[str, object] | None:
+    if not STATE_PATH.exists():
+        return None
+    info = STATE_PATH.lstat()
+    if STATE_PATH.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise DesktopDevError("Desktop live-dev state is not an owner-owned regular file")
+    return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+
+
+def _process_start(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21]
+    except (FileNotFoundError, IndexError, OSError):
+        return None
+
+
+def _state_is_active(state: dict[str, object]) -> bool:
+    pid = state.get("pid")
+    start = state.get("process_start")
+    return isinstance(pid, int) and isinstance(start, str) and _process_start(pid) == start
+
+
+def _write_state(payload: dict[str, object]) -> None:
+    _ensure_private_directory(STATE_ROOT)
+    temporary = STATE_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, STATE_PATH)
+
+
+def _desktop_executable() -> Path:
+    configured = os.environ.get("CODEX_DESKTOP_EXECUTABLE", "/usr/bin/chatgpt")
+    executable = Path(configured).resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise DesktopDevError("Codex Desktop executable is unavailable")
+    return executable
+
+
+def _prepare(
+    owner_home: Path,
+    workdir: Path,
+    *,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> tuple[Path, dict[str, object]]:
+    subprocess.run(
+        [str(SOURCE_ROOT / "scripts" / "cortex-dev"), "--prepare-only"],
+        cwd=workdir,
+        check=True,
+    )
+    codex_home = owner_home / ".cortex-dev" / ".codex"
+    _project_desktop_model_config(
+        owner_home,
+        codex_home,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    return codex_home, _candidate_identity(owner_home, codex_home)
+
+
+def _descendant_commands(root_pid: int) -> list[str]:
+    rows: dict[int, tuple[int, str]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text(encoding="utf-8").split()
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            rows[int(entry.name)] = (int(fields[3]), command)
+        except (FileNotFoundError, IndexError, OSError, ValueError):
+            continue
+    descendants: set[int] = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, (parent, _) in rows.items():
+            if parent in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    return [rows[pid][1] for pid in descendants if pid in rows]
+
+
+def start(args: argparse.Namespace) -> int:
+    owner_home = _owner_home()
+    workdir = Path(args.workdir).resolve(strict=True)
+    if workdir.is_symlink() or not workdir.is_dir():
+        raise DesktopDevError("workdir must be an existing regular directory")
+    previous = _read_state()
+    if previous is not None and _state_is_active(previous):
+        raise DesktopDevError("an isolated Codex Desktop live-dev process is already active")
+
+    codex_home, identity = _prepare(
+        owner_home,
+        workdir,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+    )
+    _ensure_private_directory(STATE_ROOT)
+    desktop_profile = Path(tempfile.mkdtemp(prefix="electron-user-data-", dir=STATE_ROOT))
+    desktop_profile.chmod(0o700)
+    prompt: str | None = None
+    if args.prompt_file is not None:
+        prompt_path = Path(args.prompt_file).resolve(strict=True)
+        if prompt_path.is_symlink() or not prompt_path.is_file():
+            raise DesktopDevError("prompt file must be a regular non-symlink file")
+        prompt = prompt_path.read_text(encoding="utf-8").strip()
+        if not prompt:
+            raise DesktopDevError("prompt file must not be empty")
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(owner_home / ".cortex-dev"),
+            "CODEX_HOME": str(codex_home),
+            "CODEX_ELECTRON_USER_DATA_PATH": str(desktop_profile),
+            "CORTEX_BUILD_ID": str(identity["build_id"]),
+            "CORTEX_SOURCE_DIGEST": str(identity["source_digest"]),
+            "CORTEX_CANDIDATE_PATH": str(identity["candidate_path"]),
+            "CORTEX_CANDIDATE_RECEIPT": str(codex_home / ".cortex-candidate-receipt.json"),
+            "CORTEX_CANDIDATE_DIGEST": str(identity["candidate_digest"]),
+            "CORTEX_HOOK_DIAGNOSTIC": "1",
+            "CORTEX_RAW_DIAGNOSTIC": "1",
+        }
+    )
+    command = [str(_desktop_executable()), f"--user-data-dir={desktop_profile}"]
+    if prompt is None:
+        command.extend(["--open-project", str(workdir)])
+    else:
+        query = urllib.parse.urlencode({"path": str(workdir), "prompt": prompt})
+        command.append(f"codex://threads/new?{query}")
+    with LOG_PATH.open("ab", buffering=0) as log:
+        process = subprocess.Popen(
+            command,
+            cwd=workdir,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    start_token = _process_start(process.pid)
+    if start_token is None:
+        raise DesktopDevError("Codex Desktop exited before its process identity was recorded")
+    _write_state(
+        {
+            "pid": process.pid,
+            "process_start": start_token,
+            "workdir": str(workdir),
+            "codex_home": str(codex_home),
+            "desktop_profile": str(desktop_profile),
+            "candidate_version": str(identity["candidate_version"]),
+            "model": args.model,
+            "reasoning_effort": args.reasoning_effort,
+            "prompt_supplied": prompt is not None,
+        }
+    )
+    time.sleep(3)
+    if not _state_is_active(_read_state() or {}):
+        raise DesktopDevError("Codex Desktop did not remain active")
+    print(f"Cortex Desktop live-dev pid={process.pid}")
+    print(f"Cortex Desktop candidate version={identity['candidate_version']}")
+    print(f"Cortex Desktop workdir={workdir}")
+    print("Cortex Desktop stable profile untouched=yes")
+    return 0
+
+
+def status(_: argparse.Namespace) -> int:
+    state = _read_state()
+    if state is None or not _state_is_active(state):
+        print("Cortex Desktop live-dev active=no")
+        return 1
+    pid = int(state["pid"])
+    commands = _descendant_commands(pid)
+    app_server = any(" app-server" in command and "/resources/codex" in command for command in commands)
+    print("Cortex Desktop live-dev active=yes")
+    print(f"Cortex Desktop live-dev pid={pid}")
+    print(f"Cortex Desktop app-server active={'yes' if app_server else 'no'}")
+    print(f"Cortex Desktop candidate version={state['candidate_version']}")
+    print(f"Cortex Desktop workdir={state['workdir']}")
+    return 0 if app_server else 2
+
+
+def stop(_: argparse.Namespace) -> int:
+    state = _read_state()
+    if state is None:
+        print("Cortex Desktop live-dev active=no")
+        return 0
+    if not _state_is_active(state):
+        STATE_PATH.unlink(missing_ok=True)
+        print("Cortex Desktop live-dev stale state removed=yes")
+        return 0
+    pid = int(state["pid"])
+    if os.getpgid(pid) != pid:
+        raise DesktopDevError("refusing to stop a process outside the dedicated Desktop process group")
+    os.killpg(pid, signal.SIGTERM)
+    for _ in range(100):
+        if not _state_is_active(state):
+            break
+        time.sleep(0.1)
+    if _state_is_active(state):
+        raise DesktopDevError("Codex Desktop did not exit after SIGTERM; no forced kill was sent")
+    STATE_PATH.unlink(missing_ok=True)
+    print("Cortex Desktop live-dev stopped=yes")
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    commands = result.add_subparsers(dest="command", required=True)
+    start_parser = commands.add_parser("start", help="prepare the candidate and launch actual Codex Desktop")
+    start_parser.add_argument("--workdir", required=True)
+    start_parser.add_argument("--prompt-file")
+    start_parser.add_argument("--model", choices=("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
+    start_parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max"))
+    start_parser.set_defaults(handler=start)
+    status_parser = commands.add_parser("status", help="report the exact isolated Desktop process")
+    status_parser.set_defaults(handler=status)
+    stop_parser = commands.add_parser("stop", help="stop only the isolated Desktop process group")
+    stop_parser.set_defaults(handler=stop)
+    return result
+
+
+def main() -> int:
+    try:
+        args = parser().parse_args()
+        return int(args.handler(args))
+    except (DesktopDevError, OSError, subprocess.CalledProcessError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

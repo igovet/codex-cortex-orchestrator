@@ -1,6 +1,6 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.14.15 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.14.16 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel
@@ -13,7 +13,7 @@ Coordinator and worker invoke every Cortex operation as its own direct tool call
 
 The coordinator owns LLM intent, the dynamic DAG, worker selection, parallelism, model and effort selection, verification/rework/documentation choices, user questions, closure judgment, and final synthesis. The backend owns only durable facts, identity binding, semantic selection, atomicity, replay, and integrity. It never schedules or commands the next workflow step.
 
-A server-issued native child is worker mode, not another coordinator. Every native worker and packaged profile is prohibited from coordinator-only operations, including governance assessment; a planner, replacement, or repeated-planning worker gains no exception. It cannot open tasks, govern, ask users, delegate, dispatch, or close. Its exact first Cortex call is the assignment view of `read_task` using the worker-scoped `task_ref` embedded by the server renderer. Because Desktop supplies no trustworthy initialize identity, pre-identity discovery is a neutral complete catalogue until that exact lifecycle-bound read commits worker role. The server then requests a catalogue refresh; supporting clients narrow to worker read/publication operations, while clients that retain the initial catalogue remain constrained by authoritative server checks. The worker works and publishes only after the read succeeds.
+A server-issued native child is worker mode, not another coordinator. Every native worker and packaged profile is prohibited from coordinator-only operations, including governance assessment; a planner, replacement, or repeated-planning worker gains no exception. It cannot open tasks, govern, ask users, delegate, dispatch, or close. Its exact first Cortex call is the assignment view of `read_task` using the worker-scoped `task_ref` embedded by the server renderer. Because Desktop supplies no trustworthy initialize identity, pre-identity discovery is a neutral complete catalogue until that exact lifecycle-bound read commits worker role. Worker commitment deliberately does not request a mid-turn catalogue refresh because Desktop can replay the already-successful bootstrap while applying it. An explicit later catalogue read returns only worker operations, while a client retaining the neutral catalogue remains constrained by authoritative server checks. The worker works and publishes only after the read succeeds.
 
 The worker derives a finite minimal first read from the live advertised contract. One materially corrected attempt is permitted only after a deterministic caller-shape rejection whose bounded diagnostics identify an unambiguous local correction. Never repeat the unchanged malformed request, guess identity or authority, or perform project work before consumption succeeds. A second deterministic failure, incomplete diagnostics, or a correction requiring guesses stops the assignment. Ambiguous transport permits only identical reconciliation.
 
