@@ -98,18 +98,25 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | --- | --- |
 | `open_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful result fields; return preferred `task_ref`. |
 | `read_task` | Use `task_ref` with `view=state|assignment|evidence`; use `continue=true` only to resume the immediately preceding bounded read. |
-| `open_assignment` | Use `task_ref` to store objective, role, packaged profile, scope, instructions, evidence inputs, and model/effort; return the host-neutral worker bootstrap. |
-| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref`; Cortex derives the consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. |
+| `open_assignment` | Use `task_ref` to store objective, role, packaged profile, scope, instructions, evidence inputs, and model/effort; return the host-neutral worker bootstrap. A confirmed lost delivery predecessor requires explicit blocked/aborted reason and evidence; Cortex derives and links the successor atomically. |
+| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref` on the exact host-bound MCP connection; Cortex derives the terminally consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. |
 | `assess_governance` | Use `task_ref` to append a model or user-override assessment. |
 | `close_task` | Record the final advisory closure aggregate from durable evidence. |
 | `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
 | `open_plan_review` → `record_plan_review` | Present and record one immutable plan review through a matching server-owned binding. |
 | `open_steering` → `record_steering` | Ask and record one steering change through a matching server-owned binding. |
 
-The catalog is identical for coordinators and workers. There is no audience
-filter, capability matrix, host-bound lifecycle authority, receipt-gated
-selector, tool-name alias, or profile admission rule. Worker handoff reads may
-emit immutable delivery receipts, but those receipts are not authority.
+The catalog is identical for coordinators and workers, but server roles are
+monotonic per MCP connection and the host lifecycle binds a child audience
+before assignment consumption. The owner-private receipt contains only bounded
+digests and categories; no locator, native message, assignment body, or bearer
+secret is persisted.
+
+Publication reconnect does not create a second bootstrap path. A fresh process
+cannot recover consumed publication authority from the worker-scoped
+`task_ref`, a report, a bare assignment reference, or the durable continuation.
+Confirmed worker loss is handled only by immutable blocked/aborted evidence and
+an explicitly linked successor assignment.
 
 
 Returned task IDs use `task-<64-lowercase-hex-project-shard>-<32-lowercase-hex-record>`
@@ -195,9 +202,16 @@ the first read and do not reconstruct documentation routing.
 plan. It is required, must contain at least one character, and is limited to
 65,536 characters. Detailed execution belongs in `instructions`; object-valued
 scope is rejected by the closed schema.
-Every assignment also selects a non-empty exact set of current outcome-item
-references. The selection is required even for planning and single-outcome
-work, so prose labels cannot silently widen or replace durable scope.
+Every complete delivery or evidence assignment omits caller-selected outcome
+names and lets the server atomically bind the full current responsibility list,
+so copying drift cannot silently replace durable scope. A caller supplies a
+non-empty exact semantic subset only when intentionally partitioning that list.
+Planning likewise omits the field and binds the complete current effective
+contract at assignment creation.
+The state view additionally exposes `aggregate_coverage.assignment_scope` as
+the canonical selector: delivery and evidence each have an exact server-owned
+list, while terminal rework explicitly requires a new user-confirmed steering
+revision before corrective delivery can be assigned.
 The public assignment projection places exact semantic outcome names in a
 compact reconciliation header before the larger policy and contract body.
 Medium and large structured responses are not duplicated into text. Evidence
@@ -245,8 +259,12 @@ Every publication supplies one disposition for each item in its immutable
 assignment scope. Worker bootstrap returns a server-owned ordered
 pre-publication reconciliation receipt: its template contains every required
 item reference without inventing a disposition, and its count and ordered
-reference sequence are the final pre-call completeness check. Compatible
-repeated rows for the same item and status are
+reference sequence are the final pre-call completeness check. Bounded
+post-compaction recovery may restart this immutable assignment from the first
+page only on the already-bound worker connection. The restart reconciles the
+same page receipts, grants no new authority, and temporarily restores the
+terminal-consumption gate until every page is consumed again; a new connection
+cannot recover the consumed assignment. Compatible repeated rows for the same item and status are
 coalesced into one canonical disposition while preserving every unique
 verification fact; conflicting repeated statuses, missing items, extra items,
 or unsupported claims are rejected before the terminal publication slot is
@@ -271,8 +289,10 @@ the standard Codex To-Do projection. The coordinator may use that evidence to
 add, remove, reorder, or rework worker stages while completed reports remain
 immutable.
 Independent delegations may proceed concurrently, and a missing worker report
-does not block replacement or synthesis. Status is `partial`, `completed`,
-`blocked`, or `failed`; it does not imply acceptance or native termination.
+does not block synthesis or unrelated scope. Replacing the same nonterminal
+delivery owner requires explicit blocked/aborted reason and evidence. Status is
+`partial`, `completed`, `blocked`, or `failed`; it does not imply acceptance or
+native termination.
 
 ## Effective outcome coverage
 
@@ -326,7 +346,7 @@ continuation; it does not infer unlinked private/internal initiative history.
 Private/internal storage repair may append only missing derived events and
 must never rewrite existing timeline rows or guess ambiguous lineage.
 
-Plan reports add `review_policy=informational|required` and may name a
+Plan reports persist server-derived `review_policy=informational|required` and may name a
 finalized predecessor. A required review is a coordinator-owned interaction;
 for light/full delivery the backend admits only an explicit approval bound to
 the exact current plan. The matching narrow decision record operation preserves an

@@ -42,7 +42,7 @@ empty rather than duplicating acceptance.
 | Effective outcome contract | `effective_contract_revisions`, `effective_contract_items`, `effective_contract_item_details` | Bootstrap, user steering decision; `read_task` | One revisioned coverage item per independent user outcome; linked criteria, constraints, steer additions, source fragments, and replacement relations remain details rather than duplicate obligations |
 | Delegation assignments and projected briefs | `delegations` plus its saved task association | Coordinator `open_assignment`; task reads | Canonical bounded assignment with required textual ownership scope, exact model/effort, and compiled knowledge contract in `instructions`; the projected native brief adds the task's saved root for context, never host authority |
 | Outcome assignments and coverage | `delegation_outcome_assignments`, `report_contract_coverage` | Assignment/publication writes; `read_task` aggregate/conformance projections | Per-revision owned/contributing/evidence-producing responsibility and immutable finalized-publication coverage claims with verification details; used to identify missing, partial, unverified, stale, and contradictory active evidence, never a backend gate |
-| Worker evidence | `reports`, `report_chunks`, `report_usage` | applicable `publish_*`; assignment references; bounded task evidence reads | Immutable progress/result/synthesis/plan content, manifest/digest, persisted `review_policy` (`informational` or `required`), assembly state, chunks, and quotas; private and potentially sensitive |
+| Worker evidence | `reports`, `report_chunks`, `report_usage` | applicable `publish_*`; assignment references; bounded task evidence reads | Immutable progress/result/synthesis/plan content, manifest/digest, server-derived persisted `review_policy` (`informational` for minimal, `required` for light/full), assembly state, chunks, and quotas; private and potentially sensitive |
 | Execution-outcome projection | Derived from finalized rows in `reports` | `read_task`; `close_task` result | Exact `execution_outcome` fields are `evidence_status`, `finalized_report_count`, `completed_report_count`, and `outcome`: every finalized publication contributes to the first count, while only semantically valid canonical finalized results determine the completed count and nullable `completed`/`incomplete` outcome, independently of advisory closure bookkeeping and without claiming native lifecycle |
 | User decision evidence | `user_decisions` | narrow decision record operations; private task-bound decision views | Append-only coordinator-asserted ordinary-chat response, neutral prompt, exact original-language response, language, private subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
 | Mode history | `governance_assessments` | `assess_governance`; task reads | Append-only advisory model/user-override assessments; one initial assessment is required after task creation and before the first assignment |
@@ -178,8 +178,14 @@ lead to rework, replacement, or disclosed risk, but never backend prohibition.
 Plan review, clarification, pause, revision, cancellation, and user-decision
 interpretation are coordinator-owned ordinary-chat policy. Storage preserves
 evidence and exact bindings and admits light/full delivery only after the exact
-current required-review plan approval. That narrow relation is neither a pause
-state nor user authorization for external or destructive action.
+current required-review plan approval. Current-plan identity includes the
+planning assignment's effective-contract revision; after steering, earlier
+plans and approvals remain immutable history but cannot be selected, reviewed,
+or used for delivery admission. The state projection separately derives exact
+delivery/evidence assignment selectors; terminal-owned outcomes are excluded
+from delivery until a user-confirmed steering revision creates replacement
+scope. That narrow relation is neither a pause state
+nor user authorization for external or destructive action.
 
 ## Derived human-readable task views
 

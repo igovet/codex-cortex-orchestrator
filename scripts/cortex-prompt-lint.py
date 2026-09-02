@@ -49,6 +49,11 @@ def main() -> int:
     for required in (
         "dynamic dag", "stores only `task_ref`", "assignment view",
         "never an imperative workflow command", "no workflow or governance admission",
+        "the host supplies this complete skill content",
+        "after compaction/reset", "user approval question",
+        "additionalcontextlimit=0", "repetition is never forbidden or consumed",
+        "first task-specific output or action must be open_task",
+        "no activation acknowledgement, commentary, question, plan, or result before its success",
     ):
         if required not in combined:
             issues.append(f"model instructions omit required boundary: {required}")

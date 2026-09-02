@@ -362,6 +362,7 @@ def create_delegation(
     bootstrap_provenance: dict[str, str] | None = None,
     derive_assignment_scope: bool = False,
     assignment_policy: str | None = None,
+    loss_recovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist a coordinator-supplied delegation without selecting a route."""
     store, canonical = _task_store(task_ref)
@@ -386,6 +387,7 @@ def create_delegation(
         bootstrap_provenance=bootstrap_provenance,
         derive_assignment_scope=derive_assignment_scope,
         assignment_policy=assignment_policy,
+        loss_recovery=loss_recovery,
     )
 
 

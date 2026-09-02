@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from cortex import PUBLIC_TOOLS
-from cortex_runtime.mcp_api import _validation_failure, _validate_schema
+from cortex_runtime.mcp_api import (
+    _validate_public_call_shape,
+    _validation_failure,
+    _validate_schema,
+)
 
 
 class CallerContractGuardTests(unittest.TestCase):
@@ -24,20 +28,15 @@ class CallerContractGuardTests(unittest.TestCase):
         schema = PUBLIC_TOOLS["publish_plan"]["inputSchema"]
         valid = {
             "task_ref": "t_0123456789ab_" + "a" * 32,
-            "summary": "Plan.", "scope": "Bounded.", "review_policy": "required",
+            "summary": "Plan.", "scope": "Bounded.",
             "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Test."]}],
             "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
             "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped."]}],
             "risks": [], "unresolved": [], "status": "completed",
         }
         _validate_schema(schema, valid)
-        self.assertIn("review_policy", schema["required"])
-        self.assertEqual(schema["properties"]["review_policy"]["enum"], ["informational", "required"])
-        with self.assertRaisesRegex(ValueError, "missing required property"):
-            _validate_schema(schema, {key: value for key, value in valid.items() if key != "review_policy"})
-        with self.assertRaisesRegex(ValueError, "permitted values"):
-            _validate_schema(schema, {**valid, "review_policy": "optional"})
-        for field in ("assignment_ref", "continuation_ref", "report_ref", "item_ref", "digest", "cursor", "handles"):
+        self.assertNotIn("review_policy", schema["properties"])
+        for field in ("review_policy", "assignment_ref", "continuation_ref", "report_ref", "item_ref", "digest", "cursor", "handles"):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, "unsupported property"):
                 _validate_schema(schema, {**valid, field: "forbidden"})
 
@@ -46,6 +45,24 @@ class CallerContractGuardTests(unittest.TestCase):
         self.assertIn("model", schema["required"])
         self.assertIn("reasoning_effort", schema["required"])
         self.assertEqual(schema["properties"]["model"]["enum"], ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
+
+    def test_runtime_assignment_shape_matches_optional_complete_scope_contract(self) -> None:
+        for responsibility in ("delivery", "evidence", "planning"):
+            with self.subTest(responsibility=responsibility):
+                _validate_public_call_shape(
+                    "open_assignment", {"responsibility": responsibility},
+                )
+        with self.assertRaisesRegex(ValueError, "unsupported property"):
+            _validate_public_call_shape(
+                "open_assignment", {"responsibility": "planning", "outcomes": ["A"]},
+            )
+        with self.assertRaisesRegex(ValueError, "missing required property"):
+            _validate_public_call_shape(
+                "open_assignment", {
+                    "responsibility": "delivery",
+                    "loss_recovery": {"state": "blocked", "reason": "Lost", "evidence": ["Confirmed"]},
+                },
+            )
 
     def test_missing_required_publication_fields_are_reported_together(self) -> None:
         schema = PUBLIC_TOOLS["publish_result"]["inputSchema"]

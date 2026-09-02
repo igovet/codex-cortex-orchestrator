@@ -27,15 +27,16 @@ from cortex_runtime.observation_generation import (  # noqa: E402
     revoke_session,
     verify_lease_record,
 )
+from cortex_runtime.event_journal import EventJournal  # noqa: E402
 
 
 def _fixture(tmp_path: Path) -> tuple[Path, str, str, str, str, str]:
     code_home = tmp_path / "codex"
     code_home.mkdir(mode=0o700)
-    candidate = code_home / "plugins/cache/cortex/cortex/1.14.1"
+    candidate = code_home / "plugins/cache/cortex/cortex/1.14.12"
     candidate.mkdir(parents=True, mode=0o700)
     build_id = "sha256:" + ("a" * 64)
-    version = "1.14.1"
+    version = "1.14.12"
     digest = "b" * 64
     nonce = "c" * 64
     request_generation(code_home=code_home, build_id=build_id, candidate_version=version, catalogue_count=15, catalogue_digest=digest, session_nonce=nonce)
@@ -81,6 +82,32 @@ def test_two_processes_claim_one_lease_without_lost_registration(tmp_path: Path)
     assert len({item["registration"] for item in results}) == 2
     assert len(lease["processes"]) == 2
     assert {item["pid"] for item in lease["processes"]} == {item["pid"] for item in results}
+
+
+def test_worker_connection_event_is_attributed_to_assignment_scope(tmp_path: Path) -> None:
+    code_home = tmp_path / "codex"
+    code_home.mkdir(mode=0o700)
+    path = code_home / ".cortex-mcp-events" / "worker-test" / "events.jsonl"
+    journal = EventJournal(
+        path,
+        build_id="sha256:" + ("a" * 64),
+        code_home=code_home,
+    )
+    worker_ref = "t_0123456789ab_" + ("b" * 32)
+    journal.emit(
+        operation="read_task",
+        kind="query",
+        success=True,
+        fault=None,
+        mutation=None,
+        task_anchor=worker_ref,
+        connection_role="worker",
+    )
+    event = json.loads(path.read_text(encoding="ascii"))
+    assert event["role"] == "worker"
+    assert event["scope"] == "assignment"
+    assert "assignment" in event
+    assert worker_ref not in path.read_text(encoding="ascii")
 
 
 def test_same_process_restart_reuses_registration_and_generation(tmp_path: Path) -> None:

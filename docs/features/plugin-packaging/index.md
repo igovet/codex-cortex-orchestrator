@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.1 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.14.12 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -15,7 +15,7 @@ and release-facing documentation must describe the same V12 contract.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) defines the GitHub Marketplace entry.
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the fourteen-tool semantic facade.
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the uniform catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the complete registry projected by runtime audience.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) defines bounded task/report constants and report-digest semantics.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 storage.
 - [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) owns host-private plan/report Markdown materialization.
@@ -36,10 +36,9 @@ and release-facing documentation must describe the same V12 contract.
 
 The package exposes exactly fourteen semantic tools with identical coordinator and worker
 schemas. `tools/list` advertises the canonical registry's closed input schemas and
-compact public result projections in one response below 65,536 bytes. The compact
-projections contain only the essential result-navigation handles, lifecycle states,
-replay/continuation information, and next-action data needed for discovery. The
-complete family result schemas remain private runtime contracts and are used to
+complete descriptions in one response below 65,536 bytes. Optional MCP
+`outputSchema` declarations are omitted from discovery. The complete family
+result schemas remain private runtime contracts and are used to
 validate every successful result before transport. Success returns canonical JSON as text plus
 `structuredContent` with `isError=false`.
 Every advertised tool description mechanically includes the exact required
@@ -145,9 +144,21 @@ report-grounded conditional documentation stage before closure: material
 impact gets documentation-sync plus a separate verifier; no impact gets an
 explicit `documentation not required` rationale without an edit.
 
-The installable package contains no lifecycle hooks and no lifecycle
-hook script. Hook trust is not an installation step. Native subagent dispatch
-remains outside the MCP server.
+The installable package contains the bounded activation guard and sanitized
+lifecycle observer declared by its hook manifest. Installation requires review
+and trust of only those declared callbacks. Hook processes store owner-private
+digests and routing categories in `PLUGIN_DATA`; the MCP process resolves the
+same exact package data directory from explicit `PLUGIN_DATA`/`CODEX_HOME` or,
+when ordinary Desktop supplies neither, from its verified content-addressed
+installed cache topology. Because Desktop initialize does not carry child
+identity, every connection starts with a neutral complete
+catalogue and foreign pending state cannot select its role. That catalogue
+grants no authority. The process consumes only
+the exact child-bound PreToolUse authorization on the first assignment read,
+then advertises the worker projection through `tools/list_changed`; clients
+that retain the neutral catalogue remain constrained by authoritative server
+role checks. Native subagent dispatch remains outside
+the MCP server, and hooks never replace server-side ledger authority.
 
 The SQLite database remains schema v1 under the V12 project namespace, with
 additive V12 migration history. Host-private Markdown views are disposable
@@ -171,11 +182,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.14.1+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.14.12+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.14.1` manifest is source-mode only and the
+in provenance strength. A plain `1.14.12` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -205,7 +216,7 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.14.1 and a suffix matching the complete normalized plugin payload;
+  1.14.12 and a suffix matching the complete normalized plugin payload;
 - exact fourteen-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private
@@ -219,6 +230,10 @@ The release candidate must prove:
   and required closure subject fields;
 - schema-v1 bootstrap/additive migration, project isolation, idempotency,
   concurrency, and ordered report reads;
+- same-connection worker publication on a persistent source stdio process,
+  copied-locator rejection on a second initialized process, monotonic
+  coordinator/worker connection roles, sanitized host audience receipts, and
+  explicit blocked/aborted successor lineage for confirmed worker loss;
 - bounded task inspection and evidence consumption through the advertised
   continuation handles;
 - assembled report lifecycle, manifest digest and aggregate quota enforcement, plan
@@ -243,7 +258,9 @@ The release candidate must prove:
   claiming model behavior;
 - exact model/effort support, Luna override omission, and no server fallback;
 - advisory profile parity across registry and TOML files;
-- absence of lifecycle hooks and lifecycle hook code;
+- exact inclusion of the activation guard and sanitized lifecycle observer,
+  with every callback using the same `python3 -B` runtime contract as the MCP
+  server and exact native `Agent` matchers for pre/post tool observation;
 - packaged maintenance-module parity without changing the fourteen-tool registry,
   including task/shard anchoring, confirmation strings, backup validation,
   offline restore, projection safety, canonical-data retention, and zero
@@ -267,12 +284,13 @@ calls return bounded sanitized errors. Task/report content, secrets,
 credentials, personal data, raw prompts, host identities, and private diagnostics
 must not enter package logs, fixtures, docs, issues, or release evidence.
 
-Package metadata must not claim waves, gates, plan authority, capability
-handoff, host lifecycle binding, receipt-gated lifecycle, profile enforcement,
-governance promotion, closure authority, repair/rework waves, resource locks,
-or server-owned recovery. Delivery receipts from worker handoff reads are
-evidence only and never host authority or proof of physical worktree/workspace
-isolation.
+Package metadata must not claim waves, server-selected scheduling gates, plan
+authority, bearer capability handoff, profile enforcement, governance
+promotion, closure authority, repair/rework waves, resource locks, or
+server-owned recovery. Assignment-page receipts are ledger evidence only. The
+separate digest-only host audience receipt binds one supported native child to
+one MCP connection but is not portable worker identity, task completion,
+report evidence, or proof of physical worktree/workspace isolation.
 
 It also must not imply that the coordinator may inspect source or operate on
 the target project, directly verify worker work, infer `project_root`, accept

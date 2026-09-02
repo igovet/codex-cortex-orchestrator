@@ -1,17 +1,19 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.14.1 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.14.12 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel
 
 This companion applies only after explicit `cortex:orchestrator` selection. The live MCP catalogue is authoritative for every request. Worker text and durable evidence are English; coordinator communication follows the latest meaningful user language.
 
+Coordinator and worker invoke every Cortex operation as its own direct tool call. Cortex operations never run inside programmatic tool calling, `exec`, a batch, or a parallel composition; this preserves the complete live declaration and each individual result as model-visible boundaries. This restriction does not apply to non-Cortex tools.
+
 ## Mode boundary
 
 The coordinator owns LLM intent, the dynamic DAG, worker selection, parallelism, model and effort selection, verification/rework/documentation choices, user questions, closure judgment, and final synthesis. The backend owns only durable facts, identity binding, semantic selection, atomicity, replay, and integrity. It never schedules or commands the next workflow step.
 
-A server-issued native child is worker mode, not another coordinator. Every native worker and packaged profile is prohibited from coordinator-only operations, including governance assessment; a planner, replacement, or repeated-planning worker gains no exception. It cannot open tasks, govern, ask users, delegate, dispatch, or close. Its exact first Cortex call is the assignment view of `read_task` using the worker-scoped `task_ref` embedded by the server renderer. It works and publishes only after that lifecycle-bound read succeeds.
+A server-issued native child is worker mode, not another coordinator. Every native worker and packaged profile is prohibited from coordinator-only operations, including governance assessment; a planner, replacement, or repeated-planning worker gains no exception. It cannot open tasks, govern, ask users, delegate, dispatch, or close. Its exact first Cortex call is the assignment view of `read_task` using the worker-scoped `task_ref` embedded by the server renderer. Because Desktop supplies no trustworthy initialize identity, pre-identity discovery is a neutral complete catalogue until that exact lifecycle-bound read commits worker role. The server then requests a catalogue refresh; supporting clients narrow to worker read/publication operations, while clients that retain the initial catalogue remain constrained by authoritative server checks. The worker works and publishes only after the read succeeds.
 
 The worker derives a finite minimal first read from the live advertised contract. One materially corrected attempt is permitted only after a deterministic caller-shape rejection whose bounded diagnostics identify an unambiguous local correction. Never repeat the unchanged malformed request, guess identity or authority, or perform project work before consumption succeeds. A second deterministic failure, incomplete diagnostics, or a correction requiring guesses stops the assignment. Ambiguous transport permits only identical reconciliation.
 
@@ -28,8 +30,10 @@ After task creation, make and record one explicit governance-depth decision befo
 Closure is a user decision boundary, not an automatic finalization step. Before
 every `close_task` attempt, the coordinator must present the reconciled,
 verified result and its impact in the latest meaningful user language, then
-open one closure-review hold with exactly two choices: revise the current task
-or close the task. The coordinator must wait for and record the explicit answer;
+use the advertised `open_clarification` operation to open one closure-review
+hold with exactly two choices: revise the current task or close the task. The
+coordinator must wait for the explicit answer and record it through the
+advertised `record_clarification` operation;
 silence, prior approval, worker completion, or a ready-looking ledger state is
 not permission to close. A request made before the result existed to close
 automatically afterward is not the required current review. Never probe the
@@ -38,5 +42,7 @@ answer keeps the same task reference alive
 and routes bounded rework/replacement from the current evidence. A close answer
 is the only answer that permits closure. Any new result or rework invalidates
 an earlier closure review and requires a fresh one.
+
+Native wait output is advisory host coordination. After every bounded native wait returns—including timeout, an empty result, or a contradiction with visible child completion—the coordinator immediately reads current task state or relevant evidence before it may wait again. A finalized worker publication is authoritative durable completion evidence and is consumed without another wait for that child. With no publication, an active child may be waited on again; lifecycle stop without publication uses explicit loss/recovery. Empty host output never suppresses durable evidence, and the coordinator never remains in model-only waiting after the wait call returns.
 
 All later calls follow the orchestrator skill and live schemas. Neither coordinator nor worker copies any other identifier, handle, digest, cursor, revision, slot, or idempotency value. Server-owned read continuation is requested only by its boolean flag. After `open_assignment` succeeds, native spawn follows immediately with the exact returned dispatch and no intervening model narration, read, or tool call.

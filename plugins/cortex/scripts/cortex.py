@@ -41,11 +41,12 @@ from cortex_runtime.domain_api import (
 )
 
 
-SERVER_VERSION = "1.14.1"
+SERVER_VERSION = "1.14.12"
 SERVER_INSTRUCTIONS = (
-    "Cortex v12 is a durable coordination ledger. All participants receive the "
-    f"same {len(OPERATION_NAMES)} semantic tools for task, assignment, evidence, publication, decision, "
-    "governance, and closure. The model owns delegation, model/effort selection, governance, "
+    "Cortex v12 is a durable coordination ledger with a complete "
+    f"{len(OPERATION_NAMES)}-operation registry and immutable host-attested audience projections. "
+    "Every Cortex operation is one separate direct MCP call and is never eligible for programmatic tool calling, exec, batching, parallelism, or speculative partial calls; this keeps each complete advertised input contract and result visible to the model. "
+    "Use only the tools advertised to this connection. The model owns delegation, model/effort selection, governance, "
     "rework, verification depth, and final-answer decisions. Governance records are "
     "advisory and never block safe coordination or a user-facing answer."
 )
@@ -70,7 +71,7 @@ _HANDLERS: Mapping[str, Callable[..., Mapping[str, Any]]] = {
 _HANDLERS = {name: _HANDLERS[name] for name in OPERATION_NAMES}
 
 def build_v12_public_tools() -> dict[str, dict[str, Any]]:
-    """Bind the uniform v12 contracts directly to their durable handlers."""
+    """Bind the complete v12 registry directly to durable handlers."""
     contracts = build_public_contracts()
     if tuple(contracts) != OPERATION_NAMES or tuple(_HANDLERS) != OPERATION_NAMES:
         raise RuntimeError(f"Cortex v12 must expose exactly the canonical {len(OPERATION_NAMES)}-tool catalogue")
@@ -81,7 +82,7 @@ PUBLIC_TOOLS = build_v12_public_tools()
 
 
 def main() -> None:
-    """Serve the single public V12 MCP catalogue over stdio."""
+    """Serve audience projections of the complete V12 registry over stdio."""
     if sys.argv[1:]:
         raise SystemExit("usage: cortex.py")
     serve_stdio(

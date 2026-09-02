@@ -5,8 +5,10 @@ import tempfile
 import threading
 import unittest
 import ast
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -114,17 +116,434 @@ def _source_stdio_tool_call(home: str, tool_name: str, arguments: dict) -> dict:
         args=(home, tool_name, arguments, ready, start, results),
     )
     worker.start()
-    assert ready.get(timeout=10) is True
-    start.set()
-    reply = results.get(timeout=15)
-    worker.join(timeout=10)
-    assert worker.exitcode == 0
-    assert reply.get("_test_stdio", {}).get("exit_code") == 0, reply
-    assert not reply.get("_test_stdio", {}).get("forced_termination"), reply
-    return reply
+    try:
+        assert ready.get(timeout=10) is True
+        start.set()
+        reply = results.get(timeout=15)
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+        assert reply.get("_test_stdio", {}).get("exit_code") == 0, reply
+        assert not reply.get("_test_stdio", {}).get("forced_termination"), reply
+        return reply
+    finally:
+        for queue in (ready, results):
+            queue.close()
+            queue.join_thread()
+        worker.close()
+
+
+def _write_host_worker_receipt(
+    plugin_data: str, worker_ref: str, *, authorize: bool = False,
+    agent_id: str = "source-worker-a", turn_id: str = "source-worker-turn",
+    session_id: str = "source-session",
+) -> None:
+    """Create one sanitized SubagentStart-equivalent host lease fixture."""
+    import hashlib
+    from cortex_runtime.audience_attestation import (
+        authorize_worker_candidate_call,
+        issue_worker_candidate,
+    )
+
+    dispatch = Path(plugin_data) / "activation" / "sessions" / "fixture" / "dispatch"
+    dispatch.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for directory in (
+        Path(plugin_data), Path(plugin_data) / "activation",
+        Path(plugin_data) / "activation" / "sessions", dispatch.parent, dispatch,
+    ):
+        os.chmod(directory, 0o700)
+    record = {
+        "session_digest": hashlib.sha256(session_id.encode("utf-8")).hexdigest(),
+        "assignment_ref_digest": hashlib.sha256(
+            ("d_" + worker_ref[-12:]).encode("utf-8")
+        ).hexdigest(),
+        "worker_task_ref_digest": hashlib.sha256(
+            worker_ref.encode("utf-8")
+        ).hexdigest(),
+        "worker_agent_digest": hashlib.sha256(agent_id.encode("utf-8")).hexdigest(),
+        "worker_turn_digest": hashlib.sha256(turn_id.encode("utf-8")).hexdigest(),
+        "worker_thread_digest": hashlib.sha256(agent_id.encode("utf-8")).hexdigest(),
+    }
+    record = issue_worker_candidate(Path(plugin_data), record)
+    path = dispatch / ("dispatch-" + hashlib.sha256(worker_ref.encode("utf-8")).hexdigest() + ".json")
+    path.write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o600)
+    if authorize:
+        assert authorize_worker_candidate_call(
+            Path(plugin_data), task_ref=worker_ref,
+            agent_id=agent_id, turn_id=turn_id,
+            session_id=session_id, tool_use_id="source-read-call",
+        )
+
+
+@contextmanager
+def _source_stdio_session(
+    home: str, *, host_identity: tuple[str, str, str] | None = None,
+):
+    """Keep one real source MCP connection alive across multiple calls."""
+    env = dict(os.environ) | {
+        "CODEX_HOME": home,
+        "CORTEX_SOURCE_MODE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    env.pop("PYTHONPATH", None)
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("CODEX_SESSION_ID", None)
+    process = subprocess.Popen(
+        [sys.executable, str(_CORTEX_SCRIPT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=env,
+    )
+    request_id = 0
+    notifications: list[dict] = []
+
+    def rpc(method: str, params: dict) -> dict:
+        nonlocal request_id
+        request_id += 1
+        assert process.stdin is not None and process.stdout is not None
+        process.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": request_id,
+            "method": method, "params": params,
+        }) + "\n")
+        process.stdin.flush()
+        while True:
+            line = process.stdout.readline()
+            if not line.strip():
+                diagnostic = process.stderr.read(512) if process.stderr is not None else ""
+                raise AssertionError(
+                    "source MCP session closed before replying"
+                    + (f": {diagnostic}" if diagnostic else "")
+                )
+            payload = json.loads(line)
+            if "id" not in payload and payload.get("method") == "notifications/tools/list_changed":
+                notifications.append(payload)
+                continue
+            return payload
+
+    initialize_result = rpc("initialize", {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "persistent-source-test", "version": "1"},
+    })
+    assert process.stdin is not None
+    process.stdin.write(json.dumps({
+        "jsonrpc": "2.0", "method": "notifications/initialized", "params": {},
+    }) + "\n")
+    process.stdin.flush()
+
+    def call(tool_name: str, arguments: dict) -> dict:
+        tool_use_id = f"source-call-{request_id + 1}"
+        host_authorized = False
+        plugin_data = env.get("PLUGIN_DATA") or str(Path(home) / "plugins" / "data" / "cortex-cortex")
+        if (
+            host_identity is not None
+            and tool_name == "read_task"
+            and arguments.get("view") in {None, "assignment"}
+        ):
+            from cortex_runtime.audience_attestation import authorize_worker_candidate_call
+            agent_id, turn_id, session_id = host_identity
+            host_authorized = authorize_worker_candidate_call(
+                Path(plugin_data), task_ref=arguments.get("task_ref"),
+                agent_id=agent_id, turn_id=turn_id,
+                session_id=session_id, tool_use_id=tool_use_id,
+            )
+        result = rpc("tools/call", {"name": tool_name, "arguments": arguments})
+        if host_authorized and result.get("result", {}).get("isError"):
+            from cortex_runtime.audience_attestation import revoke_worker_candidate_call
+            agent_id, turn_id, session_id = host_identity
+            revoke_worker_candidate_call(
+                Path(plugin_data), task_ref=arguments.get("task_ref"),
+                agent_id=agent_id, turn_id=turn_id,
+                session_id=session_id, tool_use_id=tool_use_id,
+            )
+        return result
+
+    call.rpc = rpc  # type: ignore[attr-defined]
+    call.notifications = notifications  # type: ignore[attr-defined]
+    call.initialize_result = initialize_result  # type: ignore[attr-defined]
+
+    try:
+        yield call
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        process.wait(timeout=10)
+        stderr_text = process.stderr.read(512) if process.stderr is not None else ""
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        if process.returncode != 0:
+            raise AssertionError(
+                f"source MCP session exited {process.returncode}: {stderr_text}"
+            )
 
 
 class PublicPublicationFirstCallTests(unittest.TestCase):
+    def test_signed_worker_candidate_accepts_exact_host_session_child_identity(self) -> None:
+        from cortex_runtime.audience_attestation import (
+            authorize_worker_candidate_call,
+            claim_worker_candidate,
+            release_worker_candidate_claim,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="cortex-audience-session-") as plugin_data:
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            _write_host_worker_receipt(plugin_data, worker_ref, authorize=False)
+            self.assertIsNone(claim_worker_candidate(
+                Path(plugin_data), task_ref=worker_ref,
+                connection_nonce="premature-direct-client",
+            ))
+            self.assertTrue(authorize_worker_candidate_call(
+                Path(plugin_data), task_ref=worker_ref,
+                agent_id="source-worker-a", turn_id="source-worker-turn",
+                session_id="source-session", tool_use_id="source-read-call",
+            ))
+            self.assertTrue(authorize_worker_candidate_call(
+                Path(plugin_data), task_ref=worker_ref,
+                agent_id="source-worker-a", turn_id="source-worker-turn",
+                session_id="source-session", tool_use_id="corrected-read-call",
+            ))
+            receipt = next(Path(plugin_data).glob(
+                "activation/sessions/*/dispatch/dispatch-*.json"
+            ))
+            self.assertEqual(
+                json.loads(receipt.read_text(encoding="utf-8"))[
+                    "authorized_tool_use_digest"
+                ],
+                hashlib.sha256(b"corrected-read-call").hexdigest(),
+            )
+            claim = claim_worker_candidate(
+                Path(plugin_data), task_ref=worker_ref,
+                connection_nonce="session-channel-regression",
+            )
+            self.assertIsNotNone(claim)
+            self.assertEqual(
+                claim["worker_task_ref_digest"],
+                hashlib.sha256(worker_ref.encode("utf-8")).hexdigest(),
+            )
+            self.assertTrue(release_worker_candidate_claim(
+                Path(plugin_data), claim=claim,
+                connection_nonce="session-channel-regression",
+            ))
+            receipt = next(Path(plugin_data).glob(
+                "activation/sessions/*/dispatch/dispatch-*.json"
+            ))
+            self.assertEqual(
+                json.loads(receipt.read_text(encoding="utf-8"))["state"],
+                "worker_call_authorized",
+            )
+
+    def test_signed_worker_candidate_tamper_is_rejected_without_state_change(self) -> None:
+        from cortex_runtime.audience_attestation import claim_worker_candidate
+
+        with tempfile.TemporaryDirectory(prefix="cortex-audience-tamper-") as plugin_data:
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            _write_host_worker_receipt(plugin_data, worker_ref, authorize=False)
+            path = next(Path(plugin_data).glob(
+                "activation/sessions/*/dispatch/dispatch-*.json"
+            ))
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record["worker_task_ref_digest"] = "0" * 64
+            path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.assertIsNone(claim_worker_candidate(
+                Path(plugin_data), task_ref=worker_ref,
+                connection_nonce="tamper-regression",
+            ))
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["state"],
+                "worker_candidate",
+            )
+
+    def test_stdio_tools_list_is_neutral_until_role_commitment(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cortex-audience-list-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-audience-list-data-",
+        ) as plugin_data:
+            with _source_stdio_session(home) as coordinator:
+                listed = coordinator.rpc("tools/list", {})  # type: ignore[attr-defined]
+                names = {item["name"] for item in listed["result"]["tools"]}
+                self.assertIn("open_assignment", names)
+                self.assertIn("close_task", names)
+                self.assertIn("read_task", names)
+                self.assertIn("publish_plan", names)
+                self.assertIn("publish_result", names)
+                self.assertIn("publish_documentation", names)
+
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            _write_host_worker_receipt(plugin_data, worker_ref)
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as worker:
+                listed = worker.rpc("tools/list", {})  # type: ignore[attr-defined]
+                names = {item["name"] for item in listed["result"]["tools"]}
+                self.assertIn("open_assignment", names)
+                self.assertIn("publish_result", names)
+                worker_read = next(
+                    item for item in listed["result"]["tools"]
+                    if item["name"] == "read_task"
+                )
+                self.assertIn("report_policy", worker_read["inputSchema"]["properties"])
+                self.assertEqual(worker_read["inputSchema"]["required"], ["task_ref", "view"])
+                self.assertNotIn("const", worker_read["inputSchema"]["properties"]["task_ref"])
+                self.assertFalse(worker_read["inputSchema"]["additionalProperties"])
+                self.assertNotIn("worker_label", json.dumps(worker_read, sort_keys=True))
+
+    def test_foreign_pre_spawn_hint_does_not_change_new_root_catalogue(self) -> None:
+        from cortex_runtime.audience_attestation import issue_worker_catalogue_pending
+
+        with tempfile.TemporaryDirectory(prefix="cortex-prespawn-list-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-prespawn-list-data-",
+        ) as plugin_data:
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            dispatch = Path(plugin_data) / "activation" / "sessions" / "fixture" / "dispatch"
+            dispatch.mkdir(mode=0o700, parents=True)
+            for directory in (
+                Path(plugin_data), Path(plugin_data) / "activation",
+                Path(plugin_data) / "activation" / "sessions", dispatch.parent, dispatch,
+            ):
+                os.chmod(directory, 0o700)
+            record = issue_worker_catalogue_pending(Path(plugin_data), {
+                "session_digest": hashlib.sha256(b"source-session").hexdigest(),
+                "assignment_ref_digest": hashlib.sha256(b"source-assignment").hexdigest(),
+                "worker_task_ref_digest": hashlib.sha256(worker_ref.encode()).hexdigest(),
+            })
+            receipt = dispatch / "dispatch-prespawn.json"
+            receipt.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+            os.chmod(receipt, 0o600)
+
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(home) as candidate:
+                listed = candidate.rpc("tools/list", {})  # type: ignore[attr-defined]
+                names = {item["name"] for item in listed["result"]["tools"]}
+                self.assertIn("open_task", names)
+                self.assertIn("open_assignment", names)
+                self.assertIn("publish_result", names)
+                rejected = candidate("read_task", {
+                    "task_ref": worker_ref, "view": "assignment",
+                })
+                self.assertEqual(
+                    rejected["result"]["structuredContent"]["error"]["code"],
+                    "wrong_connection",
+                )
+                self.assertEqual(
+                    json.loads(receipt.read_text(encoding="utf-8"))["state"],
+                    "worker_catalogue_pending",
+                )
+
+    def test_parallel_candidate_connections_bind_only_after_exact_host_authorization(self) -> None:
+        """Two candidate connections cannot consume each other's host-bound assignment."""
+        with tempfile.TemporaryDirectory(prefix="cortex-exact-thread-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-exact-thread-data-",
+        ) as plugin_data:
+            first_ref = "t_0123456789ab_" + "a" * 32
+            second_ref = "t_0123456789ab_" + "b" * 32
+            first_agent = "12345678-1234-4123-8123-123456789abc"
+            second_agent = "22345678-1234-4123-8123-123456789abc"
+            _write_host_worker_receipt(plugin_data, first_ref, agent_id=first_agent, turn_id="first-turn")
+            _write_host_worker_receipt(plugin_data, second_ref, agent_id=second_agent, turn_id="second-turn")
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}):
+                with _source_stdio_session(
+                    home, host_identity=(first_agent, "first-turn", "source-session"),
+                ) as first, _source_stdio_session(
+                    home, host_identity=(second_agent, "second-turn", "source-session"),
+                ) as second:
+                    for connection in (first, second):
+                        listed = connection.rpc("tools/list", {})  # type: ignore[attr-defined]
+                        names = {item["name"] for item in listed["result"]["tools"]}
+                        self.assertIn("open_assignment", names)
+                        self.assertIn("publish_result", names)
+                    wrong = first("read_task", {
+                        "task_ref": second_ref, "view": "assignment",
+                    })
+                    self.assertEqual(wrong["result"]["structuredContent"]["error"]["code"], "wrong_connection")
+                    first_read = first("read_task", {
+                        "task_ref": first_ref, "view": "assignment",
+                    })
+                    second_read = second("read_task", {
+                        "task_ref": second_ref, "view": "assignment",
+                    })
+                    self.assertNotEqual(first_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
+                    self.assertNotEqual(second_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
+
+    def test_failed_candidate_bootstrap_does_not_change_role_or_consume_assignment(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cortex-candidate-error-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-candidate-error-data-",
+        ) as plugin_data:
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            _write_host_worker_receipt(plugin_data, worker_ref)
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as worker:
+                receipt = next(Path(plugin_data).glob(
+                    "activation/sessions/*/dispatch/dispatch-*.json"
+                ))
+                before = receipt.read_bytes()
+                malformed = worker("read_task", {
+                    "task_ref": worker_ref,
+                    "worker_label": "invented",
+                })
+                self.assertEqual(
+                    malformed["result"]["structuredContent"]["error"]["code"],
+                    "validation_error",
+                )
+                self.assertEqual(receipt.read_bytes(), before)
+                wrong_server_field = worker("read_task", {
+                    "task_ref": worker_ref, "view": "state",
+                })
+                self.assertIn(
+                    wrong_server_field["result"]["structuredContent"]["error"]["code"],
+                    {"validation_error", "task_not_found"},
+                )
+                self.assertEqual(receipt.read_bytes(), before)
+                rejected = worker("read_task", {
+                    "task_ref": "t_0123456789ab_" + "b" * 32,
+                    "view": "assignment",
+                })
+                self.assertEqual(
+                    rejected["result"]["structuredContent"]["error"]["code"],
+                    "wrong_connection",
+                )
+                listed = worker.rpc("tools/list", {})  # type: ignore[attr-defined]
+                names = {item["name"] for item in listed["result"]["tools"]}
+                self.assertIn("open_assignment", names)
+                self.assertIn("publish_result", names)
+                premature = worker("publish_result", {"task_ref": worker_ref})
+                self.assertIn(
+                    premature["result"]["structuredContent"]["error"]["code"],
+                    {"connection_lost", "wrong_connection"},
+                )
+
+    def test_late_desktop_candidate_malformed_bootstrap_restores_unknown_connection(self) -> None:
+        """A post-initialize host attestation does not survive a malformed read."""
+        with tempfile.TemporaryDirectory(prefix="cortex-late-candidate-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-late-candidate-data-",
+        ) as plugin_data:
+            worker_ref = "t_0123456789ab_" + "a" * 32
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as connection:
+                # The MCP process is already initialized here, matching the
+                # Desktop lifecycle ordering observed in production.
+                _write_host_worker_receipt(plugin_data, worker_ref)
+                receipt = next(Path(plugin_data).glob(
+                    "activation/sessions/*/dispatch/dispatch-*.json"
+                ))
+                before = receipt.read_bytes()
+                malformed = connection("read_task", {
+                    "task_ref": worker_ref,
+                    "worker_label": "invented",
+                })
+                self.assertEqual(
+                    malformed["result"]["structuredContent"]["error"]["code"],
+                    "validation_error",
+                )
+                self.assertEqual(receipt.read_bytes(), before)
+                listed = connection.rpc("tools/list", {})  # type: ignore[attr-defined]
+                names = {item["name"] for item in listed["result"]["tools"]}
+                self.assertIn("open_assignment", names)
+                self.assertIn("publish_result", names)
+
     def test_open_assignment_first_stdio_call_uses_one_complete_instruction_field(self) -> None:
         """A complete advertised assignment crosses validation without invented fields."""
         with tempfile.TemporaryDirectory(prefix="cortex-assignment-first-call-") as home:
@@ -138,7 +557,6 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 "goal": "Produce one plan.",
                 "scope": "Read-only planning.",
                 "instructions": "Consume the assignment, plan once, and stop.",
-                "outcomes": ["Produce one plan."],
                 "report_policy": "none",
             }
             accepted = _source_stdio_tool_call(home, "open_assignment", arguments)
@@ -148,6 +566,43 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 "task_not_found",
                 accepted,
             )
+
+            stale_planning_shape = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {**arguments, "outcomes": ["Produce one plan."]},
+            )
+            self.assertTrue(stale_planning_shape["result"].get("isError"), stale_planning_shape)
+            stale_error = stale_planning_shape["result"]["structuredContent"]["error"]
+            self.assertEqual(stale_error["code"], "validation_error", stale_planning_shape)
+            self.assertEqual(stale_error["details"]["path"], "$.outcomes", stale_planning_shape)
+
+            complete_delivery_scope = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {**arguments, "responsibility": "delivery"},
+            )
+            self.assertTrue(complete_delivery_scope["result"].get("isError"), complete_delivery_scope)
+            delivery_error = complete_delivery_scope["result"]["structuredContent"]["error"]
+            self.assertEqual(delivery_error["code"], "task_not_found", complete_delivery_scope)
+
+            missing_recovery_scope = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {
+                    **arguments,
+                    "responsibility": "delivery",
+                    "loss_recovery": {
+                        "state": "blocked",
+                        "reason": "The predecessor connection was confirmed lost.",
+                        "evidence": ["The host recorded an explicit terminal loss."],
+                    },
+                },
+            )
+            self.assertTrue(missing_recovery_scope["result"].get("isError"), missing_recovery_scope)
+            recovery_error = missing_recovery_scope["result"]["structuredContent"]["error"]
+            self.assertEqual(recovery_error["code"], "validation_error", missing_recovery_scope)
+            self.assertEqual(recovery_error["details"]["path"], "$.outcomes", missing_recovery_scope)
 
             rejected = _source_stdio_tool_call(
                 home,
@@ -167,7 +622,6 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 "task_ref": "t_0123456789ab_" + "a" * 32,
                 "summary": "Plan.",
                 "scope": "Bounded scope.",
-                "review_policy": "required",
                 "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Run focused tests."]}],
                 "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
                 "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped to implementation."]}],
@@ -179,7 +633,7 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
             self.assertTrue(accepted["result"].get("isError"), accepted)
             self.assertEqual(
                 accepted["result"]["structuredContent"]["error"]["code"],
-                "task_not_found",
+                "wrong_connection",
                 accepted,
             )
 
@@ -188,8 +642,8 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
             )
             self.assertTrue(rejected["result"].get("isError"), rejected)
             error = rejected["result"]["structuredContent"]["error"]
-            self.assertEqual(error["code"], "validation_error", rejected)
-            self.assertEqual(error["details"]["path"], "$.unresolved", rejected)
+            self.assertEqual(error["code"], "wrong_connection", rejected)
+            self.assertNotIn("details", error)
 
 
 def _cross_process_identical_receipt(
@@ -231,6 +685,208 @@ def _abandon_sqlite_admission_lease(root: str, home: str, ready: object) -> None
 
 
 class CommandReceiptTests(unittest.TestCase):
+    def test_source_stdio_steering_requires_post_open_state_read_on_same_connection(self) -> None:
+        """Nested/programmatic calls cannot record before recovery evidence."""
+        outcome = {
+            "outcome": "Preserve one steering outcome.",
+            "acceptance": ["The current outcome remains exact."],
+            "constraints": ["Do not infer contract state from a summary."],
+            "verification": ["The steering record is accepted once."],
+        }
+        with tempfile.TemporaryDirectory(prefix="cortex-steer-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-steer-project-",
+        ) as project:
+            with _source_stdio_session(home) as coordinator:
+                opened = coordinator("open_task", {
+                    "project_root": project,
+                    "request_original": "Exercise same-connection steering admission.",
+                    "user_language": "en", "outcomes": [outcome],
+                    "constraints": outcome["constraints"],
+                })
+                task_ref = opened["result"]["structuredContent"]["task_ref"]
+
+                # A state read performed before the question opens is stale
+                # admission evidence and must be invalidated by open_steering.
+                before = coordinator("read_task", {
+                    "task_ref": task_ref, "view": "state",
+                })
+                self.assertFalse(before["result"].get("isError"), before)
+                pending = coordinator("open_steering", {
+                    "task_ref": task_ref,
+                    "prompt": "Keep the current outcome unchanged?",
+                    "prompt_language": "en",
+                })
+                self.assertFalse(pending["result"].get("isError"), pending)
+
+                denied = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Keep it.",
+                    "user_language": "en", "add": [], "retire": [],
+                })
+                self.assertTrue(denied["result"].get("isError"), denied)
+                self.assertEqual(
+                    denied["result"]["structuredContent"]["error"]["code"],
+                    "fresh_state_read_required",
+                )
+
+                refreshed = coordinator("read_task", {
+                    "task_ref": task_ref, "view": "state",
+                })
+                self.assertFalse(refreshed["result"].get("isError"), refreshed)
+                recorded = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Keep it.",
+                    "user_language": "en", "add": [], "retire": [],
+                })
+                self.assertFalse(recorded["result"].get("isError"), recorded)
+                self.assertEqual(
+                    recorded["result"]["structuredContent"]["state"],
+                    "steering_recorded",
+                )
+
+                # Admission evidence is one-shot even when durable decision
+                # replay could otherwise reconcile an identical record.
+                replay_without_read = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Keep it.",
+                    "user_language": "en", "add": [], "retire": [],
+                })
+                self.assertTrue(
+                    replay_without_read["result"].get("isError"),
+                    replay_without_read,
+                )
+                self.assertEqual(
+                    replay_without_read["result"]["structuredContent"]["error"]["code"],
+                    "fresh_state_read_required",
+                )
+
+    def test_connection_loss_has_explicit_stdio_replacement_route(self) -> None:
+        """A dead consumed worker is replaced only through linked loss evidence."""
+        outcome = {
+            "outcome": "Recover one lost stdio worker.",
+            "acceptance": ["One linked replacement publishes terminal evidence."],
+            "constraints": ["Never recover the dead connection's authority."],
+            "verification": ["The predecessor is stale and the successor report exists."],
+        }
+        with tempfile.TemporaryDirectory(prefix="cortex-loss-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-loss-project-",
+        ) as project:
+            plugin_data = str(Path(home) / "plugins" / "data" / "cortex-cortex")
+            with _source_stdio_session(home) as coordinator:
+                opened = coordinator("open_task", {
+                    "project_root": project,
+                    "request_original": "Recover one explicitly lost worker.",
+                    "user_language": "en", "outcomes": [outcome],
+                    "constraints": outcome["constraints"],
+                })
+                task_ref = opened["result"]["structuredContent"]["task_ref"]
+                assessed = coordinator("assess_governance", {
+                    "task_ref": task_ref, "mode": "minimal",
+                    "rationale": "Process-bound recovery regression.",
+                    "risk_factors": [],
+                })
+                self.assertFalse(assessed["result"].get("isError"), assessed)
+                original = coordinator("open_assignment", {
+                    "task_ref": task_ref, "role": "Original worker",
+                    "profile_name": "backend_dev", "model": "gpt-5.6-luna",
+                    "reasoning_effort": "high", "responsibility": "delivery",
+                    "goal": "Complete the assigned recovery outcome.",
+                    "scope": "Only the exact selected outcome.",
+                    "instructions": "Consume the assignment and publish once.",
+                    "outcomes": [outcome["outcome"]], "report_policy": "none",
+                })
+                original_ref = re.search(
+                    r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                    original["result"]["structuredContent"]["native_dispatch"]["message"],
+                ).group(1)
+                _write_host_worker_receipt(plugin_data, original_ref)
+                with _source_stdio_session(
+                    home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+                ) as dead_worker:
+                    consumed = dead_worker("read_task", {
+                        "task_ref": original_ref,
+                    })
+                    self.assertFalse(consumed["result"].get("isError"), consumed)
+                    self.assertEqual(consumed["result"]["structuredContent"]["view"], "assignment")
+
+                lost = _source_stdio_tool_call(home, "read_task", {
+                    "task_ref": original_ref, "view": "assignment",
+                })
+                self.assertEqual(
+                    lost["result"]["structuredContent"]["error"]["code"],
+                    "connection_lost",
+                )
+                recovery_state = coordinator("read_task", {
+                    "task_ref": task_ref, "view": "state",
+                })
+                recovery_items = recovery_state["result"]["structuredContent"][
+                    "data"
+                ]["aggregate_coverage"]["items"]
+                self.assertEqual(
+                    recovery_items[0]["loss_recovery_outcomes"],
+                    [outcome["outcome"]],
+                )
+                replacement = coordinator("open_assignment", {
+                    "task_ref": task_ref, "role": "Replacement worker",
+                    "profile_name": "backend_dev", "model": "gpt-5.6-luna",
+                    "reasoning_effort": "high", "responsibility": "delivery",
+                    "goal": "Complete the confirmed lost worker outcome.",
+                    "scope": "Only the exact selected outcome.",
+                    "instructions": "Consume the linked successor and publish once.",
+                    "outcomes": [outcome["outcome"]], "report_policy": "none",
+                    "loss_recovery": {
+                        "state": "aborted",
+                        "reason": "The original stdio worker process exited after consumption.",
+                        "evidence": ["The process closed without a publication response."],
+                    },
+                })
+                self.assertFalse(replacement["result"].get("isError"), replacement)
+                replacement_ref = re.search(
+                    r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                    replacement["result"]["structuredContent"]["native_dispatch"]["message"],
+                ).group(1)
+                _write_host_worker_receipt(plugin_data, replacement_ref)
+                with _source_stdio_session(
+                    home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+                ) as successor:
+                    consumed = successor("read_task", {
+                        "task_ref": replacement_ref, "view": "assignment",
+                    })
+                    self.assertFalse(consumed["result"].get("isError"), consumed)
+                    published = successor("publish_result", {
+                        "task_ref": replacement_ref,
+                        "summary": "The linked replacement completed.",
+                        "outcome": "The exact recovery outcome is complete.",
+                        "changes": [],
+                        "verification_facts": [{
+                            "state": "executed",
+                            "summary": "The predecessor was recorded aborted before successor creation.",
+                        }],
+                        "outcome_coverage": [{
+                            "outcome": outcome["outcome"], "status": "complete",
+                            "verification": ["The successor publication was accepted."],
+                        }],
+                        "documentation_impact": "No documentation change required.",
+                        "risks": [], "unresolved": [], "status": "completed",
+                    })
+                    self.assertFalse(published["result"].get("isError"), published)
+
+            prior = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = home
+            try:
+                store, task_id = V12Store.for_task_ref(task_ref)
+                with store._connection() as connection:
+                    self.assertEqual(connection.execute(
+                        "SELECT COUNT(*) FROM assignment_losses WHERE task_id=?",
+                        (task_id,),
+                    ).fetchone()[0], 1)
+                    self.assertEqual(connection.execute(
+                        "SELECT COUNT(*) FROM report_operations WHERE task_id=?",
+                        (task_id,),
+                    ).fetchone()[0], 1)
+            finally:
+                if prior is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = prior
+
     def setUp(self) -> None:
         self.state = tempfile.TemporaryDirectory(prefix="cortex-command-receipts-home-")
         self.prior_codex_home = os.environ.get("CODEX_HOME")
@@ -662,7 +1318,7 @@ class CommandReceiptTests(unittest.TestCase):
             context = get_context("fork")
             ready, results, start = context.Queue(), context.Queue(), context.Event()
             prompt = "Confirm shared admission."
-            open_arguments = {"task_ref": task["task_ref"], "prompt": prompt, "prompt_language": "en", "purpose": "clarification", "options": ["answer"]}
+            open_arguments = {"task_ref": task["task_ref"], "prompt": prompt, "prompt_language": "en", "purpose": "clarification"}
             workers = [context.Process(target=_stdio_tool_call, args=(home, "open_clarification", open_arguments, ready, start, results)) for _ in range(2)]
             for worker in workers: worker.start()
             self.assertEqual([ready.get(timeout=10) for _ in workers], [True, True])
@@ -693,11 +1349,11 @@ class CommandReceiptTests(unittest.TestCase):
             self.assertEqual({item["task_ref"] for item in values}, {task["task_ref"]}, observed)
             self.assertEqual({item["state"] for item in values}, {"pending_clarification"}, observed)
             recorded = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "response_original": "Continue.", "user_language": "en", "outcome": "answer",
+                "task_ref": task["task_ref"], "response_original": "Continue.", "user_language": "en",
             })
             self.assertFalse(recorded["result"].get("isError"))
             changed = _source_stdio_tool_call(home, "record_clarification", {
-                "task_ref": task["task_ref"], "response_original": "Change the answer.", "user_language": "en", "outcome": "answer",
+                "task_ref": task["task_ref"], "response_original": "Change the answer.", "user_language": "en",
             })
             self.assertTrue(changed["result"].get("isError"))
             self.assertEqual(changed["result"]["structuredContent"]["error"]["code"], "clarification_binding_stale")
@@ -719,6 +1375,262 @@ class CommandReceiptTests(unittest.TestCase):
             finally:
                 if prior is None: os.environ.pop("CODEX_HOME", None)
                 else: os.environ["CODEX_HOME"] = prior
+
+    def test_source_stdio_copied_locator_cannot_rebind_consumed_worker(self) -> None:
+        """Process B fails closed while the original process A publishes once."""
+        outcome = {
+            "outcome": "Publish after a source stdio reconnect.",
+            "acceptance": ["Exactly one terminal report is durable."],
+            "constraints": ["Do not expose private capability identity."],
+            "verification": ["Inspect the coordinator evidence view."],
+        }
+        with tempfile.TemporaryDirectory(prefix="cortex-reconnect-stdio-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-reconnect-stdio-project-",
+        ) as project, tempfile.TemporaryDirectory(
+            prefix="cortex-reconnect-plugin-data-",
+        ) as plugin_data:
+            opened = _source_stdio_tool_call(home, "open_task", {
+                "project_root": project,
+                "request_original": "Prove source stdio reconnect publication.",
+                "user_language": "en",
+                "outcomes": [outcome],
+                "constraints": ["Use one exact assignment."],
+            })
+            self.assertFalse(opened["result"].get("isError"), opened)
+            task_ref = opened["result"]["structuredContent"]["task_ref"]
+
+            assessed = _source_stdio_tool_call(home, "assess_governance", {
+                "task_ref": task_ref,
+                "mode": "minimal",
+                "rationale": "Bounded source regression.",
+                "risk_factors": [],
+            })
+            self.assertFalse(assessed["result"].get("isError"), assessed)
+            assigned = _source_stdio_tool_call(home, "open_assignment", {
+                "task_ref": task_ref,
+                "role": "Reconnect source worker",
+                "profile_name": "backend_dev",
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "high",
+                "responsibility": "delivery",
+                "goal": "Publish the exact assigned result after reconnect.",
+                "scope": "Only the reconnect source regression outcome.",
+                "instructions": "Consume and publish on one exact source connection.",
+                "outcomes": [outcome["outcome"]],
+                "report_policy": "none",
+            })
+            self.assertFalse(assigned["result"].get("isError"), assigned)
+            message = assigned["result"]["structuredContent"]["native_dispatch"]["message"]
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', message,
+            ).group(1)
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}):
+                direct = _source_stdio_tool_call(home, "read_task", {
+                    "task_ref": worker_ref,
+                    "view": "assignment",
+                })
+            self.assertTrue(direct["result"].get("isError"), direct)
+            self.assertEqual(
+                direct["result"]["structuredContent"]["error"]["code"],
+                "wrong_connection",
+            )
+            publication_arguments = {
+                "task_ref": worker_ref,
+                "summary": "Source same-connection publication completed.",
+                "outcome": "The original stdio process retained exact consumed authority.",
+                "changes": [],
+                "verification_facts": [{
+                    "state": "executed",
+                    "summary": "The copied-locator process was rejected and process A published once.",
+                }],
+                "outcome_coverage": [{
+                    "outcome": outcome["outcome"],
+                    "status": "complete",
+                    "verification": ["Coordinator evidence contains one report."],
+                }],
+                "documentation_impact": "The fail-closed connection contract is documented.",
+                "risks": [],
+                "unresolved": [],
+                "status": "completed",
+            }
+            with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as worker_a:
+                # Codex Desktop starts the child's MCP stdio process before
+                # SubagentStart issues its signed candidate.  The initial
+                # catalogue is therefore a neutral superset: absence of a
+                # candidate at initialize must not commit either role, and a
+                # Desktop client that ignores list_changed must still know the
+                # later worker publication operation.
+                before_attestation = worker_a.rpc("tools/list", {})  # type: ignore[attr-defined]
+                self.assertIn(
+                    "open_assignment",
+                    {item["name"] for item in before_attestation["result"]["tools"]},
+                )
+                self.assertIn(
+                    "publish_result",
+                    {item["name"] for item in before_attestation["result"]["tools"]},
+                )
+                _write_host_worker_receipt(plugin_data, worker_ref)
+                consumed = worker_a("read_task", {
+                    "task_ref": worker_ref,
+                })
+                self.assertFalse(consumed["result"].get("isError"), consumed)
+                self.assertEqual(consumed["result"]["structuredContent"]["view"], "assignment")
+                # Supported hosts may expose only TextContent to the worker
+                # model while retaining structuredContent in lifecycle events.
+                # The first successful one-shot bootstrap must therefore carry
+                # the complete same canonical result in both channels.
+                self.assertEqual(
+                    json.loads(consumed["result"]["content"][-1]["text"]),
+                    consumed["result"]["structuredContent"],
+                )
+                self.assertEqual(
+                    consumed["result"]["structuredContent"]["data"]
+                    ["effective_contract"]["revision"],
+                    1,
+                )
+
+                with _source_stdio_session(home) as worker_b:
+                    copied_read = worker_b("read_task", {
+                        "task_ref": worker_ref, "view": "assignment",
+                    })
+                    self.assertTrue(copied_read["result"].get("isError"), copied_read)
+                    self.assertEqual(
+                        copied_read["result"]["structuredContent"]["error"]["code"],
+                        "connection_lost",
+                    )
+                    copied_publication = worker_b(
+                        "publish_result", publication_arguments,
+                    )
+                    self.assertTrue(
+                        copied_publication["result"].get("isError"),
+                        copied_publication,
+                    )
+                    self.assertEqual(
+                        copied_publication["result"]["structuredContent"]
+                        ["error"]["code"],
+                        "connection_lost",
+                    )
+
+                prior = os.environ.get("CODEX_HOME")
+                os.environ["CODEX_HOME"] = home
+                try:
+                    store, task_id = V12Store.for_task_ref(task_ref)
+                    with store._connection() as connection:
+                        self.assertEqual(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM report_operations WHERE task_id=?",
+                                (task_id,),
+                            ).fetchone()[0],
+                            0,
+                        )
+                finally:
+                    if prior is None:
+                        os.environ.pop("CODEX_HOME", None)
+                    else:
+                        os.environ["CODEX_HOME"] = prior
+
+                published = worker_a("publish_result", publication_arguments)
+                self.assertFalse(published["result"].get("isError"), published)
+                publication = published["result"]["structuredContent"]
+                self.assertEqual(publication["state"], "published")
+                self.assertFalse(publication["replayed"])
+
+            evidence = _source_stdio_tool_call(home, "read_task", {
+                "task_ref": task_ref,
+                "view": "evidence",
+                "report_policy": "all_finalized",
+            })
+            self.assertFalse(evidence["result"].get("isError"), evidence)
+            reports = evidence["result"]["structuredContent"]["data"]["reports"]
+            self.assertEqual(len(reports), 1)
+            self.assertIn("Source same-connection publication completed.", repr(reports[0]))
+
+            prior = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = home
+            try:
+                store, task_id = V12Store.for_task_ref(task_ref)
+                with store._connection() as connection:
+                    capability_rows = connection.execute(
+                        "SELECT state,continuation_ref FROM worker_capabilities WHERE task_id=?",
+                        (task_id,),
+                    ).fetchall()
+                    operation_count = connection.execute(
+                        "SELECT COUNT(*) FROM report_operations WHERE task_id=?",
+                        (task_id,),
+                    ).fetchone()[0]
+            finally:
+                if prior is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = prior
+            self.assertEqual(len(capability_rows), 1)
+            self.assertEqual(capability_rows[0]["state"], "consumed")
+            self.assertTrue(capability_rows[0]["continuation_ref"])
+            self.assertEqual(operation_count, 1)
+
+    def test_source_stdio_coordinator_role_cannot_switch_to_worker_audience(self) -> None:
+        outcome = {
+            "outcome": "Keep coordinator and worker audiences disjoint.",
+            "acceptance": ["The coordinator connection cannot consume worker authority."],
+            "constraints": ["Use the exact host-bound worker receipt."],
+            "verification": ["A distinct worker connection consumes the assignment."],
+        }
+        with tempfile.TemporaryDirectory(prefix="cortex-role-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-role-project-",
+        ) as project:
+            # Real plugin MCP processes receive CODEX_HOME, while hook
+            # processes receive PLUGIN_DATA. Exercise the installed package
+            # data fallback rather than a test-only shared environment value.
+            plugin_data = str(Path(home) / "plugins" / "data" / "cortex-cortex")
+            with _source_stdio_session(home) as coordinator:
+                opened = coordinator("open_task", {
+                    "project_root": project,
+                    "request_original": "Prove monotonic MCP audiences.",
+                    "user_language": "en",
+                    "outcomes": [outcome],
+                    "constraints": ["Keep roles disjoint."],
+                })
+                self.assertFalse(opened["result"].get("isError"), opened)
+                task_ref = opened["result"]["structuredContent"]["task_ref"]
+                assessed = coordinator("assess_governance", {
+                    "task_ref": task_ref, "mode": "minimal",
+                    "rationale": "Focused role boundary.", "risk_factors": [],
+                })
+                self.assertFalse(assessed["result"].get("isError"), assessed)
+                assigned = coordinator("open_assignment", {
+                    "task_ref": task_ref, "role": "Bound worker",
+                    "profile_name": "backend_dev", "model": "gpt-5.6-luna",
+                    "reasoning_effort": "high", "responsibility": "delivery",
+                    "goal": "Consume only on the worker connection.",
+                    "scope": "The exact role-bound outcome.",
+                    "instructions": "Consume the complete assignment and publish only from the worker.",
+                    "outcomes": [outcome["outcome"]], "report_policy": "none",
+                })
+                self.assertFalse(assigned["result"].get("isError"), assigned)
+                worker_ref = re.search(
+                    r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                    assigned["result"]["structuredContent"]["native_dispatch"]["message"],
+                ).group(1)
+                _write_host_worker_receipt(plugin_data, worker_ref)
+                rejected = coordinator("read_task", {
+                    "task_ref": worker_ref, "view": "assignment",
+                })
+                self.assertTrue(rejected["result"].get("isError"), rejected)
+                self.assertEqual(
+                    rejected["result"]["structuredContent"]["error"]["code"],
+                    "wrong_connection",
+                )
+
+            with _source_stdio_session(
+                home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
+            ) as worker:
+                consumed = worker("read_task", {
+                    "task_ref": worker_ref,
+                })
+                self.assertFalse(consumed["result"].get("isError"), consumed)
+                self.assertFalse(consumed["result"]["structuredContent"]["has_more"])
 
     def test_repeated_two_process_stdio_admission_converges_without_duplicate_open_mutation(self) -> None:
         """Bounded stress regression for SQLite WAL/SHM cleanup races."""
@@ -816,7 +1728,7 @@ os.close = _observed_close
                         ready, results, start = context.Queue(), context.Queue(), context.Event()
                         arguments = {
                             "task_ref": task["task_ref"], "prompt": "Confirm shared sidecar admission.",
-                            "prompt_language": "en", "purpose": "clarification", "options": ["answer"],
+                            "prompt_language": "en", "purpose": "clarification",
                         }
                         workers = [context.Process(
                             target=_stdio_tool_call,

@@ -18,6 +18,8 @@ def test_github_release_gate_installs_every_direct_python_dependency() -> None:
     workflow = (ROOT / ".github/workflows/cortex.yml").read_text(encoding="utf-8")
     assert '"pytest>=8,<9"' in workflow
     assert '"PyYAML>=6,<7"' in workflow
+    assert "if: runner.os == 'macOS'" in workflow
+    assert "brew install tmux" in workflow
 
 
 def test_github_release_gate_runs_the_current_complete_suite() -> None:
@@ -25,6 +27,18 @@ def test_github_release_gate_runs_the_current_complete_suite() -> None:
     assert "tests/test_marketplace_release_gate.py" not in workflow
     assert "python -B -m pytest -q\n" in workflow
     assert "PYTHONPATH: plugins/cortex/scripts" in workflow
+
+
+def test_sync_content_parity_uses_the_canonical_plugin_digest_contract() -> None:
+    """Install parity must not duplicate platform-sensitive tree hashing."""
+    script = (ROOT / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
+    content_matches = script.split("content_matches() {", 1)[1].split(
+        "\nwrite_isolated_candidate_receipt() {", 1,
+    )[0]
+    assert "plugin_tree_digest(installed, manifest)" in content_matches
+    assert "manifest.plugin_digest(root)" in content_matches
+    assert "def tree_manifest" not in content_matches
+    assert "TemporaryDirectory" not in content_matches
 
 
 def _renderer_module():
@@ -127,9 +141,9 @@ exit 0
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
         after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
-        assert re.fullmatch(r"1\.14\.1\+codex\.sha256\.[0-9a-f]{16}", after_version)
+        assert re.fullmatch(r"1\.14\.12\+codex\.sha256\.[0-9a-f]{16}", after_version)
         assert before_version == after_version
-        staged_versions = list((codex_home / ".cortex-candidates").glob("1.14.1+codex.sha256.*"))
+        staged_versions = list((codex_home / ".cortex-candidates").glob("1.14.12+codex.sha256.*"))
         assert len(staged_versions) == 1
         assert (codex_home / "plugins/cache/cortex/cortex" / staged_versions[0].name).is_dir()
         assert not bytecode.exists()
@@ -175,6 +189,32 @@ def test_sync_rejects_symlinked_candidate_staging_root(tmp_path: Path) -> None:
     )
     assert completed.returncode != 0
     assert "candidate staging root" in completed.stdout + completed.stderr
+
+
+def test_release_verifier_normalizes_the_os_temp_alias(tmp_path: Path) -> None:
+    physical_temp = tmp_path / "physical-temp"
+    physical_temp.mkdir()
+    temp_alias = tmp_path / "temp-alias"
+    temp_alias.symlink_to(physical_temp, target_is_directory=True)
+    environment = os.environ.copy()
+    environment.update({
+        "TMPDIR": str(temp_alias),
+        "TMP": str(temp_alias),
+        "TEMP": str(temp_alias),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+
+    completed = subprocess.run(
+        [sys.executable, "-B", "scripts/verify-cortex-release.py", "--mode", "source"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "release validation passed" in completed.stdout
 
 
 def test_sync_shell_path_rejects_symlinked_installed_version_parent(tmp_path: Path) -> None:
@@ -339,7 +379,7 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     isolated_codex = stable_home / ".cortex-dev/.codex"
     receipt = json.loads((isolated_codex / ".cortex-candidate-receipt.json").read_text(encoding="utf-8"))
     stamped = receipt["candidate_version"]
-    assert re.fullmatch(r"1\.14\.1\+codex\.sha256\.[0-9a-f]{16}", stamped)
+    assert re.fullmatch(r"1\.14\.12\+codex\.sha256\.[0-9a-f]{16}", stamped)
     assert receipt["candidate_path"] == str(isolated_codex / "plugins/cache/cortex/cortex" / stamped)
     assert f"Cortex candidate version={stamped}" in first.stdout
     assert f"Cortex candidate path={receipt['candidate_path']}" in first.stdout
@@ -353,7 +393,7 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     assert (stable_home / ".codex/config.toml").read_bytes() == stable_config_before
     # The base semantic version is permitted as display metadata only.  Its
     # unstamped cache directory must never be selected or printed as a path.
-    assert f"/plugins/cache/cortex/cortex/1.14.1\n" not in first.stdout
+    assert f"/plugins/cache/cortex/cortex/1.14.12\n" not in first.stdout
     first_receipt = (isolated_codex / ".cortex-candidate-receipt.json").read_bytes()
     second = subprocess.run(
         ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
@@ -474,5 +514,5 @@ exit 0
     )
     assert completed.returncode != 0
     assert "receipt was not committed" in completed.stdout + completed.stderr
-    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.14.1+codex.sha256.*"))
+    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.14.12+codex.sha256.*"))
     assert not (codex_home / ".cortex-candidate-receipt.json").exists()

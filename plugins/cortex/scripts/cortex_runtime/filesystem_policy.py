@@ -58,6 +58,14 @@ _CAPABILITIES = {
     "observation_generation.write_ready_receipt": "candidate-observation-ready-registration",
     "observation_generation.revoke_session": "candidate-observation-lease-revoke",
     "raw_diagnostic.append": "isolated-raw-diagnostic-bounded-append",
+    "audience_attestation.issue_worker_candidate": "owner-private-worker-candidate-attestation",
+    "audience_attestation.fresh_worker_candidate_available": "owner-private-worker-candidate-catalogue",
+    "audience_attestation.authorize_worker_candidate_call": "owner-private-worker-call-authorization",
+    "audience_attestation.revoke_worker_candidate_call": "owner-private-worker-call-revocation",
+    "audience_attestation.claim_worker_candidate": "owner-private-worker-candidate-claim",
+    "audience_attestation.release_worker_candidate_claim": "owner-private-worker-candidate-release",
+    "audience_attestation._private_directory": "owner-private-audience-directory",
+    "audience_attestation._key": "owner-private-audience-signing-key",
 }
 
 

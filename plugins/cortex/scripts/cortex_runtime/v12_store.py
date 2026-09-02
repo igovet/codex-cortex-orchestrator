@@ -103,8 +103,18 @@ _ASSIGNMENT_SCOPE_SNAPSHOT_MIGRATION_VERSION = 23
 _ASSIGNMENT_SCOPE_SNAPSHOT_MIGRATION_NAME = "v23-immutable-assignment-scope"
 _OUTCOME_LINKAGE_MIGRATION_VERSION = 24
 _OUTCOME_LINKAGE_MIGRATION_NAME = "v24-outcome-linked-contract"
+_ASSIGNMENT_PAGE_RECEIPT_MIGRATION_VERSION = 25
+_ASSIGNMENT_PAGE_RECEIPT_MIGRATION_NAME = "v25-assignment-page-receipts"
+_ASSIGNMENT_LOSS_MIGRATION_VERSION = 26
+_ASSIGNMENT_LOSS_MIGRATION_NAME = "v26-explicit-assignment-loss-lineage"
 _DISPATCH_LEASE_SECONDS = 300
-_STORAGE_ADMISSION_BUDGET_SECONDS = 0.8
+# Admission covers descriptor locking, WAL negotiation, schema readiness,
+# canonical transaction work, and reconstructible locator convergence.  A
+# sub-second budget is too small on loaded CI hosts and can surface a false
+# terminal ``storage_busy`` even though the identical concurrent command is
+# already converging. Keep the wait bounded, but long enough for the maximum
+# supported local worker fan-out to serialize safely.
+_STORAGE_ADMISSION_BUDGET_SECONDS = 5.0
 _ADMISSION_DEADLINE: ContextVar[float | None] = ContextVar("cortex_v12_admission_deadline", default=None)
 _SQLITE_ADMISSION_LOCKS: dict[str, threading.RLock] = {}
 _SQLITE_ADMISSION_LOCKS_GUARD = threading.RLock()
@@ -1550,6 +1560,8 @@ class V12Store:
                         self._migrate_dispatch_lease(connection)
                         self._migrate_assignment_scope_snapshots(connection)
                         self._migrate_outcome_linkage(connection)
+                        self._migrate_assignment_page_receipts(connection)
+                        self._migrate_assignment_losses(connection)
                         self._validate_existing(connection)
                         self._timeline_backfilled_tasks = self._backfill_task_timelines(connection)
                     except BaseException:
@@ -1585,6 +1597,8 @@ class V12Store:
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_DISPATCH_LEASE_MIGRATION_VERSION, _DISPATCH_LEASE_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_ASSIGNMENT_SCOPE_SNAPSHOT_MIGRATION_VERSION, _ASSIGNMENT_SCOPE_SNAPSHOT_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_OUTCOME_LINKAGE_MIGRATION_VERSION, _OUTCOME_LINKAGE_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_ASSIGNMENT_PAGE_RECEIPT_MIGRATION_VERSION, _ASSIGNMENT_PAGE_RECEIPT_MIGRATION_NAME, _now()))
+                        connection.execute("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)", (_ASSIGNMENT_LOSS_MIGRATION_VERSION, _ASSIGNMENT_LOSS_MIGRATION_NAME, _now()))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_hash', ?)", (self.project_hash,))
                         connection.execute("INSERT INTO v12_metadata(key,value) VALUES ('project_root_digest', ?)", (hashlib.sha256(str(self.project_root).encode("utf-8")).hexdigest(),))
                     except BaseException:
@@ -2521,6 +2535,139 @@ class V12Store:
         except sqlite3.DatabaseError as exc:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
 
+    def _migrate_assignment_page_receipts(self, connection: sqlite3.Connection) -> None:
+        """Add immutable receipts for server-owned assignment pages.
+
+        Report-chunk receipts prove predecessor-evidence consumption, but they
+        cannot prove that the surrounding assignment authority was delivered
+        completely or in order.  This separate ledger records only immutable
+        page digests and private positions; it never stores page bodies,
+        public cursors, or worker bearer material.
+        """
+        row = connection.execute(
+            "SELECT name FROM schema_migrations WHERE version=?",
+            (_ASSIGNMENT_PAGE_RECEIPT_MIGRATION_VERSION,),
+        ).fetchone()
+        if row is not None:
+            if str(row[0]) != _ASSIGNMENT_PAGE_RECEIPT_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        previous = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if previous is None or int(previous[0]) != _OUTCOME_LINKAGE_MIGRATION_VERSION:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        tables = {
+            str(value[0])
+            for value in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "assignment_page_receipts" in tables:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            connection.execute(
+                "CREATE TABLE assignment_page_receipts("
+                "receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "project_hash TEXT NOT NULL,"
+                "task_id TEXT NOT NULL REFERENCES tasks(task_id),"
+                "assignment_id TEXT NOT NULL REFERENCES delegations(delegation_id),"
+                "snapshot_digest TEXT NOT NULL,"
+                "phase TEXT NOT NULL,"
+                "private_position INTEGER NOT NULL,"
+                "page_digest TEXT NOT NULL,"
+                "returned_content_bytes INTEGER NOT NULL,"
+                "has_more INTEGER NOT NULL,"
+                "created_at TEXT NOT NULL,"
+                "created_sequence INTEGER NOT NULL,"
+                "CHECK(phase IN ('complete','authority','evidence')),"
+                "UNIQUE(assignment_id,snapshot_digest,phase,private_position))"
+            )
+            connection.execute(
+                "CREATE INDEX assignment_page_task_sequence "
+                "ON assignment_page_receipts(task_id,created_sequence)"
+            )
+            connection.execute(
+                "CREATE INDEX assignment_page_assignment_position "
+                "ON assignment_page_receipts(assignment_id,phase,private_position)"
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)",
+                (
+                    _ASSIGNMENT_PAGE_RECEIPT_MIGRATION_VERSION,
+                    _ASSIGNMENT_PAGE_RECEIPT_MIGRATION_NAME,
+                    _now(),
+                ),
+            )
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
+    def _migrate_assignment_losses(self, connection: sqlite3.Connection) -> None:
+        """Add immutable evidence for an explicitly abandoned worker lease.
+
+        Loss is never inferred from a reconnect, timeout, copied locator, or
+        absent host event.  A coordinator may replace a nonterminal worker
+        only by recording one blocked/aborted reason and bounded evidence in
+        the same transaction that creates its linked successor.
+        """
+        row = connection.execute(
+            "SELECT name FROM schema_migrations WHERE version=?",
+            (_ASSIGNMENT_LOSS_MIGRATION_VERSION,),
+        ).fetchone()
+        if row is not None:
+            if str(row[0]) != _ASSIGNMENT_LOSS_MIGRATION_NAME:
+                raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+            return
+        previous = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if previous is None or int(previous[0]) != _ASSIGNMENT_PAGE_RECEIPT_MIGRATION_VERSION:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        tables = {
+            str(value[0])
+            for value in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "assignment_losses" in tables:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
+        try:
+            connection.execute(
+                "CREATE TABLE assignment_losses("
+                "loss_id TEXT PRIMARY KEY,"
+                "project_hash TEXT NOT NULL,"
+                "task_id TEXT NOT NULL REFERENCES tasks(task_id),"
+                "assignment_id TEXT NOT NULL REFERENCES delegations(delegation_id),"
+                "successor_assignment_id TEXT NOT NULL,"
+                "terminal_state TEXT NOT NULL,"
+                "reason TEXT NOT NULL,"
+                "evidence_json TEXT NOT NULL,"
+                "evidence_digest TEXT NOT NULL,"
+                "created_at TEXT NOT NULL,"
+                "created_sequence INTEGER NOT NULL,"
+                "CHECK(terminal_state IN ('blocked','aborted')),"
+                "UNIQUE(assignment_id),"
+                "UNIQUE(successor_assignment_id))"
+            )
+            connection.execute(
+                "CREATE INDEX assignment_loss_task_sequence "
+                "ON assignment_losses(task_id,created_sequence)"
+            )
+            connection.execute(
+                "CREATE TRIGGER assignment_loss_no_update BEFORE UPDATE ON assignment_losses "
+                "BEGIN SELECT RAISE(ABORT,'assignment loss records are immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER assignment_loss_no_delete BEFORE DELETE ON assignment_losses "
+                "BEGIN SELECT RAISE(ABORT,'assignment loss records are immutable'); END"
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (?, ?, ?)",
+                (_ASSIGNMENT_LOSS_MIGRATION_VERSION, _ASSIGNMENT_LOSS_MIGRATION_NAME, _now()),
+            )
+        except sqlite3.DatabaseError as exc:
+            raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported") from exc
+
     def _validate_existing(self, connection: sqlite3.Connection) -> None:
         if int(connection.execute("PRAGMA application_id").fetchone()[0]) != _APPLICATION_ID or int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
             raise V12StoreError("V12 database schema is unsupported", code="schema_unsupported")
@@ -2551,6 +2698,8 @@ class V12Store:
             (_DISPATCH_LEASE_MIGRATION_VERSION, _DISPATCH_LEASE_MIGRATION_NAME),
             (_ASSIGNMENT_SCOPE_SNAPSHOT_MIGRATION_VERSION, _ASSIGNMENT_SCOPE_SNAPSHOT_MIGRATION_NAME),
             (_OUTCOME_LINKAGE_MIGRATION_VERSION, _OUTCOME_LINKAGE_MIGRATION_NAME),
+            (_ASSIGNMENT_PAGE_RECEIPT_MIGRATION_VERSION, _ASSIGNMENT_PAGE_RECEIPT_MIGRATION_NAME),
+            (_ASSIGNMENT_LOSS_MIGRATION_VERSION, _ASSIGNMENT_LOSS_MIGRATION_NAME),
         ] or metadata is None or str(metadata[0]) != self.project_hash:
             raise V12StoreError("reference belongs to another project", code="cross_project_reference")
         required_columns = {
@@ -2575,6 +2724,8 @@ class V12Store:
             "effective_contract_item_details": {"item_id", "details_json", "source_decision_id"},
             "delegation_outcome_assignments": {"delegation_id", "item_id", "assignment_role", "revision", "superseded_by_delegation_id", "superseded_sequence"},
             "assignment_scope_snapshots": {"assignment_id", "task_id", "item_id", "assignment_role", "contract_revision", "created_sequence"},
+            "assignment_page_receipts": {"receipt_id", "project_hash", "task_id", "assignment_id", "snapshot_digest", "phase", "private_position", "page_digest", "returned_content_bytes", "has_more", "created_at", "created_sequence"},
+            "assignment_losses": {"loss_id", "project_hash", "task_id", "assignment_id", "successor_assignment_id", "terminal_state", "reason", "evidence_json", "evidence_digest", "created_at", "created_sequence"},
             "report_contract_coverage": {"report_id", "item_id", "status", "verification_json"},
         }
         for table, columns in required_columns.items():
@@ -3204,6 +3355,8 @@ class V12Store:
         CREATE TABLE effective_contract_item_details(item_id TEXT PRIMARY KEY REFERENCES effective_contract_items(item_id),details_json TEXT NOT NULL,source_decision_id TEXT REFERENCES user_decisions(decision_id));
         CREATE TABLE delegation_outcome_assignments(delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),assignment_role TEXT NOT NULL,revision INTEGER NOT NULL,superseded_by_delegation_id TEXT REFERENCES delegations(delegation_id),superseded_sequence INTEGER,PRIMARY KEY(delegation_id,item_id,assignment_role));
         CREATE TABLE assignment_scope_snapshots(assignment_id TEXT NOT NULL REFERENCES delegations(delegation_id),task_id TEXT NOT NULL REFERENCES tasks(task_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),assignment_role TEXT NOT NULL,contract_revision INTEGER NOT NULL,created_sequence INTEGER NOT NULL,PRIMARY KEY(assignment_id,item_id,assignment_role));
+        CREATE TABLE assignment_page_receipts(receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),assignment_id TEXT NOT NULL REFERENCES delegations(delegation_id),snapshot_digest TEXT NOT NULL,phase TEXT NOT NULL,private_position INTEGER NOT NULL,page_digest TEXT NOT NULL,returned_content_bytes INTEGER NOT NULL,has_more INTEGER NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,CHECK(phase IN ('complete','authority','evidence')),UNIQUE(assignment_id,snapshot_digest,phase,private_position));
+        CREATE TABLE assignment_losses(loss_id TEXT PRIMARY KEY,project_hash TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(task_id),assignment_id TEXT NOT NULL REFERENCES delegations(delegation_id),successor_assignment_id TEXT NOT NULL,terminal_state TEXT NOT NULL,reason TEXT NOT NULL,evidence_json TEXT NOT NULL,evidence_digest TEXT NOT NULL,created_at TEXT NOT NULL,created_sequence INTEGER NOT NULL,CHECK(terminal_state IN ('blocked','aborted')),UNIQUE(assignment_id),UNIQUE(successor_assignment_id));
         CREATE TABLE report_contract_coverage(report_id TEXT NOT NULL REFERENCES reports(report_id),item_id TEXT NOT NULL REFERENCES effective_contract_items(item_id),status TEXT NOT NULL,verification_json TEXT NOT NULL,PRIMARY KEY(report_id,item_id));
         CREATE TABLE report_operations(operation_id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(task_id),delegation_id TEXT NOT NULL REFERENCES delegations(delegation_id),kind TEXT NOT NULL,payload_digest TEXT NOT NULL,report_id TEXT NOT NULL REFERENCES reports(report_id),created_at TEXT NOT NULL,UNIQUE(delegation_id,kind));
         CREATE TABLE idempotency(operation TEXT NOT NULL,idempotency_key TEXT NOT NULL,payload_digest TEXT NOT NULL,result_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(operation,idempotency_key));
@@ -3233,6 +3386,9 @@ class V12Store:
         CREATE UNIQUE INDEX outcome_owned_current ON delegation_outcome_assignments(item_id) WHERE assignment_role='owned' AND superseded_by_delegation_id IS NULL;
         CREATE INDEX outcome_assignment_current ON delegation_outcome_assignments(item_id,assignment_role,superseded_by_delegation_id);
         CREATE INDEX assignment_scope_task_revision ON assignment_scope_snapshots(task_id,contract_revision,assignment_id);
+        CREATE INDEX assignment_page_task_sequence ON assignment_page_receipts(task_id,created_sequence);
+        CREATE INDEX assignment_page_assignment_position ON assignment_page_receipts(assignment_id,phase,private_position);
+        CREATE INDEX assignment_loss_task_sequence ON assignment_losses(task_id,created_sequence);
         CREATE INDEX outcome_items_task_current ON effective_contract_items(task_id,retired_revision,category,ordinal);
         """
         for statement in statements.split(";"):
@@ -3244,6 +3400,8 @@ class V12Store:
             "CREATE TRIGGER report_chunks_no_update BEFORE UPDATE ON report_chunks BEGIN SELECT RAISE(ABORT,'report chunks are immutable'); END",
             "CREATE TRIGGER assignment_scope_no_update BEFORE UPDATE ON assignment_scope_snapshots BEGIN SELECT RAISE(ABORT,'assignment scope snapshots are immutable'); END",
             "CREATE TRIGGER assignment_scope_no_delete BEFORE DELETE ON assignment_scope_snapshots BEGIN SELECT RAISE(ABORT,'assignment scope snapshots are immutable'); END",
+            "CREATE TRIGGER assignment_loss_no_update BEFORE UPDATE ON assignment_losses BEGIN SELECT RAISE(ABORT,'assignment loss records are immutable'); END",
+            "CREATE TRIGGER assignment_loss_no_delete BEFORE DELETE ON assignment_losses BEGIN SELECT RAISE(ABORT,'assignment loss records are immutable'); END",
             "CREATE TRIGGER report_chunks_no_delete BEFORE DELETE ON report_chunks BEGIN SELECT RAISE(ABORT,'report chunks are immutable'); END",
             "CREATE TRIGGER decisions_no_update BEFORE UPDATE ON user_decisions BEGIN SELECT RAISE(ABORT,'decisions are append-only'); END",
             "CREATE TRIGGER decisions_no_delete BEFORE DELETE ON user_decisions BEGIN SELECT RAISE(ABORT,'decisions are append-only'); END",
@@ -4204,26 +4362,64 @@ class V12Store:
             statuses = {str(row["claim_status"]) for row in claims}
             if owner is None:
                 status, reason = "missing", "no_owned_delegation"
+                ownership = "unowned"
+                delivery_assignability = "assignable"
             elif not claims:
                 status, reason = "missing", "no_finalized_coverage"
+                ownership = "owned"
+                delivery_assignability = "loss_recovery_only"
             elif len(statuses) > 1:
                 status, reason = "contradictory", "conflicting_claims"
+                ownership = "owned"
+                delivery_assignability = "not_assignable_terminal_owner"
             elif "not_applicable" in statuses:
                 status, reason = "stale", "not_applicable_claim"
+                ownership = "owned"
+                delivery_assignability = "not_assignable_terminal_owner"
             elif any(str(row["report_status"]) != "completed" for row in claims):
                 status, reason = "partial", "non_completed_report"
+                ownership = "owned"
+                delivery_assignability = "not_assignable_terminal_owner"
             elif "partial" in statuses:
                 status, reason = "partial", "partial_claim"
+                ownership = "owned"
+                delivery_assignability = "not_assignable_terminal_owner"
             elif "unverified" in statuses or any(not _load_json(str(row["verification_json"]), label="coverage verification") for row in claims):
                 status, reason = "unverified", "unverified_claim"
+                ownership = "owned"
+                delivery_assignability = "not_assignable_terminal_owner"
             else:
                 status, reason = "complete", "current_verified_claim"
+                ownership = "owned"
+                delivery_assignability = "not_assignable_terminal_owner"
             current_ids = {str(row["report_id"]) for row in claims}
-            rows.append({
-                "item_ref": item["item_ref"], "status": status, "reason": reason,
+            projected = {
+                # Keep the exact semantic outcome beside its disposition.  The
+                # public adapter strips the private item_ref but preserves this
+                # safe mapping, so coordinators never infer ownership from row
+                # position after steering reorders or extends the contract.
+                "item_ref": item["item_ref"], "outcome": item["text"],
+                "status": status, "reason": reason,
+                "ownership": ownership,
+                "delivery_assignability": delivery_assignability,
                 "report_refs": [record_ref(str(row["report_id"])) for row in claims],
                 "superseded_report_refs": [record_ref(str(row["report_id"])) for row in all_claims if str(row["report_id"]) not in current_ids],
-            })
+            }
+            if delivery_assignability == "loss_recovery_only" and owner is not None:
+                recoverable = connection.execute(
+                    "SELECT i.text FROM delegation_outcome_assignments a "
+                    "JOIN effective_contract_items i ON i.item_id=a.item_id "
+                    "WHERE a.delegation_id=? AND a.assignment_role='owned' "
+                    "AND a.superseded_by_delegation_id IS NULL "
+                    "AND i.task_id=? AND i.created_revision<=? "
+                    "AND (i.retired_revision IS NULL OR i.retired_revision>?) "
+                    "ORDER BY i.category,i.ordinal,i.item_id",
+                    (str(owner["delegation_id"]), task_id, contract["revision"], contract["revision"]),
+                ).fetchall()
+                projected["loss_recovery_outcomes"] = [
+                    str(recoverable_row["text"]) for recoverable_row in recoverable
+                ]
+            rows.append(projected)
         statuses = {str(row["status"]) for row in rows}
         if rows and statuses == {"complete"}:
             overall = "ready"
@@ -4231,7 +4427,31 @@ class V12Store:
             overall = "ready_with_risks"
         else:
             overall = "rework"
-        return {"status": overall, "items": rows}
+        delivery_outcomes = [
+            str(row["outcome"]) for row in rows
+            if row["delivery_assignability"] == "assignable"
+        ]
+        evidence_outcomes = [str(row["outcome"]) for row in rows]
+        terminal_outcomes = [
+            str(row["outcome"]) for row in rows
+            if row["delivery_assignability"] == "not_assignable_terminal_owner"
+        ]
+        return {
+            "status": overall,
+            "items": rows,
+            # Canonical model-visible selectors remove the need to infer a
+            # valid assignment scope from coverage rows or their ordering.
+            "assignment_scope": {
+                "planning": "complete_current_contract_server_derived",
+                "delivery_outcomes": delivery_outcomes,
+                "evidence_outcomes": evidence_outcomes,
+                "terminal_rework": (
+                    "steering_revision_required"
+                    if terminal_outcomes else "not_applicable"
+                ),
+                "terminal_outcomes": terminal_outcomes,
+            },
+        }
 
     def _conformance_review(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
         """Build advisory closure evidence from immutable current-ledger records.
@@ -4438,7 +4658,31 @@ class V12Store:
             return {"task": self._task(connection, identifier)}
         return self._mutation("create_task", payload, idempotency_key, write)
 
-    def create_delegation(self, *, task_id: Any, objective: Any, role: Any, profile_name: Any, scope: Any, instructions: Any, delegation_id: Any = None, parent_delegation_id: Any = None, input_report_ids: Any = None, input_decision_ids: Any = None, outcome_assignments: Any = None, model: Any = None, reasoning_effort: Any = None, idempotency_key: Any = None, bootstrap_provenance: Mapping[str, Any] | None = None, derive_assignment_scope: bool = False, assignment_policy: Any = None) -> tuple[dict[str, Any], bool]:
+    def active_owner_for_outcomes(self, *, task_id: Any, outcome_items: Any) -> str:
+        """Resolve one exact current owner for an explicit recovery scope."""
+        anchor = self._task_identifier(task_id)
+        if not isinstance(outcome_items, list) or not outcome_items:
+            raise V12StoreError("loss recovery outcome scope is invalid", code="invalid_argument")
+        def read(connection: sqlite3.Connection) -> str:
+            self._task(connection, anchor)
+            item_ids = [self._outcome_item_id(connection, anchor, item) for item in outcome_items]
+            rows = connection.execute(
+                "SELECT item_id,delegation_id FROM delegation_outcome_assignments "
+                "WHERE assignment_role='owned' AND superseded_by_delegation_id IS NULL "
+                f"AND item_id IN ({','.join('?' for _ in item_ids)})",
+                tuple(item_ids),
+            ).fetchall()
+            owners = {str(row["delegation_id"]) for row in rows}
+            covered = {str(row["item_id"]) for row in rows}
+            if len(owners) != 1 or covered != set(item_ids):
+                raise V12StoreError(
+                    "loss recovery scope does not identify one active assignment",
+                    code="assignment_loss_scope_conflict",
+                )
+            return next(iter(owners))
+        return self._read(read)
+
+    def create_delegation(self, *, task_id: Any, objective: Any, role: Any, profile_name: Any, scope: Any, instructions: Any, delegation_id: Any = None, parent_delegation_id: Any = None, input_report_ids: Any = None, input_decision_ids: Any = None, outcome_assignments: Any = None, model: Any = None, reasoning_effort: Any = None, idempotency_key: Any = None, bootstrap_provenance: Mapping[str, Any] | None = None, derive_assignment_scope: bool = False, assignment_policy: Any = None, loss_recovery: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
         try:
             selection = validate_model_selection(model, reasoning_effort)
         except ValueError as exc:
@@ -4460,7 +4704,20 @@ class V12Store:
         resolved_policy = packaged_profile_assignment_policy(profile_name) if assignment_policy is None else assignment_policy
         if resolved_policy not in {"owner", "review", "planning"}:
             raise V12StoreError("assignment responsibility is invalid", code="invalid_argument", details={"field": "assignment_policy"})
-        payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "outcome_assignments": assignments, "model": selection.model, "reasoning_effort": selection.reasoning_effort, "derive_assignment_scope": derive_assignment_scope, "assignment_policy": resolved_policy}
+        normalized_loss = None
+        if loss_recovery is not None:
+            if not isinstance(loss_recovery, Mapping) or set(loss_recovery) != {"state", "reason", "evidence"}:
+                raise V12StoreError("assignment loss recovery is invalid", code="invalid_argument", details={"field": "loss_recovery"})
+            state = loss_recovery.get("state")
+            evidence = _contract_text_list(loss_recovery.get("evidence"), label="loss_recovery.evidence")
+            if state not in {"blocked", "aborted"}:
+                raise V12StoreError("assignment loss state is invalid", code="invalid_argument", details={"field": "loss_recovery.state"})
+            normalized_loss = {
+                "state": str(state),
+                "reason": _opaque_text(loss_recovery.get("reason"), label="loss_recovery.reason", maximum=TASK_CONTRACT_ITEM_MAX_LENGTH),
+                "evidence": evidence,
+            }
+        payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "outcome_assignments": assignments, "model": selection.model, "reasoning_effort": selection.reasoning_effort, "derive_assignment_scope": derive_assignment_scope, "assignment_policy": resolved_policy, "loss_recovery": normalized_loss}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
             # Public/domain assignments carry ``derive_assignment_scope``.
@@ -4481,9 +4738,12 @@ class V12Store:
                     )
                 if str(payload["assignment_policy"]) == "owner" and str(assessment["mode"]) in {"light", "full"}:
                     plan = connection.execute(
-                        "SELECT report_id,content_digest,review_policy FROM reports "
-                        "WHERE project_hash=? AND task_id=? AND report_type='plan' "
-                        "AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+                        "SELECT DISTINCT r.report_id,r.content_digest,r.review_policy FROM reports r "
+                        "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
+                        "WHERE r.project_hash=? AND r.task_id=? AND r.report_type='plan' "
+                        "AND r.assembly_state='finalized' AND s.assignment_role='planning' "
+                        "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=r.task_id) "
+                        "ORDER BY r.created_sequence DESC LIMIT 1",
                         (self.project_hash, task["task_id"]),
                     ).fetchone()
                     decision = None if plan is None else connection.execute(
@@ -4508,34 +4768,40 @@ class V12Store:
                 input_reports.append(report)
             for decision_id in payload["input_decision_ids"]:
                 self._decision(connection, decision_id, task_id=task["task_id"])
-            predecessor = self._inferred_assignment_predecessor(
-                connection,
-                task_id=str(task["task_id"]),
-                profile_name=str(payload["profile_name"]),
-                input_report_ids=list(payload["input_report_ids"]),
-                input_decision_ids=list(payload["input_decision_ids"]),
-                explicit_parent_delegation_id=payload["parent_delegation_id"],
-                assignment_policy=str(payload["assignment_policy"]),
+            # Loss recovery already resolves the unique current owner from the
+            # exact advertised outcome scope before entering this transaction.
+            # Broad report policies may legitimately include finalized reports
+            # from other owners, while the lost predecessor necessarily has no
+            # terminal report.  Do not let those unrelated input authors
+            # override or conflict with the exact recovery parent.
+            predecessor = (
+                None
+                if (
+                    payload["loss_recovery"] is not None
+                    and payload["parent_delegation_id"] is not None
+                )
+                else self._inferred_assignment_predecessor(
+                    connection,
+                    task_id=str(task["task_id"]),
+                    profile_name=str(payload["profile_name"]),
+                    input_report_ids=list(payload["input_report_ids"]),
+                    input_decision_ids=list(payload["input_decision_ids"]),
+                    explicit_parent_delegation_id=payload["parent_delegation_id"],
+                    assignment_policy=str(payload["assignment_policy"]),
+                )
             )
             if predecessor is not None and payload["parent_delegation_id"] is None:
                 payload["parent_delegation_id"] = str(predecessor["delegation_id"])
             if payload["parent_delegation_id"] is not None:
                 self._delegation(connection, payload["parent_delegation_id"], task_id=task["task_id"])
-                # A successful server-side assignment mint owns a dispatch
-                # lease until the worker consumes it.  Host-side absence of a
-                # SubagentStart correlation event is not evidence that this
-                # lease ended, so parent-linked rework is rejected atomically
-                # while the lease remains active.
-                self._reconcile_dispatch_lease_in_transaction(
-                    connection, task_id=str(task["task_id"]),
-                    assignment_id=str(payload["parent_delegation_id"]),
+            elif payload["loss_recovery"] is not None:
+                raise V12StoreError(
+                    "assignment loss recovery requires one exact predecessor",
+                    code="assignment_loss_scope_conflict",
                 )
-            # A host dispatch can commit and then lose its response before
-            # SubagentStart is observed.  Mutation-digest replay covers
-            # byte-identical requests, but a resend may contain incidental
-            # wording changes.  Reconcile by stable execution boundary only
-            # after deriving the exact requested outcome scope: role/profile
-            # similarity must never replay an assignment for another outcome.
+            # Mutation-digest replay covers byte-identical requests. A
+            # non-identical replacement is admitted only after deriving exact
+            # outcome scope and recording explicit loss evidence below.
             current_revision = self._effective_contract(connection, str(task["task_id"]))["revision"]
             assignment_ids = {kind: [self._outcome_item_id(connection, str(task["task_id"]), item) for item in values] for kind, values in payload["outcome_assignments"].items()}
             parent_owned: set[str] = set()
@@ -4664,6 +4930,14 @@ class V12Store:
             identifier = str(payload["delegation_id"] or new_sharded_id("delegation", self.project_hash))
             if connection.execute("SELECT 1 FROM delegations WHERE delegation_id=?", (identifier,)).fetchone() is not None:
                 raise V12StoreError("delegation_id already exists", code="delegation_exists")
+            if payload["parent_delegation_id"] is not None:
+                self._reconcile_dispatch_lease_in_transaction(
+                    connection,
+                    task_id=str(task["task_id"]),
+                    assignment_id=str(payload["parent_delegation_id"]),
+                    successor_assignment_id=identifier,
+                    loss_recovery=payload["loss_recovery"],
+                )
             dispatch_marker = "dc_" + uuid.uuid4().hex
             dispatch_marker_digest = "sha256:" + hashlib.sha256(dispatch_marker.encode("utf-8")).hexdigest()
             base_native_name = self._next_native_task_name(
@@ -4771,14 +5045,15 @@ class V12Store:
 
     def _reconcile_dispatch_lease_in_transaction(
         self, connection: sqlite3.Connection, *, task_id: str, assignment_id: str,
+        successor_assignment_id: str, loss_recovery: Mapping[str, Any] | None,
     ) -> str | None:
-        """Reconcile one parent lease before allowing a replacement.
+        """Require explicit durable loss evidence for a nonterminal worker.
 
-        The row read is the authoritative, read-only reconciliation point:
-        ``consumed`` means the worker has started and replacement is allowed;
-        ``minted`` means the dispatch is still owned and replacement is
-        denied; an expired ``minted`` row is explicitly marked ``stale`` and
-        only then may a replacement proceed.  No host telemetry is consulted.
+        Expiry, reconnect, copied locators, and missing lifecycle observations
+        are deliberately insufficient.  A finalized predecessor can have an
+        ordinary linked successor.  Every other minted/consumed/stale worker
+        lease requires a single immutable blocked/aborted record linked to the
+        successor being created in this same SQLite transaction.
         """
         rows = connection.execute(
             "SELECT capability_ref,state,lease_expires_at FROM worker_capabilities "
@@ -4786,30 +5061,95 @@ class V12Store:
             (task_id, assignment_id),
         ).fetchall()
         if not rows:
-            return None
-        expired = []
-        for row in rows:
-            if str(row["state"]) != "minted":
-                continue
-            if not self._lease_expired(row["lease_expires_at"]):
+            if loss_recovery is not None:
                 raise V12StoreError(
-                    "parent assignment still owns an active dispatch lease",
-                    code="dispatch_lease_active",
-                    details={"assignment_id": assignment_id},
+                    "assignment loss recovery has no worker lease",
+                    code="assignment_loss_scope_conflict",
                 )
-            expired.append(row)
-        for row in expired:
-            self._timeline(
-                connection, event_type="dispatch_lease_expired", entity_type="delegation",
-                entity_id=assignment_id, task_id=task_id, delegation_id=assignment_id,
-                payload={"assignment_id": assignment_id, "capability_ref": str(row["capability_ref"])},
+            return None
+        terminal = connection.execute(
+            "SELECT 1 FROM reports WHERE task_id=? AND delegation_id=? "
+            "AND assembly_state='finalized' LIMIT 1",
+            (task_id, assignment_id),
+        ).fetchone()
+        if terminal is not None:
+            if loss_recovery is not None:
+                raise V12StoreError(
+                    "a finalized assignment cannot be recorded as lost",
+                    code="assignment_loss_conflict",
+                )
+            return "terminal"
+        if loss_recovery is None:
+            active = any(
+                str(row["state"]) == "minted"
+                and not self._lease_expired(row["lease_expires_at"])
+                for row in rows
             )
-            connection.execute(
-                "UPDATE worker_capabilities SET state='stale',updated_at=? "
-                "WHERE capability_ref=? AND state='minted'",
-                (_now(), str(row["capability_ref"])),
+            raise V12StoreError(
+                "parent assignment still owns an active dispatch lease"
+                if active else
+                "nonterminal assignment replacement requires explicit loss evidence",
+                code="dispatch_lease_active" if active else "assignment_loss_unrecorded",
+                details={"assignment_id": assignment_id},
             )
-        return "stale" if expired else str(rows[0]["state"])
+        existing = connection.execute(
+            "SELECT successor_assignment_id,terminal_state,reason,evidence_digest "
+            "FROM assignment_losses WHERE assignment_id=?",
+            (assignment_id,),
+        ).fetchone()
+        evidence_json = _canonical_json(loss_recovery["evidence"], label="loss_recovery.evidence")
+        evidence_digest = "sha256:" + hashlib.sha256(evidence_json.encode("utf-8")).hexdigest()
+        if existing is not None:
+            exact = (
+                str(existing["successor_assignment_id"]) == successor_assignment_id
+                and str(existing["terminal_state"]) == str(loss_recovery["state"])
+                and str(existing["reason"]) == str(loss_recovery["reason"])
+                and str(existing["evidence_digest"]) == evidence_digest
+            )
+            if exact:
+                return "loss_replayed"
+            raise V12StoreError(
+                "assignment loss record conflicts with an existing successor",
+                code="assignment_loss_conflict",
+            )
+        sequence = self._timeline(
+            connection,
+            event_type="assignment_loss_recorded",
+            entity_type="delegation",
+            entity_id=assignment_id,
+            task_id=task_id,
+            delegation_id=assignment_id,
+            payload={
+                "assignment_id": assignment_id,
+                "successor_assignment_id": successor_assignment_id,
+                "terminal_state": loss_recovery["state"],
+                "reason_digest": "sha256:" + hashlib.sha256(str(loss_recovery["reason"]).encode("utf-8")).hexdigest(),
+                "evidence_digest": evidence_digest,
+            },
+        )
+        connection.execute(
+            "INSERT INTO assignment_losses(loss_id,project_hash,task_id,assignment_id,successor_assignment_id,terminal_state,reason,evidence_json,evidence_digest,created_at,created_sequence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "loss-" + uuid.uuid4().hex,
+                self.project_hash,
+                task_id,
+                assignment_id,
+                successor_assignment_id,
+                loss_recovery["state"],
+                loss_recovery["reason"],
+                evidence_json,
+                evidence_digest,
+                _now(),
+                sequence,
+            ),
+        )
+        connection.execute(
+            "UPDATE worker_capabilities SET state='stale',updated_at=? "
+            "WHERE task_id=? AND assignment_id=? AND state IN ('minted','consumed')",
+            (_now(), task_id, assignment_id),
+        )
+        return str(loss_recovery["state"])
 
     def mint_worker_bootstrap(
         self, *, task_id: Any, assignment_id: Any, contract_revision: Any,
@@ -4896,6 +5236,17 @@ class V12Store:
             )
         return self._write(write)
 
+    def worker_capability_state(self, *, task_id: Any, assignment_id: Any) -> str | None:
+        """Return the latest assignment capability state without consuming it."""
+        task_key = self._task_identifier(task_id)
+        assignment_key = self._record_identifier(assignment_id, label="assignment_id")
+        row = self._read(lambda connection: connection.execute(
+            "SELECT state FROM worker_capabilities WHERE task_id=? AND assignment_id=? "
+            "ORDER BY created_sequence DESC LIMIT 1",
+            (task_key, assignment_key),
+        ).fetchone())
+        return str(row["state"]) if row is not None else None
+
     def _consume_worker_bootstrap_row(
         self, connection: sqlite3.Connection, *, row: sqlite3.Row | None,
         capability_key: str, task_key: str, assignment_key: str,
@@ -4907,11 +5258,11 @@ class V12Store:
         expected = (self.project_hash, task_key, assignment_key, revision, *digests)
         actual = tuple(row[name] for name in ("project_hash", "task_id", "assignment_id", "contract_revision", "build_digest", "candidate_digest", "source_digest", "catalogue_digest", "dispatch_digest"))
         if actual != expected:
-            raise V12StoreError("worker capability is stale or belongs to another scope", code="capability_stale")
+            raise V12StoreError("worker capability is stale or belongs to another scope", code="assignment_stale")
         if str(row["state"]) == "consumed":
             return {"continuation": str(row["continuation_ref"]), "assignment_id": assignment_key, "task_id": task_key, "state": "consumed", "replayed": True}
         if str(row["state"]) != "minted":
-            raise V12StoreError("worker capability is not consumable", code="capability_conflict")
+            raise V12StoreError("worker capability is not consumable", code="assignment_stale")
         continuation = "wc_" + uuid.uuid4().hex
         sequence = self._timeline(connection, event_type="worker_bootstrap_consumed", entity_type="delegation", entity_id=assignment_key, task_id=task_key, delegation_id=assignment_key, payload={"assignment_id": assignment_key, "capability_digest": str(row["capability_digest"])})
         now = _now()
@@ -4969,9 +5320,151 @@ class V12Store:
                 (continuation_key,),
             ).fetchone()
             if row is None or str(row["state"]) != "consumed":
-                raise V12StoreError("worker continuation is invalid", code="capability_stale")
+                raise V12StoreError("worker continuation is invalid", code="assignment_stale")
             return {"continuation": continuation_key, "task_id": str(row["task_id"]), "assignment_id": str(row["assignment_id"]), "contract_revision": int(row["contract_revision"]), "state": "consumed"}
         return self._read(read)
+
+    def record_assignment_page_receipt(
+        self, *, task_id: Any, assignment_id: Any,
+        snapshot_digest: Any, phase: Any, private_position: Any,
+        page_digest: Any, returned_content_bytes: Any, has_more: Any,
+    ) -> dict[str, Any]:
+        """Record or reconcile one exact deterministic assignment page.
+
+        The position is private server state.  It is accepted only in strict
+        sequence for one immutable snapshot, and an exact repeated page is a
+        read reconciliation rather than another authority grant or timeline
+        mutation.
+        """
+        task_key = self._task_identifier(task_id)
+        assignment_key = self._record_identifier(assignment_id, label="assignment_id")
+        snapshot_key = _digest(snapshot_digest, label="snapshot_digest", required=True)
+        page_key = _digest(page_digest, label="page_digest", required=True)
+        if phase not in {"complete", "authority", "evidence"}:
+            raise V12StoreError(
+                "assignment page phase is invalid", code="invalid_argument",
+                details={"field": "phase"},
+            )
+        if (
+            not isinstance(private_position, int)
+            or isinstance(private_position, bool)
+            or private_position < 0
+        ):
+            raise V12StoreError(
+                "assignment page position is invalid", code="invalid_argument",
+                details={"field": "private_position"},
+            )
+        if (
+            not isinstance(returned_content_bytes, int)
+            or isinstance(returned_content_bytes, bool)
+            or not 0 <= returned_content_bytes <= REPORT_RESPONSE_MAX_BYTES
+        ):
+            raise V12StoreError(
+                "assignment page byte count is invalid", code="invalid_argument",
+                details={"field": "returned_content_bytes"},
+            )
+        if not isinstance(has_more, bool):
+            raise V12StoreError(
+                "assignment page continuation state is invalid", code="invalid_argument",
+                details={"field": "has_more"},
+            )
+
+        def write(connection: sqlite3.Connection) -> dict[str, Any]:
+            self._task(connection, task_key)
+            self._delegation(connection, assignment_key, task_id=task_key)
+            capability = connection.execute(
+                "SELECT state FROM worker_capabilities "
+                "WHERE task_id=? AND assignment_id=?",
+                (task_key, assignment_key),
+            ).fetchone()
+            if capability is None or str(capability["state"]) != "consumed":
+                raise V12StoreError(
+                    "assignment page requires consumed worker authority",
+                    code="assignment_stale",
+                )
+            prior_snapshots = connection.execute(
+                "SELECT DISTINCT snapshot_digest FROM assignment_page_receipts "
+                "WHERE assignment_id=?",
+                (assignment_key,),
+            ).fetchall()
+            if prior_snapshots and any(
+                str(row["snapshot_digest"]) != snapshot_key for row in prior_snapshots
+            ):
+                raise V12StoreError(
+                    "assignment page snapshot is stale",
+                    code="report_cursor_stale",
+                    details={"field": "continue", "expected": "same_assignment_snapshot"},
+                )
+            existing = connection.execute(
+                "SELECT * FROM assignment_page_receipts "
+                "WHERE assignment_id=? AND snapshot_digest=? AND private_position=?",
+                (assignment_key, snapshot_key, private_position),
+            ).fetchone()
+            if existing is not None:
+                expected = (
+                    phase, page_key, returned_content_bytes, int(has_more),
+                )
+                actual = (
+                    str(existing["phase"]), str(existing["page_digest"]),
+                    int(existing["returned_content_bytes"]), int(existing["has_more"]),
+                )
+                if actual != expected:
+                    raise V12StoreError(
+                        "assignment page conflicts with its durable receipt",
+                        code="report_cursor_invalid",
+                        details={"field": "continue", "expected": "immediately_preceding_identical_read"},
+                    )
+                return {
+                    "replayed": True,
+                    "created_sequence": int(existing["created_sequence"]),
+                }
+            latest = connection.execute(
+                "SELECT private_position,has_more FROM assignment_page_receipts "
+                "WHERE assignment_id=? AND snapshot_digest=? "
+                "ORDER BY private_position DESC LIMIT 1",
+                (assignment_key, snapshot_key),
+            ).fetchone()
+            expected_position = 0 if latest is None else int(latest["private_position"]) + 1
+            if (
+                private_position != expected_position
+                or (latest is not None and not bool(latest["has_more"]))
+            ):
+                raise V12StoreError(
+                    "assignment page is out of sequence",
+                    code="report_cursor_invalid",
+                    details={"field": "continue", "expected": "immediately_preceding_identical_read"},
+                )
+            sequence = self._timeline(
+                connection,
+                event_type="assignment_page_read",
+                entity_type="assignment_consumption",
+                entity_id=assignment_key,
+                task_id=task_key,
+                delegation_id=assignment_key,
+                payload={
+                    "assignment_id": assignment_key,
+                    "snapshot_digest": snapshot_key,
+                    "phase": phase,
+                    "private_position": private_position,
+                    "page_digest": page_key,
+                    "returned_content_bytes": returned_content_bytes,
+                    "has_more": has_more,
+                },
+            )
+            connection.execute(
+                "INSERT INTO assignment_page_receipts("
+                "project_hash,task_id,assignment_id,snapshot_digest,phase,"
+                "private_position,page_digest,returned_content_bytes,has_more,"
+                "created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.project_hash, task_key, assignment_key, snapshot_key,
+                    phase, private_position, page_key, returned_content_bytes,
+                    int(has_more), _now(), sequence,
+                ),
+            )
+            return {"replayed": False, "created_sequence": sequence}
+
+        return self._write(write)
 
     def validate_worker_continuation(self, *, continuation: Any, task_id: Any, assignment_id: Any, contract_revision: Any) -> dict[str, Any]:
         """Read-only validation of a consumed continuation scope."""
@@ -4985,7 +5478,7 @@ class V12Store:
         def read(connection: sqlite3.Connection) -> dict[str, Any]:
             row = connection.execute("SELECT task_id,assignment_id,contract_revision,state FROM worker_capabilities WHERE continuation_ref=?", (continuation_key,)).fetchone()
             if row is None or tuple(row) != (task_key, assignment_key, revision, "consumed"):
-                raise V12StoreError("worker continuation is invalid", code="capability_stale")
+                raise V12StoreError("worker continuation is invalid", code="assignment_stale")
             return {"continuation": continuation_key, "task_id": task_key, "assignment_id": assignment_key, "contract_revision": revision, "state": "consumed"}
         return self._read(read)
 
@@ -5610,7 +6103,7 @@ class V12Store:
                 (continuation_key,),
             ).fetchone()
             if continuation is None or tuple(continuation) != (str(task["task_id"]), str(owner["delegation_id"]), revision, "consumed"):
-                raise V12StoreError("worker continuation is invalid", code="capability_stale")
+                raise V12StoreError("worker continuation is invalid", code="assignment_stale")
             existing = connection.execute("SELECT payload_digest,report_id FROM report_operations WHERE delegation_id=? AND kind=?", (owner["delegation_id"], report_kind)).fetchone()
             if existing is not None:
                 if str(existing["payload_digest"]) != payload_digest:
@@ -6358,6 +6851,22 @@ class V12Store:
                         )
                     ):
                         raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
+                elif category == "outcome_replacement":
+                    if (
+                        set(addition) != {
+                            "category", "outcome_ref", "text", "acceptance",
+                            "constraints", "verification",
+                        }
+                        or not isinstance(addition.get("outcome_ref"), str)
+                        or not isinstance(addition.get("text"), str)
+                        or not addition["text"].strip()
+                        or any(
+                            not isinstance(addition.get(field), list)
+                            or any(not isinstance(item, str) or not item.strip() for item in addition[field])
+                            for field in ("acceptance", "constraints", "verification")
+                        )
+                    ):
+                        raise V12StoreError("steering_delta is invalid", code="invalid_argument", details={"field": "steering_delta"})
                 elif (
                     set(addition) - {"outcome_ref", "category", "text"}
                     or not {"category", "text", "outcome_ref"}.issubset(addition)
@@ -6512,16 +7021,59 @@ class V12Store:
                         details = _load_json(str(prior["details_json"]), label="effective contract item details")
                         if not isinstance(details, Mapping):
                             raise V12StoreError("stored V12 data is invalid", code="ledger_corrupt")
-                        merged = {
-                            "acceptance_criteria": list(details.get("acceptance_criteria", [])),
-                            "verification_criteria": list(details.get("verification_criteria", [])),
-                            "constraints": list(details.get("constraints", [])),
-                            "requirement_extensions": list(details.get("requirement_extensions", [])),
-                            "source_fragments": list(details.get("source_fragments", [])),
-                            "supersedes_item_ref": self._outcome_ref(prior_item_id),
-                        }
-                        replacement_text = str(prior["text"])
-                        for addition_index, addition in additions:
+                        complete_replacements = [
+                            item for item in additions
+                            if item[1].get("category") == "outcome_replacement"
+                        ]
+                        if complete_replacements:
+                            if len(complete_replacements) != 1 or len(additions) != 1:
+                                raise V12StoreError("steering replacement is ambiguous", code="invalid_argument", details={"field": "steering_delta.add"})
+                            addition_index, addition = complete_replacements[0]
+                            acceptance = list(addition["acceptance"])
+                            constraints = list(addition["constraints"])
+                            verification = [
+                                value for value in addition["verification"]
+                                if value not in acceptance
+                            ]
+                            replacement_text = str(addition["text"])
+                            fragments = [{
+                                "source_type": "user_steer",
+                                "path": f"steer.add[{addition_index}].text",
+                                "text": replacement_text,
+                                "decision_ref": record_ref(identifier),
+                            }]
+                            for field, values in (
+                                ("acceptance", acceptance),
+                                ("constraints", constraints),
+                                ("verification", verification),
+                            ):
+                                fragments.extend({
+                                    "source_type": "user_steer",
+                                    "path": f"steer.add[{addition_index}].{field}[{value_index}]",
+                                    "text": value,
+                                    "decision_ref": record_ref(identifier),
+                                } for value_index, value in enumerate(values))
+                            merged = {
+                                "acceptance_criteria": acceptance,
+                                "verification_criteria": verification,
+                                "constraints": constraints,
+                                "requirement_extensions": [],
+                                "source_fragments": fragments,
+                                "supersedes_item_ref": self._outcome_ref(prior_item_id),
+                            }
+                        else:
+                            merged = {
+                                "acceptance_criteria": list(details.get("acceptance_criteria", [])),
+                                "verification_criteria": list(details.get("verification_criteria", [])),
+                                "constraints": list(details.get("constraints", [])),
+                                "requirement_extensions": list(details.get("requirement_extensions", [])),
+                                "source_fragments": list(details.get("source_fragments", [])),
+                                "supersedes_item_ref": self._outcome_ref(prior_item_id),
+                            }
+                            replacement_text = str(prior["text"])
+                        for addition_index, addition in (
+                            additions if not complete_replacements else []
+                        ):
                             category, text = str(addition["category"]), str(addition["text"])
                             if category == "acceptance":
                                 if text in merged["verification_criteria"]:

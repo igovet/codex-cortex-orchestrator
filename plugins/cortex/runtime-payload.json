@@ -3,6 +3,7 @@
   "runtime_python": [
     "scripts/cortex.py",
     "scripts/cortex_runtime/__init__.py",
+    "scripts/cortex_runtime/audience_attestation.py",
     "scripts/cortex_runtime/canonical_json.py",
     "scripts/cortex_runtime/delegation.py",
     "scripts/cortex_runtime/domain_api.py",

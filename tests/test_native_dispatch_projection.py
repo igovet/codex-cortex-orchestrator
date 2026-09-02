@@ -35,6 +35,10 @@ class NativeDispatchProjectionTests(unittest.TestCase):
             set(self.projection["native_arguments"]),
             {"fork_turns", "message", "task_name", "reasoning_effort"},
         )
+        self.assertEqual(
+            list(self.projection["native_arguments"]),
+            ["fork_turns", "task_name", "reasoning_effort", "message"],
+        )
 
         terra = native_dispatch_projection(
             assignment_ref="d_0123456789ab",
@@ -45,6 +49,10 @@ class NativeDispatchProjectionTests(unittest.TestCase):
         )
         self.assertEqual(terra["native_arguments"]["model"], "gpt-5.6-terra")
         self.assertEqual(terra["native_arguments"]["reasoning_effort"], "xhigh")
+        self.assertEqual(
+            list(terra["native_arguments"]),
+            ["fork_turns", "task_name", "reasoning_effort", "model", "message"],
+        )
 
     def test_reconstruction_or_cross_assignment_fails_closed(self) -> None:
         changed = dict(self.projection)

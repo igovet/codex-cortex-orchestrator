@@ -8,8 +8,10 @@ task locator even though the same coordinator connection had already opened
 and used exactly one task. Requiring the model to retranscribe the same opaque
 locator on every task-scoped call left task identity partly model-owned.
 
-The correction is a connection-scoped identity boundary. It does not infer a
-task from project history, task recency, a filesystem path, or a model prompt.
+The coordinator correction is a connection-scoped identity boundary. It does
+not infer a task from project history, task recency, a filesystem path, or a
+model prompt. Worker authority uses a stricter host-audience and
+same-connection boundary described below.
 
 ## State machine
 
@@ -44,6 +46,25 @@ process restart -> unbound; no ledger-recency fallback
 | Two simultaneous Codex sessions | Each owns a different stdio process and local binding | No shared mutable task-context state |
 | Native worker MCP process | Separate process and connection | Cannot inherit the coordinator's in-memory task binding |
 
+## Worker publication audience boundary
+
+A worker's first assignment read remains mandatory. The host must first bind
+that exact child to the server-issued dispatch using one owner-private,
+digest-only lifecycle receipt. Assignment authority is consumed page by page
+and publication becomes available only on the terminal page. The same MCP
+connection retains the role and assignment binding; a new process or connection
+cannot recover it from any public or durable locator.
+
+| Worker publication situation | Required result |
+| --- | --- |
+| Exact same connection after assignment consumption | Use the existing binding and unchanged atomic publication path |
+| Fresh or restarted connection after exact assignment consumption | Fail closed; copied locator and durable continuation are not bearer authority |
+| Assignment was never consumed | Fail closed without consuming the minted capability |
+| Partial or different connection binding | Fail closed without overwriting any connection state |
+| Foreign/malformed worker locator, provenance or dispatch drift, or durable stale state | Fail closed without publication |
+| Task steering after consumption | Retain the assignment's immutable consumed revision; do not substitute the task's latest revision |
+| Confirmed lost native worker | Record explicit blocked/aborted evidence and create an atomically linked successor; never recover the old worker authority |
+
 ## Public contract rule
 
 Task-scoped tools retain the compact task locator as an accepted explicit
@@ -61,4 +82,10 @@ this contract; skills and workload prompts contain no parameter guidance.
 - Explicit invalid or foreign locators do not mutate the active binding.
 - Event observations use the resolved task locator so bounded diagnostics
   remain task-anchored even when the original request omitted it.
-
+- Real persistent source stdio worker: terminally consume and publish on the
+  original process; prove a second initialized process cannot read or publish
+  from the copied worker locator and creates no report operation.
+- Role tests prove a coordinator connection cannot switch to worker audience,
+  while the exact host-bound worker connection can consume the assignment.
+- Loss tests prove explicit blocked/aborted evidence and successor lineage are
+  atomic and that timeout or lease expiry alone remains non-authoritative.

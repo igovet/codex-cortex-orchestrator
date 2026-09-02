@@ -30,13 +30,19 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert policy is not None
     normalized = " ".join(policy["common_policy"].split())
 
-    assert "Before any other action or tool call" in message
+    assert "First consume the server-owned assignment" in message
+    assert "live advertised `read_task`" in message
+    assert "select assignment evidence" in normalized_message.lower()
+    assert "`open_assignment` creates assignments for a" in normalized_message
+    assert "never reads or consumes a worker assignment" in normalized_message
     assert "assignment read is the sole authority" in message
+    assert "Do not load coordinator/orchestrator skills first" in message
+    assert "exact worker policy and packaged profile" in normalized_message
     assert "Codebase Memory as the mandatory first evidence route" not in message
     assert len(message.encode("utf-8")) < 1_024
     assert "finite first read from the live contract" in message
     assert "correct it once only when diagnostics are unambiguous" in message
-    assert "never repeat malformed input or guess authority" in message
+    assert "never repeat malformed input or guess authority" in normalized_message.lower()
     assert "Coordinator-only operations" in message
     assert "Do no project work before successful consumption" in normalized_message
     assert "Codebase Memory as the mandatory first evidence route" in normalized
@@ -45,11 +51,16 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "environment blocker" in normalized
     assert "actual graph call" in normalized
     assert "Never silently skip the graph" in normalized
-    assert "A plan publication always declares one explicit review disposition" in policy["common_policy"]
+    assert "A plan publication does not choose or declare its review disposition" in policy["common_policy"]
     assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
     assert "never publishes a supplementary result or documentation outcome" in normalized
     assert "separate evidence assignment followed by a fresh planning revision" in normalized
-    assert "Never repeat a terminal assignment read" in normalized
+    assert "Never repeat a terminal assignment read during normal execution" in normalized
+    assert "After host context compaction or reset" in normalized
+    assert "restart the same assignment from the beginning on this authenticated connection" in normalized
+    assert "fresh server-owned reconciliation projection" in normalized
+    assert "sole terminal-read exception" in normalized
+    assert "grants no new authority" in normalized
     assert "publish exactly one matching terminal outcome" in normalized
     assert "confirmed successful terminal-publication response ends all worker tool activity" in normalized
     assert "Never call any tool or repeat/reconcile that mutation after success" in normalized
@@ -81,8 +92,10 @@ def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_aut
     # first Cortex action, before project work or any coordinator lifecycle
     # operation.  Keep the assertion semantic rather than prescribing a
     # public MCP argument shape.
-    first_action = message.index("Before any other action or tool call")
-    assert message.index("server-owned Cortex", first_action) > first_action
+    first_action = message.index("First consume the server-owned assignment")
+    assert message.index("live advertised `read_task`", first_action) > first_action
+    assert "select assignment evidence" in " ".join(message.split()).lower()
+    assert "`open_assignment` creates assignments" in " ".join(message.split())
     assert "You are a worker, not a coordinator" in message
 
 
@@ -94,6 +107,8 @@ def test_every_packaged_profile_inherits_worker_only_governance_and_terminal_rea
 
     assert "Every native worker and packaged profile is worker-only" in normalized
     assert "Coordinator-only operations, including governance assessment" in normalized
-    assert "Never repeat a terminal assignment read" in normalized
+    assert "Never repeat a terminal assignment read during normal execution" in normalized
+    assert "After host context compaction or reset" in normalized
+    assert "fresh server-owned reconciliation projection" in normalized
     assert "publish exactly one matching terminal outcome" in normalized
     assert "confirmed successful terminal-publication response ends all worker tool activity" in normalized

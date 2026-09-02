@@ -19,7 +19,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from cortex_runtime.v12_store import V12Store  # noqa: E402
-from cortex_runtime.v12_projections import materialize_task  # noqa: E402
+from cortex_runtime.v12_projections import _directory, materialize_task  # noqa: E402
 from cortex_runtime.v12_contract import task_ref  # noqa: E402
 
 
@@ -657,6 +657,24 @@ class V12TimelineRepairTests(unittest.TestCase):
         view_root = store.root / "tasks" / str(compact_task_ref)
         self.assertFalse((view_root / "timeline").exists())
         self.assertEqual(store.human_view(task_id, "timeline/index.md"), {"status": "disabled", "path": None})
+
+    def test_projection_directory_accepts_outer_system_alias_but_rejects_managed_symlink(self) -> None:
+        physical = self.root / "physical-store"
+        physical.mkdir()
+        alias = self.root / "system-alias"
+        alias.symlink_to(physical, target_is_directory=True)
+        projection_root = alias / "project-shard"
+        projection_root.mkdir()
+
+        _directory(projection_root / "tasks" / "safe", root=projection_root)
+        self.assertTrue((physical / "project-shard" / "tasks" / "safe").is_dir())
+
+        outside = self.root / "outside"
+        outside.mkdir()
+        managed_alias = projection_root / "managed-alias"
+        managed_alias.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(OSError, "unsafe"):
+            _directory(managed_alias / "child", root=projection_root)
 
 
 if __name__ == "__main__":

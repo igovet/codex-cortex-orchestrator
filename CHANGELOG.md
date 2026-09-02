@@ -1,5 +1,193 @@
 # Changelog
 
+## [1.14.12] - 2026-09-02
+
+### Fixed
+
+- Kept every Cortex operation as a separate direct model-visible call for both
+  coordinators and workers. The activation guard now rejects only Cortex calls
+  hidden inside programmatic `exec`, while ordinary non-Cortex composition is
+  unchanged. The wire catalogue omits optional `outputSchema` declarations but
+  delivers the complete description and closed `inputSchema` for all fourteen
+  operations in one exact response; complete result schemas remain enforced
+  privately by the server.
+- Made coordinator recovery discard pre-compaction state before constructing
+  exact decision mutations, so steering outcome replacements are copied from a
+  fresh current-state read instead of reconstructed from a summary. Directly
+  surfaced calls are ordered by the host guard; steering additionally requires
+  one same-connection state read after the decision opens, so an outer
+  programmatic-tool call cannot record before recovery evidence reaches the
+  MCP server.
+- Allowed a consumed worker assignment to be reconciled read-only on its same
+  authenticated MCP connection after context compaction or reset. Fresh or
+  copied connections remain rejected, page receipts are not duplicated, and
+  publication remains blocked until every reconciled page is consumed.
+- Required workers to rebuild terminal publication coverage from the fresh
+  server-owned assignment reconciliation projection after compaction. The host
+  guard keeps publication blocked until the original worker connection has
+  completed that recovery read through its terminal page.
+- Kept one host lifecycle authorization valid across every successful page of
+  a paginated worker assignment. Intermediate `has_more=true` pages no longer
+  revoke the already claimed persistent-connection bootstrap, while worker
+  publication remains denied until the terminal page.
+- Made explicit lost-owner recovery compatible with broad finalized-report
+  input policies. Unrelated report authors can no longer conflict with the
+  exact predecessor derived from the advertised recovery outcome scope.
+- Prohibited timeout-driven interruption of an active worker and duplicate
+  steering requests for unfinished work or gates already covered by the
+  current approved contract.
+
+## [1.14.9] - 2026-09-01
+
+### Fixed
+
+- Added signed, one-shot `worker_candidate` attestations bound to the exact
+  child thread/session/assignment. Initialize selects only the restricted
+  candidate catalogue; the exact first worker `PreToolUse(read_task)` signs a
+  child/turn/session/assignment/tool-use authorization which the server alone
+  can consume for that connection. No guessed or forwarded thread environment
+  identity participates in authorization.
+- Projected `tools/list` by immutable audience while retaining independent
+  authoritative server checks; worker candidates/workers see only `read_task`
+  and the three publication tools.
+- Narrowed the actual worker-candidate `read_task` advertisement to the exact
+  worker reference, the sole assignment view, and bounded continuation. This
+  remains compatible with hosts that reuse the common read declaration while
+  excluding coordinator-only view values. Unknown fields remain rejected without claim,
+  role, cursor, assignment, or ledger mutation.
+- Replaced ambiguous worker bootstrap/publication `capability_stale` outcomes
+  with `assignment_not_consumed`, `wrong_connection`, `connection_lost`,
+  `assignment_stale`, or `publication_conflict`, each with a bounded recovery
+  action and no role/report mutation on rejection.
+- Added approval-free, shell-free exact skill reinjection through the supported
+  `SessionStart(source=compact)` context channel with
+  `additionalContextLimit=0`; `PostCompact` remains observation-only and
+  repeat skill loading remains explicitly allowed.
+- Kept semantic version `1.14.9`; release identity changes only through the
+  content-addressed cache suffix.
+- Required every worker to establish Git-worktree capability with a bounded,
+  failure-normalizing probe before invoking Git. Non-Git canonical project
+  roots are now successful observed evidence and Git-dependent inspection is
+  skipped instead of producing a speculative nonzero command failure.
+- Made the fresh-worker bootstrap name the assignment-reading operation and
+  distinguished it explicitly from coordinator-only assignment creation in
+  both the server-rendered brief and advertised tool descriptions.
+- Made the preload boundary unambiguous: after explicit activation, the first
+  task-specific output or action must be the single `open_task` call. The
+  coordinator may not emit an activation acknowledgement, commentary,
+  question, plan, or result before that call succeeds.
+
+## [1.14.8] - 2026-09-01
+
+### Fixed
+
+- Made worker discovery of planned, optional, or not-yet-created paths
+  existence-aware. Expected absence is now recorded as successful evidence
+  instead of invoking a command directly against a missing path and producing
+  a nonzero failure during planning or verification.
+
+## [1.14.7] - 2026-09-01
+
+### Fixed
+
+- Refined skill bootstrap recovery so compaction/reset can reload the complete
+  orchestrator and control contracts through the host loader or sandboxed
+  read-only access to the exact installed paths. Both initial load and recovery
+  reload remain approval-free; elevated reads, MCP-resource substitutes, and
+  project copies fail closed.
+
+## [1.14.6] - 2026-09-01
+
+### Fixed
+
+- Restored host-owned plugin-skill activation: the activated orchestrator
+  context explicitly forbids shell/filesystem or MCP-resource self-reads of
+  its installed `SKILL.md`, and live workloads must use the real
+  `$cortex:orchestrator` token or host skill picker rather than decorative
+  bracket text. This removes the regression that asked users to approve `cat`
+  against a content-addressed plugin cache path.
+- Strengthened the advertised first-call `project_root` contract to require
+  the existing canonical host/workspace directory and to prohibit deriving a
+  not-yet-created output/package/artifact child as the task root.
+
+## [1.14.5] - 2026-09-01
+
+### Fixed
+
+- Made every bounded successful MCP response, including medium-sized one-shot
+  worker assignment pages, self-contained as deterministic JSON `TextContent`
+  as well as `structuredContent`. This prevents hosts that retain structured
+  data only in lifecycle events from hiding already-consumed authority and
+  provoking a non-retryable duplicate bootstrap read.
+- Replaced the former quarter-operation text cutoff with a complete encoded
+  tool-result bound that reserves space for the JSON-RPC envelope; genuinely
+  oversized results still use the fixed structured-content notice without
+  risking an overlong stdio frame.
+
+## [1.14.4] - 2026-09-01
+
+### Fixed
+
+- Bound every public aggregate-coverage disposition to its exact semantic
+  outcome and exposed explicit ownership plus delivery-assignability state.
+  Coordinators can now select only newly assignable post-steering outcomes on
+  the first call instead of inferring identity from positional coverage rows.
+- Preserved fail-closed admission for mixed owned/new, terminal-owned, stale,
+  retired, duplicated, and unconfirmed-loss scopes; rejected requests still
+  perform no mutation, while confirmed nonterminal loss remains restricted to
+  the atomic lineage-linked recovery path.
+- Added coordinator and advertised-contract guidance plus regressions proving
+  new-only post-steering delivery succeeds once and mixed ownership conflicts
+  remain non-mutating.
+
+## [1.14.3] - 2026-09-01
+
+### Fixed
+
+- Removed consumed-worker publication recovery on fresh MCP connections. Worker
+  bootstrap and publication now require the exact digest-attested native child
+  and original monotonic worker connection; coordinator connections, direct
+  clients, and copied locators fail closed without report mutation.
+- Added ordered assignment-authority and predecessor-evidence pagination with
+  server-private continuation, digest-only page receipts, exact non-mutating
+  current-page restart, terminal consumption gating, and lossless UTF-8
+  fragmentation at byte boundaries.
+- Replaced implicit nonterminal worker replacement with explicit lost-assignment
+  lineage. A confirmed delivery loss requires blocked/aborted state, a concrete
+  reason, and non-empty evidence; Cortex atomically stales the old lease, stores
+  immutable evidence, and links one successor. Timeout, expiry, reconnect,
+  report references, and bare assignment references grant no recovery authority.
+- Sanitized lifecycle receipts so they retain only bounded routing categories
+  and digests, never task/worker locators, native message plaintext, or
+  assignment bodies.
+- Correlated a real `SubagentStart` audience with the worker MCP process by
+  resolving the same owner-only plugin data directory from hook `PLUGIN_DATA`
+  or MCP `CODEX_HOME`. The first successful assignment read atomically commits
+  the worker role; direct clients and coordinator processes cannot claim it.
+- Ordered every short native-routing discriminator and publication header
+  before potentially long message, change, and evidence fields so Codex result
+  compaction cannot hide required first-call inputs.
+- Attributed worker assignment reads and publications as `role=worker` and
+  `scope=assignment` in the sanitized structured event journal, including the
+  assignment digest, without exposing the worker locator.
+
+## [1.14.2] - 2026-09-01
+
+### Fixed
+
+- Restored worker publication after a legitimate MCP connection loss by
+  rehydrating only the exact durable assignment capability that the worker had
+  already consumed. Recovery remains read-only and requires matching project,
+  task, assignment, immutable revision, package/catalogue provenance, and
+  dispatch correlation.
+- Preserved exact same-connection publication and every fail-closed boundary:
+  minted, foreign, malformed, stale, partial/different-bound, or drifted
+  relations cannot publish, mutate capability state, select by recency, or
+  replace another connection binding.
+- Added store, domain, and real two-process source-stdio regressions, including
+  steering after consumption to prove publication remains bound to the
+  immutable assignment revision.
+
 ## [1.12.2] - 2026-08-31
 
 ### Fixed

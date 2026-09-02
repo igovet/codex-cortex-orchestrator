@@ -30,19 +30,20 @@ does not prove a usable child when this rewrite is present.
 
 ```text
 open_assignment
-    -> server stores authoritative worker context in an owner-only receipt
+    -> server records bounded assignment and dispatch-correlation digests
     -> model requests native spawn using the advertised host schema
     -> PreToolUse validates and atomically claims the receipt
        (context-only response; no permission override; no updatedInput)
     -> Codex accepts the unchanged native function call
-    -> SubagentStart supplies the server-owned context through additionalContext
+    -> SubagentStart binds the exact child audience using digest-only state
     -> worker MCP server_ready
     -> worker consumes assignment evidence as its first semantic action
     -> worker publishes one terminal outcome
 ```
 
 PreToolUse remains a correlation and replay guard, not a native transport
-adapter. SubagentStart is the supported pre-model context-delivery boundary.
+adapter. The host-owned spawn message is the sole locator delivery;
+SubagentStart binds the child audience without storing or repeating plaintext.
 
 ## Codex 0.151.0 routing-envelope correction
 
@@ -66,8 +67,9 @@ publication.
 
 - no `updatedInput` or `permissionDecision: allow` in successful native-spawn
   PreToolUse output;
-- exact server context is stored with a digest and emitted only for the child
-  that consumes the one-shot dispatch claim;
+- no task locator, worker locator, native message, or assignment body is stored
+  in the lifecycle receipt; only the exact digest-bound child may consume the
+  one-shot dispatch claim;
 - spawn success, SubagentStart, child MCP `server_ready`, first successful
   assignment-evidence consumption, one terminal publication, coordinator
   reconciliation, and successful closure are all observed;

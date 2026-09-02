@@ -187,14 +187,22 @@ class MandatoryClosureReviewTests(unittest.TestCase):
 
     def test_closure_options_and_outcomes_are_exact_and_ordinary_clarification_survives(self) -> None:
         schema = PUBLIC_TOOLS["open_clarification"]["inputSchema"]
-        self.assertEqual(schema["properties"]["options"]["items"]["enum"], ["answer", "revise", "close"])
+        self.assertEqual(schema["properties"]["options"]["items"]["enum"], ["revise", "close"])
+        record_schema = PUBLIC_TOOLS["record_clarification"]["inputSchema"]
+        self.assertNotIn("outcome", record_schema["required"])
+        self.assertEqual(record_schema["properties"]["outcome"]["enum"], ["revise", "close"])
         with tempfile.TemporaryDirectory() as root:
             task_ref, _ = self._task(root)
             with self.assertRaisesRegex(V12ServiceError, "exactly revise and close"):
                 open_clarification(task_ref=task_ref, prompt="Review.", prompt_language="en", purpose="closure_review", options=["close", "revise"])
-            opened = open_clarification(task_ref=task_ref, prompt="Which detail?", prompt_language="en", purpose="clarification", options=["answer"])
+            opened = open_clarification(task_ref=task_ref, prompt="Which detail?", prompt_language="en", purpose="clarification")
             self.assertEqual(opened["state"], "pending_clarification")
-            answered = record_clarification(task_ref=task_ref, response_original="The detail is explicit.", user_language="en", outcome="answer")
+            with self.assertRaisesRegex(V12ServiceError, "ordinary clarification"):
+                record_clarification(
+                    task_ref=task_ref, response_original="The detail is explicit.",
+                    user_language="en", outcome="close",
+                )
+            answered = record_clarification(task_ref=task_ref, response_original="The detail is explicit.", user_language="en")
             self.assertEqual(answered["state"], "clarification_recorded")
             open_clarification(
                 task_ref=task_ref,
@@ -204,7 +212,7 @@ class MandatoryClosureReviewTests(unittest.TestCase):
                 options=["revise", "close"],
             )
             with self.assertRaisesRegex(V12ServiceError, "closure review requires"):
-                record_clarification(task_ref=task_ref, response_original="maybe", user_language="en", outcome="answer")
+                record_clarification(task_ref=task_ref, response_original="maybe", user_language="en")
 
 
 if __name__ == "__main__":

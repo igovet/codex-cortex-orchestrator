@@ -59,6 +59,8 @@ _MIGRATIONS = (
     (22, "v22-dispatch-lease-expiry"),
     (23, "v23-immutable-assignment-scope"),
     (24, "v24-outcome-linked-contract"),
+    (25, "v25-assignment-page-receipts"),
+    (26, "v26-explicit-assignment-loss-lineage"),
 )
 _BACKUP_FORMAT = "cortex/v12-maintenance-backup/v1"
 _BACKUP_ID_PREFIX = "backup-"
@@ -99,6 +101,8 @@ _REQUIRED_TABLES = frozenset(
         "effective_contract_items",
         "delegation_outcome_assignments",
         "assignment_scope_snapshots",
+        "assignment_page_receipts",
+        "assignment_losses",
         "report_contract_coverage",
         "command_receipts",
         "worker_capabilities",
@@ -129,6 +133,11 @@ _REQUIRED_SCHEMA_OBJECTS = frozenset(
         "assignment_scope_task_revision",
         "assignment_scope_no_update",
         "assignment_scope_no_delete",
+        "assignment_page_task_sequence",
+        "assignment_page_assignment_position",
+        "assignment_loss_task_sequence",
+        "assignment_loss_no_update",
+        "assignment_loss_no_delete",
     }
 )
 _REQUIRED_COLUMNS = {
@@ -145,6 +154,8 @@ _REQUIRED_COLUMNS = {
     "effective_contract_item_details": frozenset({"item_id", "details_json", "source_decision_id"}),
     "delegation_outcome_assignments": frozenset({"delegation_id", "item_id", "assignment_role", "revision", "superseded_by_delegation_id", "superseded_sequence"}),
     "assignment_scope_snapshots": frozenset({"assignment_id", "task_id", "item_id", "assignment_role", "contract_revision", "created_sequence"}),
+    "assignment_page_receipts": frozenset({"receipt_id", "project_hash", "task_id", "assignment_id", "snapshot_digest", "phase", "private_position", "page_digest", "returned_content_bytes", "has_more", "created_at", "created_sequence"}),
+    "assignment_losses": frozenset({"loss_id", "project_hash", "task_id", "assignment_id", "successor_assignment_id", "terminal_state", "reason", "evidence_json", "evidence_digest", "created_at", "created_sequence"}),
     "report_contract_coverage": frozenset({"report_id", "item_id", "status", "verification_json"}),
     # v17 makes these four fields the authoritative immutable plan-review
     # relation.  Maintenance must reject a shard that claims v17 while any

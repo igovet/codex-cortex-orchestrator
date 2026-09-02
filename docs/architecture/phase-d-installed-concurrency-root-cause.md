@@ -166,8 +166,13 @@ the same non-authoritative rule.
 
 The lock order is fixed: target-shard admission/transaction precedes a derived
 locator write. Compact lookup holds no sidecar write lock while opening a
-canonical shard. The correction does not extend the existing admission
-deadline or retry budget.
+canonical shard. The initial locator correction did not extend the admission
+deadline or retry budget. A later platform-matrix stress exposed that the
+former sub-second deadline could still expire while the supported local worker
+fan-out serialized WAL admission on a loaded runner. The shared monotonic
+admission budget is now five seconds: still bounded, inherited end to end, and
+subordinate to canonical locator verification rather than a replacement for
+the locator.
 
 Source evidence includes missing, malformed, fingerprint-tampered,
 wrong-project, restart/recovery, migration/maintenance, and fail-closed tests,

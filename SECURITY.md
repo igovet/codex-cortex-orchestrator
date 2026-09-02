@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.1 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.12 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -36,7 +36,10 @@ backend gates. Required plan review and a genuine user decision are owned by
 the coordinator in ordinary chat: a stored decision records the evidence but
 does not authenticate the user, grant authority, or authorize a later action.
 
-Coordinators and workers receive the same exact fourteen-tool semantic catalog.
+The complete semantic registry contains fourteen tools, but every MCP
+connection receives an immutable audience projection. Coordinators receive
+coordinator operations plus `read_task`; a signed worker-candidate or committed
+worker receives only `read_task` and the three worker publication operations.
 The worker spawn receives one compact closed native dispatch; it is neither the
 full worker policy nor ledger authority. The mandatory first assignment read
 supplies the full common policy, profile guidance, and task evidence. IDs are
@@ -82,6 +85,12 @@ worker-owned, including Git, manifests, caches, worktrees, existence/absence or
 unchanged-state, and project-local `.codex`. The boundary does not change for a
 read-only check, plan preparation, report recovery, or a user request addressed
 to the coordinator.
+
+The canonical project root does not attest Git-worktree capability. Workers
+must establish that capability with a bounded, failure-normalizing probe before
+any Git command. An unsupported or non-Git root is recorded as a clean observed
+state and causes Git-dependent inspection to be skipped, not speculatively
+executed with a nonzero failure.
 
 For structural project-code discovery, every worker starts with the enabled
 Codebase Memory MCP bound to the canonical project root. Missing, disabled, or
@@ -156,8 +165,16 @@ object-shaped scope is invalid. Delegation `model` and `reasoning_effort` are
 required together and retained exactly. `profile_name` is an exact packaged
 enum distinct from the bounded human-readable `role`; it selects expertise, not
 ownership. The public mission's explicit `responsibility` selects planning,
-delivery ownership, or non-owning evidence, while exact `item_refs` bind the
-scope that must be reconciled. Renderer proof must be loaded. The returned
+delivery ownership, or non-owning evidence. Delivery/evidence use exact current
+semantic outcome selectors; planning scope is server-derived as the complete
+current effective contract and cannot be narrowed or reconstructed by the
+caller. Private exact `item_refs` bind the scope that must be reconciled.
+The public state projection also emits canonical responsibility-specific
+assignment selectors. Delivery can use only `delivery_outcomes`; terminal-owned
+outcomes are separated with `terminal_rework=steering_revision_required` and
+cannot become corrective delivery scope until an explicit steering revision
+creates new unowned outcomes. Evidence remains selectable without acquiring
+delivery ownership. Renderer proof must be loaded. The returned
 closed native dispatch preserves the compact bootstrap and exact selected
 model/effort for one matching host spawn. This semantic delegation
 receipt proves packaged profile and semantic dispatch data, not host lifecycle.
@@ -169,15 +186,87 @@ history, timestamps, and content-hash filename order are never routing
 authority; malformed or ambiguous active state fails closed for that session.
 Settled diagnostic history is independently capped at 64 receipts per session
 and cleanup is never a precondition for routing correctness.
-Normal spawning consumes
-that receipt directly; recovery uses `read_task` continuation data only
-after host reconciliation. Continuations never attest lifecycle, and native
-commentary alone is never durable progression: a recovered child needs a
-finalized report, explicit blocked/partial handoff, or parent-linked
-replacement. `close_task` records a task-scoped advisory closure from durable
-evidence and does not gate safe work or a truthful user-facing answer.
+Normal spawning consumes that receipt directly. A successful non-terminal
+assignment page keeps the already claimed authorization on that same bound
+child and persistent MCP connection until the terminal page; it never creates
+or claims a second authorization. Assignment continuations never independently
+attest lifecycle and cannot transfer worker authority to another connection.
+Native commentary alone is never durable progression: a lost child requires
+explicit blocked/aborted evidence and an atomically linked successor, while a
+completed child requires a finalized report. `close_task` records a task-scoped
+advisory closure from durable evidence and does not gate safe work or a truthful
+user-facing answer.
+
+Worker publication authority is established only after terminal consumption of
+the exact server-owned assignment view on one signed, host-bound MCP
+connection. Current Codex Desktop supplies no trustworthy connection-specific
+identity in MCP initialize parameters or environment: root and child processes
+are indistinguishable at that boundary. Cortex therefore never selects an
+initial audience from a global fresh worker record. Every unattributed
+connection starts with a neutral complete catalogue and an uncommitted role;
+the catalogue grants no call authority, and an unrelated pending/candidate
+receipt cannot select a new root audience.
+`SubagentStart` creates a one-shot digest-only attestation bound to the exact
+child agent/session/assignment, and `PreToolUse` authorizes the exact first
+assignment read without rewriting it. Only that otherwise-uncommitted
+connection may atomically claim the authorization. The server validates the
+read against its worker-candidate schema, fixes the assignment view, and
+commits worker role only after successful terminal assignment consumption.
+It then emits the standard `notifications/tools/list_changed` notification;
+a supporting client refresh receives only `read_task` and the three worker
+publication tools. A client that retains the neutral catalogue remains
+fail-closed because committed server role checks reject every coordinator-only
+worker call without mutation. A confirmed coordinator can never pivot. Pre-consumption
+catalogue hiding cannot be authenticated until the host supplies identity at
+initialize; server authorization and the activation hook remain authoritative
+during that unavoidable discovery window.
+Hook processes address the owner-only package data root through `PLUGIN_DATA`.
+An installed MCP process uses an explicit `PLUGIN_DATA` or `CODEX_HOME` when
+available; ordinary Desktop may forward neither, so the process otherwise
+derives the same fixed data root from the already verified content-addressed
+cache topology. Source mode has no installed topology and must supply its
+isolated data root explicitly. A missing GUI environment variable therefore
+cannot silently disable the host-attested worker claim.
+Coordinator and worker roles are
+monotonic per connection. A fresh process,
+reconnect, copied worker locator, report reference, bare assignment reference,
+or durable continuation cannot rehydrate or transfer consumed publication
+authority. Context compaction does not create another bootstrap path: the
+already-bound worker connection may reread only its same immutable assignment,
+with exact page-receipt reconciliation and publication gated until that read is
+terminal again. This read-only recovery grants no new identity or authority;
+every fresh or copied connection remains rejected. After a compact lifecycle
+event, the activation guard rejects coordinator mutations until a fresh
+current state read succeeds and rejects worker publications until the same
+bound connection completes its terminal assignment reread. The guard also
+rejects any Cortex invocation hidden inside programmatic `exec`, for both
+coordinator and worker routes, because host hooks cannot authorize or observe
+those nested calls individually. Every Cortex operation must therefore remain
+one separate direct model-visible call. Steering also has server-side,
+same-connection admission: its successful
+opening invalidates earlier state-read evidence and its record consumes one
+later state read. The host audience receipt
+is owner-only and digest-only: it carries
+no task/worker locator, native message, assignment body, or bearer secret.
+Unconsumed, consumed-on-another-connection, foreign, stale, partial, or
+mismatched relations all fail closed without a report mutation or role change.
+Worker failures are explicit: `assignment_not_consumed`, `wrong_connection`,
+`connection_lost`, `assignment_stale`, and `publication_conflict` each carry a
+bounded action specific to that state.
+
+Confirmed loss uses an explicit successor workflow, never authority recovery.
+The coordinator must record a `blocked` or `aborted` reason with non-empty
+evidence. Cortex derives one unique current predecessor from the exact selected
+outcomes and atomically stores immutable loss evidence, stales the old worker
+lease, creates the successor, and links the lineage. Broad report inputs remain
+evidence and never override that exact recovery predecessor. Timeout, lease
+expiry, silence, reconnect, repeated waits, slow progress, or missing lifecycle
+telemetry is not loss evidence and never justifies interrupting an active child.
 
 Closure review is distinct from ordinary clarification. After the current
+ordinary clarification is opened, its matching record omits outcome because
+the pending binding already identifies an answer; supplying `revise` or
+`close` against that binding is rejected without mutation. After the current
 result is presented, exactly two localized choices are offered: revise the
 same task or close it. Revision preserves the same `task_ref`; any later
 assignment, report, or decision makes an earlier close choice stale. The
@@ -291,6 +380,22 @@ named active items; it does not rewrite unrelated evidence. This evidence and
 the linked conformance projection guide model reasoning but never become a
 backend authorization or lifecycle gate.
 
+Required-review plans are revision-bound evidence. The server exposes a plan as
+active, opens its review, and admits light/full delivery only when the plan's
+planning-assignment snapshot matches the current effective-contract revision.
+A material steering revision therefore invalidates reuse of every earlier plan
+approval without deleting or rewriting its audit history.
+
+The public aggregate projection binds each row to the exact semantic outcome
+and supplies explicit `ownership` plus `delivery_assignability`. `assignable`
+means an ordinary delivery owner may claim the currently unowned outcome;
+`loss_recovery_only` identifies a nonterminal current owner and does not itself
+prove loss; `not_assignable_terminal_owner` preserves finalized ownership and
+cannot be reassigned. These values are a safe routing projection, not an
+authorization grant: the transactional admission check remains authoritative
+and rejects mixed, stale, retired, duplicate, or otherwise conflicting scope
+without mutation.
+
 The current V3 specialist envelope is admitted before terminal finalization.
 It requires an exact one-to-one disposition for every independent outcome in
 the immutable assignment scope, observable evidence, and residual
@@ -301,6 +406,11 @@ worker bootstrap provides a server-owned ordered reconciliation template and
 count/reference receipt, but deliberately supplies no status or verification
 claim. The worker must preserve and complete that row set before its first
 publication attempt, so completeness enforcement cannot fabricate evidence.
+The exact template is also the first model-visible `TextContent` block for an
+assignment result and remains present when the larger serialized result falls
+back to `structuredContent`. Publication resolves the complete ordered row set
+in one validation pass, so a rejected outcome identifies its actual array
+position instead of resetting every diagnostic to index zero.
 Each steer addition targets an active outcome and produces a source-grounded
 replacement revision; it cannot create an unlinked parallel item. Compatible
 repeated rows for one item are losslessly coalesced only when their
@@ -327,7 +437,6 @@ facade.
 Private tool-error logs are same-user sensitive data. Inspect only a bounded
 tail when necessary, extract sanitized correlation metadata, and never paste
 raw records into a chat, issue, prompt, commit, fixture, or external system.
-
 ## State and filesystem safety
 
 Each exact resolved project root maps to a separate database:
@@ -462,7 +571,7 @@ that may preserve an evidence-backed warning or recommendation without
 silently replacing the user's choice.
 
 Every light or full delivery assignment requires a current finalized plan with
-`review_policy=required`; the coordinator opens the matching review, presents
+server-derived `review_policy=required`; the coordinator opens the matching review, presents
 the verified plan, and records an explicit approval bound to that exact report
 and digest before dispatching delivery work. The backend enforces this narrow
 pre-dispatch relation while leaving planning/evidence assignments available.
@@ -526,7 +635,8 @@ delegation returns one exact compact closed native dispatch, which Codex forward
 once to exactly one matching active host spawn and then awaits that worker's own
 report. The ledger does not launch or bind native agents. An
 ambiguous spawn is reconciled by exact host handle, never blindly duplicated; a
-reportless result may lead to an explicitly parent-linked replacement.
+reportless result alone never authorizes replacement of the same delivery
+scope. A successor requires explicit blocked/aborted reason and evidence.
 
 ## Bundled skill and plugin integrity
 
@@ -584,8 +694,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.1+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.1` is
+`1.14.12+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.12` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a
@@ -619,8 +729,9 @@ A useful report includes:
 
 ## Release safety checklist
 
-1. Verify the manifest is V12, the public registry has exactly fourteen tools, and
-   coordinator and worker catalogs are identical.
+1. Verify the manifest is V12, the complete registry has exactly fourteen
+   tools, and coordinator/worker `tools/list` projections are disjoint except
+   for `read_task`.
 2. Verify the bundled skills make the root coordinator orchestration-only and
    delegate every source/code/config read, analysis, edit, command, test,
    verification, and conditional documentation update to workers, while
@@ -643,7 +754,13 @@ A useful report includes:
    rejection, governance and decision history, dependency warnings,
    host-private verified projection behavior, and V11 byte-for-byte
    preservation.
-6. Confirm lifecycle hook code and enabled hook declarations are absent.
+6. Confirm the packaged activation guard and lifecycle observer are present,
+   every declared callback uses the shared host-resolved `python3 -B`
+   contract without an absolute interpreter path, and `PreToolUse` plus
+   `PostToolUse` bind the lifecycle observer only through the exact `^Agent$`
+   matcher. Verify that hooks carry host lifecycle attestation only and never
+   replace the server's independent identity, schema, isolation, or mutation
+   checks.
 7. Verify the packaged maintenance CLI remains outside the fourteen-tool semantic catalog,
    uses task/shard-derived host-private targets and exact confirmations,
    validates backups before retention/restore, requires offline `MCP_STOPPED`

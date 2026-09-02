@@ -1,29 +1,3 @@
-The real isolated live-dev Codex session is already running in the current
-disposable test project. Explicitly activate `$cortex:orchestrator` and execute
-this task through the complete live orchestration pipeline.
+$cortex:orchestrator
 
-Build one accessible, self-contained `index.html` landing page. It must use no
-external assets, network requests, or dependencies; have clear semantic HTML,
-responsive layout, good keyboard/focus behavior, and a small interactive theme
-toggle that works without a build step. Keep the implementation proportionate
-to this task and verify the result in the disposable project.
-
-Before planning, ask exactly one genuine product clarification about the visual
-theme. Pause for that clarification and no other question at that point. After
-the answer, have the planner create one durable plan covering the requirements,
-acceptance evidence, implementation, verification, and documentation impact.
-Render the plan for the user and pause for the user's visible approval. After
-approval, dispatch implementation to a worker, run independent verification,
-assess documentation impact, and reach advisory closure.
-
-All worker and subagent communication and reports must be in English. The
-coordinator's communication with the user must be in Russian. Preserve every
-orchestration capability and pass context through the normal pipeline. Derive
-all Cortex call arguments exclusively from the live advertised tool schemas and
-their descriptions; do not rely on parameter hints in this prompt or in skills.
-
-Do not start nested tmux or `cortex-dev`, do not test or modify the
-orchestration repository, do not change the stable profile/plugin, and do not
-repeat a successful mutation. Pause only for the one genuine clarification and
-the later visible plan approval; otherwise continue through the pipeline using
-the real callable tools and observed results.
+Build one accessible, self-contained index.html landing page. It must use no external assets, network requests, or dependencies; have clear semantic HTML, a responsive layout, good keyboard and focus behavior, and a small interactive theme toggle that works without a build step. Before implementation, ask me one genuine product question about the visual theme, then show me the plan and wait for my approval. After implementation, independently verify the page without network access, including keyboard operation, visible focus, responsive behavior, reduced-motion support, readable contrast, and the theme toggle. Add a concise README explaining how to open and check the page locally.

@@ -68,9 +68,9 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 - Perform only project-facing work owned by this delegation. Do not invent
   authority, spawn policy, host lifecycle semantics, model selection, retries,
   or recovery procedures.
-- Your first action in this fresh worker session is to consume the server-owned
-  assignment evidence with `read_task(view="assignment")` using the exact
-  worker-scoped `task_ref` supplied below. Do not read any other task view or
+- Your first action is to consume the server-owned assignment through the live
+  advertised `read_task` contract with the exact worker reference below and
+  select assignment evidence. Do not read any other task view or
   inspect the project before that read succeeds. Its result is the only bootstrap
   authority for continuing this assignment.
 - Derive that finite first read only from the live advertised contract. If a
@@ -121,15 +121,21 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   Product-facing evidence uses the applicable versioned semantic envelope;
   preserve one unchanged source value only where that envelope permits it,
   without language tags or translated/original duplicates. Before project work,
-  consume every declared predecessor evidence item through bounded
-  `read_task(view="assignment")` pages and verify its returned immutable
+  consume every declared predecessor through the same bounded read and verify its immutable
   evidence. State consumed
   evidence in your final publication. If an input is incomplete, mismatched, or
   unreadable, publish an honest blocked/partial outcome and do not claim it was
   consumed.
 - Continue an assignment read only when the immediately preceding otherwise-
-  identical read explicitly reports more data, and continue immediately. Once
-  the terminal page reports completion, never read the assignment again.
+  identical read explicitly reports more data, and continue immediately. In
+  normal execution, once the terminal page reports completion, never read the
+  assignment again. After host context compaction or reset, discard every exact
+  publication selector and live-schema value retained from the earlier model
+  context, then immediately restart the same assignment from the beginning on
+  this authenticated connection. This is the sole terminal-read exception.
+  Complete every page again and rebuild publication coverage only from the
+  fresh server-owned reconciliation projection before further work or
+  publication; the restart grants no new authority.
 - Publish one complete terminal outcome only after its declared evidence is
   consumed. A provisional outcome followed by a replacement is not the normal
   flow: use the active recovery/rework assignment semantics when correction is
@@ -141,11 +147,9 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   transport reconciliation after an actually ambiguous response, never a
   post-success confirmation step.
 
-- A plan publication always declares one explicit review disposition. Use
-  required review when the assignment or governance evidence requires it, or
-  when material product, scope, external, destructive, security, privacy, or
-  risk decisions remain; otherwise use informational review. Never omit the
-  disposition or downgrade it to bypass coordinator review.
+- A plan publication does not choose or declare its review disposition. The
+  server derives that persisted state from authoritative task governance; do
+  not add a review-policy field to the advertised publication contract.
 
 - Reconcile every exact item in the server-issued assignment scope once in the
   publication evidence. Use the semantic outcome objects returned by the
@@ -212,18 +216,18 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 # evidence from the server-owned immutable snapshot.
 _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
 
-- Before any other action or tool call, consume the server-owned Cortex
-  assignment using the exact worker task reference below.
-- Build that finite first read from the live contract. After a deterministic
-  local-shape rejection, correct it once only when diagnostics are unambiguous;
-  never repeat malformed input or guess authority. Ambiguous transport permits
-  only identical reconciliation.
-- That assignment read is the sole authority for the full common policy,
-  packaged profile, mission, scope, outcomes, decisions, and evidence.
-- You are a worker, not a coordinator. Coordinator-only operations, including
-  governance assessment, are prohibited for every profile. Do no project work
-  before successful consumption. If safe correction fails, stop; never
-  reconstruct, replace, or broaden the assignment.
+- First consume the server-owned assignment through the live advertised `read_task`;
+  use the exact worker reference below and select assignment
+  evidence. `open_assignment` creates assignments for a coordinator; it never
+  reads or consumes a worker assignment.
+- Build that finite first read from the live contract; correct it once only when diagnostics are unambiguous.
+  Never repeat malformed input or guess authority.
+- The assignment read is the sole authority for policy, scope, outcomes, and
+  evidence. Do not load coordinator/orchestrator skills first; it returns the
+  exact worker policy and packaged profile.
+- You are a worker, not a coordinator. Coordinator-only operations are
+  prohibited. Do no project work before successful consumption. If correction
+  fails, stop without broadening the assignment.
 """
 
 # The full common policy is retained for continuation/contract documentation,
@@ -241,7 +245,12 @@ _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
   transport permits only identical reconciliation.
 - Continue only when the immediately preceding otherwise-identical assignment
   read explicitly reports more data, and continue immediately. Never repeat a
-  terminal assignment read. After terminal consumption, perform bounded role
+  terminal assignment read during normal execution. After host context
+  compaction or reset, immediately restart the same assignment from the
+  beginning on this authenticated connection, complete every page again, and
+  rebuild exact publication coverage only from the fresh server-owned
+  reconciliation projection; this is the sole terminal-read exception and
+  grants no new authority. After terminal consumption, perform bounded role
   work and publish exactly one matching terminal outcome; unresolved evidence
   produces an honest partial or blocked publication instead of a read loop.
 - A confirmed successful terminal-publication response ends all worker tool
@@ -261,11 +270,9 @@ _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
   record that concrete limitation and use exactly one bounded repository-native
   enumeration or text-search fallback. Never silently skip the graph, begin with
   `rg`/`find`/directory enumeration, or chain fallback searches.
-- A plan publication always declares one explicit review disposition. Use
-  required review when the assignment or governance evidence requires it, or
-  when material product, scope, external, destructive, security, privacy, or
-  risk decisions remain; otherwise use informational review. Never omit the
-  disposition or downgrade it to bypass coordinator review.
+- A plan publication does not choose or declare its review disposition. The
+  server derives that persisted state from authoritative task governance; do
+  not add a review-policy field to the advertised publication contract.
 - A planning worker completes all bounded discovery before publishing one
   terminal plan, then stops project/tool work and never publishes a
   supplementary result or documentation outcome. Later material evidence uses

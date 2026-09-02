@@ -39,7 +39,9 @@ def test_docs_use_classic_operator_workflow() -> None:
         "./scripts/cortex-live-smoke events",
         "./scripts/cortex-live-smoke stop",
         "default tmux server",
-        "already live-dev",
+        "only permitted Cortex-specific content",
+        "ordinary user request",
+        "external operator",
         "nested tmux",
         "schema_unsupported",
     ):
@@ -92,70 +94,60 @@ def test_docs_define_llm_owned_multiturn_e2e_acceptance() -> None:
         assert text in docs
 
 
-def test_prompt_fixture_is_task_specific_without_mcp_parameter_hints() -> None:
+def _assert_ordinary_live_workload(prompt: str) -> None:
+    normalized = prompt.strip()
+    assert normalized.startswith("$cortex:orchestrator\n")
+    assert normalized.lower().count("cortex") == 1
+    assert "[$cortex:orchestrator]" not in normalized
+    task_text = normalized.removeprefix("$cortex:orchestrator").strip()
+    assert task_text
+    for forbidden in (
+        "live-dev", "orchestrat", "mcp", "worker", "subagent", "coordinator",
+        "ledger", "governance", "tmux", "tool call", "tool-call", "replay",
+        "sentinel", "stabilization", "harness", "pipeline", "task_ref",
+        "delegation_ref", "report_ref", "idempotency_key",
+        "оркестрац", "воркер", "сабагент", "координатор",
+    ):
+        assert forbidden not in task_text.lower()
+
+
+def test_prompt_fixtures_are_ordinary_requests_with_only_the_skill_token() -> None:
     prompt = (ROOT / "tests/fixtures/live_cortex_stabilization_prompt.txt").read_text(encoding="utf-8")
-    assert "already live-dev" in prompt
-    assert "selected route is $cortex:orchestrator" in prompt
-    assert "Cortex MCP tools for ledger operations and orchestration evidence" in prompt
-    assert "Native collaboration/subagents are allowed and required" in prompt
-    assert "worker dispatch and report ownership" in prompt
-    assert "Dispatch one bounded native worker and use its owned report" in prompt
-    for prohibited in ("Do not run shell commands", "inspect source", "modify files", "start nested live-dev", "start nested tmux"):
-        assert prohibited in prompt
-    assert "advertised schemas and descriptions" in prompt
-    assert "canonical current user-decision contract" in prompt
-    assert "CORTEX_LIVE_TOOLS_OK" in prompt
-    assert "nested tmux" in prompt
-    assert "exactly one task-creation request" in prompt
-    assert "exactly one non-replayed success" in prompt
-    assert "Never repeat or replay any successful mutation" in prompt
-    assert "transport-ambiguous" in prompt
-    assert "If any mutation is repeated, do not emit the success sentinel" in prompt
-    workload = (ROOT / "tests/fixtures/live_contract_workload.json").read_text(encoding="utf-8")
-    assert "selected route is $cortex:orchestrator" in workload
-    assert "Cortex MCP tools for ledger operations and orchestration evidence" in workload
-    assert "Native collaboration/subagents are allowed and required" in workload
-    assert "worker dispatch and report ownership" in workload
-    assert "Dispatch one bounded native worker and use its owned report" in workload
-    for prohibited in ("Do not run shell commands", "inspect source", "modify files", "start nested live-dev", "start nested tmux"):
-        assert prohibited in workload
-    for forbidden in ("prompt_en", "consumer_delegation_ref", "task_ref", "delegation_ref", "report_ref", "idempotency_key"):
-        assert forbidden not in prompt
-        assert forbidden not in (ROOT / "tests/fixtures/live_contract_workload.json").read_text(encoding="utf-8")
-    assert "exactly one task-creation request" in workload
-    assert "exactly one non-replayed success" in workload
-    assert "Never repeat or replay any successful mutation" in workload
-    assert "If any mutation is repeated, do not emit the success sentinel" in workload
+    contract = json.loads((ROOT / "tests/fixtures/live_contract_workload.json").read_text(encoding="utf-8"))
+    _assert_ordinary_live_workload(prompt)
+    _assert_ordinary_live_workload(contract["prompt"])
+    architecture = ROOT / "docs" / "architecture"
+    for path in (
+        architecture / "live-baseline-run2p-prompt.txt",
+        architecture / "live-baseline-run3q-prompt.txt",
+        architecture / "live-e2e-html-production-prompt.txt",
+    ):
+        _assert_ordinary_live_workload(path.read_text(encoding="utf-8"))
+    assert "настроек уведомлений" in prompt
+    assert "избранное" in contract["prompt"]
+    assert "покажи план и дождись" in prompt
+    assert "покажи план и дождись" in contract["prompt"]
 
 
-def test_one_page_workload_covers_approved_semantic_lifecycle_without_parameter_hints() -> None:
+def test_one_page_workload_is_an_ordinary_feature_request_with_natural_acceptance() -> None:
     fixture = ROOT / "tests/fixtures/live_dev_one_page_workload.json"
     workload = json.loads(fixture.read_text(encoding="utf-8"))
     prompt = workload["prompt"]
     assert workload["project"] == "simple-one-page-html"
-    assert workload["success_marker"] == "CORTEX_ONE_PAGE_OK"
+    _assert_ordinary_live_workload(prompt)
     for required in (
-        "selected route is $cortex:orchestrator",
-        "Complete the task contract",
-        "full or light governance",
-        "planner worker",
-        "immutable plan",
-        "exactly one genuine product-clarification question",
-        "driver's answer",
-        "record that decision",
-        "explicit approval",
-        "implementation worker",
-        "self-contained index.html",
-        "independent verification worker",
-        "worker-owned report evidence",
-        "documentation-impact or no-impact stage",
-        "advisory closure",
-        "implementation worker authorized to use local project tooling",
-        "create exactly one self-contained index.html",
-        "verification worker authorized to inspect that test project read-only",
-        "The coordinator must not run shell commands",
-        "external actions remain forbidden",
-        "zero tool errors and zero unauthorized replays",
+        "$cortex:orchestrator",
+        "самодостаточную страницу index.html",
+        "ровно тремя карточками преимуществ",
+        "компактным FAQ",
+        "переключателем темы",
+        "Внешние ресурсы и сетевые зависимости не используй",
+        "keyboard focus",
+        "reduced motion",
+        "один вопрос о цвете акцента",
+        "покажи план и дождись моего одобрения",
+        "независимо проверь функциональность",
+        "короткий README",
     ):
         assert required in prompt
     for forbidden in (
@@ -475,7 +467,7 @@ def test_events_accepts_ready_then_activation_observation_in_sequence() -> None:
     driver = module()
     build_id = "sha256:" + "a" * 64
     rows = b"\n".join([
-        ("{\"build_id\":\"" + build_id + "\",\"catalogue_count\":15,\"catalogue_digest\":\"" + "b" * 64 + "\",\"kind\":\"registration\",\"monotonic_ns\":1,\"operation\":\"server_ready\",\"outcome\":\"success\",\"scope\":\"coordinator\",\"sequence\":1}").encode(),
+        ("{\"build_id\":\"" + build_id + "\",\"catalogue_count\":15,\"catalogue_digest\":\"" + "b" * 64 + "\",\"kind\":\"registration\",\"monotonic_ns\":1,\"operation\":\"server_ready\",\"outcome\":\"success\",\"scope\":\"unattributed\",\"sequence\":1}").encode(),
         ("{\"build_id\":\"" + build_id + "\",\"kind\":\"pre_tool\",\"monotonic_ns\":2,\"operation\":\"activation_hook\",\"outcome\":\"success\",\"scope\":\"coordinator\",\"sequence\":2}").encode(),
     ]) + b"\n"
     stage, rendered = driver._validate_event_stream(rows, build_id)
@@ -603,7 +595,7 @@ def test_events_rejects_resigned_stale_lease(monkeypatch, tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("field,value", [
     ("candidate_path", "/tmp/not-the-candidate"),
-    ("candidate_version", "1.14.1+codex.sha256." + "0" * 16),
+    ("candidate_version", "1.14.12+codex.sha256." + "0" * 16),
     ("build_id", "sha256:" + "0" * 64),
     ("source_digest", "0" * 64),
     ("candidate_digest", "0" * 64),

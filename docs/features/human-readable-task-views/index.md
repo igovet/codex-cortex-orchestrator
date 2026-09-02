@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 1.14.1 projects selected host-private plan and finalized-report evidence
+Cortex 1.14.12 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read
@@ -161,6 +161,17 @@ effective-contract coverage and makes no native-lifecycle claim. The
 closure projection contains `record_status`
 and `latest_record` (or `null`).
 Neither projection is a native-host lifecycle signal.
+
+The state view also exposes an outcome-keyed aggregate coverage list. Each row
+repeats the exact current semantic `outcome` and binds it to coverage
+`status`/`reason`, `ownership`, and `delivery_assignability`. Ordinary delivery
+uses only `assignable` outcomes. `loss_recovery_only` means one nonterminal
+owner still exists and requires independently confirmed loss plus the atomic
+successor path; `not_assignable_terminal_owner` means finalized immutable
+ownership. Row ordering carries no identity or routing meaning, so steering can
+add, retire, or reorder outcomes without making positional inference safe.
+Admission remains authoritative and rejects an inconsistent selection without
+mutation even when a caller ignores the projection.
 
 After sufficient completed evidence, the coordinator selects `ready`,
 `ready_with_risks`, or `not_ready`, attempts the advisory closure, and inspects

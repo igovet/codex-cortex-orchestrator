@@ -19,13 +19,12 @@ implemented in the source stdio transport; the third remains intentionally
 capability-gated:
 
 1. **Resolved in source — structured-result interoperability.** The server
-   now returns
-   `structuredContent` but intentionally does not also put its serialized JSON
-   in a `TextContent` block. The official tools specification says a tool that
-   returns structured content SHOULD also return serialized JSON in text for
-   backwards compatibility. This is not required for a conforming modern
-   client, but it is a real interoperability risk and must be an explicit
-   release decision.
+   returns `structuredContent` and the same deterministic serialized JSON in
+   `TextContent` whenever the complete duplicated response fits the physical
+   frame. This includes bounded one-shot worker assignment pages, so a host
+   that exposes only text to the model cannot erase successfully consumed
+   authority and induce an invalid replay. A fixed notice is used only when
+   duplication itself would approach the wire bound.
 2. **Resolved in source — protocol version negotiation.** The server now
    declares and negotiates the core versions `2025-11-25` and `2025-06-18`.
    It returns the requested version when supported and the newest supported
@@ -66,24 +65,26 @@ replacement for an application domain protocol.
 | Transport | JSON-RPC MCP lifecycle over stdio; initialization precedes normal operations | `mcp_api.serve_stdio` has explicit `new → initialize_response_sent → ready` states and JSONL frame bounds | Pass; retain tests |
 | Initialization | Client sends `initialize`; server responds with protocol version, capabilities, and server info; client sends `notifications/initialized` | Implemented; server info adds candidate provenance metadata | Pass for current version; add version-set negotiation (P1) |
 | Version negotiation | Echo a supported requested version, otherwise select another supported version; peer may disconnect if unsupported | Explicit supported set `2025-11-25`, `2025-06-18`; requested version is echoed when supported, otherwise newest is counter-offered | Resolved in source; candidate black-box gate remains |
-| Server capabilities | Tools servers MUST declare `tools`; optional capabilities must be negotiated | Emits `{"tools": {}}`; no optional extension is advertised | Pass; do not advertise unimplemented extensions |
-| `tools/list` | Returns tools and supports opaque pagination cursor; list-change notification is optional | Fixed catalogue with opaque cursor handling; no list-change capability | Pass for immutable catalogue |
+| Server capabilities | Tools servers MUST declare `tools`; optional capabilities must be negotiated | Emits `{"tools":{"listChanged":true}}`; notification is sent only after authoritative worker-role commitment | Pass; verify one post-consume notification and no pre-commit notification |
+| `tools/list` | Returns tools and supports opaque pagination cursor; list-change notification is optional | Neutral complete catalogue before identity commitment; post-commit refresh returns the immutable coordinator or worker projection with opaque cursor handling; retained neutral catalogues remain constrained by server authorization | Pass; foreign candidate isolation, ignored refresh, and both committed projections require black-box checks |
 | `tools/call` envelope | `name` and optional arguments; unknown/malformed protocol requests are protocol errors | Validates envelope and maps correctable/business failures to tool results | Pass in principle; add conformance cases for malformed notifications and unknown tools |
 | Input schema | Tool has object `inputSchema`; descriptions help the model understand calls | Closed per-tool schemas, descriptions, JSON Schema draft marker, model derives arguments from advertisement | Pass; preserve “no parameter recipes in prompts/skills” invariant |
 | Output schema | If advertised, server structured result MUST conform; clients SHOULD validate | Server validates every successful projected result against advertised output schema | Pass; keep output schemas authoritative |
-| Structured results | `structuredContent` is a JSON object; official tools guidance says also return serialized JSON text for backwards compatibility | Every successful result now contains deterministic serialized projected JSON as the first `TextContent` block plus the compact handle guidance block; both derive from the same value | Resolved in source; bounded reply fallback remains a gate |
+| Structured results | `structuredContent` is a JSON object; official tools guidance says also return serialized JSON text for backwards compatibility | Every bounded successful result contains deterministic serialized projected JSON in `TextContent`; the same value remains in `structuredContent`, and only an encoded response approaching the physical frame uses a fixed notice | Resolved in source; self-contained worker bootstrap and bounded fallback remain gates |
 | Tool annotations | Optional hints: title/readOnly/destructive/idempotent/openWorld; clients must treat them as untrusted | Not advertised | Pass; optional P2 metadata only after semantic review; never use it for authorization |
 | Error split | Protocol errors for unknown tool/invalid protocol; tool execution errors in result with `isError: true` | Caller validation and service/ledger errors are returned as structured tool errors; lifecycle/envelope faults use JSON-RPC errors | Pass; verify no raw exception reaches stdout |
 | Pagination | Cursors are opaque and requestors should reuse them | `tools/list` and bounded read projections expose cursor behavior | Pass; add cross-parameter cursor mismatch tests where applicable |
 | Security | Validate inputs, access-control, rate-limit, sanitize outputs, timeouts/logging recommended | Closed schemas, bounded frames/results, isolated candidate provenance, sanitized observation journal | Pass with operational gates; rate limiting is a future deployment concern for stdio |
 | Shutdown | Stdio client closes input, waits, then terminates if needed | Live helper owns exact-session cleanup; MCP process exits with launcher | Pass operationally; add direct stdio shutdown regression if needed |
 
-## All 15 Cortex tools
+## Complete fourteen-tool registry and audience projections
 
-The public catalogue is exactly the following, grouped by semantic role. The
-same MCP contract applies to every row: the model must use only the advertised
-schema and descriptions; no skill, prompt, or live workload may teach a call
-shape.
+The private registry contains the following fourteen operations, grouped by
+semantic role. Coordinator `tools/list` exposes coordinator operations plus
+`read_task`; worker-candidate/worker `tools/list` exposes only `read_task` and
+the three publications. The server independently enforces the same boundary.
+The model must use only the schema and descriptions advertised to its audience;
+no skill, prompt, or live workload may teach a call shape.
 
 | Tool | MCP classification | Idempotency/domain invariant | Protocol finding |
 |---|---|---|---|
@@ -96,7 +97,6 @@ shape.
 | `open_steering` | command | One pending steering binding; same-task supersession rules | Core MCP-compatible |
 | `record_steering` | command | Atomic decision plus effective-contract revision | Core MCP-compatible |
 | `open_assignment` | command | Assignment identity, evidence declarations, model/profile choice | Core MCP-compatible; native worker task is not an MCP Task |
-| `consume_assignment_evidence` | query | Read only declared evidence; cursor scoped to assignment | Core MCP-compatible |
 | `publish_plan` | command | Atomic immutable plan publication and approval relation | Core MCP-compatible; output schema is useful here |
 | `publish_result` | command | One terminal result slot per assignment; correction uses a new assignment | Core MCP-compatible; do not treat replay as automatic success |
 | `publish_documentation` | command | Atomic documentation-impact publication | Core MCP-compatible |

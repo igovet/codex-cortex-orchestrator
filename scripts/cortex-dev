@@ -42,7 +42,7 @@ PY
 
 umask 077
 mkdir -p -- "${dev_home}/.codex"
-chmod 700 -- "${dev_home}" "${dev_home}/.codex"
+chmod 700 "${dev_home}" "${dev_home}/.codex"
 
 # Native workers and the root coordinator share one Codex MCP catalogue.  The
 # isolated profile therefore receives only the non-secret executable

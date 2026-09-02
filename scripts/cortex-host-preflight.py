@@ -25,10 +25,34 @@ MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-EXPECTED_BASE_VERSION = "1.14.1"
-EXPECTED_MCP = {"mcpServers": {"cortex": {"command": "python3", "args": ["./scripts/cortex.py"], "cwd": "."}}}
+EXPECTED_BASE_VERSION = "1.14.12"
+EXPECTED_MCP = {
+    "mcpServers": {
+        "cortex": {
+            "command": "python3",
+            "args": ["-B", "./scripts/cortex.py"],
+            "cwd": ".",
+            "env_vars": [
+                "CORTEX_SESSION_NONCE",
+                "CORTEX_RAW_DIAGNOSTIC",
+            ],
+        }
+    }
+}
+REQUIRED_HOOK_EVENTS = frozenset({
+    "SessionStart",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+})
+ACTIVATION_HOOK_COMMAND = 'python3 -B "$PLUGIN_ROOT/hooks/cortex_activation.py"'
+LIFECYCLE_HOOK_COMMAND = 'python3 -B "$PLUGIN_ROOT/hooks/cortex_lifecycle_observer.py"'
 RETIRED_PLUGIN_PATHS = {
-    Path("hooks"),
     Path("scripts/cortex_hook.py"),
     Path("scripts/cortex-launcher"),
     Path("scripts/cortex_runtime/core"),
@@ -186,6 +210,70 @@ def regular_non_symlink_file(path: Path) -> bool:
         return stat.S_ISREG(path.lstat().st_mode)
     except OSError:
         return False
+
+
+def hook_contract_failure(root: Path) -> str | None:
+    """Return a bounded reason when the packaged host hook contract is invalid."""
+    manifest_path = root / "hooks/hooks.json"
+    activation_path = root / "hooks/cortex_activation.py"
+    lifecycle_path = root / "hooks/cortex_lifecycle_observer.py"
+    for path in (manifest_path, activation_path, lifecycle_path):
+        if not regular_non_symlink_file(path):
+            return f"required hook payload is missing or not a regular file: {path.name}"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "hook manifest is unreadable or invalid JSON"
+    hooks = payload.get("hooks") if isinstance(payload, dict) else None
+    if not isinstance(hooks, dict):
+        return "hook manifest has no hooks table"
+    observed_events = set(hooks)
+    if observed_events != REQUIRED_HOOK_EVENTS:
+        missing = sorted(REQUIRED_HOOK_EVENTS - observed_events)
+        unexpected = sorted(observed_events - REQUIRED_HOOK_EVENTS)
+        if missing:
+            return "hook manifest is missing required event(s): " + ", ".join(missing)
+        return "hook manifest declares unsupported event(s): " + ", ".join(unexpected)
+
+    commands: list[tuple[str, str | None, str]] = []
+    for event_name, declarations in hooks.items():
+        if not isinstance(declarations, list) or not declarations:
+            return f"hook event {event_name} has no declarations"
+        for declaration in declarations:
+            if not isinstance(declaration, dict):
+                return f"hook event {event_name} has a malformed declaration"
+            matcher = declaration.get("matcher")
+            if matcher is not None and not isinstance(matcher, str):
+                return f"hook event {event_name} has a malformed matcher"
+            callbacks = declaration.get("hooks")
+            if not isinstance(callbacks, list) or not callbacks:
+                return f"hook event {event_name} has no callbacks"
+            for callback in callbacks:
+                if not isinstance(callback, dict) or callback.get("type") != "command":
+                    return f"hook event {event_name} has a non-command callback"
+                command = callback.get("command")
+                if not isinstance(command, str):
+                    return f"hook event {event_name} has no command"
+                if "/usr/bin/python3" in command:
+                    return "hook commands must not hard-code /usr/bin/python3"
+                if command not in {ACTIVATION_HOOK_COMMAND, LIFECYCLE_HOOK_COMMAND}:
+                    return f"hook event {event_name} does not use the shared python3 -B contract"
+                commands.append((event_name, matcher, command))
+
+    declared_commands = {command for _, _, command in commands}
+    if declared_commands != {ACTIVATION_HOOK_COMMAND, LIFECYCLE_HOOK_COMMAND}:
+        return "activation guard and lifecycle observer must both be declared"
+    for event_name in ("PreToolUse", "PostToolUse"):
+        if not any(
+            event == event_name and matcher == "^Agent$" and command == LIFECYCLE_HOOK_COMMAND
+            for event, matcher, command in commands
+        ):
+            return f"hook event {event_name} lacks the exact native Agent lifecycle matcher"
+    for event_name in ("SessionStart", "SubagentStart"):
+        event_commands = {command for event, _, command in commands if event == event_name}
+        if event_commands != {ACTIVATION_HOOK_COMMAND, LIFECYCLE_HOOK_COMMAND}:
+            return f"hook event {event_name} must run activation and lifecycle callbacks"
+    return None
 
 
 def package_residue(root: Path) -> str | None:
@@ -395,7 +483,17 @@ def inspect_plugin(plugin_root: Path) -> tuple[dict[str, Any], str | None]:
     manifest_path = plugin_root / ".codex-plugin/plugin.json"
     mcp_path = plugin_root / ".mcp.json"
     entrypoint = plugin_root / "scripts/cortex.py"
-    symlink = first_symlinked_path([manifest_path, mcp_path, entrypoint])
+    hook_manifest = plugin_root / "hooks/hooks.json"
+    activation_hook = plugin_root / "hooks/cortex_activation.py"
+    lifecycle_hook = plugin_root / "hooks/cortex_lifecycle_observer.py"
+    symlink = first_symlinked_path([
+        manifest_path,
+        mcp_path,
+        entrypoint,
+        hook_manifest,
+        activation_hook,
+        lifecycle_hook,
+    ])
     if symlink:
         return (
             check(
@@ -438,7 +536,12 @@ def inspect_plugin(plugin_root: Path) -> tuple[dict[str, Any], str | None]:
         return check("plugin_root", False, "MCP manifest does not route directly to the V12 Python entrypoint", "Reinstall the same-version Cortex plugin."), version
     if not regular_non_symlink_file(entrypoint):
         return check("plugin_root", False, "bundled Cortex MCP entrypoint is missing or not a regular file", "Restore the installed Cortex plugin contents."), version
-    return check("plugin_root", True, f"Cortex {version} has a valid direct Python MCP entrypoint"), version
+    if manifest.get("hooks") != "./hooks/hooks.json":
+        return check("plugin_root", False, "plugin manifest does not declare the packaged host hooks", "Restore the Cortex hook declaration."), version
+    hook_failure = hook_contract_failure(plugin_root)
+    if hook_failure is not None:
+        return check("plugin_root", False, f"plugin hook contract is invalid: {hook_failure}", "Restore the current Cortex activation and lifecycle hook contract."), version
+    return check("plugin_root", True, f"Cortex {version} has valid shared Python MCP and hook entrypoints"), version
 
 
 def inspect_cache(codex_home: Path, version: str | None, source_digest: str | None) -> dict[str, Any]:

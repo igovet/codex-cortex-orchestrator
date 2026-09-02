@@ -89,7 +89,7 @@ def load_routing(root: Path) -> tuple[tuple[str, str, str], ...]:
 
 
 def render_tool_catalog(contracts: Mapping[str, Mapping[str, Any]]) -> str:
-    """Render the shared uniform catalogue without V11 audience projections."""
+    """Render the complete registry; runtime projects it by audience."""
     lines = ["| Tool | Semantic purpose |", "| --- | --- |"]
     for name, contract in contracts.items():
         description = contract.get("description")
@@ -185,7 +185,7 @@ def main() -> int:
                 for error in errors:
                     print(f"catalog validation failed: {error}", file=sys.stderr)
                 return 1
-            print("Cortex uniform tool catalog and model-routing table are current")
+            print("Cortex complete tool registry and model-routing table are current")
             return 0
         print("## Public semantic catalog")
         print()
