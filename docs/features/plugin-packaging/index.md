@@ -149,10 +149,14 @@ The installable package contains the bounded activation guard and sanitized
 lifecycle observer declared by its hook manifest. Installation requires review
 and trust of only those declared callbacks. Hook processes store owner-private
 digests and routing categories in `PLUGIN_DATA`; the MCP process resolves the
-same exact package data directory from `CODEX_HOME`, advertises a fail-closed
-candidate catalogue while a signed SubagentStart child is active, and consumes
-only the exact child-bound PreToolUse authorization on the first assignment
-read. Native subagent dispatch remains outside
+same exact package data directory from `CODEX_HOME`. Because Desktop initialize
+does not carry child identity, every connection starts with a neutral complete
+catalogue and foreign pending state cannot select its role. That catalogue
+grants no authority. The process consumes only
+the exact child-bound PreToolUse authorization on the first assignment read,
+then advertises the worker projection through `tools/list_changed`; clients
+that retain the neutral catalogue remain constrained by authoritative server
+role checks. Native subagent dispatch remains outside
 the MCP server, and hooks never replace server-side ledger authority.
 
 The SQLite database remains schema v1 under the V12 project namespace, with
@@ -253,7 +257,9 @@ The release candidate must prove:
   claiming model behavior;
 - exact model/effort support, Luna override omission, and no server fallback;
 - advisory profile parity across registry and TOML files;
-- absence of lifecycle hooks and lifecycle hook code;
+- exact inclusion of the activation guard and sanitized lifecycle observer,
+  with every callback using the same `python3 -B` runtime contract as the MCP
+  server and exact native `Agent` matchers for pre/post tool observation;
 - packaged maintenance-module parity without changing the fourteen-tool registry,
   including task/shard anchoring, confirmation strings, backup validation,
   offline restore, projection safety, canonical-data retention, and zero

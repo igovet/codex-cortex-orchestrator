@@ -119,6 +119,17 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     added[1]["outcome"]: ("unowned", "missing", "assignable"),
                 },
             )
+            assignment_scope = state["data"]["aggregate_coverage"]["assignment_scope"]
+            self.assertEqual(
+                assignment_scope,
+                {
+                    "planning": "complete_current_contract_server_derived",
+                    "delivery_outcomes": [item["outcome"] for item in added],
+                    "evidence_outcomes": [item["outcome"] for item in owned + added],
+                    "terminal_rework": "steering_revision_required",
+                    "terminal_outcomes": [item["outcome"] for item in owned],
+                },
+            )
 
             before_conflict = read_task(task_ref=task["task_ref"], view="state")["data"]["aggregate_coverage"]
             with self.assertRaises(V12ServiceError) as conflict:
@@ -140,9 +151,85 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
                 goal="Deliver only the new outcomes.", scope="Steered revision only.",
                 instructions="Consume and deliver only the assignable outcomes.",
-                outcomes=[item["outcome"] for item in added], report_policy="none",
+                report_policy="none",
             )
             self.assertFalse(new_only["replayed"])
+
+    def test_completed_owner_advertises_no_delivery_rework_until_steering_revision(self) -> None:
+        outcome = {
+            "outcome": "Deliver the bounded API.",
+            "acceptance": ["The API works."],
+            "constraints": [],
+            "verification": ["Focused checks pass."],
+        }
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, [outcome])
+            owner = open_assignment(
+                task_ref=task["task_ref"], role="initial delivery", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                goal="Deliver the bounded API.", scope="Bounded delivery scope.",
+                instructions="Implement and verify the current outcome.",
+                outcomes=[outcome["outcome"]], report_policy="none",
+            )
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                owner["native_dispatch"]["message"],
+            ).group(1)
+            context: dict = {}
+            read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            publish_result(
+                task_ref=worker_ref, summary="Delivery complete.", outcome="Complete.", changes=[],
+                verification_facts=[{"state": "executed", "summary": "Focused checks passed."}],
+                outcome_coverage=[{"outcome": outcome["outcome"], "status": "complete", "verification": ["Focused checks passed."]}],
+                documentation_impact="No documentation impact.", risks=[], unresolved=[],
+                status="completed", _connection_context=context,
+            )
+
+            state = read_task(task_ref=task["task_ref"], view="state")["data"]
+            scope = state["aggregate_coverage"]["assignment_scope"]
+            self.assertEqual(scope["delivery_outcomes"], [])
+            self.assertEqual(scope["evidence_outcomes"], [outcome["outcome"]])
+            self.assertEqual(scope["terminal_outcomes"], [outcome["outcome"]])
+            self.assertEqual(scope["terminal_rework"], "steering_revision_required")
+
+            before_rework = state["aggregate_coverage"]
+            with self.assertRaises(V12ServiceError) as conflict:
+                open_assignment(
+                    task_ref=task["task_ref"], role="invalid implicit rework", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                    goal="Attempt delivery without a new contract revision.", scope="No assignable outcomes.",
+                    instructions="This must fail without claiming terminal outcomes.", report_policy="none",
+                )
+            self.assertEqual(conflict.exception.code, "outcome_assignment_conflict")
+            self.assertEqual(
+                read_task(task_ref=task["task_ref"], view="state")["data"]["aggregate_coverage"],
+                before_rework,
+            )
+
+            replacement = {
+                **outcome,
+                "acceptance": ["The API works, including the reviewed edge case."],
+            }
+            open_steering(task_ref=task["task_ref"], prompt="Apply the reviewed correction?", prompt_language="en")
+            record_steering(
+                task_ref=task["task_ref"], response_original="Apply the reviewed correction.",
+                user_language="en", add=[replacement], retire=[outcome],
+            )
+            revised = read_task(task_ref=task["task_ref"], view="state")["data"]
+            revised_scope = revised["aggregate_coverage"]["assignment_scope"]
+            self.assertEqual(revised_scope["delivery_outcomes"], [replacement["outcome"]])
+            self.assertEqual(revised_scope["terminal_rework"], "not_applicable")
+            self.assertEqual(revised_scope["terminal_outcomes"], [])
+
+            replacement_owner = open_assignment(
+                task_ref=task["task_ref"], role="implicit complete rework", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                goal="Deliver the complete revised scope.", scope="All advertised delivery outcomes.",
+                instructions="Consume and deliver the complete server-derived current scope.", report_policy="none",
+            )
+            self.assertFalse(replacement_owner["replayed"])
 
     def test_assignment_requires_governance_assessment(self) -> None:
         outcome = {"outcome": "Inspect the artifact.", "acceptance": ["Evidence is returned."], "constraints": [], "verification": []}
@@ -195,14 +282,13 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     task_ref=task["task_ref"], role=f"planner {label}", profile_name="explorer",
                     model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
                     goal=f"Plan {label}.", scope="Secured flow.", instructions="Publish an exact plan.",
-                    outcomes=[outcome["outcome"]], report_policy="none",
+                    report_policy="none",
                 )
                 planner_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', planner["native_dispatch"]["message"]).group(1)
                 context: dict = {}
                 read_task(task_ref=planner_ref, view="assignment", _connection_context=context)
                 publish_plan(
                     task_ref=planner_ref, summary=f"Required plan {label}.", scope="Secured flow.",
-                    review_policy="required",
                     stages=[{"owner": "implementer", "work": [f"Implement {label}."], "verification": ["Run security checks."]}],
                     verification_facts=[{"state": "not_run", "summary": "Delivery awaits approval."}],
                     outcome_coverage=[{"outcome": outcome["outcome"], "status": "blocked", "verification": ["Approval pending."]}],
@@ -236,6 +322,114 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     goal="Implement v2.", scope="Secured flow.", instructions="Do not reuse v1 approval.",
                     outcomes=[outcome["outcome"]], report_policy="active_plan",
                 )
+
+    def test_material_steering_invalidates_old_plan_and_approval(self) -> None:
+        original = {
+            "outcome": "Deliver reset.",
+            "acceptance": ["Reset works."],
+            "constraints": [],
+            "verification": ["Reset tests pass."],
+        }
+        replacement = {
+            "outcome": "Deliver contains.",
+            "acceptance": ["Contains is read-only."],
+            "constraints": ["Time must be finite."],
+            "verification": ["Contains tests pass."],
+        }
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, [original])
+            assess_governance(task_ref=task["task_ref"], mode="light", rationale="Reviewed product change.")
+            planner = open_assignment(
+                task_ref=task["task_ref"], role="planner", profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
+                goal="Plan reset.", scope="Current contract.", instructions="Publish the required plan.",
+                report_policy="none",
+            )
+            planner_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                planner["native_dispatch"]["message"],
+            ).group(1)
+            planner_context: dict = {}
+            read_task(task_ref=planner_ref, view="assignment", _connection_context=planner_context)
+            publish_plan(
+                task_ref=planner_ref, summary="Reset plan.", scope="Current contract.",
+                stages=[{"owner": "implementer", "work": ["Implement reset."], "verification": ["Run reset tests."]}],
+                verification_facts=[{"state": "not_run", "summary": "Delivery awaits approval."}],
+                outcome_coverage=[{"outcome": original["outcome"], "status": "blocked", "verification": ["Approval pending."]}],
+                risks=[], unresolved=[], status="blocked", _connection_context=planner_context,
+            )
+            open_plan_review(task_ref=task["task_ref"], prompt="Approve reset plan?", prompt_language="en")
+            record_plan_review(
+                task_ref=task["task_ref"], outcome="approve",
+                response_original="Approve reset plan.", user_language="en",
+            )
+
+            open_steering(task_ref=task["task_ref"], prompt="Replace reset with contains?", prompt_language="en")
+            record_steering(
+                task_ref=task["task_ref"], response_original="Use contains instead.", user_language="en",
+                add=[replacement], retire=[original],
+            )
+
+            with self.assertRaises(V12ServiceError) as review_error:
+                open_plan_review(task_ref=task["task_ref"], prompt="Reuse old plan?", prompt_language="en")
+            self.assertEqual(review_error.exception.code, "approval_view_required")
+            with self.assertRaises(V12ServiceError) as delivery_error:
+                open_assignment(
+                    task_ref=task["task_ref"], role="implementer", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="delivery",
+                    goal="Implement contains.", scope="Current contract.", instructions="Do not reuse the reset plan.",
+                    outcomes=[replacement["outcome"]], report_policy="active_plan",
+                )
+            self.assertEqual(delivery_error.exception.code, "plan_approval_required")
+
+    def test_current_approved_multi_outcome_plan_admits_fullstack_delivery(self) -> None:
+        outcomes = [
+            {"outcome": "Implement API.", "acceptance": ["API works."], "constraints": [], "verification": ["API checked."]},
+            {"outcome": "Add tests.", "acceptance": ["Tests exist."], "constraints": [], "verification": ["Tests pass."]},
+            {"outcome": "Update README.", "acceptance": ["README is current."], "constraints": [], "verification": ["README checked."]},
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, outcomes)
+            assess_governance(task_ref=task["task_ref"], mode="light", rationale="Cross-surface change.")
+            planner = open_assignment(
+                task_ref=task["task_ref"], role="planner", profile_name="planner",
+                model="gpt-5.6-terra", reasoning_effort="high", responsibility="planning",
+                goal="Plan all outcomes.", scope="Current contract.", instructions="Publish one required plan.",
+                report_policy="none",
+            )
+            planner_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                planner["native_dispatch"]["message"],
+            ).group(1)
+            planner_context: dict = {}
+            read_task(task_ref=planner_ref, view="assignment", _connection_context=planner_context)
+            publish_plan(
+                task_ref=planner_ref, summary="Current multi-outcome plan.", scope="Current contract.",
+                stages=[{"owner": "developer", "work": ["Implement all outcomes."], "verification": ["Run all checks."]}],
+                verification_facts=[{"state": "not_run", "summary": "Delivery awaits approval."}],
+                outcome_coverage=[
+                    {"outcome": item["outcome"], "status": "blocked", "verification": ["Approval pending."]}
+                    for item in outcomes
+                ],
+                risks=[], unresolved=[], status="blocked", _connection_context=planner_context,
+            )
+            open_plan_review(task_ref=task["task_ref"], prompt="Approve current plan?", prompt_language="en")
+            record_plan_review(
+                task_ref=task["task_ref"], outcome="approve",
+                response_original="Approve current plan.", user_language="en",
+            )
+
+            delivery = open_assignment(
+                task_ref=task["task_ref"], role="developer", profile_name="fullstack_dev",
+                model="gpt-5.6-terra", reasoning_effort="high", responsibility="delivery",
+                goal="Deliver all outcomes.", scope="Current contract.", instructions="Use the approved plan.",
+                outcomes=[item["outcome"] for item in outcomes], report_policy="active_plan",
+            )
+            self.assertFalse(delivery["replayed"])
 
     def test_open_assignment_returns_only_native_dispatch_and_replay_state(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
@@ -634,7 +828,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     self.assertNotIn(private_field, repr(rejected.exception.details))
                     self.assertNotIn(private_field, str(rejected.exception))
 
-    def test_partial_plan_is_accepted_once_and_is_immediately_active_evidence(self) -> None:
+    def test_partial_plan_for_server_derived_complete_scope_is_immediately_active_evidence(self) -> None:
         """Regression for the real planner failure observed in live orchestration.
 
         A schema-valid partial plan used to fail first as
@@ -648,34 +842,36 @@ class DomainPublicApiContractTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
             task, _ = self._task(root, outcomes)
+            with self.assertRaises(V12ServiceError) as stale_shape:
+                open_assignment(
+                    task_ref=task["task_ref"], role="legacy planner", profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
+                    goal="Plan one copied outcome.", scope="Invalid caller-selected scope.",
+                    instructions="This shape must not mutate.",
+                    outcomes=[outcomes[0]["outcome"]], report_policy="none",
+                )
+            self.assertEqual(stale_shape.exception.code, "invalid_argument")
             assignment = open_assignment(
                 task_ref=task["task_ref"], role="bounded planner", profile_name="explorer",
                 model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
-                goal="Prepare the next plan.", scope="Only the first semantic outcome.",
-                instructions="Publish observed planning evidence.", outcomes=[outcomes[0]["outcome"]], report_policy="none",
+                goal="Prepare the next plan.", scope="The complete current contract.",
+                instructions="Publish observed planning evidence.", report_policy="none",
             )
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', assignment["native_dispatch"]["message"]).group(1)
             context: dict = {}
             bootstrap = read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
             self.assertEqual(bootstrap["data"]["assignment_context"]["responsibility"], "planning")
             self.assertEqual(bootstrap["data"]["assignment_context"]["project_root"], str(Path(root).resolve()))
-            self.assertEqual(len(bootstrap["data"]["effective_contract"]["planning_items"]), 1)
-
-            with self.assertRaisesRegex(V12ServiceError, "review policy is invalid"):
-                publish_plan(
-                    task_ref=worker_ref, summary="Invalid policy.", scope="First outcome only.",
-                    review_policy="optional", stages=[{"owner": "implementation", "work": ["Implement."], "verification": ["Check."]}],
-                    verification_facts=[{"state": "not_run", "summary": "Not started."}],
-                    outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Planned."]}],
-                    risks=[], unresolved=[], status="partial", _connection_context=context,
-                )
+            self.assertEqual(len(bootstrap["data"]["effective_contract"]["planning_items"]), 2)
 
             published = publish_plan(
-                task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="First outcome only.",
-                review_policy="informational",
+                task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="Complete current contract.",
                 stages=[{"owner": "implementation", "work": ["Implement the bounded change."], "verification": ["Run the focused check."]}],
                 verification_facts=[{"state": "not_run", "summary": "Execution belongs to the implementation worker."}],
-                outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]}],
+                outcome_coverage=[
+                    {"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]},
+                    {"outcome": outcomes[1]["outcome"], "status": "partial", "verification": ["Uncertainty remains visible."]},
+                ],
                 risks=["Implementation remains."], unresolved=["Runtime result is not available yet."], status="partial",
                 _connection_context=context,
             )
@@ -683,29 +879,17 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertFalse(published["replayed"])
 
             replayed = publish_plan(
-                task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="First outcome only.",
-                review_policy="informational",
+                task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="Complete current contract.",
                 stages=[{"owner": "implementation", "work": ["Implement the bounded change."], "verification": ["Run the focused check."]}],
                 verification_facts=[{"state": "not_run", "summary": "Execution belongs to the implementation worker."}],
-                outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]}],
+                outcome_coverage=[
+                    {"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]},
+                    {"outcome": outcomes[1]["outcome"], "status": "partial", "verification": ["Uncertainty remains visible."]},
+                ],
                 risks=["Implementation remains."], unresolved=["Runtime result is not available yet."], status="partial",
                 _connection_context=context,
             )
             self.assertTrue(replayed["replayed"])
-
-            # Review disposition is part of the immutable publication payload:
-            # changing only that value must conflict instead of silently
-            # reusing an informational plan as a required one (or vice versa).
-            with self.assertRaisesRegex(V12ServiceError, "different terminal report"):
-                publish_plan(
-                    task_ref=worker_ref, summary="A bounded plan with an explicit uncertainty.", scope="First outcome only.",
-                    review_policy="required",
-                    stages=[{"owner": "implementation", "work": ["Implement the bounded change."], "verification": ["Run the focused check."]}],
-                    verification_facts=[{"state": "not_run", "summary": "Execution belongs to the implementation worker."}],
-                    outcome_coverage=[{"outcome": outcomes[0]["outcome"], "status": "partial", "verification": ["Sequence established; implementation remains."]}],
-                    risks=["Implementation remains."], unresolved=["Runtime result is not available yet."], status="partial",
-                    _connection_context=context,
-                )
 
             # A worker may inspect neutral state after its mandatory bootstrap;
             # this advertised view must not trip a hidden capability gate.
@@ -717,6 +901,9 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertIn("A bounded plan", repr(handoff["data"]))
             self.assertEqual(handoff["data"]["reports"][0]["review_policy"], "informational")
             self.assertEqual(handoff["data"]["consumption_receipts"][0]["reader_kind"], "coordinator")
+            with self.assertRaises(V12ServiceError) as rejected_review:
+                open_plan_review(task_ref=task["task_ref"], prompt="Review informational plan?", prompt_language="en")
+            self.assertEqual(rejected_review.exception.code, "approval_view_required")
 
     def test_planning_assignment_cannot_publish_supplementary_result_after_plan(self) -> None:
         outcome = {
@@ -734,7 +921,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
                 goal="Publish the terminal plan.", scope="Bounded planning only.",
                 instructions="Complete discovery before publishing.",
-                outcomes=[outcome["outcome"]], report_policy="none",
+                report_policy="none",
             )
             worker_ref = re.search(
                 r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
@@ -751,7 +938,6 @@ class DomainPublicApiContractTests(unittest.TestCase):
             }
             publish_plan(
                 summary="Complete terminal plan.", scope="Bounded planning only.",
-                review_policy="required",
                 stages=[{"owner": "implementation", "work": ["Implement."], "verification": ["Run focused tests."]}],
                 **common,
             )
@@ -823,14 +1009,13 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 task_ref=task["task_ref"], role="planner", profile_name="explorer",
                 model="gpt-5.6-luna", reasoning_effort="high", responsibility="planning",
                 goal="Plan the change.", scope="The semantic outcome.", instructions="Publish the plan.",
-                outcomes=[outcome["outcome"]], report_policy="none",
+                report_policy="none",
             )
             planner_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', planner["native_dispatch"]["message"]).group(1)
             planner_context: dict = {}
             read_task(task_ref=planner_ref, view="assignment", _connection_context=planner_context)
             publish_plan(
                 task_ref=planner_ref, summary="Plan with visible uncertainty.", scope="Bounded.",
-                review_policy="required",
                 stages=[{"owner": "worker", "work": ["Implement."], "verification": ["Check."]}],
                 verification_facts=[{"state": "not_run", "summary": "Implementation has not run."}],
                 outcome_coverage=[{"outcome": outcome["outcome"], "status": "blocked", "verification": ["User review is requested."]}],

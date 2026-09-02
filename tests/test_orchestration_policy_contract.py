@@ -119,12 +119,34 @@ def test_assignment_selection_uses_current_outcomes_and_one_bounded_recovery():
     orchestrator = _text(ORCHESTRATOR)
 
     assert "Immediately before every assignment, read current task state" in orchestrator
-    assert "complete exact unique semantic outcome names" in orchestrator
+    assert "aggregate_coverage.assignment_scope" in orchestrator
+    assert "delivery_outcomes" in orchestrator
+    assert "evidence_outcomes" in orchestrator
+    assert "omit outcome selection" in orchestrator
+    assert "partition work intentionally" in orchestrator
+    assert "terminal_rework=steering_revision_required" in orchestrator
+    assert "first obtain and record explicit user steering" in orchestrator
     assert "Do not reuse a pre-steering snapshot" in orchestrator
     assert "at most one fresh-state read and one rebuilt assignment" in orchestrator
     assert "Never retry the unchanged request or reconstruct a retired outcome" in orchestrator
     assert "spawns exactly once and immediately" in orchestrator
     assert "never creates a duplicate worker" in orchestrator
+
+
+def test_native_wait_is_advisory_and_durable_publication_recovers_empty_wait():
+    orchestrator = _text(ORCHESTRATOR)
+    control = _text(CONTROL)
+
+    for text in (orchestrator, control):
+        assert "Native wait output is advisory host coordination" in text
+        assert "every bounded native wait returns" in text
+        assert "an empty result" in text
+        assert "finalized worker publication is authoritative durable completion evidence" in text
+        assert "without another wait for that child" in text
+        assert "lifecycle stop" in text.lower()
+        assert "loss/recovery" in text
+        assert "model-only waiting" in text
+        assert "suppress" in text and "durable evidence" in text
 
 
 def test_added_policy_does_not_embed_mcp_payload_contracts():

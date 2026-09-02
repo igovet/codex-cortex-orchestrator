@@ -31,8 +31,8 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     normalized = " ".join(policy["common_policy"].split())
 
     assert "First consume the server-owned assignment" in message
-    assert "candidate-scoped `read_task`" in message
-    assert "assignment is its sole advertised view" in normalized_message.lower()
+    assert "live advertised `read_task`" in message
+    assert "select assignment evidence" in normalized_message.lower()
     assert "`open_assignment` creates assignments for a" in normalized_message
     assert "never reads or consumes a worker assignment" in normalized_message
     assert "assignment read is the sole authority" in message
@@ -49,7 +49,7 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "environment blocker" in normalized
     assert "actual graph call" in normalized
     assert "Never silently skip the graph" in normalized
-    assert "A plan publication always declares one explicit review disposition" in policy["common_policy"]
+    assert "A plan publication does not choose or declare its review disposition" in policy["common_policy"]
     assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
     assert "never publishes a supplementary result or documentation outcome" in normalized
     assert "separate evidence assignment followed by a fresh planning revision" in normalized
@@ -86,8 +86,8 @@ def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_aut
     # operation.  Keep the assertion semantic rather than prescribing a
     # public MCP argument shape.
     first_action = message.index("First consume the server-owned assignment")
-    assert message.index("candidate-scoped `read_task`", first_action) > first_action
-    assert "assignment is its sole advertised view" in " ".join(message.split()).lower()
+    assert message.index("live advertised `read_task`", first_action) > first_action
+    assert "select assignment evidence" in " ".join(message.split()).lower()
     assert "`open_assignment` creates assignments" in " ".join(message.split())
     assert "You are a worker, not a coordinator" in message
 

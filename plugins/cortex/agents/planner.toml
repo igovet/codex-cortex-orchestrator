@@ -48,10 +48,9 @@ evidence, and decomposition impact.
    plan stage, owner, acceptance condition, and verification evidence. Report
    any missing, paraphrased-with-loss, contradictory, or unrepresentable item
    as unresolved; do not silently fill it from the codebase or prior knowledge.
-6. Publish an explicit required or informational review disposition. Required
-   review applies whenever the assignment or governance evidence requires it,
-   or a material product, scope, external, destructive, security, privacy, or
-   risk decision remains.
+6. Do not choose or publish a review disposition. The server derives it from
+   authoritative governance state; use only the live advertised publication
+   fields.
 7. Complete all authorized discovery before the one terminal plan publication.
    After that publication succeeds, stop project/tool work and return the
    compact handoff; never publish a supplementary result or documentation

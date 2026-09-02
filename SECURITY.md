@@ -165,8 +165,16 @@ object-shaped scope is invalid. Delegation `model` and `reasoning_effort` are
 required together and retained exactly. `profile_name` is an exact packaged
 enum distinct from the bounded human-readable `role`; it selects expertise, not
 ownership. The public mission's explicit `responsibility` selects planning,
-delivery ownership, or non-owning evidence, while exact `item_refs` bind the
-scope that must be reconciled. Renderer proof must be loaded. The returned
+delivery ownership, or non-owning evidence. Delivery/evidence use exact current
+semantic outcome selectors; planning scope is server-derived as the complete
+current effective contract and cannot be narrowed or reconstructed by the
+caller. Private exact `item_refs` bind the scope that must be reconciled.
+The public state projection also emits canonical responsibility-specific
+assignment selectors. Delivery can use only `delivery_outcomes`; terminal-owned
+outcomes are separated with `terminal_rework=steering_revision_required` and
+cannot become corrective delivery scope until an explicit steering revision
+creates new unowned outcomes. Evidence remains selectable without acquiring
+delivery ownership. Renderer proof must be loaded. The returned
 closed native dispatch preserves the compact bootstrap and exact selected
 model/effort for one matching host spawn. This semantic delegation
 receipt proves packaged profile and semantic dispatch data, not host lifecycle.
@@ -188,22 +196,27 @@ user-facing answer.
 
 Worker publication authority is established only after terminal consumption of
 the exact server-owned assignment view on one signed, host-bound MCP
-worker-candidate connection. Before native spawn, the validated unchanged host
-call creates a signed, non-authoritative catalogue hint, so a Desktop child
-whose MCP process initializes before `SubagentStart` still receives only the
-fail-closed worker-candidate catalogue. `SubagentStart` then replaces that hint
-with a one-shot digest-only attestation bound to the exact child
-agent/session/assignment; inherited root environment is not treated as child
-identity. The hint grants no call or ledger authority. `PreToolUse` authorizes
-the exact first call without rewriting it. A connection that initialized before
-the child attestation may adopt it only while its role is still unknown and only
-by atomically claiming that signed exact-call authorization; a confirmed
-coordinator can never pivot. The candidate schema exposes no selectable view:
-an optional view field is
-limited to `const=assignment`, and the server fixes that value even when it is
-omitted. It atomically consumes only the matching child, turn, session,
-assignment, and tool-use authorization on the calling connection. Worker role
-is committed only after successful terminal assignment consumption.
+connection. Current Codex Desktop supplies no trustworthy connection-specific
+identity in MCP initialize parameters or environment: root and child processes
+are indistinguishable at that boundary. Cortex therefore never selects an
+initial audience from a global fresh worker record. Every unattributed
+connection starts with a neutral complete catalogue and an uncommitted role;
+the catalogue grants no call authority, and an unrelated pending/candidate
+receipt cannot select a new root audience.
+`SubagentStart` creates a one-shot digest-only attestation bound to the exact
+child agent/session/assignment, and `PreToolUse` authorizes the exact first
+assignment read without rewriting it. Only that otherwise-uncommitted
+connection may atomically claim the authorization. The server validates the
+read against its worker-candidate schema, fixes the assignment view, and
+commits worker role only after successful terminal assignment consumption.
+It then emits the standard `notifications/tools/list_changed` notification;
+a supporting client refresh receives only `read_task` and the three worker
+publication tools. A client that retains the neutral catalogue remains
+fail-closed because committed server role checks reject every coordinator-only
+worker call without mutation. A confirmed coordinator can never pivot. Pre-consumption
+catalogue hiding cannot be authenticated until the host supplies identity at
+initialize; server authorization and the activation hook remain authoritative
+during that unavoidable discovery window.
 Coordinator and worker roles are
 monotonic per connection. A fresh process,
 reconnect, copied worker locator, report reference, bare assignment reference,
@@ -340,6 +353,12 @@ named active items; it does not rewrite unrelated evidence. This evidence and
 the linked conformance projection guide model reasoning but never become a
 backend authorization or lifecycle gate.
 
+Required-review plans are revision-bound evidence. The server exposes a plan as
+active, opens its review, and admits light/full delivery only when the plan's
+planning-assignment snapshot matches the current effective-contract revision.
+A material steering revision therefore invalidates reuse of every earlier plan
+approval without deleting or rewriting its audit history.
+
 The public aggregate projection binds each row to the exact semantic outcome
 and supplies explicit `ownership` plus `delivery_assignability`. `assignable`
 means an ordinary delivery owner may claim the currently unowned outcome;
@@ -386,7 +405,6 @@ facade.
 Private tool-error logs are same-user sensitive data. Inspect only a bounded
 tail when necessary, extract sanitized correlation metadata, and never paste
 raw records into a chat, issue, prompt, commit, fixture, or external system.
-
 ## State and filesystem safety
 
 Each exact resolved project root maps to a separate database:
@@ -521,7 +539,7 @@ that may preserve an evidence-backed warning or recommendation without
 silently replacing the user's choice.
 
 Every light or full delivery assignment requires a current finalized plan with
-`review_policy=required`; the coordinator opens the matching review, presents
+server-derived `review_policy=required`; the coordinator opens the matching review, presents
 the verified plan, and records an explicit approval bound to that exact report
 and digest before dispatching delivery work. The backend enforces this narrow
 pre-dispatch relation while leaving planning/evidence assignments available.
@@ -704,7 +722,13 @@ A useful report includes:
    rejection, governance and decision history, dependency warnings,
    host-private verified projection behavior, and V11 byte-for-byte
    preservation.
-6. Confirm lifecycle hook code and enabled hook declarations are absent.
+6. Confirm the packaged activation guard and lifecycle observer are present,
+   every declared callback uses the shared host-resolved `python3 -B`
+   contract without an absolute interpreter path, and `PreToolUse` plus
+   `PostToolUse` bind the lifecycle observer only through the exact `^Agent$`
+   matcher. Verify that hooks carry host lifecycle attestation only and never
+   replace the server's independent identity, schema, isolation, or mutation
+   checks.
 7. Verify the packaged maintenance CLI remains outside the fourteen-tool semantic catalog,
    uses task/shard-derived host-private targets and exact confirmations,
    validates backups before retention/restore, requires offline `MCP_STOPPED`

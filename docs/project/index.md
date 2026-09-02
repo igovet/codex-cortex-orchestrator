@@ -91,8 +91,8 @@ including when the user asks the coordinator to perform one.
 
 The sidecar enforces strict schemas, reference existence, project isolation,
 idempotency, transactions, uniqueness, SQLite integrity, monotonic connection
-audiences, exact SubagentStart/PreToolUse-bound worker bootstrap with an
-assignment-only candidate catalogue, ordered assignment-page receipts,
+audiences, exact SubagentStart/PreToolUse-bound worker bootstrap, post-consume
+worker catalogue refresh, foreign-candidate isolation, ordered assignment-page receipts,
 and immutable lost-assignment successor lineage. It does not enforce waves,
 model-owned gates, profile-based capability admission, governance promotion, or
 a server-selected recovery ladder. Exact packaged `profile_name` validation is
@@ -179,8 +179,9 @@ second receipt or timeline mutation.
 `publish_plan`, `publish_result`, and `publish_documentation` record immutable
 worker-owned evidence through semantic publication operations. The server owns storage,
 completion, and replay identity; each delegation/report-kind slot has one
-terminal outcome, and changed payloads require recovery/rework. Plans
-declare `informational` or `required` review policy.
+terminal outcome, and changed payloads require recovery/rework. Plans persist a
+server-derived `informational` or `required` review policy; the worker
+publication does not choose or supply it.
 Only the native worker that owns the delegation calls the applicable `publish_*` operation; its
 completion handoff returns a concise `Summary` and exact `Report ref`. The
 coordinator dispatches, waits, and consumes that handoff without rereading the

@@ -116,12 +116,16 @@ public locators.
 
 Reports are immutable `progress`, `result`, or `synthesis` evidence with
 `partial`, `completed`, `blocked`, or `failed` status; `plan` is the fourth
-report type. A plan's review policy is `informational` or `required`.
+report type. A plan's persisted review policy is server-derived as
+`informational` or `required`; it is not a worker-selected publication field.
 `required` means the coordinator presents the exact finalized plan/digest,
 explains the review, requests an unambiguous approve/revise/cancel response,
 and ends the turn. For light/full delivery the backend then admits only an
-explicit approval bound to that exact current plan; it does not authenticate
-the chat participant or authorize external action.
+explicit approval bound to that exact current plan and the same
+effective-contract revision; it does not authenticate the chat participant or
+authorize external action. Material steering makes the previous plan and
+approval historical, so the new revision requires a new planner publication
+and review before delivery.
 
 New reports use the semantic publication operation, which owns storage
 representation and completion atomically and records one terminal outcome per

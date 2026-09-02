@@ -471,7 +471,7 @@ def test_exact_candidate_stdio_reports_identity_and_catalog(tmp_path: Path) -> N
     assert info["sourceDigest"] == digest
     assert info["parityVerified"] is True
     tools = next(item for item in lines if item.get("id") == 2)["result"]["tools"]
-    expected = tuple(name for name in OPERATION_NAMES if not name.startswith("publish_"))
+    expected = OPERATION_NAMES
     assert tuple(item["name"] for item in tools) == expected
     observations = [json.loads(line) for line in journal_path.read_text(encoding="ascii").splitlines()]
     ready = [item for item in observations if item["operation"] == "server_ready"]
@@ -520,7 +520,7 @@ def test_content_addressed_installed_release_stdio_initializes_without_source_mo
     assert info["parityVerified"] is True
     assert info["buildId"] == "sha256:" + info["sourceDigest"]
     tools = next(item for item in lines if item.get("id") == 2)["result"]["tools"]
-    expected = tuple(name for name in OPERATION_NAMES if not name.startswith("publish_"))
+    expected = OPERATION_NAMES
     assert tuple(item["name"] for item in tools) == expected
 
 

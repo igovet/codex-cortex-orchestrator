@@ -248,6 +248,13 @@ Release evidence must prove:
   partial, unverified, stale, and contradictory evidence, complete unpaired
   steering additions create independent outcomes, and one retire plus one add
   atomically replaces only the selected outcome;
+- coordinator state publishes canonical `assignment_scope` selectors:
+  delivery names only currently unowned assignable outcomes, evidence names
+  all current outcomes, and omitted assignment outcomes bind the complete
+  responsibility list server-side. Exact names remain optional only for an
+  intentional subset partition; planning is server-derived, and terminal
+  rework remains unavailable until an explicit steering revision creates new
+  delivery scope;
 - failed or partial QA, failed executed checks, and required unrun checks create
   bounded corrective ownership for source or release/verification infrastructure
   and require an independent rerun of failed and affected gates before closure;
@@ -285,13 +292,14 @@ Each narrow decision record operation has one closed canonical contract. Retired
 rejected by the public schema before mutation.
 
 The public `publish_plan` operation provides immutable plan evidence without
-adding a fifteenth tool. Its required `review_policy` field expresses a
-coordinator-owned ordinary-chat
-review hold: present the finalized plan revision, digest, localized summary,
-and approve/revise/cancel choices; then record an unambiguous response against
-that exact revision. A revised plan is a new report and requires fresh review.
-The backend never authorizes or blocks a later action because a decision,
-approval, review record, or review policy is present, absent, or stale.
+adding a fifteenth tool. It does not accept a model-selected review-policy
+field: the server derives persisted `informational` for minimal governance and
+`required` for light/full governance. A required plan creates the
+coordinator-owned ordinary-chat review hold: present the finalized plan
+revision, digest, localized summary, and approve/revise/cancel choices; then
+record an unambiguous response against that exact revision. A revised plan is a
+new report and requires fresh review. This approval is a narrow light/full
+delivery-integrity relation, not authorization for external action.
 
 The database is canonical. Per-task Markdown files are derived host-private
 views beside the V12 shard, never written to the target project or a
@@ -506,7 +514,7 @@ TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
 ./scripts/cortex-live-smoke stop
 ```
 
-After `start`, `capture` reads the bounded output-only PTY stream when detached `capture-pane` is stale. `events` reads the exact session's bounded owner-only sanitized MCP observation stream. It exposes safe metadata only and never parses readiness, errors, replay, or acceptance; the LLM verifier owns those decisions. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If the visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; it sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the composer before `send`. Each task must provide its own prompt, identify the changed behavior, state that the session is already live-dev, and forbid nested tmux, cortex-dev, shell validation, and repository inspection. The transport uses safe unframed tmux-buffer insertion, then computes collapsed paste blocks as `ceil(normalized Unicode character count / 1024)` for current Codex 0.149.1 compatibility. It waits five seconds before each standalone `C-m`: one per collapsed paste block, plus one final key requesting submission; its receipt reports counts and key deliveries only, never TUI acceptance. The coordinator/LLM decides readiness, rollout, acceptance, and errors from the terminal and bounded events. Observe actual task-relevant Cortex MCP calls. `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or a missing marker is a failed gate. A repeated successful mutation without an explicitly ambiguous prior transport result is also a failed gate; backend idempotency does not excuse an unexplained replay. The stabilization example requires exactly one task-creation request and a non-replayed success before its sentinel. Use the default tmux server, isolated HOME/CODEX_HOME, ordinary Codex, bounded captures, and exact-session cleanup only; never use `codex exec`, another socket, or stable plugin updates.
+After `start`, `capture` reads the bounded output-only PTY stream when detached `capture-pane` is stale. `events` reads the exact session's bounded owner-only sanitized MCP observation stream. It exposes safe metadata only and never parses readiness, errors, replay, or acceptance; the LLM verifier owns those decisions. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If the visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; it sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the composer before `send`. Each workload begins with the exact `$cortex:orchestrator` token; no other Cortex-specific text is permitted in the prompt. The remainder must look like a normal user request for a concrete development, change, diagnosis, or verification task. The external operator owns live-dev restrictions, internal lifecycle coverage, tool/replay checks, worker-event inspection, and completion criteria. The transport uses safe unframed tmux-buffer insertion, then computes collapsed paste blocks as `ceil(normalized Unicode character count / 1024)` for current Codex 0.149.1 compatibility. It waits five seconds before each standalone `C-m`: one per collapsed paste block, plus one final key requesting submission; its receipt reports counts and key deliveries only, never TUI acceptance. The coordinator/LLM decides readiness, rollout, acceptance, and errors from the terminal and bounded events. Observe actual task-relevant Cortex MCP calls. `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or missing expected completion is a failed gate. A repeated successful mutation without an explicitly ambiguous prior transport result is also a failed gate; backend idempotency does not excuse an unexplained replay. Use the default tmux server, isolated HOME/CODEX_HOME, ordinary Codex, bounded captures, and exact-session cleanup only; never use `codex exec`, another socket, or stable plugin updates.
 
 The current prompt transport contract is literal insertion with one `send-keys -l`, a real five-second wait after insertion returns, and exactly one standalone named `Enter`; no pre-submit `C-m` or `C-j` is permitted. The transport reports delivery only; the LLM verifier owns TUI acceptance.
 

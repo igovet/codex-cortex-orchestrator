@@ -241,9 +241,12 @@ def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_re
             rows = connection.execute("SELECT report_id FROM reports WHERE task_id=? AND assembly_state='finalized' ORDER BY created_sequence", (task_id,)).fetchall()
         elif policy == "active_plan":
             rows = connection.execute(
-                "SELECT r.report_id FROM reports r "
+                "SELECT DISTINCT r.report_id FROM reports r "
+                "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
                 "WHERE r.task_id=? AND r.report_type='plan' AND r.assembly_state='finalized' "
-                "ORDER BY r.created_sequence DESC LIMIT 1", (task_id,),
+                "AND s.assignment_role='planning' "
+                "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=?) "
+                "ORDER BY r.created_sequence DESC LIMIT 1", (task_id, task_id),
             ).fetchall()
         elif policy == "latest_for_scope":
             # Coverage identity stays private. Choose the latest finalized
@@ -296,9 +299,12 @@ def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> 
         if assignment_policy != "owner" or mode not in {"light", "full"}:
             return
         plan = connection.execute(
-            "SELECT report_id,content_digest,review_policy FROM reports "
-            "WHERE project_hash=? AND task_id=? AND report_type='plan' "
-            "AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+            "SELECT DISTINCT r.report_id,r.content_digest,r.review_policy FROM reports r "
+            "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
+            "WHERE r.project_hash=? AND r.task_id=? AND r.report_type='plan' "
+            "AND s.assignment_role='planning' "
+            "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=r.task_id) "
+            "AND r.assembly_state='finalized' ORDER BY r.created_sequence DESC LIMIT 1",
             (store.project_hash, task_id),
         ).fetchone()
         if plan is None or str(plan["review_policy"] or "") != "required":
@@ -531,8 +537,8 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
 def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
                     reasoning_effort: str,
                     responsibility: str, goal: str, scope: str,
-                    instructions: str, outcomes: list[str],
-                    report_policy: str,
+                    instructions: str, outcomes: list[str] | None = None,
+                    report_policy: str = "none",
                     loss_recovery: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Atomically bind a worker assignment to its current effective contract."""
     from cortex_runtime.model_routing import validate_model_selection
@@ -545,12 +551,51 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
         raise V12ServiceError("assignment responsibility is invalid", code="invalid_argument", details={"field": "mission.responsibility"})
     store, canonical = _task_store(task_ref)
     _admit_assignment(store, canonical, assignment_policy)
-    current = ledger.inspect_task(task_ref=task_ref).get("effective_contract")
+    task_state = ledger.inspect_task(task_ref=task_ref)
+    current = task_state.get("effective_contract")
     current_items = current.get("items") if isinstance(current, Mapping) else None
     if not isinstance(current_items, list):
         raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
     typed_items = [item for item in current_items if isinstance(item, Mapping)]
-    item_refs = _match_outcomes(typed_items, outcomes, path="$.outcomes")
+    if responsibility == "planning":
+        if outcomes is not None:
+            raise V12ServiceError(
+                "planning outcome scope is server-derived",
+                code="invalid_argument",
+                details={"path": "$.outcomes", "reason": "unsupported_property"},
+            )
+        item_refs = [
+            str(item["item_ref"]) for item in typed_items
+            if isinstance(item.get("item_ref"), str)
+        ]
+        if len(item_refs) != len(typed_items) or not item_refs:
+            raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
+    elif outcomes is None:
+        if loss_recovery is not None:
+            raise V12ServiceError(
+                "loss recovery requires an exact predecessor outcome scope",
+                code="assignment_loss_scope_conflict",
+                details={"path": "$.outcomes", "expected": "exact_loss_recovery_scope", "reason": "required"},
+            )
+        aggregate = task_state.get("aggregate_coverage")
+        assignment_scope = aggregate.get("assignment_scope") if isinstance(aggregate, Mapping) else None
+        scope_key = "delivery_outcomes" if responsibility == "delivery" else "evidence_outcomes"
+        advertised = assignment_scope.get(scope_key) if isinstance(assignment_scope, Mapping) else None
+        if not isinstance(advertised, list) or not advertised:
+            raise V12ServiceError(
+                "no current outcomes are assignable for this responsibility",
+                code="outcome_assignment_conflict",
+                details={"path": "$.outcomes", "expected": f"non_empty_{scope_key}", "reason": "no_assignable_scope"},
+            )
+        item_refs = _match_outcomes(typed_items, advertised, path="$.outcomes")
+    elif isinstance(outcomes, list):
+        item_refs = _match_outcomes(typed_items, outcomes, path="$.outcomes")
+    else:
+        raise V12ServiceError(
+            "assignment outcome scope is invalid",
+            code="invalid_argument",
+            details={"path": "$.outcomes", "expected": "array", "reason": "type"},
+        )
     outcome_assignments = {
         "owned": list(item_refs) if responsibility == "delivery" else [],
         "contributing": list(item_refs) if responsibility in {"evidence", "planning"} else [],
@@ -1271,6 +1316,25 @@ def _publish_from_task(*, task_ref: str, kind: str, evidence: Mapping[str, Any],
     store, assignment_id, continuation_ref = _worker_publication_binding(
         task_ref=task_ref, context=context,
     )
+    if kind == "plan":
+        # Review disposition is task-state, not a planner-authored semantic
+        # choice.  Derive it from the latest effective governance assessment
+        # so light/full plans cannot be accidentally published as
+        # informational and minimal plans cannot fabricate an approval gate.
+        mode = store._read(lambda connection: connection.execute(
+            "SELECT g.mode FROM delegations d JOIN governance_assessments g "
+            "ON g.task_id=d.task_id AND g.project_hash=d.project_hash "
+            "WHERE d.delegation_id=? AND d.project_hash=? "
+            "ORDER BY CASE WHEN g.source='user_override' THEN 0 ELSE 1 END, "
+            "g.created_sequence DESC LIMIT 1",
+            (assignment_id, store.project_hash),
+        ).fetchone())
+        if mode is None:
+            raise V12ServiceError(
+                "governance assessment is required before plan publication",
+                code="governance_assessment_required",
+            )
+        review_policy = "required" if str(mode["mode"]) in {"light", "full"} else "informational"
     internal_evidence = _internalize_publication_evidence(store, assignment_id, evidence)
     published = _publish(
         continuation_ref=continuation_ref, assignment_ref=record_ref(assignment_id),
@@ -1296,7 +1360,7 @@ def _publication_evidence(*, schema_kind: str, summary: str,
     }
 
 
-def publish_plan(*, task_ref: str, summary: str, scope: str, review_policy: str,
+def publish_plan(*, task_ref: str, summary: str, scope: str,
                  stages: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
                  outcome_coverage: list[Mapping[str, Any]], risks: list[str], unresolved: list[str],
                  status: str, _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1305,7 +1369,7 @@ def publish_plan(*, task_ref: str, summary: str, scope: str, review_policy: str,
                                      scope=scope, stages=[dict(item) for item in stages])
     return _publish_from_task(
         task_ref=task_ref, kind="plan", evidence=evidence, status=status,
-        review_policy=review_policy, _connection_context=_connection_context,
+        _connection_context=_connection_context,
     )
 
 
@@ -1498,7 +1562,13 @@ def open_plan_review(*, task_ref: str, prompt: str,
     store, canonical = _task_store(task_ref)
     try:
         plans = store._read(lambda connection: connection.execute(
-            "SELECT report_id FROM reports WHERE task_id=? AND report_type='plan' AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+            "SELECT DISTINCT r.report_id FROM reports r "
+            "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
+            "WHERE r.task_id=? AND r.report_type='plan' AND r.assembly_state='finalized' "
+            "AND r.review_policy='required' "
+            "AND s.assignment_role='planning' "
+            "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=r.task_id) "
+            "ORDER BY r.created_sequence DESC LIMIT 1",
             (canonical,),
         ).fetchall())
         if len(plans) != 1:

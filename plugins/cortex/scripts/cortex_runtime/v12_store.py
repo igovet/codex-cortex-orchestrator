@@ -4421,7 +4421,31 @@ class V12Store:
             overall = "ready_with_risks"
         else:
             overall = "rework"
-        return {"status": overall, "items": rows}
+        delivery_outcomes = [
+            str(row["outcome"]) for row in rows
+            if row["delivery_assignability"] == "assignable"
+        ]
+        evidence_outcomes = [str(row["outcome"]) for row in rows]
+        terminal_outcomes = [
+            str(row["outcome"]) for row in rows
+            if row["delivery_assignability"] == "not_assignable_terminal_owner"
+        ]
+        return {
+            "status": overall,
+            "items": rows,
+            # Canonical model-visible selectors remove the need to infer a
+            # valid assignment scope from coverage rows or their ordering.
+            "assignment_scope": {
+                "planning": "complete_current_contract_server_derived",
+                "delivery_outcomes": delivery_outcomes,
+                "evidence_outcomes": evidence_outcomes,
+                "terminal_rework": (
+                    "steering_revision_required"
+                    if terminal_outcomes else "not_applicable"
+                ),
+                "terminal_outcomes": terminal_outcomes,
+            },
+        }
 
     def _conformance_review(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any]:
         """Build advisory closure evidence from immutable current-ledger records.
@@ -4708,9 +4732,12 @@ class V12Store:
                     )
                 if str(payload["assignment_policy"]) == "owner" and str(assessment["mode"]) in {"light", "full"}:
                     plan = connection.execute(
-                        "SELECT report_id,content_digest,review_policy FROM reports "
-                        "WHERE project_hash=? AND task_id=? AND report_type='plan' "
-                        "AND assembly_state='finalized' ORDER BY created_sequence DESC LIMIT 1",
+                        "SELECT DISTINCT r.report_id,r.content_digest,r.review_policy FROM reports r "
+                        "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
+                        "WHERE r.project_hash=? AND r.task_id=? AND r.report_type='plan' "
+                        "AND r.assembly_state='finalized' AND s.assignment_role='planning' "
+                        "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=r.task_id) "
+                        "ORDER BY r.created_sequence DESC LIMIT 1",
                         (self.project_hash, task["task_id"]),
                     ).fetchone()
                     decision = None if plan is None else connection.execute(

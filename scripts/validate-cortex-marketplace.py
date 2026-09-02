@@ -134,8 +134,8 @@ def validate_hooks(plugin: Path) -> None:
     if set(hooks["hooks"]) != allowed_events:
         fail("plugin hooks must declare exactly the activation events")
     activation_events = {"PreToolUse", "PostToolUse", "Stop", "SessionStart"}
-    lifecycle_command = '/usr/bin/python3 -B "$PLUGIN_ROOT/hooks/cortex_lifecycle_observer.py"'
-    expected_command = '/usr/bin/python3 "$PLUGIN_ROOT/hooks/cortex_activation.py"'
+    lifecycle_command = 'python3 -B "$PLUGIN_ROOT/hooks/cortex_lifecycle_observer.py"'
+    expected_command = 'python3 -B "$PLUGIN_ROOT/hooks/cortex_activation.py"'
     for event_name, groups in hooks["hooks"].items():
         if not isinstance(groups, list) or not groups:
             fail(f"plugin hook {event_name} must contain a non-empty matcher list")
@@ -483,8 +483,15 @@ def validate_runtime(plugin: Path) -> None:
             fail(f"{name} must use task_ref as its public task identity")
         if name == "open_task" and not {"project_root", "request_original", "user_language", "outcomes", "constraints"}.issubset(required):
             fail("open_task must expose one flat coherent task contract")
-        if name == "open_assignment" and not {"profile_name", "model", "reasoning_effort", "responsibility", "outcomes", "report_policy"}.issubset(required):
-            fail("open_assignment must expose one flat LLM-owned mission contract")
+        if name == "open_assignment":
+            mission_required = {
+                "profile_name", "model", "reasoning_effort", "responsibility",
+                "report_policy",
+            }
+            if not mission_required.issubset(required) or "outcomes" not in properties:
+                fail("open_assignment must expose one flat LLM-owned mission contract")
+            if "outcomes" in required:
+                fail("open_assignment outcomes must remain optional for server-derived complete responsibility scope")
     if hasattr(__import__("cortex_runtime.mcp_api", fromlist=["public_tools_for_audience"]), "public_tools_for_audience"):
         fail("V12 MCP transport must not project tools by audience")
 

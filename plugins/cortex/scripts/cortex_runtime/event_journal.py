@@ -366,7 +366,7 @@ class EventJournal:
                         "build_id": self.build_id,
                         "catalogue_count": catalogue_count,
                         "catalogue_digest": catalogue_digest,
-                        "scope": "coordinator",
+                        "scope": "unattributed",
                     }
                     encoded = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n"
                     retained = self._retained(prior + encoded)

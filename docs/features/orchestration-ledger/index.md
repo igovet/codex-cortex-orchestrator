@@ -202,9 +202,16 @@ the first read and do not reconstruct documentation routing.
 plan. It is required, must contain at least one character, and is limited to
 65,536 characters. Detailed execution belongs in `instructions`; object-valued
 scope is rejected by the closed schema.
-Every assignment also selects a non-empty exact set of current outcome-item
-references. The selection is required even for planning and single-outcome
-work, so prose labels cannot silently widen or replace durable scope.
+Every complete delivery or evidence assignment omits caller-selected outcome
+names and lets the server atomically bind the full current responsibility list,
+so copying drift cannot silently replace durable scope. A caller supplies a
+non-empty exact semantic subset only when intentionally partitioning that list.
+Planning likewise omits the field and binds the complete current effective
+contract at assignment creation.
+The state view additionally exposes `aggregate_coverage.assignment_scope` as
+the canonical selector: delivery and evidence each have an exact server-owned
+list, while terminal rework explicitly requires a new user-confirmed steering
+revision before corrective delivery can be assigned.
 The public assignment projection places exact semantic outcome names in a
 compact reconciliation header before the larger policy and contract body.
 Medium and large structured responses are not duplicated into text. Evidence
@@ -335,7 +342,7 @@ continuation; it does not infer unlinked private/internal initiative history.
 Private/internal storage repair may append only missing derived events and
 must never rewrite existing timeline rows or guess ambiguous lineage.
 
-Plan reports add `review_policy=informational|required` and may name a
+Plan reports persist server-derived `review_policy=informational|required` and may name a
 finalized predecessor. A required review is a coordinator-owned interaction;
 for light/full delivery the backend admits only an explicit approval bound to
 the exact current plan. The matching narrow decision record operation preserves an

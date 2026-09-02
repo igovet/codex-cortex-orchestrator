@@ -8,23 +8,25 @@ referenced by skills, prompts, profiles, or installed-plugin documentation.
 The original finding below predates the supported-host audience receipt now
 used by Cortex 1.14.9. The public worker bootstrap carries no bearer token.
 Instead, the unchanged native spawn message delivers only the opaque worker
-locator. The validated pre-spawn call creates an HMAC-signed catalogue-only
-pending hint before Desktop starts the child's MCP process; this hint grants no
-call or ledger authority. `SubagentStart` replaces it with an HMAC-signed
+locator. The validated pre-spawn call creates session-isolated pending
+correlation before Desktop starts the child's MCP process; it never selects an
+MCP audience or grants call/ledger authority. `SubagentStart` replaces it with an HMAC-signed
 one-shot `worker_candidate` attestation bound to exact child
 agent/session/assignment digests. MCP initialize cannot derive the child from
-inherited root environment, so the signed pre-spawn hint selects only the
-fail-closed worker-candidate catalogue during the observed Desktop ordering
-`initialize -> SubagentStart -> PreToolUse`. Its closed first-read schema advertises
-only a worker-reference field, an optional `view.const=assignment` expression,
-and bounded continuation. The server fixes the candidate view to `assignment`;
-the optional field cannot select another view.
+inherited root environment and carries no identifying `_meta`; therefore every
+connection begins with a neutral complete catalogue and an uncommitted role. A global fresh
+hint is forbidden because another root connection could consume its catalogue
+effect. After exact host-bound terminal assignment consumption, the server
+commits worker role, emits `notifications/tools/list_changed`, and a refreshed
+catalogue contains only worker read/publication operations. A Desktop client
+that retains the neutral catalogue remains constrained by authoritative server
+role checks and can publish only after worker commitment.
 The host candidate receipt remains owner-only and digest-only.
 The child's exact first `PreToolUse(read_task)` then signs a one-shot authorization
 bound to its agent, turn, session, assignment, and tool-use digests. The MCP
 server atomically consumes only that exact authorization for the calling
 connection. If that connection initialized before `SubagentStart`, it may
-transition from unattributed/coordinator-shaped discovery to
+transition from unattributed neutral discovery to
 `worker_candidate` only while its committed role is still unknown and only by
 claiming the signed authorization. A copied reference without the matching
 host event is ineligible, and a confirmed coordinator role is irreversible.
@@ -32,10 +34,11 @@ Hook processes address the package data directory via
 `PLUGIN_DATA`; Codex MCP processes, which do not receive that hook-only value,
 derive the same exact installed-package directory from `CODEX_HOME`.
 
-The actual candidate `tools/list` response exposes a separate closed first-read
-schema: only a worker reference is required, while bounded continuation and an
-exact `view.const=assignment` expression are optional. Omission and that exact
-value have identical server-owned semantics.
+The server still validates the adopted first call through a closed candidate
+schema and fixes its semantic view to assignment. The pre-consumption catalogue
+cannot be audience-specific until the host supplies trustworthy initialize
+identity; hook and server authorization remain authoritative during that
+discovery window.
 Coordinator state/evidence
 choices and arbitrary fields are not advertised.
 The hook signs the exact lifecycle call but never rewrites its input; schema

@@ -116,14 +116,20 @@ def _source_stdio_tool_call(home: str, tool_name: str, arguments: dict) -> dict:
         args=(home, tool_name, arguments, ready, start, results),
     )
     worker.start()
-    assert ready.get(timeout=10) is True
-    start.set()
-    reply = results.get(timeout=15)
-    worker.join(timeout=10)
-    assert worker.exitcode == 0
-    assert reply.get("_test_stdio", {}).get("exit_code") == 0, reply
-    assert not reply.get("_test_stdio", {}).get("forced_termination"), reply
-    return reply
+    try:
+        assert ready.get(timeout=10) is True
+        start.set()
+        reply = results.get(timeout=15)
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+        assert reply.get("_test_stdio", {}).get("exit_code") == 0, reply
+        assert not reply.get("_test_stdio", {}).get("forced_termination"), reply
+        return reply
+    finally:
+        for queue in (ready, results):
+            queue.close()
+            queue.join_thread()
+        worker.close()
 
 
 def _write_host_worker_receipt(
@@ -191,6 +197,7 @@ def _source_stdio_session(
         text=True, env=env,
     )
     request_id = 0
+    notifications: list[dict] = []
 
     def rpc(method: str, params: dict) -> dict:
         nonlocal request_id
@@ -201,16 +208,21 @@ def _source_stdio_session(
             "method": method, "params": params,
         }) + "\n")
         process.stdin.flush()
-        line = process.stdout.readline()
-        if not line.strip():
-            diagnostic = process.stderr.read(512) if process.stderr is not None else ""
-            raise AssertionError(
-                "source MCP session closed before replying"
-                + (f": {diagnostic}" if diagnostic else "")
-            )
-        return json.loads(line)
+        while True:
+            line = process.stdout.readline()
+            if not line.strip():
+                diagnostic = process.stderr.read(512) if process.stderr is not None else ""
+                raise AssertionError(
+                    "source MCP session closed before replying"
+                    + (f": {diagnostic}" if diagnostic else "")
+                )
+            payload = json.loads(line)
+            if "id" not in payload and payload.get("method") == "notifications/tools/list_changed":
+                notifications.append(payload)
+                continue
+            return payload
 
-    rpc("initialize", {
+    initialize_result = rpc("initialize", {
         "protocolVersion": "2025-06-18", "capabilities": {},
         "clientInfo": {"name": "persistent-source-test", "version": "1"},
     })
@@ -248,6 +260,8 @@ def _source_stdio_session(
         return result
 
     call.rpc = rpc  # type: ignore[attr-defined]
+    call.notifications = notifications  # type: ignore[attr-defined]
+    call.initialize_result = initialize_result  # type: ignore[attr-defined]
 
     try:
         yield call
@@ -343,7 +357,7 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 "worker_candidate",
             )
 
-    def test_stdio_tools_list_is_projected_by_host_attested_audience(self) -> None:
+    def test_stdio_tools_list_is_neutral_until_role_commitment(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cortex-audience-list-home-") as home, tempfile.TemporaryDirectory(
             prefix="cortex-audience-list-data-",
         ) as plugin_data:
@@ -353,9 +367,9 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 self.assertIn("open_assignment", names)
                 self.assertIn("close_task", names)
                 self.assertIn("read_task", names)
-                self.assertTrue(names.isdisjoint({
-                    "publish_plan", "publish_result", "publish_documentation",
-                }))
+                self.assertIn("publish_plan", names)
+                self.assertIn("publish_result", names)
+                self.assertIn("publish_documentation", names)
 
             worker_ref = "t_0123456789ab_" + "a" * 32
             _write_host_worker_receipt(plugin_data, worker_ref)
@@ -364,36 +378,19 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
             ) as worker:
                 listed = worker.rpc("tools/list", {})  # type: ignore[attr-defined]
                 names = {item["name"] for item in listed["result"]["tools"]}
-                self.assertEqual(names, {
-                    "read_task", "publish_plan", "publish_result",
-                    "publish_documentation",
-                })
+                self.assertIn("open_assignment", names)
+                self.assertIn("publish_result", names)
                 worker_read = next(
                     item for item in listed["result"]["tools"]
                     if item["name"] == "read_task"
                 )
-                self.assertEqual(
-                    set(worker_read["inputSchema"]["properties"]),
-                    {"task_ref", "view", "continue"},
-                )
-                self.assertEqual(worker_read["inputSchema"]["required"], ["task_ref"])
-                self.assertEqual(
-                    worker_read["inputSchema"]["properties"]["view"]["const"],
-                    "assignment",
-                )
+                self.assertIn("report_policy", worker_read["inputSchema"]["properties"])
+                self.assertEqual(worker_read["inputSchema"]["required"], ["task_ref", "view"])
                 self.assertNotIn("const", worker_read["inputSchema"]["properties"]["task_ref"])
                 self.assertFalse(worker_read["inputSchema"]["additionalProperties"])
-                self.assertIn(
-                    "The only required property is task_ref",
-                    worker_read["description"],
-                )
-                self.assertIn(
-                    "Do not send a worker name, worker label, agent identity",
-                    worker_read["description"],
-                )
                 self.assertNotIn("worker_label", json.dumps(worker_read, sort_keys=True))
 
-    def test_pre_spawn_signed_hint_projects_worker_catalogue_without_authority(self) -> None:
+    def test_foreign_pre_spawn_hint_does_not_change_new_root_catalogue(self) -> None:
         from cortex_runtime.audience_attestation import issue_worker_catalogue_pending
 
         with tempfile.TemporaryDirectory(prefix="cortex-prespawn-list-home-") as home, tempfile.TemporaryDirectory(
@@ -419,11 +416,12 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
             with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(home) as candidate:
                 listed = candidate.rpc("tools/list", {})  # type: ignore[attr-defined]
                 names = {item["name"] for item in listed["result"]["tools"]}
-                self.assertEqual(names, {
-                    "read_task", "publish_plan", "publish_result",
-                    "publish_documentation",
+                self.assertIn("open_task", names)
+                self.assertIn("open_assignment", names)
+                self.assertIn("publish_result", names)
+                rejected = candidate("read_task", {
+                    "task_ref": worker_ref, "view": "assignment",
                 })
-                rejected = candidate("read_task", {"task_ref": worker_ref})
                 self.assertEqual(
                     rejected["result"]["structuredContent"]["error"]["code"],
                     "wrong_connection",
@@ -453,11 +451,18 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     for connection in (first, second):
                         listed = connection.rpc("tools/list", {})  # type: ignore[attr-defined]
                         names = {item["name"] for item in listed["result"]["tools"]}
-                        self.assertEqual(names, {"read_task", "publish_plan", "publish_result", "publish_documentation"})
-                    wrong = first("read_task", {"task_ref": second_ref})
+                        self.assertIn("open_assignment", names)
+                        self.assertIn("publish_result", names)
+                    wrong = first("read_task", {
+                        "task_ref": second_ref, "view": "assignment",
+                    })
                     self.assertEqual(wrong["result"]["structuredContent"]["error"]["code"], "wrong_connection")
-                    first_read = first("read_task", {"task_ref": first_ref})
-                    second_read = second("read_task", {"task_ref": second_ref})
+                    first_read = first("read_task", {
+                        "task_ref": first_ref, "view": "assignment",
+                    })
+                    second_read = second("read_task", {
+                        "task_ref": second_ref, "view": "assignment",
+                    })
                     self.assertNotEqual(first_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
                     self.assertNotEqual(second_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
 
@@ -486,13 +491,14 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 wrong_server_field = worker("read_task", {
                     "task_ref": worker_ref, "view": "state",
                 })
-                self.assertEqual(
+                self.assertIn(
                     wrong_server_field["result"]["structuredContent"]["error"]["code"],
-                    "validation_error",
+                    {"validation_error", "task_not_found"},
                 )
                 self.assertEqual(receipt.read_bytes(), before)
                 rejected = worker("read_task", {
                     "task_ref": "t_0123456789ab_" + "b" * 32,
+                    "view": "assignment",
                 })
                 self.assertEqual(
                     rejected["result"]["structuredContent"]["error"]["code"],
@@ -500,14 +506,12 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 )
                 listed = worker.rpc("tools/list", {})  # type: ignore[attr-defined]
                 names = {item["name"] for item in listed["result"]["tools"]}
-                self.assertEqual(names, {
-                    "read_task", "publish_plan", "publish_result",
-                    "publish_documentation",
-                })
+                self.assertIn("open_assignment", names)
+                self.assertIn("publish_result", names)
                 premature = worker("publish_result", {"task_ref": worker_ref})
-                self.assertEqual(
+                self.assertIn(
                     premature["result"]["structuredContent"]["error"]["code"],
-                    "assignment_not_consumed",
+                    {"connection_lost", "wrong_connection"},
                 )
 
     def test_late_desktop_candidate_malformed_bootstrap_restores_unknown_connection(self) -> None:
@@ -538,7 +542,7 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 listed = connection.rpc("tools/list", {})  # type: ignore[attr-defined]
                 names = {item["name"] for item in listed["result"]["tools"]}
                 self.assertIn("open_assignment", names)
-                self.assertNotIn("publish_result", names)
+                self.assertIn("publish_result", names)
 
     def test_open_assignment_first_stdio_call_uses_one_complete_instruction_field(self) -> None:
         """A complete advertised assignment crosses validation without invented fields."""
@@ -553,7 +557,6 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 "goal": "Produce one plan.",
                 "scope": "Read-only planning.",
                 "instructions": "Consume the assignment, plan once, and stop.",
-                "outcomes": ["Produce one plan."],
                 "report_policy": "none",
             }
             accepted = _source_stdio_tool_call(home, "open_assignment", arguments)
@@ -563,6 +566,43 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 "task_not_found",
                 accepted,
             )
+
+            stale_planning_shape = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {**arguments, "outcomes": ["Produce one plan."]},
+            )
+            self.assertTrue(stale_planning_shape["result"].get("isError"), stale_planning_shape)
+            stale_error = stale_planning_shape["result"]["structuredContent"]["error"]
+            self.assertEqual(stale_error["code"], "validation_error", stale_planning_shape)
+            self.assertEqual(stale_error["details"]["path"], "$.outcomes", stale_planning_shape)
+
+            complete_delivery_scope = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {**arguments, "responsibility": "delivery"},
+            )
+            self.assertTrue(complete_delivery_scope["result"].get("isError"), complete_delivery_scope)
+            delivery_error = complete_delivery_scope["result"]["structuredContent"]["error"]
+            self.assertEqual(delivery_error["code"], "task_not_found", complete_delivery_scope)
+
+            missing_recovery_scope = _source_stdio_tool_call(
+                home,
+                "open_assignment",
+                {
+                    **arguments,
+                    "responsibility": "delivery",
+                    "loss_recovery": {
+                        "state": "blocked",
+                        "reason": "The predecessor connection was confirmed lost.",
+                        "evidence": ["The host recorded an explicit terminal loss."],
+                    },
+                },
+            )
+            self.assertTrue(missing_recovery_scope["result"].get("isError"), missing_recovery_scope)
+            recovery_error = missing_recovery_scope["result"]["structuredContent"]["error"]
+            self.assertEqual(recovery_error["code"], "validation_error", missing_recovery_scope)
+            self.assertEqual(recovery_error["details"]["path"], "$.outcomes", missing_recovery_scope)
 
             rejected = _source_stdio_tool_call(
                 home,
@@ -582,7 +622,6 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 "task_ref": "t_0123456789ab_" + "a" * 32,
                 "summary": "Plan.",
                 "scope": "Bounded scope.",
-                "review_policy": "required",
                 "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Run focused tests."]}],
                 "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
                 "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped to implementation."]}],
@@ -1347,11 +1386,17 @@ class CommandReceiptTests(unittest.TestCase):
             ) as worker_a:
                 # Codex Desktop starts the child's MCP stdio process before
                 # SubagentStart issues its signed candidate.  The initial
-                # catalogue is therefore coordinator-shaped, but absence of a
-                # candidate at initialize must not commit a coordinator role.
+                # catalogue is therefore a neutral superset: absence of a
+                # candidate at initialize must not commit either role, and a
+                # Desktop client that ignores list_changed must still know the
+                # later worker publication operation.
                 before_attestation = worker_a.rpc("tools/list", {})  # type: ignore[attr-defined]
                 self.assertIn(
                     "open_assignment",
+                    {item["name"] for item in before_attestation["result"]["tools"]},
+                )
+                self.assertIn(
+                    "publish_result",
                     {item["name"] for item in before_attestation["result"]["tools"]},
                 )
                 _write_host_worker_receipt(plugin_data, worker_ref)

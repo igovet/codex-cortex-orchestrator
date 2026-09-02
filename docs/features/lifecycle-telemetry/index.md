@@ -24,11 +24,12 @@ Each coordinator session owns a private receipt directory and an atomic active
 index whose receipt state progresses through `pending`,
 `worker_catalogue_pending`, `worker_candidate`,
 `worker_call_authorized`, and `server_candidate_claimed`. The pre-spawn
-`worker_catalogue_pending` record is signed and catalogue-only: it lets a
-Desktop child initialize with the worker projection before `SubagentStart`, but
-cannot authorize a call. Add, claim, bind, server-claim, and
+`worker_catalogue_pending` record is signed correlation state only; it never
+selects an initialize audience because Desktop supplies no trustworthy child
+identity there. Add, claim, bind, server-claim, and
 consume transitions are owner-only and lock-protected; terminal assignment
-consumption removes the receipt from the active index immediately. Hook
+consumption removes the receipt from the active index immediately and triggers
+one `tools/list_changed` notification for a worker-catalogue refresh. Hook
 processes locate this directory through `PLUGIN_DATA`; the plugin MCP process
 resolves the same exact installed-package data directory through `CODEX_HOME`
 when `PLUGIN_DATA` is not in its environment. Historical or foreign-session

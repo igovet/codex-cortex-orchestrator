@@ -24,7 +24,6 @@ from cortex_runtime.observation_generation import ObservationGenerationError, ca
 from cortex_runtime.audience_attestation import (
     claim_matches_task,
     claim_worker_candidate,
-    fresh_worker_candidate_available,
     release_worker_candidate_claim,
 )
 from cortex_runtime.v12_service import V12ServiceError
@@ -91,14 +90,6 @@ def _plugin_data_root() -> Path | None:
     if not isinstance(codex_home, str) or not codex_home:
         return None
     return Path(codex_home) / "plugins" / "data" / "cortex-cortex"
-
-
-def _host_worker_candidate_available() -> bool:
-    """Select a fail-closed candidate catalogue from signed host lifecycle state."""
-    plugin_data = _plugin_data_root()
-    if plugin_data is None:
-        return False
-    return fresh_worker_candidate_available(plugin_data)
 
 
 def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -474,7 +465,12 @@ def _validate_public_call_shape(tool_name: str, arguments: Mapping[str, Any]) ->
             if name in arguments:
                 raise _SchemaError(f"$.{name}", f"unsupported property '{name}'")
 
-    if tool_name == "submit_report":
+    if tool_name == "open_assignment":
+        if arguments.get("responsibility") == "planning":
+            forbid("outcomes")
+        elif arguments.get("loss_recovery") is not None:
+            require("outcomes")
+    elif tool_name == "submit_report":
         mode = arguments.get("mode")
         plan_fields = ("review_policy", "supersedes_report_ref")
         if mode == "begin":
@@ -1277,7 +1273,7 @@ def serve_stdio(
         result: Mapping[str, Any], *, success: bool, fault: str | None = None,
         public_result: Mapping[str, Any] | None = None,
         failure: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Write the final tool reply, then observe that exact wire outcome.
 
         A handler success is not a client success until its complete physical
@@ -1289,6 +1285,7 @@ def serve_stdio(
             observe_call(name, arguments, success=success, fault=fault, result=public_result, failure=failure)
         else:
             observe_call(name, arguments, success=False, fault="ledger_error")
+        return wire_success
 
     def finish_malformed_tool_call(request_id: object, *, respond: bool) -> None:
         """Record one safe terminal observation for a malformed call envelope."""
@@ -1305,16 +1302,22 @@ def serve_stdio(
         """Build the largest complete catalog page that fits one JSONL frame.
 
         MCP defines ``tools/list`` pagination through ``nextCursor``. Cortex
-        keeps each immutable audience projection in one bounded response so
-        ordinary Codex discovery sees no operation outside the connection's
-        authenticated audience. The complete private registry still owns the
-        schemas and handlers behind the independent server authorization gate.
+        keeps each immutable projection in one bounded response. A connection
+        with a committed coordinator or worker role sees only that audience.
+        Before role commitment, current Codex Desktop provides no trustworthy
+        connection identity and does not reliably refresh tools after
+        ``tools/list_changed``; the honest unattributed projection is therefore
+        the complete neutral catalogue. Independent server authorization still
+        rejects every role-incompatible call without changing role or durable
+        state.
         """
         audience = connection_context.get("_audience")
         allowed = (
             _WORKER_AUDIENCE_TOOLS
             if audience in {"worker_candidate", "worker"}
             else _COORDINATOR_AUDIENCE_TOOLS
+            if audience == "coordinator"
+            else frozenset(public_tools)
         )
         advertised_tools = tuple(
             (
@@ -1517,10 +1520,15 @@ def serve_stdio(
                     provenance = verify_runtime(package_root, server_version, allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1")
                 except RuntimeError as exc:
                     raise SystemExit(f"Cortex candidate provenance verification failed: {exc}") from exc
-                if not _host_worker_candidate_available():
-                    connection_context["_audience"] = "coordinator"
-                else:
-                    connection_context["_audience"] = "worker_candidate"
+                # Current Codex Desktop supplies no trustworthy connection-
+                # specific identity in initialize params or the MCP process
+                # environment. A global fresh worker hint can therefore be
+                # stolen by an unrelated root connection. Keep the connection
+                # unattributed until a successful semantic boundary commits
+                # coordinator or worker role. The initial tools/list is a
+                # neutral superset because current Desktop also does not
+                # reliably refresh its model-visible catalogue after
+                # tools/list_changed; server authorization remains decisive.
                 requested_protocol_version = params["protocolVersion"]
                 negotiated_protocol_version = (
                     requested_protocol_version
@@ -1540,7 +1548,7 @@ def serve_stdio(
                 })
                 initialize_wire_success = reply(request_id, {
                     "protocolVersion": negotiated_protocol_version,
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {"listChanged": True}},
                     "serverInfo": server_info,
                     "instructions": instructions,
                 })
@@ -1640,7 +1648,7 @@ def serve_stdio(
             if audience == "worker_candidate" and name in _WORKER_PUBLICATIONS:
                 audience_failure = "assignment_not_consumed"
             elif name not in allowed:
-                if audience == "coordinator" and name in _WORKER_PUBLICATIONS:
+                if audience in {"coordinator", "unattributed"} and name in _WORKER_PUBLICATIONS:
                     from cortex_runtime.domain_api import worker_assignment_connection_code
                     audience_failure = worker_assignment_connection_code(
                         arguments.get("task_ref")
@@ -1649,7 +1657,7 @@ def serve_stdio(
                     audience_failure = "wrong_connection"
             elif name == "read_task" and isinstance(arguments, Mapping):
                 requested_view = arguments.get("view")
-                if audience == "coordinator" and requested_view == "assignment":
+                if audience in {"coordinator", "unattributed"} and requested_view == "assignment":
                     from cortex_runtime.domain_api import worker_assignment_connection_code
                     audience_failure = worker_assignment_connection_code(
                         arguments.get("task_ref")
@@ -1830,10 +1838,12 @@ def serve_stdio(
                     release_failed_candidate()
                     finish_internal_tool_error(request_id, name, resolved_arguments)
                     continue
+                role_committed_now = False
                 if role == "unknown":
                     if connection_context.get("_role") == "worker":
                         committed_role = "worker"
                         connection_context["_audience"] = "worker"
+                        role_committed_now = True
                     elif name == "read_task" and resolved_arguments.get("view") == "assignment":
                         # Non-terminal assignment pages deliberately leave the
                         # connection unknown. The terminal page handler is the
@@ -1844,6 +1854,8 @@ def serve_stdio(
                     else:
                         committed_role = "coordinator"
                         connection_context["_role"] = committed_role
+                        connection_context["_audience"] = "coordinator"
+                        role_committed_now = True
                     if committed_role != "unknown":
                         history = connection_context.get("_role_history")
                         if isinstance(history, list) and not history:
@@ -1884,11 +1896,23 @@ def serve_stdio(
                     and task_ref_parts(resolved_arguments["task_ref"]) is not None
                 ):
                     active_task_ref = resolved_arguments["task_ref"]
-                finish_tool_call(
+                wire_success = finish_tool_call(
                     request_id, name, resolved_arguments,
                     _success_tool_result(dict(result)), success=True,
                     public_result=observation_result,
                 )
+                if wire_success and role_committed_now:
+                    # Audience narrowing becomes available only after a
+                    # successful semantic role commitment. Supporting clients
+                    # refresh to the authoritative coordinator/worker
+                    # projection; clients that retain the initial neutral
+                    # catalogue remain safe because every call is still
+                    # checked against the committed server role.
+                    write({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tools/list_changed",
+                        "params": {},
+                    })
         except _RpcError as error:
             if has_request_id:
                 rpc_error(request_id, error.code, error.message)

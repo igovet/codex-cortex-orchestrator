@@ -180,6 +180,16 @@ inherit the shell `PATH`; configure the application launch environment or start
 Codex from a shell where `python3 --version` is correct. Fully quit and reopen
 Codex afterward, then start a new task.
 
+The packaged MCP server and every activation/lifecycle callback deliberately
+share the same host-resolved `python3 -B` launch contract. Cortex does not
+hard-code `/usr/bin/python3`: Codex CLI and Desktop must both resolve
+`python3` to Python 3.11 or newer in their own launch environments, while
+`-B` prevents runtime bytecode from changing the content-addressed package.
+When behavior differs between the two hosts, compare the Desktop launch
+environment with the interactive shell first, then run the host preflight
+against the same installed package; do not compensate with a host-specific
+hook command.
+
 ### Required Codex configuration
 
 > [!IMPORTANT]
@@ -244,13 +254,18 @@ user's configured approval policy.
 
 The activation guard enforces host-side ordering around task anchoring and
 native worker dispatch. It never rewrites a native spawn call: the unchanged
-host call carries the exact server-rendered bootstrap. Its validated pre-spawn
-boundary signs a catalogue-only hint before Desktop creates the child MCP
-process; the hint exposes no call or ledger authority. `SubagentStart` replaces
-that hint with the real child-bound digest-only one-shot receipt. The worker MCP
+host call carries the exact server-rendered bootstrap. Current Desktop MCP
+initialize carries no connection-specific thread/session identity, so Cortex
+does not guess an initial audience from shared pending state. Every new
+connection begins with a neutral complete catalogue and an uncommitted role;
+that pre-identity catalogue grants no authority. `SubagentStart`
+creates the real child-bound digest-only one-shot receipt, and the worker MCP
 process atomically claims the later exact-call authorization from the same
-owner-only plugin data directory before its first assignment read, including
-when its stdio connection initialized before `SubagentStart`; the hook never
+owner-only plugin data directory on its first assignment read. Successful
+terminal consumption commits worker role and emits `tools/list_changed`; a
+supporting client refreshes to only worker read/publication tools. A Desktop
+client that retains the initial catalogue can still publish, while committed
+server role checks reject every coordinator-only call. The hook never
 repeats or stores bootstrap plaintext. Receipt routing is isolated by coordinator session
 through an atomic active index; completed and foreign history is never scanned
 or selected. The lifecycle observer records bounded structural markers needed
@@ -559,7 +574,7 @@ flowchart TB
 
         PLANDEL["Coordinator creates planner delegation"] --> PW["Planner worker<br/>English project solution plan report"]
         PW --> PLANWRITE["publish_plan<br/>complete plan evidence<br/>stable publication ref · immutable digest"]
-        PLANWRITE --> PLANPOLICY{"review_policy + coordinator policy<br/>informational · required<br/>required review admits light/full delivery"}
+        PLANWRITE --> PLANPOLICY{"server-derived review policy<br/>minimal → informational<br/>light/full → required review"}
 
         DOCDEL["Coordinator creates documentation-sync delegation"] --> DW["Technical-writer worker<br/>update project + feature knowledge"]
         DW --> DOCWORK["Document material behavior · architecture · interfaces<br/>commands · verification · conventions · ownership"]
@@ -900,10 +915,18 @@ a non-empty text string of at most 65,536 characters containing a concise
 boundary of worker ownership; detailed execution belongs in `instructions`, and
 object-valued scopes are invalid. The mission's explicit `responsibility`
 selects planning, delivery ownership, or non-owning evidence independently of
-the packaged `profile_name`. `outcomes` select the exact bounded semantic outcomes that the worker must
-reconcile one-to-one. They are required on every assignment, including a
-single-outcome or planning assignment; prose item names never substitute for
-the exact current names. `open_assignment` returns only one compact closed
+the packaged `profile_name`. When one assignment covers the complete current
+scope for its responsibility, `outcomes` is omitted: the server binds all
+advertised `delivery_outcomes`, all `evidence_outcomes`, or every current item
+for planning atomically, eliminating unnecessary model-side copying. The field
+is supplied only for an intentional delivery/evidence partition and then must
+be one exact non-empty subset of the matching advertised list. Prose item names
+never substitute for exact current names where a partition is required. The
+state projection publishes that canonical
+`aggregate_coverage.assignment_scope`. When completed owner evidence makes
+`terminal_rework=steering_revision_required`, a user-confirmed steering revision
+must create new delivery outcomes before any corrective delivery assignment.
+`open_assignment` returns only one compact closed
 `native_dispatch` plus a replay flag. It carries isolated-history behavior, the
 compact assignment anchor, native task name, exact effort, and an explicit
 model only for non-default Terra or Sol;
@@ -963,8 +986,9 @@ authority on a new process or connection.
 The current plan publication contract checks observable evidence, explicit
 stage ownership and dependencies, verification, residual risks, unresolved
 items, and documentation impact before accepting a terminal plan publication.
-The server supplies the effective task contract to the planner through the
-assignment brief; the coordinator uses the public receipt and assignment brief;
+The server derives the planner's complete scope from the current effective
+contract and supplies it through the assignment brief; the coordinator neither
+selects nor recopies planner outcome names and uses only the public receipt;
 after publication the coordinator uses `read_task` to consume
 the server-produced evidence view and does not reconstruct report bodies or
 acceptance state.
@@ -998,23 +1022,34 @@ public assignment schema.
 
 The active host schema, not the ledger, defines native spawn and follow-up
 arguments. There is no backend-enforced fixed `wait_agent`/read/continue sequence and no
-`SubagentStop` barrier. Native waiting is ordinary host coordination outside
-the ledger, but the coordinator still waits for or reconciles the exact spawned
-worker before consuming its worker-owned report. If it ends without a report,
-the coordinator discloses the evidence gap and replaces the same delivery owner
-only after recording explicit blocked/aborted reason and non-empty evidence;
-otherwise it waits, follows up, or proceeds on independent scope.
+`SubagentStop` barrier. Native waiting is advisory host coordination outside
+the ledger; durable task state and finalized publication evidence are completion
+authority. After every bounded native wait returns—including timeout, an empty
+result, or a contradiction with visible child completion—the coordinator reads
+current task state or relevant evidence before deciding whether to wait again.
+If publication already exists, it consumes that evidence and continues without
+another wait for the same child. If no publication exists and the child remains
+active, another bounded wait is optional. Lifecycle stop without publication
+uses the explicit loss/recovery route: disclose the evidence gap and replace the
+same delivery owner only after recording an explicit blocked/aborted reason and
+non-empty evidence. The coordinator never remains in model-only waiting after a
+wait call has returned and never lets empty host output hide durable evidence.
 
 ### Cortex 1.14.9 plans and user decisions
 
 A plan is a complete `publish_plan` publication with private canonical
-content/manifest identity. It must include the explicit
-`review_policy=informational|required`; the server binds any predecessor
-relation privately. For light/full delivery, the policy must be `required`; the
+content/manifest identity. The public call does not choose review policy: the
+server derives persisted `informational` for minimal governance and `required`
+for light/full governance, and binds any predecessor relation privately. For
+light/full delivery, the policy is therefore `required`; the
 coordinator opens review, presents the verified plan, and records an explicit
 decision before dispatch. Derived review states distinguish informational,
 awaiting user, approved, revision requested, rejected, cancelled, and superseded
-plans.
+plans. A plan is current only for the effective-contract revision captured by
+its planning assignment. Any material steering revision makes earlier plans
+and their approvals historical; `active_plan`, plan review, and light/full
+delivery remain unavailable until a new plan for the new revision is published
+and explicitly approved.
 
 `record_clarification`, `record_plan_review`, and `record_steering` append
 coordinator-attributed `user_via_coordinator` evidence for a task. Their public
@@ -1254,7 +1289,7 @@ work cannot silently supersede unresolved QA evidence.
 Before each rework assignment, the coordinator also preflights the mission's
 explicit responsibility and exact item scope against current governance and
 predecessor evidence; the selected profile supplies expertise only. Light/full production-owner work requires finalized approved planner
-evidence; bounded C1 owner work that genuinely needs no plan stays minimal from
+evidence from the same current effective-contract revision; bounded C1 owner work that genuinely needs no plan stays minimal from
 the outset, while test-only QA correction remains non-owning. Multiple workers
 or rework alone do not justify light/full governance. A rejected first attempt
 remains a failed orchestration check even if a later retry succeeds.
@@ -1355,17 +1390,15 @@ observation; they do not grant ledger authority or authorize project work. The s
 packaged `profile_name` and projects one compact closed native dispatch
 statelessly, but never spawns or authorizes the native worker. Native spawn
 input remains host-owned and is never rewritten through `PreToolUse.updatedInput`.
-The validated unchanged native spawn first signs a catalogue-only pending hint,
-allowing a Desktop child that initializes MCP before `SubagentStart` to see the
-fail-closed worker catalogue without receiving worker authority. `SubagentStart`
-replaces it with a one-shot worker-candidate attestation bound to the exact
-child agent/session/assignment using sanitized private digests. A connection
-that initialized before this child attestation may adopt it only while its role
-is still unknown and only after the exact `PreToolUse` authorization is signed;
+The validated unchanged native spawn creates only session-isolated pending
+correlation. It does not select an MCP audience. `SubagentStart` creates a
+one-shot worker-candidate attestation bound to the exact child
+agent/session/assignment using sanitized private digests. A connection that
+initialized before this child attestation may adopt it only while its role is
+still unknown and only after the exact `PreToolUse` authorization is signed;
 request content alone cannot change its audience, and a committed coordinator
 role is irreversible. Inherited root environment is never treated as exact
-child identity. The catalogue exposes a closed `read_task` schema with the sole
-`view.const` assignment view. The child's exact first
+child identity. The child's exact first
 `PreToolUse(read_task)` lifecycle event then signs a one-shot call
 authorization bound to child agent, turn, session, assignment, and tool-use
 digests. The server independently and atomically claims that exact authorized
@@ -1790,9 +1823,10 @@ V11 tasks are not compatible with Cortex 1.14.9.
 - Preserve exact machine-readable profile names from `profiles.json`.
 - Keep profiles advisory; never add model/effort pins or tool authority to role
   templates.
-- Keep the complete registry at exactly fourteen canonical tools, with an
-  immutable coordinator projection and a four-tool worker projection sharing
-  only `read_task`.
+- Keep the complete registry at exactly fourteen canonical tools, with a
+  pre-identity neutral complete projection, an immutable coordinator
+  projection, and a four-tool worker projection. Catalogue visibility never
+  substitutes for authoritative per-call role enforcement.
 - Keep the root coordinator orchestration-only. All project discovery, source
   inspection, domain analysis, edits, commands, builds, tests, and verification
   belong to delegated workers. Its only project-read exception is the bounded
@@ -1937,7 +1971,7 @@ TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
 ./scripts/cortex-live-smoke stop
 ```
 
-After `start`, `capture` provides the bounded output-only PTY stream when detached `capture-pane` is stale. `events` provides the exact session's bounded owner-only sanitized MCP observation stream; it carries only safe operation/outcome metadata and is never an automated readiness or acceptance parser. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If a visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; that transport action sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the interactive composer before `send`. Every task authors its own prompt for its changed behavior. It must say the session is already live-dev and prohibit nested tmux, cortex-dev, shell validation, and repository inspection. The controller normalizes the prompt to one line, inserts it literally with one `send-keys -l` delivery, waits five real seconds after insertion returns, and sends exactly one standalone named `Enter` to the same pane. Its receipt reports delivery only; it never claims TUI acceptance. The coordinator/LLM confirms acceptance and progress from the pane and bounded events. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or a missing success marker is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure. Capture the exit marker before stopping; cleanup stops the pipe and removes only `cortex-v12-smoke` plus its owner-only temporary capture. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
+After `start`, `capture` provides the bounded output-only PTY stream when detached `capture-pane` is stale. `events` provides the exact session's bounded owner-only sanitized MCP observation stream; it carries only safe operation/outcome metadata and is never an automated readiness or acceptance parser. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If a visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; that transport action sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the interactive composer before `send`. Every workload begins with the real `$cortex:orchestrator` token. That token is the prompt's only Cortex-specific content; the remainder is an ordinary user request for a concrete product change, development task, diagnosis, or verification. Environment constraints, internal stages, tool policy, replay handling, worker/coordinator instructions, and pass/fail sentinels belong to the external operator and verifier, never to the workload prompt. The controller normalizes the prompt to one line, inserts it literally with one `send-keys -l` delivery, waits five real seconds after insertion returns, and sends exactly one standalone named `Enter` to the same pane. Its receipt reports delivery only; it never claims TUI acceptance. The coordinator/LLM confirms acceptance and progress from the pane and bounded events. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or missing expected completion is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure. Capture the exit marker before stopping; cleanup stops the pipe and removes only `cortex-v12-smoke` plus its owner-only temporary capture. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
 
 Prompt delivery contract: after the composer is visibly confirmed, normalize the prompt to one line, send the complete prompt literally with one `send-keys -l` delivery, wait a real five seconds after that insertion returns, then send exactly one standalone named `Enter` to the same pane. Do not send a pre-submit `C-m` or `C-j`; the transport receipt reports delivery only and the coordinator/LLM confirms TUI acceptance.
 

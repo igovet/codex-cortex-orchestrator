@@ -35,14 +35,16 @@ The V12 protocol evidence must prove:
   `read_task`, `open_assignment`, `publish_plan`, `publish_result`,
   `publish_documentation`, `assess_governance`, `close_task`, and the six
   narrow clarification, plan-review, and steering open/record operations;
-- coordinator `tools/list` excludes all worker publications; signed
-  worker-candidate/worker `tools/list` contains exactly `read_task` and the
-  three publications and excludes assignment creation, governance, decisions,
-  and closure; candidate `read_task` requires its closed worker-reference field
-  and permits only an optional `view.const=assignment` expression (the server
-  fixes `assignment` whether omitted or expressed), while only the exact signed
-  SubagentStart/PreToolUse child identity can authorize and consume the
-  referenced candidate on one connection;
+- every initialize without trusted connection identity returns the neutral
+  complete catalogue even when a fresh foreign pending/candidate receipt
+  exists, without committing either role or granting call authority. Only the exact
+  signed SubagentStart/PreToolUse child identity plus successful terminal
+  assignment consumption commits worker role. The server then emits
+  `notifications/tools/list_changed`, and the refreshed worker `tools/list`
+  contains exactly `read_task` and the three publications while excluding
+  assignment creation, governance, decisions, and closure. A client that
+  retains the initial catalogue can still publish after worker commitment but
+  cannot execute coordinator-only operations;
 - runtime validation uses the same closed input schemas advertised by the
   registry and validates successful results against each complete private
   runtime result schema; the advertised `outputSchema` is a compact public
@@ -114,8 +116,9 @@ The V12 protocol evidence must prove:
   inspection failure. An `unconfirmed` result preserves and reports the
   independent `execution_outcome` evidence;
 - `publish_plan`, `publish_result`, and `publish_documentation` accept the
-  corresponding immutable worker evidence. `publish_plan` requires an explicit
-  `informational` or `required` review policy; publication is atomic at the
+  corresponding immutable worker evidence. `publish_plan` has no model-selected
+  review-policy field; the server derives `informational` for minimal governance
+  and `required` for light/full governance. Publication is atomic at the
   semantic operation boundary;
 - private/internal publication bodies support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
   schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas;
@@ -148,10 +151,10 @@ The V12 protocol evidence must prove:
   lossless at the byte boundary, and publication is unavailable until the
   terminal page;
 - real persistent source-stdio tests reproduce Desktop ordering by initializing
-  the worker MCP process before `SubagentStart`/call attestation, prove the
-  signed pre-spawn hint advertises only the worker catalogue without granting
-  authority, and then prove the original host-bound connection can consume and
-  publish once; a copied locator on another initialized process cannot read or
+  the worker MCP process before `SubagentStart`/call attestation, prove a fresh
+  foreign pending/candidate record cannot change a new root catalogue, then
+  prove the exact host-bound connection consumes once, receives one list-change
+  notification, refreshes to the worker catalogue, and publishes once; a copied locator cannot read or
   publish, a coordinator connection cannot switch to worker audience, malformed
   late bootstrap restores the unknown role without state mutation, and no
   failed copy creates a report operation;
@@ -190,6 +193,17 @@ The V12 protocol evidence must prove:
   their task-ref-only advertised fields; private subject/revision/digest
   bindings remain server-owned. They preserve attribution and supersession;
 - only plan review approval requires a current private ready plan relation;
+  current means the plan's planning-assignment snapshot has the same
+  effective-contract revision as the task, so steering invalidates old-plan
+  selection, review, and delivery admission until a replacement plan is
+  approved;
+- coordinator state exposes canonical responsibility-specific assignment
+  selectors. Completed terminal owners are absent from `delivery_outcomes`,
+  remain present for evidence, and advertise
+  `terminal_rework=steering_revision_required` until a user-confirmed steering
+  revision creates a new delivery scope. Omitted assignment outcomes bind the
+  complete current responsibility list server-side; explicit exact names are
+  exercised only for intentional subset partitioning;
   missing, renamed, extra, or cross-mixed public fields fail before mutation;
   plan `request_revision` and `cancel` preserve the exact finalized plan
   digest/response without volatile view binding, so intervening non-plan events
@@ -461,7 +475,7 @@ TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
 ./scripts/cortex-live-smoke stop
 ```
 
-After `start`, `capture` reads the bounded output-only PTY stream when detached `capture-pane` is stale. `events` reads the exact session's bounded owner-only sanitized MCP observation stream. It exposes safe metadata only and never parses readiness, errors, replay, or acceptance; the LLM verifier makes those decisions. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If the visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; it sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the composer before `send`. Every task authors its own prompt for its changed behavior. It must say the session is already live-dev and prohibit nested tmux, cortex-dev, shell validation, and repository inspection. The controller normalizes the prompt to one line, uses literal `send-keys -l`, then issues one separate `send-keys ... Enter` call; it does not poll readiness or decide acceptance. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or a missing success marker is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure; backend idempotency does not excuse an unexplained replay. For the stabilization example, require exactly one task-creation request and a non-replayed success before its sentinel. Capture the exit marker before stopping; cleanup stops the pipe and removes only `cortex-v12-smoke` plus its owner-only temporary capture. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
+After `start`, `capture` reads the bounded output-only PTY stream when detached `capture-pane` is stale. `events` reads the exact session's bounded owner-only sanitized MCP observation stream. It exposes safe metadata only and never parses readiness, errors, replay, or acceptance; the LLM verifier makes those decisions. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If the visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; it sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the composer before `send`. Every workload begins with the real `$cortex:orchestrator` token, and that token is its only Cortex-specific content. The rest must be an ordinary task request describing concrete user-visible functionality or a normal diagnosis/verification need. Never place live-dev state, harness restrictions, internal stages, MCP/tool guidance, worker or coordinator instructions, replay policy, or success markers in the model-visible workload; the operator and bounded event verifier enforce those conditions externally. The controller normalizes the prompt to one line, uses literal `send-keys -l`, then issues one separate `send-keys ... Enter` call; it does not poll readiness or decide acceptance. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or missing expected completion is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure; backend idempotency does not excuse an unexplained replay. Capture the exit marker before stopping; cleanup stops the pipe and removes only `cortex-v12-smoke` plus its owner-only temporary capture. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
 
 For every native worker spawned by live orchestration, the LLM verifier must inspect a bounded sanitized structured event stream as well as the coordinator pane because worker MCP calls/errors may be hidden. The helper may expose events but must not decide pass/fail. Acceptance requires a clean first worker-owned report-submission success, zero prior hidden validation/tool errors or mutation replays; a final report reference alone is insufficient.
 
@@ -582,8 +596,14 @@ Exercise several explicit `$cortex:orchestrator` tasks:
 Confirm native Luna dispatch omits the model override while Terra/Sol carry
 exact overrides and every selected effort is preserved. Confirm no hook trust,
 native stop barrier, backend-enforced fixed wait/read sequence, or server
-recovery route appears; the coordinator must still wait for or reconcile its
-exact spawned worker before consuming that worker's finalized report.
+recovery route appears. Native wait output is advisory: after every bounded
+wait returns, including timeout, empty output, or contradiction with visible
+child completion, the coordinator immediately reads current task state or
+relevant evidence. A finalized publication is authoritative and is consumed
+without another wait for that child. Only an active child with no publication
+may be waited on again; lifecycle stop without publication enters explicit
+loss/recovery. Empty host output must never suppress durable evidence or leave
+the coordinator in model-only waiting.
 
 Inspect the coordinator chronology. Its only non-user actions may be Cortex
 ledger calls, native worker coordination, and the bounded orchestrator-owned

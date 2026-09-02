@@ -37,10 +37,10 @@ EXPECTED_REQUIRED = {
     "record_steering": {"task_ref", "response_original", "user_language", "add", "retire"},
     "open_assignment": {
         "task_ref", "role", "profile_name", "model", "reasoning_effort", "responsibility",
-        "goal", "scope", "instructions", "outcomes", "report_policy",
+        "goal", "scope", "instructions", "report_policy",
     },
     "publish_plan": {
-        "task_ref", "summary", "scope", "review_policy", "stages", "verification_facts",
+        "task_ref", "summary", "scope", "stages", "verification_facts",
         "outcome_coverage", "risks", "unresolved", "status",
     },
     "publish_result": {
@@ -220,30 +220,43 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             try:
                 assert process.stdin is not None and process.stdout is not None
 
+                notifications: list[dict] = []
+
                 def call(payload: dict) -> dict:
                     process.stdin.write(json.dumps(payload) + "\n")
                     process.stdin.flush()
-                    line = process.stdout.readline()
-                    self.assertTrue(line.strip(), "stdio server closed before a response")
-                    return json.loads(line)
+                    while True:
+                        line = process.stdout.readline()
+                        self.assertTrue(line.strip(), "stdio server closed before a response")
+                        response = json.loads(line)
+                        if "id" not in response and response.get("method") == "notifications/tools/list_changed":
+                            notifications.append(response)
+                            continue
+                        return response
 
                 call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "conformance", "version": "1"}}})
                 process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}) + "\n")
                 process.stdin.flush()
                 catalogue = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
                 names = [item["name"] for item in catalogue["result"]["tools"]]
-                self.assertEqual(len(names), 11)
+                self.assertEqual(len(names), 14)
                 by_name = {item["name"]: item for item in catalogue["result"]["tools"]}
                 close_description = by_name["close_task"]["description"]
                 self.assertIn("open_clarification", close_description)
                 self.assertIn("record_clarification", close_description)
-                self.assertTrue(set(names).isdisjoint({
+                self.assertTrue({
                     "publish_plan", "publish_result", "publish_documentation",
-                }))
+                }.issubset(set(names)))
                 opened = call({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "open_task", "arguments": {"project_root": project, "request_original": "Conformance", "user_language": "en", "outcomes": [{"outcome": "Check the contract.", "acceptance": ["The contract is durable."], "constraints": [], "verification": ["Read the created task."]}], "constraints": ["No additional constraints."]}}})
                 self.assertNotIn("error", opened)
                 self.assertFalse(opened["result"].get("isError"), opened)
                 task_ref = opened["result"]["structuredContent"]["task_ref"]
+                narrowed = call({"jsonrpc": "2.0", "id": 31, "method": "tools/list", "params": {}})
+                narrowed_names = {item["name"] for item in narrowed["result"]["tools"]}
+                self.assertTrue(narrowed_names.isdisjoint({
+                    "publish_plan", "publish_result", "publish_documentation",
+                }))
+                self.assertEqual(len(notifications), 1)
                 read = call({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "read_task", "arguments": {"task_ref": task_ref, "view": "state"}}})
                 self.assertNotIn("error", read)
                 unreviewed_close = call({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "close_task", "arguments": {"task_ref": task_ref, "verdict": "ready"}}})
@@ -266,6 +279,10 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
                 if process.stdin is not None:
                     process.stdin.close()
                 process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
 
     def test_catalogue_is_flat_task_ref_only(self) -> None:
         self.assertEqual(tuple(PUBLIC_TOOLS), EXPECTED_TOOLS)
@@ -302,7 +319,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
     def test_publication_terminal_discriminators_precede_long_evidence(self) -> None:
         """Required short fields remain visible before host-compacted arrays."""
         expected_prefixes = {
-            "publish_plan": ["task_ref", "status", "summary", "scope", "review_policy"],
+            "publish_plan": ["task_ref", "status", "summary", "scope"],
             "publish_result": ["task_ref", "status", "summary", "outcome", "documentation_impact"],
             "publish_documentation": ["task_ref", "status", "summary", "documentation_impact"],
         }
@@ -327,6 +344,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertNotIn("task", PUBLIC_TOOLS["open_task"]["inputSchema"]["properties"])
         self.assertNotIn("mission", PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"])
         self.assertIn("outcomes", PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"])
+        self.assertNotIn("outcomes", PUBLIC_TOOLS["open_assignment"]["inputSchema"]["required"])
         self.assertEqual(
             PUBLIC_TOOLS["open_assignment"]["inputSchema"]["properties"]["outcomes"]["items"]["type"],
             "string",

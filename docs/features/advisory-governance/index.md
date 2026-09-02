@@ -60,13 +60,13 @@ classification or mode. Neither label creates a backend wave, mandatory stage,
 model escalation, or user-approval gate.
 
 Light/full mode selection remains model-owned, but every delivery assignment in
-those modes requires a current finalized plan with `review_policy=required` and
+those modes requires a current finalized plan with server-derived `review_policy=required` and
 an explicit approval bound to that exact report and digest. The backend enforces
 this narrow pre-dispatch integrity relation while leaving planning/evidence
 assignments available; it does not choose a schedule. A minimal plan may use
-`review_policy=informational` only when
+server-derived `review_policy=informational` only when
 no material product, scope, external, destructive, security, privacy, or risk
-decision remains. The selected policy is persisted on the immutable plan report.
+decision remains. The derived policy is persisted on the immutable plan report.
 
 ## Project-level initiatives
 
@@ -120,8 +120,8 @@ are not public locators or inspection inputs.
 
 ## Plans and user decisions
 
-A plan is a complete `publish_plan` publication. Its review policy is
-`informational` or `required`; an updated plan names a private finalized
+A plan is a complete `publish_plan` publication. Its persisted review policy is
+server-derived as `informational` or `required`; an updated plan names a private finalized
 predecessor through the plan-revision relation and receives new private
 immutable identity. Informational plans do not pause work. Required review
 creates a coordinator-owned pause only for plan-dependent work when explicit

@@ -12,11 +12,12 @@ concurrency:
 
 jobs:
   marketplace-release-gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12"]
     permissions:
       contents: read
@@ -39,5 +40,11 @@ jobs:
           bash -n scripts/sync-cortex.sh
           python -B scripts/validate-cortex-marketplace.py
           python -B scripts/verify-cortex-release.py --mode source
+          python -B -m pytest -q \
+            tests/test_cortex_host_preflight_plugin_contract.py \
+            tests/test_cli_desktop_source_parity.py \
+            tests/test_activation_hook.py \
+            tests/test_command_receipts.py \
+            -k 'plugin_contract or lifecycle_are_equivalent or catalogue_pending or late_desktop or parallel_candidate or copied_locator or coordinator_role'
           python -B -m pytest -q
           git diff --check

@@ -68,9 +68,9 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 - Perform only project-facing work owned by this delegation. Do not invent
   authority, spawn policy, host lifecycle semantics, model selection, retries,
   or recovery procedures.
-- Your first action is to consume the server-owned assignment through the
-  candidate-scoped `read_task` contract with the exact worker reference below.
-  Assignment is its sole advertised view. Do not read any other task view or
+- Your first action is to consume the server-owned assignment through the live
+  advertised `read_task` contract with the exact worker reference below and
+  select assignment evidence. Do not read any other task view or
   inspect the project before that read succeeds. Its result is the only bootstrap
   authority for continuing this assignment.
 - Derive that finite first read only from the live advertised contract. If a
@@ -140,11 +140,9 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   transport reconciliation after an actually ambiguous response, never a
   post-success confirmation step.
 
-- A plan publication always declares one explicit review disposition. Use
-  required review when the assignment or governance evidence requires it, or
-  when material product, scope, external, destructive, security, privacy, or
-  risk decisions remain; otherwise use informational review. Never omit the
-  disposition or downgrade it to bypass coordinator review.
+- A plan publication does not choose or declare its review disposition. The
+  server derives that persisted state from authoritative task governance; do
+  not add a review-policy field to the advertised publication contract.
 
 - Reconcile every exact item in the server-issued assignment scope once in the
   publication evidence. Use the semantic outcome objects returned by the
@@ -211,8 +209,8 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
 # evidence from the server-owned immutable snapshot.
 _MINIMAL_WORKER_BOOTSTRAP = """# Cortex worker bootstrap
 
-- First consume the server-owned assignment through the candidate-scoped `read_task`
-  contract with the worker reference below; assignment is its sole advertised view.
+- First consume the server-owned assignment through the live advertised `read_task`
+  contract with the worker reference below and select assignment evidence.
   `open_assignment` creates
   assignments for a coordinator; it never reads or consumes a worker assignment.
 - Build that finite first read from the live contract. After a deterministic local-
@@ -260,11 +258,9 @@ _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
   record that concrete limitation and use exactly one bounded repository-native
   enumeration or text-search fallback. Never silently skip the graph, begin with
   `rg`/`find`/directory enumeration, or chain fallback searches.
-- A plan publication always declares one explicit review disposition. Use
-  required review when the assignment or governance evidence requires it, or
-  when material product, scope, external, destructive, security, privacy, or
-  risk decisions remain; otherwise use informational review. Never omit the
-  disposition or downgrade it to bypass coordinator review.
+- A plan publication does not choose or declare its review disposition. The
+  server derives that persisted state from authoritative task governance; do
+  not add a review-policy field to the advertised publication contract.
 - A planning worker completes all bounded discovery before publishing one
   terminal plan, then stops project/tool work and never publishes a
   supplementary result or documentation outcome. Later material evidence uses
