@@ -27,6 +27,7 @@ from cortex_runtime.domain_kernel import DecisionAggregate
 
 
 _WORKER_TASK_REF = re.compile(r"^(t_[0-9a-f]{12})_([0-9a-f]{32})$")
+_STATE_READ_PAGE_LIMIT = 16
 
 
 def _resolve_task_context(value: str) -> tuple[V12Store, str, str | None, str]:
@@ -354,7 +355,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.14.12",
+        "1.14.13",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -458,20 +459,39 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
         cursor = None
         context.pop("cursor", None)
     if view == "state":
-        raw = ledger.inspect_task(task_ref=coordinator_ref, after_sequence=0)
-        data = _publicize(raw)
+        after_sequence = cursor if isinstance(cursor, int) and not isinstance(cursor, bool) else 0
+        raw = ledger.inspect_task(
+            task_ref=coordinator_ref,
+            after_sequence=after_sequence,
+            limit=_STATE_READ_PAGE_LIMIT,
+        )
+        has_more = bool(raw.get("has_more"))
+        next_sequence = raw.get("next_sequence")
+        if has_more and (isinstance(next_sequence, bool) or not isinstance(next_sequence, int)):
+            raise V12ServiceError("task state continuation is unavailable", code="ledger_error")
+        public_raw = dict(raw)
+        # The transport owns pagination.  Never expose a second nested marker
+        # that can disagree with the callable top-level continuation contract.
+        public_raw.pop("has_more", None)
+        public_raw.pop("next_sequence", None)
+        data = _publicize(public_raw)
         context.update({
             "read_key": page_key,
-            "cursor": None,
-            "has_more": False,
-            # Private, same-connection admission evidence.  A successful
-            # steering opening clears this marker, so recording the user's
-            # later answer requires a state read performed after that opening.
-            # This remains effective when Codex invokes Cortex through an
-            # outer programmatic-tool call that host hooks cannot decompose.
-            "steering_state_read_task_ref": task_ref,
+            "cursor": next_sequence if has_more else None,
+            "has_more": has_more,
         })
-        result = {"task_ref": task_ref, "view": view, "data": data, "has_more": False}
+        if has_more:
+            context.pop("steering_state_read_task_ref", None)
+        else:
+            # Private, same-connection admission evidence is valid only after
+            # the complete bounded state read reaches its terminal page.
+            context["steering_state_read_task_ref"] = task_ref
+        result = {
+            "task_ref": task_ref,
+            "view": view,
+            "has_more": has_more,
+            "data": data,
+        }
     elif view == "assignment":
         if assignment_id is None:
             raise V12ServiceError("assignment view requires worker-scoped task_ref", code="wrong_connection")

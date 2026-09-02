@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.12.
+Status: content-addressed production and development release contract for Cortex 1.14.13.
 
 ## Current release identity
 
-- semantic release label: 1.14.12
-- installable identity: `1.14.12+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.13
+- installable identity: `1.14.13+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - source-to-installed synchronization reuses that same canonical plugin
   manifest and digest contract on Linux and macOS; it does not maintain a
@@ -243,10 +243,19 @@ Release evidence must prove:
   `evidence` views with server-owned continuation through `continue=true`; a
   fresh worker's first call consumes the assignment view and is its only
   authoritative route to declared predecessor bodies;
+- coordinator state history uses bounded 16-event pages with one top-level
+  `has_more` marker; nested state data exposes no competing continuation or
+  cursor marker, and terminal state consumption alone establishes fresh-read
+  evidence;
 - the compact assignment reconciliation header retains exact public outcome
   names before the larger policy body, continuation occurs only immediately
   after `has_more=true`, and restarted identical terminal reads reuse existing
   consumption receipts without new timeline events;
+- planner and worker handoffs containing several finalized reports are measured
+  against the 224 KiB report-response envelope, not the 65,536-byte bound for
+  one stored JSON value; valid evidence is complete or server-paginated and is
+  never rejected as `content_invalid` merely because the aggregate crosses the
+  smaller storage boundary;
 - `publish_result` aggregate-size tests cover below/exact/above boundaries,
   Unicode byte accounting, safe actual/maximum diagnostics, section redaction,
   one materially corrected complete retry, and rejection of unchanged,
@@ -403,7 +412,7 @@ fourteen-tool semantic facade and runtime, schema-v1 store, host-private operato
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.14.12,
+The package and repository metadata must consistently identify Cortex 1.14.13,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the complete fourteen-tool semantic registry plus its two audience
 projections. Stale claims about waves, gates, capabilities,

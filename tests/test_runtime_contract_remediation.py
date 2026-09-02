@@ -593,6 +593,55 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 )
             self.assertEqual(exhausted.exception.code, "report_cursor_invalid")
 
+    def test_multi_report_assignment_uses_response_limit_not_storage_value_limit(self) -> None:
+        outcomes = [
+            self._semantic_outcome(f"Independent evidence outcome {index}.")
+            for index in range(9)
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task = self._task(root, outcomes)
+            for index, outcome in enumerate(outcomes):
+                _producer, producer_ref = self._assignment(
+                    task["task_ref"], [outcome["outcome"]],
+                    role=f"independent producer {index}", responsibility="delivery",
+                )
+                self._publish(
+                    producer_ref, outcome,
+                    f"Evidence {index}: " + "x" * 6_300,
+                )
+
+            consumer = open_assignment(
+                task_ref=task["task_ref"], role="multi-report planner",
+                profile_name="planner", model="gpt-5.6-terra",
+                reasoning_effort="high", responsibility="planning",
+                goal="Plan from every independent report.",
+                scope="The complete effective contract.",
+                instructions="Consume all evidence and publish one plan.",
+                report_policy="all_finalized",
+            )
+            match = WORKER_REF.search(consumer["native_dispatch"]["message"])
+            self.assertIsNotNone(match)
+            consumer_ref = match.group(1)
+            assignment = read_task(
+                task_ref=consumer_ref, view="assignment",
+                _connection_context={},
+            )
+
+            self.assertFalse(assignment["has_more"])
+            reports = assignment["data"]["evidence"]["reports"]
+            self.assertEqual(len(reports), len(outcomes))
+            self.assertTrue(all(report["chunks"] for report in reports))
+            self.assertGreater(
+                len(json.dumps(
+                    assignment["data"]["evidence"],
+                    ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")),
+                MCP_OPERATION_MAX_BYTES,
+            )
+
     def test_large_assignment_is_self_contained_in_first_text_response(self) -> None:
         long_outcome = {
             "outcome": "Exact terminal publication outcome.",

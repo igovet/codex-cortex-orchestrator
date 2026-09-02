@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.12 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.14.13 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.

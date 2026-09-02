@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.12 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.13 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -428,7 +428,10 @@ immutable and readable.
 Ordinary task reads create no receipt or lifecycle fact. `read_task` accepts
 only its advertised task-scoped view (`state`, `assignment`, or `evidence`),
 with `continue=true` for the immediately preceding bounded read. The server
-retains the continuation privately; callers do not supply report refs,
+retains the continuation privately. The result's top-level `has_more` is the
+only continuation decision; nested state data exposes neither `has_more` nor
+`next_sequence`, and fresh-state admission is granted only by a terminal page.
+Callers do not supply report refs,
 private assignment/publication references, private cursors, or caller replay keys. Native
 handoffs are routing context, not semantic authority. Private/internal report
 assembly and ledger continuation state remain inaccessible through the public
@@ -694,8 +697,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.12+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.12` is
+`1.14.13+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.13` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a

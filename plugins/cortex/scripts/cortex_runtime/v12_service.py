@@ -338,10 +338,14 @@ def create_task(
     )
 
 
-def inspect_task(*, task_ref: str, after_sequence: int = 0) -> dict[str, Any]:
+def inspect_task(*, task_ref: str, after_sequence: int = 0,
+                 limit: int = 50) -> dict[str, Any]:
     """Read a task, its delegations/reports, and its ordered local timeline."""
     store, canonical = _task_store(task_ref)
-    return _call_task(canonical, "inspect_task", task_id=canonical, after_sequence=after_sequence, limit=50, store=store)
+    return _call_task(
+        canonical, "inspect_task", task_id=canonical,
+        after_sequence=after_sequence, limit=limit, store=store,
+    )
 
 
 def create_delegation(

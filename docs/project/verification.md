@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.14.12 source, package, installed-host, and
+This page describes Cortex 1.14.13 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -190,10 +190,16 @@ The V12 protocol evidence must prove:
   receipt;
 - report-read request/response aggregation is preflighted before body
   materialization (including report/chunk counts and the 224 KiB response cap),
+  uses that response cap rather than the unrelated 65,536-byte single-value
+  storage bound for multi-report assembly, and preserves every report through
+  the existing server-owned continuation instead of returning
+  `content_invalid` for valid aggregate evidence;
   and projection rendering preflights its aggregate 512-file/32 MiB output
   budget plus the 10 MiB per-file cap without partial writes;
-- `read_task` bounds task reads and returns the advertised `has_more` continuation
-  state; no obsolete inspection or report-body operation is public;
+- `read_task` bounds task reads and returns one authoritative top-level
+  `has_more` continuation state; coordinator timeline history uses 16-event
+  pages, nested state data exposes no duplicate pagination marker, and a fresh
+  state read becomes admissible only at its terminal page;
 - ordinary `read_task` reads create no native lifecycle evidence;
 - The narrow decision record operations accept an existing in-scope task and
   their task-ref-only advertised fields; private subject/revision/digest
@@ -399,7 +405,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.14.12+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.14.13+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -451,7 +457,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.14.12` with
+successful `initialize`, report semantic version `1.14.13` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -647,7 +653,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.14.12/schema-v1 identifiers;
+- V12/1.14.13/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional

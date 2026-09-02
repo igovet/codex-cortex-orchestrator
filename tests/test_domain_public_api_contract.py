@@ -60,6 +60,47 @@ class DomainPublicApiContractTests(unittest.TestCase):
             for name in ("item_ref", "report_ref", "decision_ref", "digest", "cursor", "handles"):
                 self.assertNotIn(name, rendered)
 
+    def test_state_read_has_one_authoritative_marker_and_terminal_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            task, _outcomes = self._task(root)
+            for index in range(20):
+                assess_governance(
+                    task_ref=task["task_ref"], mode="minimal",
+                    rationale=f"Bounded pagination evidence {index}.",
+                )
+
+            context: dict = {}
+            page = read_task(
+                task_ref=task["task_ref"], view="state",
+                _connection_context=context,
+            )
+            self.assertTrue(page["has_more"])
+            self.assertNotIn("has_more", page["data"])
+            self.assertNotIn("next_sequence", page["data"])
+            self.assertNotIn("steering_state_read_task_ref", context)
+
+            timeline = list(page["data"]["timeline"])
+            while page["has_more"]:
+                page = read_task(
+                    task_ref=task["task_ref"], view="state", continue_=True,
+                    _connection_context=context,
+                )
+                self.assertNotIn("has_more", page["data"])
+                self.assertNotIn("next_sequence", page["data"])
+                timeline.extend(page["data"]["timeline"])
+
+            self.assertEqual(
+                [item["sequence"] for item in timeline],
+                sorted({item["sequence"] for item in timeline}),
+            )
+            self.assertEqual(context["steering_state_read_task_ref"], task["task_ref"])
+            with self.assertRaises(V12ServiceError) as rejected:
+                read_task(
+                    task_ref=task["task_ref"], view="state", continue_=True,
+                    _connection_context=context,
+                )
+            self.assertEqual(rejected.exception.code, "report_cursor_invalid")
+
     def test_state_binds_exact_outcomes_to_post_steering_delivery_assignability(self) -> None:
         owned = [
             {"outcome": "Deliver the initial API.", "acceptance": ["The API works."], "constraints": [], "verification": []},
@@ -1146,7 +1187,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.14.12")
+        self.assertEqual(SERVER_VERSION, "1.14.13")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

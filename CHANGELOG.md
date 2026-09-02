@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.14.13] - 2026-09-02
+
+### Fixed
+
+- Made coordinator state reads expose one authoritative top-level pagination
+  marker. Timeline pages now continue through the same server-owned
+  `read_task` connection in bounded 16-event slices; nested `data.has_more`
+  and `data.next_sequence` markers are no longer exposed, and fresh-state
+  admission is recorded only after the terminal page. This prevents the model
+  from following a nested `has_more=true` into a server-declared terminal read
+  and preserves the complete ordered state instead of truncating it.
+- Applied the dedicated 224 KiB report-response envelope when assembling
+  multi-report worker handoffs. A valid planner assignment with several
+  finalized predecessor reports no longer fails at the unrelated 65,536-byte
+  single-storage-value limit; complete evidence is returned or paginated
+  through the existing server-owned continuation without truncation.
+
 ## [1.14.12] - 2026-09-02
 
 ### Fixed

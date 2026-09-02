@@ -7798,7 +7798,18 @@ class V12Store:
                     # caller asks for the full allowed content budget.
                     trial = {"reports": result_reports, "returned_content_bytes": returned + size, "next_cursor": None, "has_more": True}
                     result_reports[position]["chunks"].append(candidate)
-                    if len(_canonical_json(trial, label="report response").encode("utf-8")) > response_max_bytes:
+                    # ``trial`` is a transport response assembled from
+                    # individually validated report metadata and chunks.  Its
+                    # allowed envelope is REPORT_RESPONSE_MAX_BYTES, not the
+                    # smaller JSON_MAX_BYTES used for one stored JSON value.
+                    # Applying the storage-value limit here made a valid
+                    # multi-report worker handoff fail as ``content_invalid``
+                    # before normal response pagination could take over.
+                    if len(_canonical_json(
+                        trial,
+                        label="report response",
+                        maximum_bytes=REPORT_RESPONSE_MAX_BYTES,
+                    ).encode("utf-8")) > response_max_bytes:
                         result_reports[position]["chunks"].pop()
                         more = True
                         break
