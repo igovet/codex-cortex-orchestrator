@@ -249,6 +249,44 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 "complete_outcome_object",
             )
 
+    def test_post_compaction_steering_uses_fresh_exact_current_outcome(self) -> None:
+        current = self._semantic_outcome(
+            "Build, install on the connected USB-debug phone, and verify it."
+        )
+        remembered = self._semantic_outcome(
+            "Build, install it on the USB-debug phone, and verify it."
+        )
+        replacement = self._semantic_outcome(
+            "Build, install on the connected USB-debug phone, and verify the replacement."
+        )
+        with tempfile.TemporaryDirectory() as root:
+            task = self._task(root, [current])
+            open_steering(
+                task_ref=task["task_ref"], prompt="Replace the outcome?",
+                prompt_language="en",
+            )
+            with self.assertRaises(V12ServiceError) as stale:
+                record_steering(
+                    task_ref=task["task_ref"], response_original="Replace it.",
+                    user_language="en", add=[replacement], retire=[remembered],
+                )
+            self.assertEqual(stale.exception.code, "outcome_item_not_found")
+            self.assertEqual(stale.exception.details.get("path"), "$.retire[0]")
+
+            fresh = read_task(task_ref=task["task_ref"], view="state")
+            self.assertEqual(fresh["data"]["effective_contract"]["revision"], 1)
+            exact = fresh["data"]["effective_contract"]["items"][0]
+            recorded = record_steering(
+                task_ref=task["task_ref"], response_original="Replace it.",
+                user_language="en", add=[replacement], retire=[exact],
+            )
+            self.assertFalse(recorded["replayed"])
+            after = read_task(task_ref=task["task_ref"], view="state")
+            self.assertEqual(after["data"]["effective_contract"]["revision"], 2)
+            self.assertEqual(
+                after["data"]["effective_contract"]["items"], [replacement],
+            )
+
     def test_exact_scope_replay_does_not_collapse_distinct_assignments(self) -> None:
         outcomes = [self._semantic_outcome("Outcome A."), self._semantic_outcome("Outcome B.")]
         with tempfile.TemporaryDirectory() as root, patch(
@@ -389,6 +427,61 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                     status="blocked", _connection_context=original_context,
                 )
             self.assertEqual(old_worker.exception.code, "assignment_stale")
+
+    def test_loss_recovery_ignores_unrelated_broad_report_authors(self) -> None:
+        completed = self._semantic_outcome("Already completed sibling outcome.")
+        lost = self._semantic_outcome("Recover the interrupted owner outcome.")
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task = self._task(root, [completed, lost])
+            _finished, finished_ref = self._assignment(
+                task["task_ref"], [completed["outcome"]],
+                role="completed sibling owner", responsibility="delivery",
+            )
+            self._publish(finished_ref, completed, "Sibling owner completed.")
+
+            _original, original_ref = self._assignment(
+                task["task_ref"], [lost["outcome"]],
+                role="interrupted owner", responsibility="delivery",
+            )
+            original_context: dict = {}
+            read_task(
+                task_ref=original_ref, view="assignment",
+                _connection_context=original_context,
+            )
+
+            replacement = open_assignment(
+                task_ref=task["task_ref"], role="recovery owner",
+                profile_name="explorer", model="gpt-5.6-luna",
+                reasoning_effort="high", responsibility="delivery",
+                goal="Recover the exact interrupted outcome.",
+                scope="Only the exact lost owner outcome.",
+                instructions="Reconcile existing work and publish one terminal result.",
+                outcomes=[lost["outcome"]], report_policy="all_finalized",
+                loss_recovery={
+                    "state": "aborted",
+                    "reason": "The host explicitly interrupted the bound worker.",
+                    "evidence": [
+                        "The host observed the worker terminate without a publication."
+                    ],
+                },
+            )
+            replacement_ref = WORKER_REF.search(
+                replacement["native_dispatch"]["message"]
+            ).group(1)
+            self.assertNotEqual(replacement_ref, original_ref)
+            store, _task_id, successor_id, _coordinator = _resolve_task_context(
+                replacement_ref
+            )
+            with store._connection() as connection:
+                loss_row = connection.execute(
+                    "SELECT assignment_id,successor_assignment_id "
+                    "FROM assignment_losses"
+                ).fetchone()
+            self.assertEqual(loss_row["assignment_id"], original_context["assignment_id"])
+            self.assertEqual(loss_row["successor_assignment_id"], successor_id)
 
     def test_terminal_assignment_receipts_do_not_authorize_a_fresh_context(self) -> None:
         outcome = self._semantic_outcome("Produce predecessor evidence.")
@@ -633,6 +726,53 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             self.assertIn("goal-marker", rendered)
             self.assertIn("scope-marker", rendered)
             self.assertIn("instructions-marker", rendered)
+
+            terminal_receipts = store._read(lambda connection: [
+                tuple(row) for row in connection.execute(
+                    "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
+                    "WHERE assignment_id=? ORDER BY private_position",
+                    (assignment_id,),
+                ).fetchall()
+            ])
+            recovery_pages = [read_task(
+                task_ref=worker_ref, view="assignment",
+                _connection_context=context,
+            )]
+            self.assertTrue(recovery_pages[0]["has_more"])
+            self.assertFalse(context["assignment_complete"])
+            while recovery_pages[-1]["has_more"]:
+                recovery_pages.append(read_task(
+                    task_ref=worker_ref, view="assignment", continue_=True,
+                    _connection_context=context,
+                ))
+            self.assertTrue(context["assignment_complete"])
+            self.assertEqual(
+                store._read(lambda connection: [
+                    tuple(row) for row in connection.execute(
+                        "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
+                        "WHERE assignment_id=? ORDER BY private_position",
+                        (assignment_id,),
+                    ).fetchall()
+                ]),
+                terminal_receipts,
+            )
+            published = publish_result(
+                task_ref=worker_ref,
+                summary="Published after exact post-compaction assignment reconciliation.",
+                outcome="The assigned outcome is complete.",
+                changes=[{"path": "runtime", "summary": "Focused fixture change."}],
+                verification_facts=[{
+                    "state": "executed", "summary": "Focused fixture check passed.",
+                }],
+                outcome_coverage=[{
+                    "outcome": outcome["outcome"], "status": "complete",
+                    "verification": ["Focused fixture check passed."],
+                }],
+                documentation_impact="No documentation update is required for the fixture.",
+                risks=[], unresolved=[], status="completed",
+                _connection_context=context,
+            )
+            self.assertEqual(published["state"], "published")
             with self.assertRaises(V12ServiceError) as copied:
                 read_task(
                     task_ref=worker_ref, view="assignment",

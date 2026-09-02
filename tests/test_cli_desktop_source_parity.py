@@ -135,9 +135,15 @@ def _installed_hook(
     return json.loads(output) if output else None
 
 
-@pytest.mark.parametrize("surface", ["cli", "desktop"])
+@pytest.mark.parametrize(
+    ("surface", "paginated"),
+    [
+        ("cli", False), ("desktop", False),
+        ("cli", True), ("desktop", True),
+    ],
+)
 def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
-    tmp_path: Path, surface: str,
+    tmp_path: Path, surface: str, paginated: bool,
 ) -> None:
     home = str(tmp_path / "home")
     project = tmp_path / "project"
@@ -148,11 +154,20 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
     worker_turn = f"{surface}-worker-turn"
     worker_agent = f"{surface}-worker-agent"
     outcome = {
-        "outcome": f"Complete the {surface} parity fixture.",
+        "outcome": f"Complete the {surface} {'paginated ' if paginated else ''}parity fixture.",
         "acceptance": ["One exact worker publication is durable."],
         "constraints": ["Use the real hook and one persistent MCP connection."],
         "verification": ["Coordinator evidence contains one completed result."],
     }
+    evidence_outcomes = [
+        {
+            "outcome": f"Supply bounded predecessor evidence {index} for {surface}.",
+            "acceptance": ["One finalized evidence report exists."],
+            "constraints": ["Keep the public task-opening request bounded."],
+            "verification": ["The report is consumed by the target assignment."],
+        }
+        for index in range(6)
+    ] if paginated else []
 
     with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}):
         with COMMANDS._source_stdio_session(home) as coordinator:
@@ -160,7 +175,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                 "project_root": str(project),
                 "request_original": f"Exercise ordinary {surface} worker startup.",
                 "user_language": "en",
-                "outcomes": [outcome],
+                "outcomes": [outcome, *evidence_outcomes],
                 "constraints": ["Keep CLI and Desktop results equivalent."],
             })
             assert not opened["result"].get("isError"), opened
@@ -172,6 +187,67 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                 "risk_factors": [],
             })
             assert not assessed["result"].get("isError"), assessed
+            if paginated:
+                # Build large predecessor evidence through ordinary public MCP
+                # calls. Each call remains below the operation limit, while
+                # the target assignment must be consumed across real pages.
+                report_filler = "bounded-predecessor-report-" * 900
+                for index, evidence_outcome in enumerate(evidence_outcomes):
+                    evidence_assignment = coordinator("open_assignment", {
+                        "task_ref": task_ref,
+                        "role": f"predecessor evidence worker {index}",
+                        "profile_name": "explorer",
+                        "model": "gpt-5.6-luna",
+                        "reasoning_effort": "high",
+                        "responsibility": "evidence",
+                        "outcomes": [evidence_outcome["outcome"]],
+                        "goal": "Publish one bounded predecessor report.",
+                        "scope": evidence_outcome["outcome"],
+                        "instructions": "Consume the assignment, then publish one report.",
+                        "report_policy": "none",
+                    })
+                    assert not evidence_assignment["result"].get("isError"), evidence_assignment
+                    evidence_ref = re.search(
+                        r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                        evidence_assignment["result"]["structuredContent"]
+                        ["native_dispatch"]["message"],
+                    ).group(1)
+                    evidence_identity = (
+                        f"{surface}-evidence-agent-{index}",
+                        f"{surface}-evidence-turn-{index}",
+                        f"{surface}-evidence-session-{index}",
+                    )
+                    COMMANDS._write_host_worker_receipt(
+                        plugin_data, evidence_ref, authorize=True,
+                        agent_id=evidence_identity[0],
+                        turn_id=evidence_identity[1],
+                        session_id=evidence_identity[2],
+                    )
+                    with COMMANDS._source_stdio_session(
+                        home, host_identity=evidence_identity,
+                    ) as evidence_worker:
+                        evidence_read = evidence_worker("read_task", {
+                            "task_ref": evidence_ref, "view": "assignment",
+                        })
+                        assert not evidence_read["result"].get("isError"), evidence_read
+                        evidence_published = evidence_worker("publish_result", {
+                            "task_ref": evidence_ref,
+                            "summary": f"Predecessor {index}: {report_filler}",
+                            "outcome": "The bounded predecessor evidence was captured.",
+                            "changes": [],
+                            "verification_facts": [{
+                                "state": "executed",
+                                "summary": "The source fixture produced this report.",
+                            }],
+                            "outcome_coverage": [{
+                                "outcome": evidence_outcome["outcome"],
+                                "status": "complete",
+                                "verification": ["The report was finalized."],
+                            }],
+                            "documentation_impact": "No documentation change.",
+                            "risks": [], "unresolved": [], "status": "completed",
+                        })
+                        assert not evidence_published["result"].get("isError"), evidence_published
             assigned = coordinator("open_assignment", {
                 "task_ref": task_ref,
                 "role": f"{surface} parity worker",
@@ -182,7 +258,8 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                 "goal": "Publish one exact result through the assigned connection.",
                 "scope": outcome["outcome"],
                 "instructions": "Consume the assignment first, then publish once.",
-                "report_policy": "none",
+                "outcomes": [outcome["outcome"]],
+                "report_policy": "all_finalized" if paginated else "none",
             })
             assert not assigned["result"].get("isError"), assigned
             assignment = assigned["result"]["structuredContent"]
@@ -250,29 +327,42 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     # a neutral superset until exact bootstrap consumption.
                     _hook(tmp_path, start_event)
 
-                read_input = {"task_ref": worker_ref}
-                assert _hook(tmp_path, {
-                    "hook_event_name": "PreToolUse",
-                    "session_id": root_session,
-                    "turn_id": worker_turn,
-                    "agent_id": worker_agent,
-                    "tool_use_id": f"{surface}-worker-read",
-                    "tool_name": "mcp__cortex__read_task",
-                    "tool_input": read_input,
-                }) is None
-                consumed = worker("read_task", read_input)
-                assert not consumed["result"].get("isError"), consumed
-                assert consumed["result"]["structuredContent"]["view"] == "assignment"
-                assert _hook(tmp_path, {
-                    "hook_event_name": "PostToolUse",
-                    "session_id": root_session,
-                    "turn_id": worker_turn,
-                    "agent_id": worker_agent,
-                    "tool_use_id": f"{surface}-worker-read",
-                    "tool_name": "mcp__cortex__read_task",
-                    "tool_input": read_input,
-                    "tool_response": consumed["result"],
-                }) is None
+                read_input = {"task_ref": worker_ref, "view": "assignment"}
+                page_count = 0
+                while True:
+                    page_count += 1
+                    tool_use_id = f"{surface}-worker-read-{page_count}"
+                    assert _hook(tmp_path, {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": root_session,
+                        "turn_id": worker_turn,
+                        "agent_id": worker_agent,
+                        "tool_use_id": tool_use_id,
+                        "tool_name": "mcp__cortex__read_task",
+                        "tool_input": read_input,
+                    }) is None
+                    consumed = worker("read_task", read_input)
+                    assert not consumed["result"].get("isError"), consumed
+                    structured = consumed["result"]["structuredContent"]
+                    assert structured["view"] == "assignment"
+                    assert _hook(tmp_path, {
+                        "hook_event_name": "PostToolUse",
+                        "session_id": root_session,
+                        "turn_id": worker_turn,
+                        "agent_id": worker_agent,
+                        "tool_use_id": tool_use_id,
+                        "tool_name": "mcp__cortex__read_task",
+                        "tool_input": read_input,
+                        "tool_response": consumed["result"],
+                    }) is None
+                    if not structured["has_more"]:
+                        break
+                    read_input = {
+                        "task_ref": worker_ref,
+                        "view": "assignment",
+                        "continue": True,
+                    }
+                assert (page_count > 1) is paginated
 
                 narrowed = worker.rpc("tools/list", {})
                 worker_tools = {item["name"] for item in narrowed["result"]["tools"]}
@@ -280,6 +370,56 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     "read_task", "publish_plan", "publish_result",
                     "publish_documentation",
                 }
+                assert worker.notifications == [{
+                    "jsonrpc": "2.0",
+                    "method": "notifications/tools/list_changed",
+                    "params": {},
+                }]
+
+                _hook(tmp_path, {
+                    "hook_event_name": "SessionStart",
+                    "source": "compact",
+                    "session_id": root_session,
+                    "turn_id": worker_turn,
+                    "agent_id": worker_agent,
+                })
+                recovery_input = {"task_ref": worker_ref, "view": "assignment"}
+                recovery_pages = 0
+                while True:
+                    recovery_pages += 1
+                    recovery_tool_use_id = (
+                        f"{surface}-worker-recovery-read-{recovery_pages}"
+                    )
+                    assert _hook(tmp_path, {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": root_session,
+                        "turn_id": worker_turn,
+                        "agent_id": worker_agent,
+                        "tool_use_id": recovery_tool_use_id,
+                        "tool_name": "mcp__cortex__read_task",
+                        "tool_input": recovery_input,
+                    }) is None
+                    recovered = worker("read_task", recovery_input)
+                    assert not recovered["result"].get("isError"), recovered
+                    recovered_page = recovered["result"]["structuredContent"]
+                    assert _hook(tmp_path, {
+                        "hook_event_name": "PostToolUse",
+                        "session_id": root_session,
+                        "turn_id": worker_turn,
+                        "agent_id": worker_agent,
+                        "tool_use_id": recovery_tool_use_id,
+                        "tool_name": "mcp__cortex__read_task",
+                        "tool_input": recovery_input,
+                        "tool_response": recovered["result"],
+                    }) is None
+                    if not recovered_page["has_more"]:
+                        break
+                    recovery_input = {
+                        "task_ref": worker_ref,
+                        "view": "assignment",
+                        "continue": True,
+                    }
+                assert recovery_pages == page_count
                 assert worker.notifications == [{
                     "jsonrpc": "2.0",
                     "method": "notifications/tools/list_changed",
@@ -320,14 +460,47 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                 assert result["state"] == "published"
                 assert result["replayed"] is False
 
-            evidence = coordinator("read_task", {
-                "task_ref": task_ref,
-                "view": "evidence",
+            _hook(tmp_path, {
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+                "session_id": root_session,
+                "turn_id": "coordinator-after-compact",
             })
-            assert not evidence["result"].get("isError"), evidence
-            reports = evidence["result"]["structuredContent"]["data"]["reports"]
-            assert len(reports) == 1
-            assert f"{surface.capitalize()} parity fixture completed." in json.dumps(reports)
+            coordinator_state_input = {"task_ref": task_ref, "view": "state"}
+            assert _hook(tmp_path, {
+                "hook_event_name": "PreToolUse",
+                "session_id": root_session,
+                "turn_id": "coordinator-after-compact",
+                "tool_name": "mcp__cortex__read_task",
+                "tool_input": coordinator_state_input,
+            }) is None
+            coordinator_state = coordinator("read_task", coordinator_state_input)
+            assert not coordinator_state["result"].get("isError"), coordinator_state
+            assert _hook(tmp_path, {
+                "hook_event_name": "PostToolUse",
+                "session_id": root_session,
+                "turn_id": "coordinator-after-compact",
+                "tool_name": "mcp__cortex__read_task",
+                "tool_input": coordinator_state_input,
+                "tool_response": coordinator_state["result"],
+            }) is None
+
+            reports = []
+            evidence_input = {"task_ref": task_ref, "view": "evidence"}
+            while True:
+                evidence = coordinator("read_task", evidence_input)
+                assert not evidence["result"].get("isError"), evidence
+                evidence_page = evidence["result"]["structuredContent"]
+                reports.extend(evidence_page["data"]["reports"])
+                if not evidence_page["has_more"]:
+                    break
+                evidence_input = {
+                    "task_ref": task_ref,
+                    "view": "evidence",
+                    "continue": True,
+                }
+            target_summary = f"{surface.capitalize()} parity fixture completed."
+            assert json.dumps(reports).count(target_summary) == 1
 
 
 def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_env(

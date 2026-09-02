@@ -478,7 +478,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertIn("Audit B.", repr(second))
             self.assertNotIn("Audit A.", repr(second["data"]["effective_contract"]))
 
-    def test_consumed_assignment_is_not_bearer_authority_for_a_fresh_context(self) -> None:
+    def test_terminal_assignment_reconciles_only_on_its_bound_connection(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
             task, outcomes = self._task(root)
             assignment = self._assignment(task["task_ref"], outcomes[0], "restart")
@@ -489,9 +489,21 @@ class DomainPublicApiContractTests(unittest.TestCase):
             with self.assertRaises(V12ServiceError) as fresh:
                 read_task(task_ref=worker_ref, view="assignment", _connection_context={})
             self.assertEqual(fresh.exception.code, "connection_lost")
-            with self.assertRaises(V12ServiceError) as terminal_repeat:
-                read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
-            self.assertEqual(terminal_repeat.exception.code, "assignment_stale")
+            before = read_task(task_ref=task["task_ref"], view="state")
+            reconciled = read_task(
+                task_ref=worker_ref, view="assignment",
+                _connection_context=context,
+            )
+            after = read_task(task_ref=task["task_ref"], view="state")
+            self.assertEqual(reconciled["data"], first["data"])
+            self.assertFalse(reconciled["has_more"])
+            self.assertTrue(context["assignment_complete"])
+            self.assertEqual(context["assignment_id"], context["bootstrap_assignment_id"])
+            self.assertEqual(
+                after["data"]["consumption_receipts"],
+                before["data"]["consumption_receipts"],
+            )
+            self.assertEqual(after["data"]["timeline"], before["data"]["timeline"])
 
     def test_fresh_connection_cannot_recover_consumed_worker_publication(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch(
@@ -1134,7 +1146,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.14.10")
+        self.assertEqual(SERVER_VERSION, "1.14.11")
         self.assertEqual(len(PUBLIC_TOOLS), 14)
 
 

@@ -1,9 +1,9 @@
 ---
 name: orchestrator
-description: Explicit opt-in Cortex v1.14.10 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. Read this skill completely before task-specific output; after compaction or reset, accept its complete exact repeat through host-supplied context or the host skill loader without requesting user approval. The first task-specific output or action must be open_task: render no activation acknowledgement, commentary, question, plan, or result before its success.
+description: Explicit opt-in Cortex v1.14.11 coordinator for worker-only project execution, task_ref-only durable orchestration, exact knowledge routing, and LLM-owned dynamic DAG decisions. Use only when the user directly selects or mentions cortex:orchestrator. Read this skill completely before task-specific output; after compaction or reset, accept its complete exact repeat through host-supplied context or the host skill loader without requesting user approval. The first task-specific output or action must be open_task: render no activation acknowledgement, commentary, question, plan, or result before its success.
 ---
 
-# Cortex Orchestrator v1.14.10
+# Cortex Orchestrator v1.14.11
 
 ## Activation and language
 
@@ -101,6 +101,8 @@ The available model routes are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol
 
 Native wait output is advisory host coordination, not completion authority. After every bounded native wait returns for any reason—including timeout, an empty result, or a result that contradicts a visible child-completion notification—immediately read current task state or relevant evidence before deciding whether to wait again. A finalized worker publication is authoritative durable completion evidence even when the host wait says that no agent completed; consume it and continue without another wait for that child. If no publication exists and the child remains active, another bounded wait is optional. If lifecycle stop is observed without a publication, use the explicit loss/recovery rules. Never remain in model-only waiting after a native wait has returned, and never let an empty host wait suppress already-published durable evidence.
 
+Never interrupt or cancel a child merely because bounded waits repeated, elapsed time increased, progress was slow, or no terminal publication exists yet. An active child remains the owner. Interrupt only on an explicit user instruction or concrete observed unsafe/out-of-scope behavior that requires immediate containment; otherwise keep waiting or report the still-active state without fabricating loss. A host-confirmed terminal stop without publication may use the explicit loss/recovery path.
+
 The worker consumes its assignment view before project work, follows its bounded semantic scope, does not delegate or ask the user, and publishes only its own evidence. A coordinator never publishes worker evidence. A worker never publishes for another assignment or task.
 
 ## Publications
@@ -112,6 +114,8 @@ Coverage accounts for every assigned outcome. `not_run`, `failed`, `partial`, `b
 ## User decisions
 
 At most one user decision is pending per task. Use distinct clarification, plan-review, and steering operations. Open the decision, render its neutral question in the user's language, record the exact response, then read current state before choosing more work. The server resolves pending binding, active plan relation, revision, and supersession atomically; the model never sees or supplies those identities.
+
+Steering is only for a real user-directed semantic outcome revision or genuinely new authority outside the current approved contract. Never open steering merely to re-authorize unfinished work, recovery, verification, demo/release gates, or deployment conditions that the current task and approved plan already contain. A failed worker, partial report, dirty worktree, missing evidence, or unrun gate is a workflow fact to recover, verify, complete, or report honestly—not by itself a scope change.
 
 For a required plan, open the plan review immediately after reading the finalized current plan, present the verified plan view and a localized summary, and wait for an explicit approve, revise, or cancel response. Record that response before creating plan-dependent delivery assignments. Never infer approval from the original implementation request, prior conversation, an informational acknowledgement, or the absence of objections. A revised plan requires a fresh review.
 
@@ -155,4 +159,4 @@ The final answer leads with the user-visible outcome, decisive checks, documenta
 
 ## Safety and recovery
 
-Follow packaged content-safety policy for secrets, credentials, personal data, logs, and reports. After compaction retain only exact `task_ref`, already recorded user-visible decisions, neutral progress, and current LLM intent; recover durable facts through `read_task`. Never reconstruct private identity from prose or earlier output.
+Follow packaged content-safety policy for secrets, credentials, personal data, logs, and reports. After compaction retain only exact `task_ref`, already recorded user-visible decisions, neutral progress, and current LLM intent; recover durable facts through a fresh `read_task`. A state result obtained before compaction is never current input for a post-compaction mutation, even when it immediately preceded compaction. Copy complete semantic outcomes for a pending decision only from the fresh current-state result and derive all exact live values from the current advertised contract, never from the summary. Perform the recovery read and any later decision record or approval-bearing mutation as separate direct Cortex calls; never put them inside programmatic tool calling, `exec`, or one batch because host hooks cannot authorize nested operations individually. Never reconstruct private identity from prose or earlier output.

@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.10.
+Status: content-addressed production and development release contract for Cortex 1.14.11.
 
 ## Current release identity
 
-- semantic release label: 1.14.10
-- installable identity: `1.14.10+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.14.11
+- installable identity: `1.14.11+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - source-to-installed synchronization reuses that same canonical plugin
   manifest and digest contract on Linux and macOS; it does not maintain a
@@ -79,9 +79,12 @@ non-duplicable result uses the fixed `structuredContent` notice. Assignment
 results additionally place their exact compact publication reconciliation in
 the first text block; that block survives the notice fallback and is checked
 against the unchanged structured result. Worker authority is paginated so a
-valid bootstrap page remains directly visible without replaying its consumed
-link, and ordered publication diagnostics retain the actual mismatched outcome
-index.
+valid bootstrap page remains directly visible. After host context compaction or
+reset, the already-bound worker may restart the same assignment from its first
+page on the same authenticated connection; exact page receipts reconcile
+without duplication, publication remains blocked until the restarted read is
+terminal, and a fresh or copied connection remains rejected. Ordered
+publication diagnostics retain the actual mismatched outcome index.
 
 Live workload activation uses the real `$cortex:orchestrator` token or host
 skill picker. The host normally supplies the complete activated context; after
@@ -401,7 +404,7 @@ fourteen-tool semantic facade and runtime, schema-v1 store, host-private operato
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.14.10,
+The package and repository metadata must consistently identify Cortex 1.14.11,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the complete fourteen-tool semantic registry plus its two audience
 projections. Stale claims about waves, gates, capabilities,

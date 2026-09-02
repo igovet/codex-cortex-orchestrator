@@ -55,7 +55,12 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
     assert "never publishes a supplementary result or documentation outcome" in normalized
     assert "separate evidence assignment followed by a fresh planning revision" in normalized
-    assert "Never repeat a terminal assignment read" in normalized
+    assert "Never repeat a terminal assignment read during normal execution" in normalized
+    assert "After host context compaction or reset" in normalized
+    assert "restart the same assignment from the beginning on this authenticated connection" in normalized
+    assert "fresh server-owned reconciliation projection" in normalized
+    assert "sole terminal-read exception" in normalized
+    assert "grants no new authority" in normalized
     assert "publish exactly one matching terminal outcome" in normalized
     assert "confirmed successful terminal-publication response ends all worker tool activity" in normalized
     assert "Never call any tool or repeat/reconcile that mutation after success" in normalized
@@ -102,6 +107,8 @@ def test_every_packaged_profile_inherits_worker_only_governance_and_terminal_rea
 
     assert "Every native worker and packaged profile is worker-only" in normalized
     assert "Coordinator-only operations, including governance assessment" in normalized
-    assert "Never repeat a terminal assignment read" in normalized
+    assert "Never repeat a terminal assignment read during normal execution" in normalized
+    assert "After host context compaction or reset" in normalized
+    assert "fresh server-owned reconciliation projection" in normalized
     assert "publish exactly one matching terminal outcome" in normalized
     assert "confirmed successful terminal-publication response ends all worker tool activity" in normalized

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.10 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.14.11 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -186,7 +186,10 @@ history, timestamps, and content-hash filename order are never routing
 authority; malformed or ambiguous active state fails closed for that session.
 Settled diagnostic history is independently capped at 64 receipts per session
 and cleanup is never a precondition for routing correctness.
-Normal spawning consumes that receipt directly. Assignment continuations never
+Normal spawning consumes that receipt directly. A successful non-terminal
+assignment page keeps the already claimed authorization on that same bound
+child and persistent MCP connection until the terminal page; it never creates
+or claims a second authorization. Assignment continuations never independently
 attest lifecycle and cannot transfer worker authority to another connection.
 Native commentary alone is never durable progression: a lost child requires
 explicit blocked/aborted evidence and an atomically linked successor, while a
@@ -228,7 +231,21 @@ Coordinator and worker roles are
 monotonic per connection. A fresh process,
 reconnect, copied worker locator, report reference, bare assignment reference,
 or durable continuation cannot rehydrate or transfer consumed publication
-authority. The host audience receipt is owner-only and digest-only: it carries
+authority. Context compaction does not create another bootstrap path: the
+already-bound worker connection may reread only its same immutable assignment,
+with exact page-receipt reconciliation and publication gated until that read is
+terminal again. This read-only recovery grants no new identity or authority;
+every fresh or copied connection remains rejected. After a compact lifecycle
+event, the activation guard rejects directly surfaced coordinator mutations
+until a fresh current state read succeeds and rejects directly surfaced worker
+publications until the same bound connection completes its terminal assignment
+reread. Host hooks observe an outer programmatic-tool or `exec` call rather
+than authorizing nested Cortex calls individually, so the packaged recovery
+contract requires recovery reads and later mutations to use separate direct
+calls. Steering also has server-side, same-connection admission: its successful
+opening invalidates earlier state-read evidence and its record consumes one
+later state read. The host audience receipt
+is owner-only and digest-only: it carries
 no task/worker locator, native message, assignment body, or bearer secret.
 Unconsumed, consumed-on-another-connection, foreign, stale, partial, or
 mismatched relations all fail closed without a report mutation or role change.
@@ -240,8 +257,10 @@ Confirmed loss uses an explicit successor workflow, never authority recovery.
 The coordinator must record a `blocked` or `aborted` reason with non-empty
 evidence. Cortex derives one unique current predecessor from the exact selected
 outcomes and atomically stores immutable loss evidence, stales the old worker
-lease, creates the successor, and links the lineage. Timeout, lease expiry,
-silence, reconnect, or missing lifecycle telemetry is not loss evidence.
+lease, creates the successor, and links the lineage. Broad report inputs remain
+evidence and never override that exact recovery predecessor. Timeout, lease
+expiry, silence, reconnect, repeated waits, slow progress, or missing lifecycle
+telemetry is not loss evidence and never justifies interrupting an active child.
 
 Closure review is distinct from ordinary clarification. After the current
 ordinary clarification is opened, its matching record omits outcome because
@@ -674,8 +693,8 @@ cache or interactive host behavior.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.10+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.10` is
+`1.14.11+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.14.11` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a

@@ -259,8 +259,12 @@ Every publication supplies one disposition for each item in its immutable
 assignment scope. Worker bootstrap returns a server-owned ordered
 pre-publication reconciliation receipt: its template contains every required
 item reference without inventing a disposition, and its count and ordered
-reference sequence are the final pre-call completeness check. Compatible
-repeated rows for the same item and status are
+reference sequence are the final pre-call completeness check. Bounded
+post-compaction recovery may restart this immutable assignment from the first
+page only on the already-bound worker connection. The restart reconciles the
+same page receipts, grants no new authority, and temporarily restores the
+terminal-consumption gate until every page is consumed again; a new connection
+cannot recover the consumed assignment. Compatible repeated rows for the same item and status are
 coalesced into one canonical disposition while preserving every unique
 verification fact; conflicting repeated statuses, missing items, extra items,
 or unsupported claims are rejected before the terminal publication slot is

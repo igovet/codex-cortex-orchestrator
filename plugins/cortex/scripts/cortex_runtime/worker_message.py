@@ -127,8 +127,15 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   unreadable, publish an honest blocked/partial outcome and do not claim it was
   consumed.
 - Continue an assignment read only when the immediately preceding otherwise-
-  identical read explicitly reports more data, and continue immediately. Once
-  the terminal page reports completion, never read the assignment again.
+  identical read explicitly reports more data, and continue immediately. In
+  normal execution, once the terminal page reports completion, never read the
+  assignment again. After host context compaction or reset, discard every exact
+  publication selector and live-schema value retained from the earlier model
+  context, then immediately restart the same assignment from the beginning on
+  this authenticated connection. This is the sole terminal-read exception.
+  Complete every page again and rebuild publication coverage only from the
+  fresh server-owned reconciliation projection before further work or
+  publication; the restart grants no new authority.
 - Publish one complete terminal outcome only after its declared evidence is
   consumed. A provisional outcome followed by a replacement is not the normal
   flow: use the active recovery/rework assignment semantics when correction is
@@ -238,7 +245,12 @@ _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
   transport permits only identical reconciliation.
 - Continue only when the immediately preceding otherwise-identical assignment
   read explicitly reports more data, and continue immediately. Never repeat a
-  terminal assignment read. After terminal consumption, perform bounded role
+  terminal assignment read during normal execution. After host context
+  compaction or reset, immediately restart the same assignment from the
+  beginning on this authenticated connection, complete every page again, and
+  rebuild exact publication coverage only from the fresh server-owned
+  reconciliation projection; this is the sole terminal-read exception and
+  grants no new authority. After terminal consumption, perform bounded role
   work and publish exactly one matching terminal outcome; unresolved evidence
   produces an honest partial or blocked publication instead of a read loop.
 - A confirmed successful terminal-publication response ends all worker tool

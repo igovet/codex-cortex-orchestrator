@@ -4768,14 +4768,27 @@ class V12Store:
                 input_reports.append(report)
             for decision_id in payload["input_decision_ids"]:
                 self._decision(connection, decision_id, task_id=task["task_id"])
-            predecessor = self._inferred_assignment_predecessor(
-                connection,
-                task_id=str(task["task_id"]),
-                profile_name=str(payload["profile_name"]),
-                input_report_ids=list(payload["input_report_ids"]),
-                input_decision_ids=list(payload["input_decision_ids"]),
-                explicit_parent_delegation_id=payload["parent_delegation_id"],
-                assignment_policy=str(payload["assignment_policy"]),
+            # Loss recovery already resolves the unique current owner from the
+            # exact advertised outcome scope before entering this transaction.
+            # Broad report policies may legitimately include finalized reports
+            # from other owners, while the lost predecessor necessarily has no
+            # terminal report.  Do not let those unrelated input authors
+            # override or conflict with the exact recovery parent.
+            predecessor = (
+                None
+                if (
+                    payload["loss_recovery"] is not None
+                    and payload["parent_delegation_id"] is not None
+                )
+                else self._inferred_assignment_predecessor(
+                    connection,
+                    task_id=str(task["task_id"]),
+                    profile_name=str(payload["profile_name"]),
+                    input_report_ids=list(payload["input_report_ids"]),
+                    input_decision_ids=list(payload["input_decision_ids"]),
+                    explicit_parent_delegation_id=payload["parent_delegation_id"],
+                    assignment_policy=str(payload["assignment_policy"]),
+                )
             )
             if predecessor is not None and payload["parent_delegation_id"] is None:
                 payload["parent_delegation_id"] = str(predecessor["delegation_id"])

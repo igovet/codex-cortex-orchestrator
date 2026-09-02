@@ -72,6 +72,61 @@ def test_compact_session_start_reloads_exact_skills_repeatedly_without_shell_or_
     assert "cat " not in context.lower()
 
 
+def test_compacted_coordinator_must_refresh_state_before_mutation(tmp_path: Path) -> None:
+    session, turn = "root", "turn"
+    task_ref = "t_0123456789ab"
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": turn, "prompt": "$cortex:orchestrator",
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": turn, "tool_name": "mcp__cortex__open_task",
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": task_ref, "replayed": False,
+        }},
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "SessionStart", "source": "compact",
+        # Real Desktop compaction recovery does not necessarily include a
+        # turn_id on SessionStart; the session-scoped guard must still arm.
+        "session_id": session,
+    })
+
+    code, denied = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "turn-after-compact",
+        "tool_name": "mcp__cortex__record_plan_review",
+        "tool_input": {"task_ref": task_ref},
+    })
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    state_input = {"task_ref": task_ref, "view": "state"}
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "turn-after-compact", "tool_name": "mcp__cortex__read_task",
+        "tool_input": state_input,
+    })
+    assert code == 0 and allowed is None
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": "turn-after-compact", "tool_name": "mcp__cortex__read_task",
+        "tool_input": state_input,
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": task_ref, "view": "state", "data": {},
+            "has_more": False,
+        }},
+    })
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "turn-after-compact",
+        "tool_name": "mcp__cortex__record_plan_review",
+        "tool_input": {"task_ref": task_ref},
+    })
+    assert code == 0 and allowed is None
+
+
 def test_postcompact_is_observation_only_and_does_not_emit_unsupported_context(tmp_path: Path) -> None:
     session, turn = "root", "turn"
     invoke(tmp_path, {
@@ -104,7 +159,7 @@ def test_noncompact_session_start_does_not_repeat_skills(tmp_path: Path) -> None
 def test_activation_session_start_does_not_overwrite_lifecycle_owned_live_binding(tmp_path: Path) -> None:
     """The lifecycle observer is the sole writer of the exact resume identity."""
     codex_home = tmp_path / "home/.codex"
-    hook = codex_home / "plugins/cache/cortex/cortex/1.14.10/hooks/cortex_activation.py"
+    hook = codex_home / "plugins/cache/cortex/cortex/1.14.11/hooks/cortex_activation.py"
     hook.parent.mkdir(parents=True)
     hook.write_bytes(HOOK.read_bytes())
     launch = codex_home / ".cortex-live-launch.json"
@@ -292,6 +347,195 @@ def test_hook_requires_terminal_worker_bootstrap_before_publication(tmp_path: Pa
 
     invoke(tmp_path, {"hook_event_name": "PostToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_name": "mcp__cortex__read_task", "tool_input": {"task_ref": ref}, "tool_response": {"isError": False, "structuredContent": {"task_ref": ref, "view": "assignment", "data": {}, "has_more": False}}})
     code, allowed = invoke(tmp_path, {"hook_event_name": "PreToolUse", "session_id": session, "turn_id": "worker-turn", "agent_id": "agent", "tool_name": "mcp__cortex__publish_result", "tool_input": {"task_ref": ref}})
+    assert code == 0 and allowed is None
+
+
+def test_paginated_worker_bootstrap_keeps_one_lifecycle_authorization(tmp_path: Path) -> None:
+    session, turn = "root", "turn"
+    ref = "t_0123456789ab_" + "a" * 32
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": turn, "prompt": "$cortex:orchestrator",
+    })
+    native = native_dispatch(ref, "worker")
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": turn, "tool_name": "mcp__cortex__open_assignment",
+        "tool_input": {"task_ref": "t_0123456789ab"},
+        "tool_response": {"isError": False, "structuredContent": {
+            "native_dispatch": native, "replayed": False,
+        }},
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": turn, "tool_use_id": "spawn",
+        "tool_name": "collaboration.spawn_agent", "tool_input": native,
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "SubagentStart", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+    })
+
+    first_input = {"task_ref": ref, "view": "assignment"}
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_use_id": "worker-read-1", "tool_name": "mcp__cortex__read_task",
+        "tool_input": first_input,
+    })
+    assert code == 0 and allowed is None
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_use_id": "worker-read-1", "tool_name": "mcp__cortex__read_task",
+        "tool_input": first_input,
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": ref, "view": "assignment", "data": {},
+            "has_more": True,
+        }},
+    })
+
+    code, denied = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__publish_result",
+        "tool_input": {"task_ref": ref},
+    })
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    continuation_input = {
+        "task_ref": ref, "view": "assignment", "continue": True,
+    }
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_use_id": "worker-read-2", "tool_name": "mcp__cortex__read_task",
+        "tool_input": continuation_input,
+    })
+    assert code == 0 and allowed is None
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_use_id": "worker-read-2", "tool_name": "mcp__cortex__read_task",
+        "tool_input": continuation_input,
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": ref, "view": "assignment", "data": {},
+            "has_more": False,
+        }},
+    })
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__publish_result",
+        "tool_input": {"task_ref": ref},
+    })
+    assert code == 0 and allowed is None
+
+
+def test_compacted_worker_must_refresh_terminal_assignment_before_publication(tmp_path: Path) -> None:
+    session, turn = "root", "turn"
+    ref = "t_0123456789ab_" + "a" * 32
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": turn, "prompt": "$cortex:orchestrator",
+    })
+    native = native_dispatch(ref, "worker")
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": turn, "tool_name": "mcp__cortex__open_assignment",
+        "tool_input": {"task_ref": "t_0123456789ab"},
+        "tool_response": {"isError": False, "structuredContent": {
+            "native_dispatch": native, "replayed": False,
+        }},
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": turn, "tool_use_id": "spawn",
+        "tool_name": "collaboration.spawn_agent", "tool_input": native,
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "SubagentStart", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+    })
+    initial_input = {"task_ref": ref, "view": "assignment"}
+    invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_use_id": "initial-read", "tool_name": "mcp__cortex__read_task",
+        "tool_input": initial_input,
+    })
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_use_id": "initial-read", "tool_name": "mcp__cortex__read_task",
+        "tool_input": initial_input,
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": ref, "view": "assignment", "data": {},
+            "has_more": False,
+        }},
+    })
+
+    invoke(tmp_path, {
+        "hook_event_name": "SessionStart", "source": "compact",
+        "session_id": session, "turn_id": "worker-turn", "agent_id": "agent",
+    })
+    code, denied = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__publish_result",
+        "tool_input": {"task_ref": ref},
+    })
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    first_input = {"task_ref": ref, "view": "assignment"}
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__read_task", "tool_input": first_input,
+    })
+    assert code == 0 and allowed is None
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__read_task", "tool_input": first_input,
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": ref, "view": "assignment", "data": {},
+            "has_more": True,
+        }},
+    })
+    code, denied = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__publish_result",
+        "tool_input": {"task_ref": ref},
+    })
+    assert code == 0
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    continuation = {"task_ref": ref, "view": "assignment", "continue": True}
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__read_task", "tool_input": continuation,
+    })
+    assert code == 0 and allowed is None
+    invoke(tmp_path, {
+        "hook_event_name": "PostToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__read_task", "tool_input": continuation,
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": ref, "view": "assignment", "data": {},
+            "has_more": False,
+        }},
+    })
+    code, allowed = invoke(tmp_path, {
+        "hook_event_name": "PreToolUse", "session_id": session,
+        "turn_id": "worker-turn", "agent_id": "agent",
+        "tool_name": "mcp__cortex__publish_result",
+        "tool_input": {"task_ref": ref},
+    })
     assert code == 0 and allowed is None
 
 

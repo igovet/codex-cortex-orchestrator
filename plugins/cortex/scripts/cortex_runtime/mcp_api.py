@@ -1831,7 +1831,10 @@ def serve_stdio(
                 continue
             try:
                 handler_arguments = dict(resolved_arguments)
-                if name in {"read_task", "publish_plan", "publish_result", "publish_documentation"}:
+                if name in {
+                    "read_task", "open_steering", "record_steering",
+                    "publish_plan", "publish_result", "publish_documentation",
+                }:
                     handler_arguments["_connection_context"] = connection_context
                 worker_read = (
                     name == "read_task"

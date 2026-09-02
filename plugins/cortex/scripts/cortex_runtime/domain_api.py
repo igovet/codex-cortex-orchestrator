@@ -354,7 +354,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.14.10",
+        "1.14.11",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -460,7 +460,17 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
     if view == "state":
         raw = ledger.inspect_task(task_ref=coordinator_ref, after_sequence=0)
         data = _publicize(raw)
-        context.update({"read_key": page_key, "cursor": None, "has_more": False})
+        context.update({
+            "read_key": page_key,
+            "cursor": None,
+            "has_more": False,
+            # Private, same-connection admission evidence.  A successful
+            # steering opening clears this marker, so recording the user's
+            # later answer requires a state read performed after that opening.
+            # This remains effective when Codex invokes Cortex through an
+            # outer programmatic-tool call that host hooks cannot decompose.
+            "steering_state_read_task_ref": task_ref,
+        })
         result = {"task_ref": task_ref, "view": view, "data": data, "has_more": False}
     elif view == "assignment":
         if assignment_id is None:
@@ -470,8 +480,18 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
                 "coordinator connection cannot consume worker authority",
                 code="wrong_connection",
             )
-        if (
+        terminal_reconciliation = (
             context.get("assignment_complete") is True
+            and context.get("_role") == "worker"
+            and context.get("actor") == "worker"
+            and context.get("bootstrap_assignment_id") == assignment_id
+            and context.get("assignment_id") == assignment_id
+            and context.get("task_id") == canonical
+            and context.get("worker_task_ref") == task_ref
+            and isinstance(context.get("continuation_ref"), str)
+        )
+        if (
+            (context.get("assignment_complete") is True and not terminal_reconciliation)
             or (
                 context.get("bootstrap_assignment_id") is not None
                 and context.get("bootstrap_assignment_id") != assignment_id
@@ -491,6 +511,18 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
             continuation_ref=bound_continuation
             if isinstance(bound_continuation, str) else None,
         )
+        if terminal_reconciliation:
+            # Context compaction can remove the model-visible exact assignment
+            # projection while the authenticated MCP connection and its
+            # publication authority remain live.  Re-reading that same
+            # terminal assignment on the same bound connection is a read-only
+            # reconciliation: it neither adopts a new worker identity nor
+            # mints a new continuation.  Clear only the assembled page state
+            # after the exact restart succeeds so a paginated reconciliation
+            # must again reach its terminal page before publication.
+            context.pop("assignment_evidence", None)
+            context.pop("assignment_evidence_pages", None)
+            context["assignment_complete"] = False
         has_more = bool(raw.get("has_more"))
         context.update({
             "bootstrap_assignment_id": assignment_id,
@@ -1614,13 +1646,16 @@ def record_plan_review(*, task_ref: str, outcome: str,
         _stale_replay_conflict(exc, replay_candidate)
 
 
-def open_steering(*, task_ref: str, prompt: str, prompt_language: str) -> dict[str, Any]:
+def open_steering(*, task_ref: str, prompt: str, prompt_language: str,
+                  _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
         issued = DecisionAggregate(store).open_steering(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
             subject_type="task", subject_id=canonical, assignment_id=None,
         )
+        if isinstance(_connection_context, dict):
+            _connection_context.pop("steering_state_read_task_ref", None)
         return _decision_receipt(task_ref, "pending_steering", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
@@ -1628,7 +1663,17 @@ def open_steering(*, task_ref: str, prompt: str, prompt_language: str) -> dict[s
 
 def record_steering(*, task_ref: str, response_original: str,
                     user_language: str, add: list[Mapping[str, Any]] | None = None,
-                    retire: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+                    retire: list[Mapping[str, Any]] | None = None,
+                    _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    if isinstance(_connection_context, dict):
+        fresh_task_ref = _connection_context.pop(
+            "steering_state_read_task_ref", None,
+        )
+        if fresh_task_ref != task_ref:
+            raise V12ServiceError(
+                "steering requires a fresh same-connection task-state read",
+                code="fresh_state_read_required",
+            )
     store, canonical = _task_store(task_ref)
     replay_candidate = False
     try:

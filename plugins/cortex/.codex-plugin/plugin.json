@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.14.10+codex.sha256.d106aa93c52c9570",
+  "version": "1.14.11+codex.sha256.ed0d168842d9e83e",
   "description": "Durable local coordination ledger for model-owned multi-agent governance.",
   "author": {
     "name": "igovet"
@@ -11,7 +11,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate durable multi-agent work",
-    "longDescription": "Cortex 1.14.10 provides 22 advisory agent profiles and a local durable coordination ledger. It exposes exactly 14 flat task_ref-only semantic operations for tasks, server-bound native assignments, closed worker publications, user decisions, advisory governance, and closure. The LLM owns the dynamic DAG, worker selection, parallelism, models, reasoning effort, rework, verification, documentation, and final answer. The lifecycle hook binds real native workers to private assignments without rewriting spawn input; SQLite enforces identity, isolation, atomic replay, lineage, evidence consumption, and coverage without acting as a workflow engine.",
+    "longDescription": "Cortex 1.14.11 provides 22 advisory agent profiles and a local durable coordination ledger. It exposes exactly 14 flat task_ref-only semantic operations for tasks, server-bound native assignments, closed worker publications, user decisions, advisory governance, and closure. The LLM owns the dynamic DAG, worker selection, parallelism, models, reasoning effort, rework, verification, documentation, and final answer. The lifecycle hook binds real native workers to private assignments without rewriting spawn input; SQLite enforces identity, isolation, atomic replay, lineage, evidence consumption, and coverage without acting as a workflow engine.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [
@@ -23,6 +23,6 @@
       "Advisory agent profiles"
     ],
     "logo": "./assets/logo.png",
-    "defaultPrompt": "Coordinate this task with Cortex 1.14.10 using task_ref-only durable worker evidence and an LLM-owned dynamic DAG."
+    "defaultPrompt": "Coordinate this task with Cortex 1.14.11 using task_ref-only durable worker evidence and an LLM-owned dynamic DAG."
   }
 }

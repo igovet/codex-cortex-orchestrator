@@ -223,6 +223,8 @@ def _read_state(path: Path | None) -> dict[str, Any]:
     return {
         "selected": value.get("selected") is True,
         "anchored": value.get("anchored") is True,
+        "bootstrap_in_progress": value.get("bootstrap_in_progress") is True,
+        "recovery_read_required": value.get("recovery_read_required") is True,
         "turn_fingerprint": value.get("turn_fingerprint") if isinstance(value.get("turn_fingerprint"), str) else None,
         "child_mode": value.get("child_mode") is True,
         "parent_session_fingerprint": value.get("parent_session_fingerprint") if isinstance(value.get("parent_session_fingerprint"), str) else None,
@@ -1138,6 +1140,19 @@ def _is_worker_semantic_event(event: dict[str, Any]) -> bool:
 
 
 def _is_successful_consume(event: dict[str, Any]) -> bool:
+    return _is_successful_assignment_page(event) and (
+        event["tool_response"]["structuredContent"].get("has_more") is False
+    )
+
+
+def _is_successful_assignment_page(event: dict[str, Any]) -> bool:
+    """Recognize every successful page of the bound assignment read.
+
+    A paginated bootstrap remains on the same already-attested MCP connection.
+    Only its terminal page settles the dispatch receipt, but an intermediate
+    page is not a failed bootstrap and must not revoke the one-shot lifecycle
+    authorization that the server has already claimed for that connection.
+    """
     response = event.get("tool_response")
     supplied = event.get("tool_input")
     if not isinstance(response, dict) or response.get("isError") is not False or not isinstance(supplied, dict):
@@ -1146,6 +1161,24 @@ def _is_successful_consume(event: dict[str, Any]) -> bool:
     return (isinstance(structured, dict)
             and structured.get("task_ref") == supplied.get("task_ref")
             and structured.get("view") == "assignment"
+            and isinstance(structured.get("has_more"), bool)
+            and isinstance(structured.get("data"), (dict, list)))
+
+
+def _is_successful_state_read(event: dict[str, Any]) -> bool:
+    """Recognize a terminal fresh coordinator state read after compaction."""
+    response = event.get("tool_response")
+    supplied = event.get("tool_input")
+    if (not _is_consume(event.get("tool_name"))
+            or not isinstance(response, dict)
+            or response.get("isError") is not False
+            or not isinstance(supplied, dict)):
+        return False
+    structured = response.get("structuredContent")
+    return (isinstance(structured, dict)
+            and structured.get("task_ref") == supplied.get("task_ref")
+            and supplied.get("view") == "state"
+            and structured.get("view") == "state"
             and structured.get("has_more") is False
             and isinstance(structured.get("data"), (dict, list)))
 
@@ -1182,6 +1215,10 @@ def main() -> int:
 
     if (event_name == "SessionStart" and event.get("source") == "compact"
             and state.get("selected")):
+        if state.get("anchored"):
+            recovery_state = dict(state)
+            recovery_state["recovery_read_required"] = True
+            _write_state(path, recovery_state)
         additional_context = _compaction_skill_context(child=child)
         if additional_context is not None:
             print(_json({"hookSpecificOutput": {
@@ -1189,6 +1226,17 @@ def main() -> int:
                 "additionalContext": additional_context,
             }}))
         return 0
+
+    if (event_name == "PostToolUse" and state.get("recovery_read_required")
+            and _is_consume(event.get("tool_name"))):
+        recovered = (
+            _is_successful_consume(event)
+            if child else _is_successful_state_read(event)
+        )
+        if recovered:
+            state = dict(state)
+            state["recovery_read_required"] = False
+            _write_state(path, state)
 
     # The host delivery receipt is provisional. Only a successful worker MCP
     # evidence-consumption result proves that the child actually received and
@@ -1281,7 +1329,22 @@ def main() -> int:
             if _is_successful_consume(event):
                 child_state = dict(state)
                 child_state.update({"selected": True, "anchored": True,
+                                    "bootstrap_in_progress": False,
                                     "turn_fingerprint": _fingerprint(turn_id), "child_mode": True})
+                _write_state(path, child_state)
+            elif _is_successful_assignment_page(event):
+                # The worker has consumed a valid non-terminal page.  The MCP
+                # process retains the exact server claim and private cursor;
+                # later pages on this same bound child must not attempt to
+                # mint or claim a second lifecycle authorization.
+                child_state = dict(state)
+                child_state.update({
+                    "selected": True,
+                    "anchored": False,
+                    "bootstrap_in_progress": True,
+                    "turn_fingerprint": _fingerprint(turn_id),
+                    "child_mode": True,
+                })
                 _write_state(path, child_state)
             else:
                 try:
@@ -1354,6 +1417,23 @@ def main() -> int:
     if not state["selected"]:
         return 0
 
+    if (event_name == "PreToolUse" and state.get("recovery_read_required")
+            and isinstance(event.get("tool_name"), str)
+            and event["tool_name"].strip().lower().startswith("mcp__cortex__")):
+        supplied = event.get("tool_input")
+        expected_view = "assignment" if child else "state"
+        if (not _is_consume(event.get("tool_name"))
+                or not isinstance(supplied, dict)
+                or supplied.get("view") != expected_view):
+            _deny(
+                "Post-compaction recovery requires a fresh current assignment read."
+                if child else
+                "Post-compaction recovery requires a fresh current state read.",
+                event,
+                reason_code="recovery_read_required",
+            )
+            return 0
+
     if event_name == "PreToolUse" and not child and (
         _is_worker_assignment_read(event)
         or _is_publication(event.get("tool_name"))
@@ -1386,6 +1466,12 @@ def main() -> int:
                     event,
                     reason_code="worker_bootstrap_required",
                 )
+                return 0
+            if state.get("bootstrap_in_progress"):
+                # Exact child and task-ref binding were checked above.  The
+                # persistent MCP connection owns the already-claimed host
+                # authorization and server-side continuation; allowing the
+                # call through the hook cannot transfer it to another process.
                 return 0
             try:
                 plugin_root = os.environ.get("PLUGIN_ROOT")

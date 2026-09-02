@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.14.11] - 2026-09-02
+
+### Fixed
+
+- Made coordinator recovery discard pre-compaction state before constructing
+  exact decision mutations, so steering outcome replacements are copied from a
+  fresh current-state read instead of reconstructed from a summary. Directly
+  surfaced calls are ordered by the host guard; steering additionally requires
+  one same-connection state read after the decision opens, so an outer
+  programmatic-tool call cannot record before recovery evidence reaches the
+  MCP server.
+- Allowed a consumed worker assignment to be reconciled read-only on its same
+  authenticated MCP connection after context compaction or reset. Fresh or
+  copied connections remain rejected, page receipts are not duplicated, and
+  publication remains blocked until every reconciled page is consumed.
+- Required workers to rebuild terminal publication coverage from the fresh
+  server-owned assignment reconciliation projection after compaction. The host
+  guard keeps publication blocked until the original worker connection has
+  completed that recovery read through its terminal page.
+- Kept one host lifecycle authorization valid across every successful page of
+  a paginated worker assignment. Intermediate `has_more=true` pages no longer
+  revoke the already claimed persistent-connection bootstrap, while worker
+  publication remains denied until the terminal page.
+- Made explicit lost-owner recovery compatible with broad finalized-report
+  input policies. Unrelated report authors can no longer conflict with the
+  exact predecessor derived from the advertised recovery outcome scope.
+- Prohibited timeout-driven interruption of an active worker and duplicate
+  steering requests for unfinished work or gates already covered by the
+  current approved contract.
+
 ## [1.14.9] - 2026-09-01
 
 ### Fixed

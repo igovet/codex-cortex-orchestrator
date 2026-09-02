@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.14.10 source, package, installed-host, and
+This page describes Cortex 1.14.11 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -400,7 +400,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.14.10+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.14.11+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -452,7 +452,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 fourteen-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.14.10` with
+successful `initialize`, report semantic version `1.14.11` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -568,7 +568,15 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     observation-only, and the host skill loader may repeat
     the same load whenever needed. It uses no `cat`, filesystem/shell read,
     approval, elevated execution, MCP resource, project copy, or `skill://`;
-    decorative bracket text is not activation.
+    decorative bracket text is not activation. The coordinator discards every
+    pre-compaction exact state selector and freshly reads current state before
+    a decision mutation. A worker restarts the same assignment on its original
+    authenticated connection, consumes every page again without duplicate
+    receipts, and rebuilds publication coverage from the fresh reconciliation
+    projection; a copied or fresh connection remains rejected. Verify the host
+    guard denies a coordinator mutation before the state refresh and denies a
+    worker publication before the recovery assignment reaches its terminal
+    page.
 19. Four successful durable delegations produce four distinct matching native
     spawns from their returned payloads, each with `fork_turns="none"`, explicit
     selected effort, correct Luna/Terra/Sol model transport, full renderer and
@@ -613,7 +621,10 @@ relevant evidence. A finalized publication is authoritative and is consumed
 without another wait for that child. Only an active child with no publication
 may be waited on again; lifecycle stop without publication enters explicit
 loss/recovery. Empty host output must never suppress durable evidence or leave
-the coordinator in model-only waiting.
+the coordinator in model-only waiting. Repeated waits or slow progress must not
+interrupt an active child. A lost-owner replacement with broad finalized-report
+inputs must keep the exact outcome-derived predecessor instead of inferring a
+conflicting owner from unrelated report authors.
 
 Inspect the coordinator chronology. Its only non-user actions may be Cortex
 ledger calls, native worker coordination, and the bounded orchestrator-owned
@@ -637,7 +648,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.14.10/schema-v1 identifiers;
+- V12/1.14.11/schema-v1 identifiers;
 - exact fourteen-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional

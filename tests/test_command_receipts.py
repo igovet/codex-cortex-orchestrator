@@ -685,6 +685,78 @@ def _abandon_sqlite_admission_lease(root: str, home: str, ready: object) -> None
 
 
 class CommandReceiptTests(unittest.TestCase):
+    def test_source_stdio_steering_requires_post_open_state_read_on_same_connection(self) -> None:
+        """Nested/programmatic calls cannot record before recovery evidence."""
+        outcome = {
+            "outcome": "Preserve one steering outcome.",
+            "acceptance": ["The current outcome remains exact."],
+            "constraints": ["Do not infer contract state from a summary."],
+            "verification": ["The steering record is accepted once."],
+        }
+        with tempfile.TemporaryDirectory(prefix="cortex-steer-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-steer-project-",
+        ) as project:
+            with _source_stdio_session(home) as coordinator:
+                opened = coordinator("open_task", {
+                    "project_root": project,
+                    "request_original": "Exercise same-connection steering admission.",
+                    "user_language": "en", "outcomes": [outcome],
+                    "constraints": outcome["constraints"],
+                })
+                task_ref = opened["result"]["structuredContent"]["task_ref"]
+
+                # A state read performed before the question opens is stale
+                # admission evidence and must be invalidated by open_steering.
+                before = coordinator("read_task", {
+                    "task_ref": task_ref, "view": "state",
+                })
+                self.assertFalse(before["result"].get("isError"), before)
+                pending = coordinator("open_steering", {
+                    "task_ref": task_ref,
+                    "prompt": "Keep the current outcome unchanged?",
+                    "prompt_language": "en",
+                })
+                self.assertFalse(pending["result"].get("isError"), pending)
+
+                denied = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Keep it.",
+                    "user_language": "en", "add": [], "retire": [],
+                })
+                self.assertTrue(denied["result"].get("isError"), denied)
+                self.assertEqual(
+                    denied["result"]["structuredContent"]["error"]["code"],
+                    "fresh_state_read_required",
+                )
+
+                refreshed = coordinator("read_task", {
+                    "task_ref": task_ref, "view": "state",
+                })
+                self.assertFalse(refreshed["result"].get("isError"), refreshed)
+                recorded = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Keep it.",
+                    "user_language": "en", "add": [], "retire": [],
+                })
+                self.assertFalse(recorded["result"].get("isError"), recorded)
+                self.assertEqual(
+                    recorded["result"]["structuredContent"]["state"],
+                    "steering_recorded",
+                )
+
+                # Admission evidence is one-shot even when durable decision
+                # replay could otherwise reconcile an identical record.
+                replay_without_read = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Keep it.",
+                    "user_language": "en", "add": [], "retire": [],
+                })
+                self.assertTrue(
+                    replay_without_read["result"].get("isError"),
+                    replay_without_read,
+                )
+                self.assertEqual(
+                    replay_without_read["result"]["structuredContent"]["error"]["code"],
+                    "fresh_state_read_required",
+                )
+
     def test_connection_loss_has_explicit_stdio_replacement_route(self) -> None:
         """A dead consumed worker is replaced only through linked loss evidence."""
         outcome = {

@@ -29,6 +29,9 @@ def test_activation_kernels_define_task_ref_only_llm_owned_orchestration() -> No
     assert "exact value and meaning" in orchestrator
     assert "silently omit it" in orchestrator
     assert "complete effective contract" in orchestrator
+    assert "never interrupt or cancel a child merely because bounded waits repeated" in orchestrator
+    assert "never open steering merely to re-authorize unfinished work" in orchestrator
+    assert "not by itself a scope change" in orchestrator
     planner = (ROOT / "plugins/cortex/agents/planner.toml").read_text(encoding="utf-8").lower()
     assert "requirement-coverage reconciliation" in planner
     assert "paraphrased-with-loss" in planner
@@ -51,6 +54,7 @@ def test_preload_metadata_blocks_unanchored_user_questions() -> None:
 def test_compaction_reload_is_available_without_an_approval_prompt() -> None:
     orchestrator = (ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8").lower()
     recovery = (ROOT / "plugins/cortex/skills/context-compaction/SKILL.md").read_text(encoding="utf-8").lower()
+    normalized_recovery = " ".join(recovery.split())
     combined = orchestrator + recovery
     for required in (
         "host skill loader",
@@ -62,3 +66,14 @@ def test_compaction_reload_is_available_without_an_approval_prompt() -> None:
         assert required in combined
     assert "`cat`" in combined
     assert "additionalcontextlimit=0" in combined
+    for required in (
+        "obtained before compaction as unavailable",
+        "first post-compaction cortex action is a fresh current-state read",
+        "never from the summary",
+        "worker's first post-compaction cortex action restarts its assignment view",
+        "sole recovery exception",
+        "fresh server-owned reconciliation projection",
+        "without granting new authority",
+    ):
+        assert required in normalized_recovery
+    assert "a state result obtained before compaction is never current input" in orchestrator
