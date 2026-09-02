@@ -945,10 +945,13 @@ dispatch with a complete role contract plus explicit disclosure. The worker's
 first semantic operation is `read_task(view=assignment)`; it then performs its
 bounded work and publishes immutable evidence using its worker-scoped `task_ref`.
 The assignment response places a compact publication-reconciliation block with
-the exact public outcome names ahead of the larger policy and contract body.
-Medium and large structured results are not duplicated into `TextContent`, so
-the authoritative selectors are not displaced by a redundant copy of the same
-JSON. Predecessor evidence uses server-owned pagination. A worker continues
+the exact public outcome names in the first `TextContent` block, ahead of the
+larger policy, contract, and predecessor-evidence body. The same block remains
+first when the full serialized result is too large to duplicate and the host
+must use `structuredContent`; it is a projection of that structured result, not
+a second authority. When the complete MCP envelope fits, the full structured
+result is still duplicated as the final JSON text block for compatibility.
+Predecessor evidence uses server-owned pagination. A worker continues
 only immediately after an otherwise-identical read returns `has_more=true`;
 after the terminal page it proceeds to work and one publication instead of
 rereading the assignment. An identical restarted page reconciles the durable

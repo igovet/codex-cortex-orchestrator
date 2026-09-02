@@ -144,7 +144,12 @@ The V12 protocol evidence must prove:
   for the exact immutable assignment scope; verify its count, exact public
   outcome names, and
   disposition-free rows agree with the planner or assigned item collection and
-  are preserved through a clean first publication call;
+  are preserved through a clean first publication call. The compact exact
+  template must be the first assignment `TextContent` block, must remain there
+  when a large full result uses the structured-content notice, and must agree
+  with `structuredContent`. A multi-outcome publication with only item seven
+  renamed must fail at `$.outcome_coverage[6]`, proving diagnostics retain the
+  real ordered position;
 - worker assignment authority and predecessor evidence paginate with private
   ordered positions and digest-only receipts; exact page restart is
   non-mutating, skipped/stale continuations fail closed, UTF-8 fragmentation is
@@ -179,9 +184,11 @@ The V12 protocol evidence must prove:
   data; workers start with the assignment view and resume only with its
   server-owned continuation;
 - large assignment tests verify the exact publication outcome appears in the
-  compact reconciliation header, the structured response is not duplicated in
-  text, continuation follows only `has_more=true`, and a restarted terminal
-  read reuses rather than duplicates its consumption receipt;
+  first compact reconciliation text block, the complete structured response is
+  duplicated only when the full MCP envelope fits, the compact block survives
+  the large-result fallback, continuation follows only `has_more=true`, and a
+  restarted terminal read reuses rather than duplicates its consumption
+  receipt;
 - report-read request/response aggregation is preflighted before body
   materialization (including report/chunk counts and the 224 KiB response cap),
   and projection rendering preflights its aggregate 512-file/32 MiB output

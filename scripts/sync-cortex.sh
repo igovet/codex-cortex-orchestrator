@@ -474,10 +474,7 @@ PY
 content_matches() {
   local installed="${codex_home}/plugins/cache/${marketplace_name}/${plugin_name}/$(plugin_version)"
   "${cortex_python}" -B - "${project_dir}" "${installed}" "${script_dir}" <<'PY'
-import hashlib
-import stat
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[3])
@@ -489,41 +486,20 @@ except RuntimePayloadError as exc:
     raise SystemExit(f"error: {exc}") from None
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(root / "scripts"))
-from cortex_release_candidate import CandidateError, build_source_candidate, validate_candidate_tree
-
-RETIRED_PATHS = {
-    Path("scripts/cortex_hook.py"),
-    Path("scripts/cortex-launcher"),
-    Path("scripts/cortex_runtime/core"),
-    Path("scripts/cortex_runtime/record_report"),
-}
-
-def tree_manifest(tree: Path) -> dict[str, str]:
-    files: dict[str, str] = {}
-    for path in tree.rglob("*"):
-        relative = path.relative_to(tree)
-        if path.is_symlink():
-            raise ValueError("contains a symlink")
-        if any(part == "__pycache__" for part in relative.parts) or path.suffix in {".pyc", ".pyo"}:
-            raise ValueError("contains Python bytecode residue")
-        if relative in RETIRED_PATHS or any(retired in relative.parents for retired in RETIRED_PATHS):
-            raise ValueError("contains retired V11 hook/control-plane residue")
-        if path.is_file():
-            mode = path.lstat().st_mode
-            if not stat.S_ISREG(mode):
-                raise ValueError("contains a non-regular payload")
-            files[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return files
+from cortex_release_candidate import CandidateError, plugin_tree_digest, source_candidate_manifest
 
 try:
-    with tempfile.TemporaryDirectory(prefix="cortex-installable-") as directory:
-        candidate = Path(directory) / "candidate"
-        manifest = build_source_candidate(root, candidate)
-        validate_candidate_tree(candidate, manifest)
-        staged = candidate / "plugins/cortex"
-        if tree_manifest(staged) != tree_manifest(installed):
-            raise ValueError("content differs from the exact staged installable tree")
-except (CandidateError, OSError, ValueError):
+    # Use the same canonical package closure and payload normalization that
+    # stamps and validates candidates.  The former ad-hoc temporary-tree
+    # comparison duplicated those rules and produced false content drift on
+    # macOS even after the candidate had passed release validation.  This
+    # remains fail-closed for missing, extra, changed, symlinked, non-regular,
+    # bytecode, and retired payload paths; only the generated cache suffix is
+    # normalized by the shared provenance contract.
+    manifest = source_candidate_manifest(root)
+    if plugin_tree_digest(installed, manifest) != manifest.plugin_digest(root):
+        raise CandidateError("installed candidate payload digest differs from source")
+except (CandidateError, OSError):
     raise SystemExit(1)
 PY
 }

@@ -530,6 +530,16 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 [{"outcome": long_outcome["outcome"]}],
             )
             rendered = _success_tool_result(read)
+            compact = json.loads(rendered["content"][0]["text"])
+            self.assertEqual(
+                compact,
+                {
+                    "task_ref": worker_ref,
+                    "view": "assignment",
+                    "publication_reconciliation": reconciliation,
+                    "has_more": False,
+                },
+            )
             self.assertEqual(
                 json.loads(rendered["content"][-1]["text"]),
                 rendered["structuredContent"],
@@ -749,6 +759,31 @@ class RuntimeContractRemediationTests(unittest.TestCase):
         self.assertLess(
             len(json.dumps(large, separators=(",", ":")).encode("utf-8")),
             MAX_PHYSICAL_JSONL_FRAME_BYTES,
+        )
+
+        large_assignment = _success_tool_result({
+            "task_ref": "t_123456789abc_" + "1" * 32,
+            "view": "assignment",
+            "data": {
+                "publication_reconciliation": {
+                    "coverage_source": "planning_items",
+                    "required_item_count": 1,
+                    "required_outcomes": ["Exact large outcome."],
+                    "contract_coverage_template": [{"outcome": "Exact large outcome."}],
+                },
+                "large_body": "z" * 130_000,
+            },
+            "has_more": False,
+        })
+        compact_assignment = json.loads(large_assignment["content"][0]["text"])
+        self.assertEqual(
+            compact_assignment["publication_reconciliation"]
+            ["required_outcomes"],
+            ["Exact large outcome."],
+        )
+        self.assertEqual(
+            large_assignment["content"][-1]["text"],
+            "Complete Cortex result is available in structuredContent.",
         )
 
     def test_governance_mode_is_structurally_required(self) -> None:

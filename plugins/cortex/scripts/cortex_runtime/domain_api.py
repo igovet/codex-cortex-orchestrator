@@ -166,14 +166,28 @@ def _internalize_publication_evidence(store: V12Store, assignment_id: str, evide
     effective = worker.get("effective_contract") if isinstance(worker, Mapping) else None
     items = (effective.get("planning_items") or effective.get("assigned_items")) if isinstance(effective, Mapping) else None
     typed_items = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
-    internal: list[dict[str, Any]] = []
+    public_rows: list[Mapping[str, Any]] = []
+    outcome_names: list[str] = []
     for row in coverage:
         if not isinstance(row, Mapping) or not isinstance(row.get("outcome"), str):
             raise V12ServiceError("publication coverage requires a semantic outcome name", code="invalid_argument", details={"field": "evidence.contract_coverage"})
-        matches = _match_outcomes(
-            typed_items, [row["outcome"]], path="$.outcome_coverage",
-        )
-        internal.append({"item_ref": matches[0], **{key: value for key, value in row.items() if key != "outcome"}})
+        public_rows.append(row)
+        outcome_names.append(str(row["outcome"]))
+    # Resolve the complete ordered coverage in one call. Resolving each row as
+    # a one-element list reset every diagnostic to index zero, so a mismatch in
+    # the seventh planner outcome misleadingly reported
+    # ``$.outcome_coverage[0]``. The single ordered match also applies duplicate
+    # and overlap validation to the publication as a whole.
+    matches = _match_outcomes(
+        typed_items, outcome_names, path="$.outcome_coverage",
+    )
+    internal = [
+        {
+            "item_ref": item_ref,
+            **{key: value for key, value in row.items() if key != "outcome"},
+        }
+        for row, item_ref in zip(public_rows, matches, strict=True)
+    ]
     result["contract_coverage"] = internal
     return result
 

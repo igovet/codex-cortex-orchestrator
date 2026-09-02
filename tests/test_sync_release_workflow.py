@@ -29,6 +29,18 @@ def test_github_release_gate_runs_the_current_complete_suite() -> None:
     assert "PYTHONPATH: plugins/cortex/scripts" in workflow
 
 
+def test_sync_content_parity_uses_the_canonical_plugin_digest_contract() -> None:
+    """Install parity must not duplicate platform-sensitive tree hashing."""
+    script = (ROOT / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
+    content_matches = script.split("content_matches() {", 1)[1].split(
+        "\nwrite_isolated_candidate_receipt() {", 1,
+    )[0]
+    assert "plugin_tree_digest(installed, manifest)" in content_matches
+    assert "manifest.plugin_digest(root)" in content_matches
+    assert "def tree_manifest" not in content_matches
+    assert "TemporaryDirectory" not in content_matches
+
+
 def _renderer_module():
     path = ROOT / "scripts/render_cortex_tool_catalog.py"
     spec = importlib.util.spec_from_file_location("cortex_catalog_renderer_test", path)

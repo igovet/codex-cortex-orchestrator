@@ -7,6 +7,9 @@ Status: content-addressed production and development release contract for Cortex
 - semantic release label: 1.14.10
 - installable identity: `1.14.10+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
+- source-to-installed synchronization reuses that same canonical plugin
+  manifest and digest contract on Linux and macOS; it does not maintain a
+  second platform-specific temporary-tree hash
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
 - public facade: exactly fourteen action-specific MCP tools
@@ -72,9 +75,13 @@ Successful structured results are duplicated as deterministic JSON text when
 the complete encoded tool result leaves the fixed JSON-RPC envelope reserve.
 This keeps one-shot worker assignment consumption self-contained even when a
 host exposes only `TextContent` to the model. Only a genuinely oversized
-non-duplicable result uses the fixed `structuredContent` notice; worker
-authority is paginated so a valid bootstrap page remains directly visible
-without replaying its consumed link.
+non-duplicable result uses the fixed `structuredContent` notice. Assignment
+results additionally place their exact compact publication reconciliation in
+the first text block; that block survives the notice fallback and is checked
+against the unchanged structured result. Worker authority is paginated so a
+valid bootstrap page remains directly visible without replaying its consumed
+link, and ordered publication diagnostics retain the actual mismatched outcome
+index.
 
 Live workload activation uses the real `$cortex:orchestrator` token or host
 skill picker. The host normally supplies the complete activated context; after

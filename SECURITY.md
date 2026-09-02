@@ -386,6 +386,11 @@ worker bootstrap provides a server-owned ordered reconciliation template and
 count/reference receipt, but deliberately supplies no status or verification
 claim. The worker must preserve and complete that row set before its first
 publication attempt, so completeness enforcement cannot fabricate evidence.
+The exact template is also the first model-visible `TextContent` block for an
+assignment result and remains present when the larger serialized result falls
+back to `structuredContent`. Publication resolves the complete ordered row set
+in one validation pass, so a rejected outcome identifies its actual array
+position instead of resetting every diagnostic to index zero.
 Each steer addition targets an active outcome and produces a source-grounded
 replacement revision; it cannot create an unlinked parallel item. Compatible
 repeated rows for one item are losslessly coalesced only when their

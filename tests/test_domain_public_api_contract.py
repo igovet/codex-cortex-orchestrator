@@ -962,6 +962,75 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertIn("Complete terminal plan.", repr(after["data"]["reports"][0]))
             self.assertNotIn("Late supplementary evidence.", repr(after["data"]))
 
+    def test_planning_publication_reports_exact_mismatched_outcome_position(self) -> None:
+        outcomes = [
+            {
+                "outcome": f"Planner outcome {index}.",
+                "acceptance": [f"Planner outcome {index} is covered."],
+                "constraints": [],
+                "verification": [],
+            }
+            for index in range(7)
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, outcomes)
+            planner = open_assignment(
+                task_ref=task["task_ref"], role="planner", profile_name="planner",
+                model="gpt-5.6-terra", reasoning_effort="high",
+                responsibility="planning", goal="Plan every exact outcome.",
+                scope="The complete current contract.",
+                instructions="Publish one terminal plan from the exact assignment.",
+                report_policy="none",
+            )
+            planner_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                planner["native_dispatch"]["message"],
+            ).group(1)
+            context: dict = {}
+            assignment = read_task(
+                task_ref=planner_ref, view="assignment",
+                _connection_context=context,
+            )
+            self.assertEqual(
+                assignment["data"]["publication_reconciliation"]
+                ["required_outcomes"],
+                [item["outcome"] for item in outcomes],
+            )
+            coverage = [
+                {
+                    "outcome": item["outcome"],
+                    "status": "planned",
+                    "verification": ["Mapped exactly."],
+                }
+                for item in outcomes
+            ]
+            coverage[6] = {
+                **coverage[6],
+                "outcome": "Invented replacement for the seventh outcome.",
+            }
+            with self.assertRaises(V12ServiceError) as rejected:
+                publish_plan(
+                    task_ref=planner_ref, summary="Plan prepared.",
+                    scope="The complete current contract.",
+                    stages=[{
+                        "owner": "developer", "work": ["Implement the plan."],
+                        "verification": ["Run focused checks."],
+                    }],
+                    verification_facts=[{
+                        "state": "not_run", "summary": "Delivery awaits review.",
+                    }],
+                    outcome_coverage=coverage, risks=[], unresolved=[],
+                    status="blocked", _connection_context=context,
+                )
+            self.assertEqual(rejected.exception.code, "outcome_item_not_found")
+            self.assertEqual(
+                rejected.exception.details.get("path"),
+                "$.outcome_coverage[6]",
+            )
+
     def test_unique_outcome_name_resolves_current_user_refined_revision(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
             task, outcomes = self._task(root)

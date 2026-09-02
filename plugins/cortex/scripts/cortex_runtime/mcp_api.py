@@ -1035,6 +1035,33 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
             leading_view = view["markdown_link"]
             break
     content = []
+    data = structured.get("data")
+    reconciliation = (
+        data.get("publication_reconciliation")
+        if structured.get("view") == "assignment" and isinstance(data, Mapping)
+        else None
+    )
+    if isinstance(reconciliation, Mapping):
+        # The full assignment can contain a large policy, semantic contract,
+        # and predecessor reports.  Hosts which primarily expose TextContent
+        # may abbreviate that body before the model reaches the exact terminal
+        # publication selectors.  Put the small server-owned reconciliation
+        # block first and keep structuredContent unchanged.  This is not a
+        # second authority: it is a byte-for-byte projection of the same
+        # structured result and survives the large-result fallback below.
+        compact_assignment = {
+            "task_ref": structured.get("task_ref"),
+            "view": "assignment",
+            "publication_reconciliation": dict(reconciliation),
+            "has_more": structured.get("has_more"),
+        }
+        content.append({
+            "type": "text",
+            "text": json.dumps(
+                compact_assignment, ensure_ascii=False,
+                separators=(",", ":"), allow_nan=False,
+            ),
+        })
     if leading_view is not None:
         content.append({"type": "text", "text": leading_view})
     # Some supported hosts expose only TextContent to the model even though
