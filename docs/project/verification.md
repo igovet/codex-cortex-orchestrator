@@ -409,7 +409,10 @@ Read-only `--check` continues to reject a stale checkout suffix.
 The GitHub release gate installs both `pytest` and `PyYAML` explicitly before
 running the validators. This matters because marketplace validation imports
 YAML support before the test suite starts; a clean runner must not depend on a
-transitive or preinstalled `yaml` module.
+transitive or preinstalled `yaml` module. The macOS matrix entries also install
+`tmux` explicitly so the real transport tests execute instead of depending on
+runner-image contents. Shell helpers use the portable BSD/GNU `chmod MODE PATH`
+form; every affected target is an already validated absolute path.
 
 Before publication, verify the committed candidate:
 

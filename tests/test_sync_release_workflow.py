@@ -18,6 +18,8 @@ def test_github_release_gate_installs_every_direct_python_dependency() -> None:
     workflow = (ROOT / ".github/workflows/cortex.yml").read_text(encoding="utf-8")
     assert '"pytest>=8,<9"' in workflow
     assert '"PyYAML>=6,<7"' in workflow
+    assert "if: runner.os == 'macOS'" in workflow
+    assert "brew install tmux" in workflow
 
 
 def test_github_release_gate_runs_the_current_complete_suite() -> None:

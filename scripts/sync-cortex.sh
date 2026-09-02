@@ -332,7 +332,7 @@ PY
   then
     return 1
   fi
-  chmod 700 -- "${staging_root}"
+  chmod 700 "${staging_root}"
   temporary="$(mktemp -d "${staging_root}/.candidate.XXXXXX")"
   if ! "${cortex_python}" -B - "${project_dir}" "${temporary}" <<'PY'
 import sys
@@ -402,11 +402,11 @@ prepare_backup_directory() {
   local backup_dir="$1"
   validate_cleanup_target "${codex_home}" "backups/${plugin_name}-upgrade" "${backup_dir}" || return 1
   run mkdir -p -- "${backup_dir}"
-  run chmod 700 -- "${backup_dir}"
+  run chmod 700 "${backup_dir}"
 }
 
 harden_backup_slot() {
-  run chmod -R go-rwx -- "$1"
+  run chmod -R go-rwx "$1"
 }
 
 validate_sources() {
@@ -782,7 +782,7 @@ ensure_global_subagent_model() {
   previous_model="${original_global_subagent_model_state:-${global_subagent_model_state}}"
   if [[ "${previous_model}" == "${target_model}" ]]; then
     if [[ "${mode}" == "install" && -n "${original_global_config_mode}" ]]; then
-      run chmod "${original_global_config_mode}" -- "${config_path}"
+      run chmod "${original_global_config_mode}" "${config_path}"
     fi
     echo "ok      agents.default_subagent_model=${target_model}"
     return 0

@@ -108,7 +108,13 @@ _ASSIGNMENT_PAGE_RECEIPT_MIGRATION_NAME = "v25-assignment-page-receipts"
 _ASSIGNMENT_LOSS_MIGRATION_VERSION = 26
 _ASSIGNMENT_LOSS_MIGRATION_NAME = "v26-explicit-assignment-loss-lineage"
 _DISPATCH_LEASE_SECONDS = 300
-_STORAGE_ADMISSION_BUDGET_SECONDS = 0.8
+# Admission covers descriptor locking, WAL negotiation, schema readiness,
+# canonical transaction work, and reconstructible locator convergence.  A
+# sub-second budget is too small on loaded CI hosts and can surface a false
+# terminal ``storage_busy`` even though the identical concurrent command is
+# already converging. Keep the wait bounded, but long enough for the maximum
+# supported local worker fan-out to serialize safely.
+_STORAGE_ADMISSION_BUDGET_SECONDS = 5.0
 _ADMISSION_DEADLINE: ContextVar[float | None] = ContextVar("cortex_v12_admission_deadline", default=None)
 _SQLITE_ADMISSION_LOCKS: dict[str, threading.RLock] = {}
 _SQLITE_ADMISSION_LOCKS_GUARD = threading.RLock()

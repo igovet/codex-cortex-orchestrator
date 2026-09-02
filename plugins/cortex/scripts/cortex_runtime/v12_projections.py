@@ -101,11 +101,22 @@ def _regular(path: Path, *, required: bool = False) -> bool:
 
 def _directory(path: Path, *, root: Path) -> None:
     """Create/check every projection directory with no symlink traversal."""
-    root = root.resolve(strict=True)
+    # Keep the store's lexical root. macOS intentionally exposes temporary
+    # storage through ``/var -> /private/var``; resolving only ``root`` while
+    # leaving ``path`` lexical makes an otherwise contained child appear to
+    # escape. Descendants are still checked component-by-component with
+    # ``lstat``, so a symlink inside the managed projection tree remains
+    # fail-closed without rejecting the host's system-level alias.
+    root = Path(root)
+    path = Path(path)
+    if not root.is_absolute() or not path.is_absolute():
+        raise OSError("projection path must be absolute")
     try:
         relative = path.relative_to(root)
     except ValueError as exc:
         raise OSError("projection path escapes the shard") from exc
+    if any(part in {".", ".."} for part in relative.parts):
+        raise OSError("projection path escapes the shard")
     info = os.lstat(root)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise OSError("projection root is unsafe")

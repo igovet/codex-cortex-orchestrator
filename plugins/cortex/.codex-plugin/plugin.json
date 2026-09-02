@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.14.10+codex.sha256.38325cfe7526ecb2",
+  "version": "1.14.10+codex.sha256.3b4fc9fd91277261",
   "description": "Durable local coordination ledger for model-owned multi-agent governance.",
   "author": {
     "name": "igovet"
