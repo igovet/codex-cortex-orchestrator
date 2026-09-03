@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.15.0 ships two bounded native hook components: an activation guard and
+Cortex 1.15.3 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without
@@ -53,6 +53,12 @@ evidence. The MCP backend still owns task state, assignment evidence,
 idempotency, publication, reconciliation, and closure. A spawn result or a
 `SubagentStart` marker alone never substitutes for the worker's successful
 server-side evidence consumption and terminal publication.
+The worker lease is keyed first by the native child thread extracted from its
+transcript path, then by stable agent identity. This preserves exact publication
+authority when Desktop omits `agent_id` from a later child tool event and keeps
+parallel workers from aliasing through a shared parent turn. The turn-only alias
+is compatibility state for hosts that expose neither stronger identity and is
+never preferred when a child thread is available.
 Host hooks see directly surfaced tool calls. They do not decompose an outer
 programmatic-tool or `exec` call into separately authorized nested Cortex
 operations. The activation guard therefore rejects an outer `exec` containing

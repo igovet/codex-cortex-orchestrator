@@ -16,9 +16,9 @@ The coordinator maintains an evidence-driven, model-owned orchestration DAG;
 it never writes a project solution plan. The current DAG and every revision are
 persisted through task-linked initiative revisions and the existing
 delegation/report/decision graph, while the backend never executes it. Planning
-is optional for genuinely minimal work; light/full delivery requires a `planner`
-delegation that publishes the immutable required-review `plan` report and its
-exact approval relation. C1/C2/C3 classification remains model-owned
+is optional for genuinely minimal work; planned delivery requires a `planner`
+delegation that publishes an immutable plan report and, when the derived policy
+is `required`, its exact approval relation. C1/C2/C3 classification remains model-owned
 baseline labels—bounded low-risk / multi-step or cross-surface / high-risk or
 cross-domain—normally selecting `minimal` / `light` / `full` governance. They
 are not server waves, gates, model escalation, or user approval. Report evidence
@@ -108,7 +108,7 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | `close_task` | Record the final advisory closure aggregate from durable evidence. |
 | `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
 | `open_plan_review` → `record_plan_review` | Present and record one immutable plan review through a matching server-owned binding. |
-| `open_steering` → `record_steering` | Ask and record one steering change through a matching server-owned binding. |
+| `open_steering` / `record_steering` | Open a real branch question and record its answer, or record an already-explicit user-authored semantic change directly without a duplicate confirmation. |
 
 Coordinator and worker catalogs are audience-specific, and server roles are
 monotonic per MCP connection and the host lifecycle binds a child audience
@@ -356,7 +356,7 @@ must never rewrite existing timeline rows or guess ambiguous lineage.
 
 Plan reports persist server-derived `review_policy=informational|required` and may name a
 finalized predecessor. A required review is a coordinator-owned interaction;
-for light/full delivery the backend admits only an explicit approval bound to
+for required-review delivery the backend admits only an explicit approval bound to
 the exact current plan. The matching narrow decision record operation preserves an
 exact original response and attribution `user_via_coordinator` through one
 closed operation-specific request containing the task reference, neutral prompt
@@ -478,8 +478,8 @@ summarizes canonical evidence inline; view failure is never a lifecycle gate.
 Core tools validate public shape/size, strict JSON, identifier/reference
 existence, project isolation, transaction/foreign-key integrity, and
 idempotency. Assignment admission also requires one governance assessment;
-light/full delivery additionally requires the exact current finalized
-required-review plan approval. Initiative status, dependency warnings, closure
+delivery with a required-review plan additionally requires the exact current
+finalized plan approval. Initiative status, dependency warnings, closure
 verdict, and closure presence never admit an operation.
 
 No host epoch, stop marker, mandatory wait, repair escrow, resource lock,

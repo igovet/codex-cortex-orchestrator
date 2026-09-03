@@ -13,22 +13,22 @@ ORCHESTRATOR = ROOT / "plugins/cortex/skills/orchestrator/SKILL.md"
 WORKER_MESSAGE = ROOT / "plugins/cortex/scripts/cortex_runtime/worker_message.py"
 
 
-def test_codebase_memory_is_mandatory_first_route_with_single_evidence_fallback():
+def test_codebase_memory_is_preferred_with_single_safe_fallback():
     text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (HARVEST, CENSUS, ROUTE_DOC, README, ORCHESTRATOR, WORKER_MESSAGE)
     )
 
     normalized = re.sub(r"\s+", " ", text)
-    assert normalized.count("mandatory first route") >= 2
+    assert normalized.count("preferred") >= 4
     assert text.count("exactly one") >= 2
-    assert "concrete graph limitation" in normalized
+    assert "bounded limitation" in normalized
     assert "silent" in normalized.lower()
     assert "chain multiple fallback searches" in normalized.lower() or "chained fallback" in normalized.lower()
-    assert "every Cortex route" in text
-    assert "before any structural project-code discovery" in text
+    assert "not only knowledge harvest" in text
+    assert "Before structural project-code discovery" in text
     assert "canonical `project_root` returned in the server-owned assignment context" in normalized
-    assert "Never silently skip the graph" in text
+    assert "Do not silently skip an available usable graph" in text
 
 
 def test_route_docs_do_not_teach_mcp_request_shapes():

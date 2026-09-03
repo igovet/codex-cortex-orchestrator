@@ -156,6 +156,9 @@ def test_native_wait_is_advisory_and_durable_publication_recovers_empty_wait():
     assert "open steering before showing that question" in orchestrator
     assert "direct answer is the steering answer" in control
     assert "do not route it through ordinary clarification" in control
+    assert "terminal worker stop without publication" in control
+    assert "never repeats the original assignment opening" in control
+    assert "asks the user to say “continue”" in control
 
 
 def test_orchestrator_has_one_canonical_routing_state_machine_without_payload_shapes():

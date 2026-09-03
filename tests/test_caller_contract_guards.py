@@ -36,7 +36,7 @@ class CallerContractGuardTests(unittest.TestCase):
         }
         _validate_schema(schema, valid)
         self.assertNotIn("review_policy", schema["properties"])
-        for field in ("review_policy", "assignment_ref", "continuation_ref", "report_ref", "item_ref", "digest", "cursor", "handles"):
+        for field in ("review_policy", "nonmateriality", "assignment_ref", "continuation_ref", "report_ref", "item_ref", "digest", "cursor", "handles"):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, "unsupported property"):
                 _validate_schema(schema, {**valid, field: "forbidden"})
 

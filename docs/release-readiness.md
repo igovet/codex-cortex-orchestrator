@@ -1,11 +1,11 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.15.0.
+Status: content-addressed production and development release contract for Cortex 1.15.3.
 
 ## Current release identity
 
-- semantic release label: 1.15.0
-- installable identity: `1.15.0+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.15.3
+- installable identity: `1.15.3+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - source-to-installed synchronization reuses that same canonical plugin
   manifest and digest contract on Linux and macOS; it does not maintain a
@@ -189,10 +189,14 @@ cases:
 
 In each case, the coordinator remains free to create a useful delegation, read
 known reports, synthesize reported evidence, request a real user decision, or
-provide a final answer. A user-requested plan review and any genuine external,
-destructive, scope, acceptance, or product decision remain coordinator-owned
-ordinary-chat holds, not backend gates. It does not fill an evidence gap by
-directly inspecting or testing the project. Replacing the same nonterminal
+provide a final answer. A completed risk-free minimal-governance plan is
+informational and continues without a manufactured approval. Light/full
+governance, incomplete or uncertain evidence, unresolved items, plan-discovered
+risk, and any material plan,
+genuine external or destructive action, or scope, acceptance, or product
+decision remains a coordinator-owned hold; required plan review is enforced by
+the exact current plan relation. The coordinator does not fill an evidence gap
+by directly inspecting or testing the project. Replacing the same nonterminal
 delivery ownership is narrower: it requires explicit blocked/aborted reason and
 non-empty evidence, committed atomically with the linked successor.
 
@@ -285,7 +289,8 @@ Release evidence must prove:
   and require an independent rerun of failed and affected gates before closure;
 - the live assignment profile schema separates owner, review, and planning
   classes; first-attempt routing keeps bounded no-plan C1 owner work minimal,
-  requires approved planner evidence for light/full owner work, and treats any
+  requires current planner evidence for light/full owner work and exact approval
+  when its derived policy is `required`, and treats any
   planning-predecessor rejection as a failed orchestration run even after retry;
 - broad server-side report selection preserves multi-author evidence without
   inventing one predecessor, and no public assignment failure names private
@@ -317,13 +322,14 @@ Each narrow decision record operation has one closed canonical contract. Retired
 rejected by the public schema before mutation.
 
 The public `publish_plan` operation provides immutable plan evidence without
-adding a fifteenth tool. It does not accept a model-selected review-policy
-field: the server derives persisted `informational` for minimal governance and
-`required` for light/full governance. A required plan creates the
+adding another tool. It does not accept a planner-selected review-policy field:
+the server derives persisted `informational` only for a complete, risk-free
+minimal-governance plan and otherwise derives `required`, independent of the
+plan's language. A planner cannot self-attest a downgrade. A required plan creates the
 coordinator-owned ordinary-chat review hold: present the finalized plan
 revision, digest, localized summary, and approve/revise/cancel choices; then
 record an unambiguous response against that exact revision. A revised plan is a
-new report and requires fresh review. This approval is a narrow light/full
+new report and requires fresh review. This approval is a narrow required-review
 delivery-integrity relation, not authorization for external action.
 
 The database is canonical. Per-task Markdown files are derived host-private
@@ -419,7 +425,7 @@ twenty-tool semantic facade and runtime, schema-v1 store, host-private operator
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.15.0,
+The package and repository metadata must consistently identify Cortex 1.15.3,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
 and the complete twenty-tool semantic registry plus its two audience
 projections. Stale claims about waves, gates, capabilities,

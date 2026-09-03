@@ -14,7 +14,7 @@ The V12 project database is the only authoritative mutable Cortex store:
 
 The database is a durable coordination ledger. It does not store native host
 authority or schedule work. It admits an assignment only after governance is
-assessed and admits light/full delivery only after exact current-plan approval;
+assessed and admits required-review delivery only after exact current-plan approval;
 it never decides whether the model may read evidence, rework, close, or answer
 the user.
 
@@ -42,7 +42,7 @@ empty rather than duplicating acceptance.
 | Effective outcome contract | `effective_contract_revisions`, `effective_contract_items`, `effective_contract_item_details` | Bootstrap, user steering decision; `read_scope`; `read_outcome`; worker `read_task` | One revisioned coverage item per independent user outcome; linked criteria, constraints, steer additions, source fragments, and replacement relations remain details rather than duplicate obligations |
 | Delegation assignments and projected briefs | `delegations` plus its saved task association | Coordinator `open_assignment`; task reads | Canonical bounded assignment with required textual ownership scope, exact model/effort, and compiled knowledge contract in `instructions`; the projected native brief adds the task's saved root for context, never host authority |
 | Outcome assignments and coverage | `delegation_outcome_assignments`, `report_contract_coverage` | Assignment/publication writes; `read_scope`; worker `read_task` | Per-revision owned/contributing/evidence-producing responsibility and immutable finalized-publication coverage claims with verification details; used to identify missing, partial, unverified, stale, and contradictory active evidence, never a backend gate |
-| Worker evidence | `reports`, `report_chunks`, `report_usage` | applicable `publish_*`; assignment references; bounded task evidence reads | Immutable progress/result/synthesis/plan content, manifest/digest, server-derived persisted `review_policy` (`informational` for minimal, `required` for light/full), assembly state, chunks, and quotas; private and potentially sensitive |
+| Worker evidence | `reports`, `report_chunks`, `report_usage` | applicable `publish_*`; assignment references; bounded task evidence reads | Immutable progress/result/synthesis/plan content, manifest/digest, server-derived persisted `review_policy` (`informational` only for complete risk-free minimal-governance plans, otherwise `required`), assembly state, chunks, and quotas; private and potentially sensitive |
 | Execution-outcome projection | Derived from finalized rows in `reports` | `read_state`; `close_task` result | Scalar evidence status, finalized/completed report counts, and outcome derive independently of advisory closure bookkeeping and make no native lifecycle claim |
 | User decision evidence | `user_decisions` | narrow decision record operations; private task-bound decision views | Append-only coordinator-asserted ordinary-chat response, neutral prompt, exact original-language response, language, private subject binding/digest, supersession, and `user_via_coordinator` attribution; evidence only, never authentication or authority |
 | Mode history | `governance_assessments` | `assess_governance`; task reads | Append-only advisory model/user-override assessments; one initial assessment is required after task creation and before the first assignment |
@@ -85,7 +85,11 @@ assignment, and coverage tables. Bootstrap materializes revision 1 from the
 immutable task contract. A later user `steer` decision creates a new effective
 revision, retiring only named active items and adding only the stated
 replacements; it does not rewrite the immutable original task contract or
-unaffected coverage.
+unaffected finalized coverage. In the same transaction, every nonterminal
+worker capability from an earlier revision becomes stale. Its assignment and
+receipts remain immutable history, but it cannot continue reading, publish,
+appear as resumable work, retain active ownership, or dispatch a successor.
+Fresh work is assigned from the complete current contract.
 
 The state, project-shard, task, and view directories are created or reconciled
 to `0700`. Before every SQLite open, symlink and non-regular database paths are
@@ -177,7 +181,7 @@ lead to rework, replacement, or disclosed risk, but never backend prohibition.
 
 Plan review, clarification, pause, revision, cancellation, and user-decision
 interpretation are coordinator-owned ordinary-chat policy. Storage preserves
-evidence and exact bindings and admits light/full delivery only after the exact
+evidence and exact bindings and admits required-review delivery only after the exact
 current required-review plan approval. Current-plan identity includes the
 planning assignment's effective-contract revision; after steering, earlier
 plans and approvals remain immutable history but cannot be selected, reviewed,

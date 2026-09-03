@@ -47,12 +47,12 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "never repeat malformed input or guess authority" in normalized_message.lower()
     assert "Coordinator-only operations" in message
     assert "Do no project work before successful consumption" in normalized_message
-    assert "Codebase Memory as the mandatory first evidence route" in normalized
+    assert "Codebase Memory as the preferred first evidence route when it is available" in normalized
     assert "canonical `project_root` returned in the server-owned assignment context" in normalized
-    assert "bounded repository-native enumeration or text-search fallback" in normalized
-    assert "environment blocker" in normalized
-    assert "actual graph call" in normalized
-    assert "Never silently skip the graph" in normalized
+    assert "exactly one safe assignment-scoped repository-native enumeration or text-search fallback" in normalized
+    assert "unavailable, denied, times out, errors" in normalized
+    assert "absence alone is not a blocked publication cause" in normalized
+    assert "Do not silently skip an available usable graph" in normalized
     assert "A plan publication does not choose or declare its review disposition" in policy["common_policy"]
     assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
     assert "never publishes a supplementary result or documentation outcome" in normalized
@@ -96,6 +96,21 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     }
     assert "worker label" not in bootstrap_match.group(1)
     assert len(re.findall(r"t_[0-9a-f]{12}_[0-9a-f]{32}", message)) == 1
+
+
+def test_worker_catalogue_without_codebase_memory_still_authorizes_one_bounded_fallback():
+    tool_catalogue = [
+        {"name": "mcp__cortex__read_task"},
+        {"name": "mcp__cortex__publish_result"},
+    ]
+    assert not any("codebase_memory" in item["name"] for item in tool_catalogue)
+
+    policy = worker_message.assignment_worker_policy("explorer")
+    assert policy is not None
+    normalized = " ".join(policy["common_policy"].split())
+    assert "exactly one safe assignment-scoped repository-native enumeration or text-search fallback" in normalized
+    assert "Its absence alone is not a blocked publication cause" in normalized
+    assert "stop and report an environment blocker" not in normalized
 
 
 def test_common_policy_is_exposed_by_the_assignment_policy_boundary():

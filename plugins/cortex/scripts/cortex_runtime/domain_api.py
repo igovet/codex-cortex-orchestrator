@@ -356,10 +356,11 @@ def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> 
 
     Governance is deliberately advisory in the ledger, but an assignment is
     still not admissible until the coordinator has recorded its assessment.
-    For light/full governance, owner (production) work additionally requires
-    the latest finalized required-review plan and the latest decision for that
-    exact plan to be an explicit approval.  Planning/review work remains the
-    proportional path used to produce that evidence.
+    Owner work honors the latest current plan's server-derived adaptive review
+    policy.  Informational plans proceed without manufacturing an approval;
+    required-review plans need an approval bound to that exact plan.  A
+    light/full assessment still requires a current plan, while minimal work may
+    proceed directly only when no earlier plan has become stale.
     """
     def read(connection):
         assessment = connection.execute(
@@ -374,7 +375,7 @@ def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> 
                 code="governance_assessment_required",
             )
         mode = str(assessment["mode"])
-        if assignment_policy != "owner" or mode not in {"light", "full"}:
+        if assignment_policy != "owner":
             return
         plan = connection.execute(
             "SELECT DISTINCT r.report_id,r.content_digest,r.review_policy FROM reports r "
@@ -385,9 +386,24 @@ def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> 
             "AND r.assembly_state='finalized' ORDER BY r.created_sequence DESC LIMIT 1",
             (store.project_hash, task_id),
         ).fetchone()
-        if plan is None or str(plan["review_policy"] or "") != "required":
+        any_plan = connection.execute(
+            "SELECT 1 FROM reports WHERE project_hash=? AND task_id=? "
+            "AND report_type='plan' AND assembly_state='finalized' LIMIT 1",
+            (store.project_hash, task_id),
+        ).fetchone()
+        if plan is None:
+            if mode == "minimal" and any_plan is None:
+                return
             raise V12ServiceError(
-                "a current finalized required-review plan is required before delivery",
+                "a current finalized required-review plan or authoritatively derived informational plan is required before delivery",
+                code="plan_approval_required",
+            )
+        policy = str(plan["review_policy"] or "")
+        if policy == "informational":
+            return
+        if policy != "required":
+            raise V12ServiceError(
+                "the current plan has no valid adaptive review classification",
                 code="plan_approval_required",
             )
         decision = connection.execute(
@@ -406,6 +422,104 @@ def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> 
     store._read(read)
 
 
+def _plan_review_policy(
+    store: V12Store, assignment_id: str, evidence: Mapping[str, Any], status: str,
+) -> str:
+    """Classify a current plan from authoritative assessment and plan evidence.
+
+    Informational is deliberately the narrow case: the coordinator classified
+    the complete user contract as minimal, recorded no risk factors, and the
+    plan itself is complete with no risks or unresolved items. A planner cannot
+    downgrade review by self-attesting that its own choices are nonmaterial.
+    Light/full governance and every uncertain or incomplete plan fail closed to
+    required review independently of the plan's natural language.
+    """
+    def classifier_evidence(connection: Any) -> tuple[Any, list[Any]]:
+        assessment = connection.execute(
+            "SELECT g.mode,g.risk_factors_json FROM delegations d JOIN governance_assessments g "
+            "ON g.task_id=d.task_id AND g.project_hash=d.project_hash "
+            "WHERE d.delegation_id=? AND d.project_hash=? "
+            "ORDER BY CASE WHEN g.source='user_override' THEN 0 ELSE 1 END, "
+            "g.created_sequence DESC LIMIT 1",
+            (assignment_id, store.project_hash),
+        ).fetchone()
+        contract = connection.execute(
+            "SELECT i.text,d.details_json FROM assignment_scope_snapshots s "
+            "JOIN effective_contract_items i ON i.item_id=s.item_id "
+            "LEFT JOIN effective_contract_item_details d ON d.item_id=i.item_id "
+            "WHERE s.assignment_id=? AND s.assignment_role='planning' "
+            "ORDER BY i.ordinal,i.item_id",
+            (assignment_id,),
+        ).fetchall()
+        return assessment, list(contract)
+
+    assessment, contract_rows = store._read(classifier_evidence)
+    if assessment is None:
+        raise V12ServiceError(
+            "governance assessment is required before plan publication",
+            code="governance_assessment_required",
+        )
+
+    try:
+        risk_factors = json.loads(str(assessment["risk_factors_json"] or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        risk_factors = ["unreadable governance risk evidence"]
+    if not isinstance(risk_factors, list) or risk_factors:
+        return "required"
+    if str(assessment["mode"] or "") != "minimal":
+        return "required"
+    if status != "completed":
+        return "required"
+    if evidence.get("risks") or evidence.get("unresolved"):
+        return "required"
+
+    coverage = evidence.get("contract_coverage")
+    if (
+        not isinstance(coverage, list)
+        or not coverage
+        or any(
+            not isinstance(item, Mapping)
+            or item.get("status") not in {"planned", "complete"}
+            for item in coverage
+        )
+    ):
+        return "required"
+    stages = evidence.get("stages")
+    if not isinstance(stages, list) or not stages or not contract_rows:
+        return "required"
+
+    for stage in stages:
+        if not isinstance(stage, Mapping):
+            return "required"
+        owner = stage.get("owner")
+        work = stage.get("work")
+        verification = stage.get("verification")
+        if (
+            not isinstance(owner, str) or not owner.strip()
+            or not isinstance(work, list) or not work
+            or not isinstance(verification, list) or not verification
+            or any(not isinstance(value, str) or not value.strip() for value in work)
+            or any(not isinstance(value, str) or not value.strip() for value in verification)
+        ):
+            return "required"
+    for row in contract_rows:
+        text = row["text"]
+        if not isinstance(text, str) or not text.strip():
+            return "required"
+        try:
+            details = json.loads(str(row["details_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return "required"
+        if not isinstance(details, Mapping):
+            return "required"
+        for field in ("acceptance_criteria", "constraints", "verification_criteria"):
+            values = details.get(field, [])
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                return "required"
+
+    return "informational"
+
+
 def _worker_capability_provenance() -> dict[str, str]:
     """Return the running package identity used to bind worker bootstrap.
 
@@ -418,7 +532,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.15.0",
+        "1.15.3",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -675,6 +789,15 @@ def read_scope(*, task_ref: str, responsibility: str, continue_: bool = False,
             raise V12ServiceError("scope continuation is unavailable", code="ledger_error")
         revision = context.get("scope_revision")
         summary = context.get("scope_summary")
+        current_revision = _store._read(
+            lambda connection: _store._effective_contract(connection, _canonical)["revision"]
+        )
+        if revision != current_revision:
+            context.update({"cursor": None, "has_more": False})
+            raise V12ServiceError(
+                "scope continuation is stale after a contract revision",
+                code="assignment_stale",
+            )
     else:
         current = _public_read_data(ledger.inspect_task(
             task_ref=coordinator_ref, after_sequence=0, limit=1,
@@ -784,7 +907,7 @@ def read_continuations(*, task_ref: str, continue_: bool = False,
     if compat:
         raise V12ServiceError("continuation read shape is invalid", code="invalid_argument")
     context = _connection_context if isinstance(_connection_context, dict) else {}
-    _store, _canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
+    store, canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
     if assignment_id is not None:
         raise V12ServiceError("coordinator continuations require coordinator task_ref", code="wrong_connection")
     key = ("read_continuations", task_ref)
@@ -795,6 +918,15 @@ def read_continuations(*, task_ref: str, continue_: bool = False,
         start = context.get("cursor")
         if not isinstance(snapshot, list) or isinstance(start, bool) or not isinstance(start, int):
             raise V12ServiceError("continuation is unavailable", code="ledger_error")
+        revision = store._read(
+            lambda connection: store._effective_contract(connection, canonical)["revision"]
+        )
+        if context.get("continuation_revision") != revision:
+            context.update({"cursor": None, "has_more": False})
+            raise V12ServiceError(
+                "continuation snapshot is stale after a contract revision",
+                code="assignment_stale",
+            )
     else:
         current = _public_read_data(ledger.inspect_task(
             task_ref=coordinator_ref, after_sequence=0, limit=1,
@@ -803,6 +935,10 @@ def read_continuations(*, task_ref: str, continue_: bool = False,
         snapshot = list(raw) if isinstance(raw, list) else []
         start = 0
         context["continuation_snapshot"] = snapshot
+        contract = current.get("effective_contract") if isinstance(current, Mapping) else None
+        context["continuation_revision"] = (
+            contract.get("revision") if isinstance(contract, Mapping) else None
+        )
     page, position = _bounded_page(snapshot, start)
     has_more = position < len(snapshot)
     context.update({"read_key": key, "cursor": position if has_more else None, "has_more": has_more})
@@ -827,8 +963,20 @@ def read_evidence(*, task_ref: str, report_policy: str,
         if context.get("read_key") != page_key or not context.get("has_more"):
             raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
         cursor = context.get("cursor")
+        revision = store._read(
+            lambda connection: store._effective_contract(connection, canonical)["revision"]
+        )
+        if context.get("evidence_revision") != revision:
+            context.update({"cursor": None, "has_more": False})
+            raise V12ServiceError(
+                "evidence continuation is stale after a contract revision",
+                code="assignment_stale",
+            )
     else:
         cursor = None
+        context["evidence_revision"] = store._read(
+            lambda connection: store._effective_contract(connection, canonical)["revision"]
+        )
     report_ids = _select_report_inputs(store, canonical, report_policy, [])
     raw = (
         store.read_reports(
@@ -911,6 +1059,9 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
     current_items = current.get("items") if isinstance(current, Mapping) else None
     if not isinstance(current_items, list):
         raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
+    expected_contract_revision = current.get("revision")
+    if isinstance(expected_contract_revision, bool) or not isinstance(expected_contract_revision, int):
+        raise V12ServiceError("task outcome revision is unavailable", code="ledger_error")
     typed_items = [item for item in current_items if isinstance(item, Mapping)]
     if responsibility == "planning":
         if outcomes is not None:
@@ -1026,6 +1177,7 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
             derive_assignment_scope=True,
             assignment_policy=assignment_policy,
             loss_recovery=dict(loss_recovery) if loss_recovery is not None else None,
+            expected_contract_revision=expected_contract_revision,
         )
     except V12ServiceError as exc:
         private_fields = {"input_report_refs", "input_decision_refs", "parent_assignment_ref"}
@@ -1698,23 +1850,9 @@ def _publish_from_task(*, task_ref: str, kind: str, evidence: Mapping[str, Any],
     )
     if kind == "plan":
         # Review disposition is task-state, not a planner-authored semantic
-        # choice.  Derive it from the latest effective governance assessment
-        # so light/full plans cannot be accidentally published as
-        # informational and minimal plans cannot fabricate an approval gate.
-        mode = store._read(lambda connection: connection.execute(
-            "SELECT g.mode FROM delegations d JOIN governance_assessments g "
-            "ON g.task_id=d.task_id AND g.project_hash=d.project_hash "
-            "WHERE d.delegation_id=? AND d.project_hash=? "
-            "ORDER BY CASE WHEN g.source='user_override' THEN 0 ELSE 1 END, "
-            "g.created_sequence DESC LIMIT 1",
-            (assignment_id, store.project_hash),
-        ).fetchone())
-        if mode is None:
-            raise V12ServiceError(
-                "governance assessment is required before plan publication",
-                code="governance_assessment_required",
-            )
-        review_policy = "required" if str(mode["mode"]) in {"light", "full"} else "informational"
+        # choice. Derive it from the current authoritative assessment and the
+        # complete plan evidence. Governance depth alone never forces review.
+        review_policy = _plan_review_policy(store, assignment_id, evidence, status)
     internal_evidence = _internalize_publication_evidence(store, assignment_id, evidence)
     published = _publish(
         continuation_ref=continuation_ref, assignment_ref=record_ref(assignment_id),
@@ -1743,10 +1881,15 @@ def _publication_evidence(*, schema_kind: str, summary: str,
 def publish_plan(*, task_ref: str, summary: str, scope: str,
                  stages: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
                  outcome_coverage: list[Mapping[str, Any]], risks: list[str], unresolved: list[str],
-                 status: str, _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+                 status: str,
+                 _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    specific: dict[str, Any] = {
+        "scope": scope,
+        "stages": [dict(item) for item in stages],
+    }
     evidence = _publication_evidence(schema_kind="plan", summary=summary, verification_facts=verification_facts,
                                      outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
-                                     scope=scope, stages=[dict(item) for item in stages])
+                                     **specific)
     return _publish_from_task(
         task_ref=task_ref, kind="plan", evidence=evidence, status=status,
         _connection_context=_connection_context,
@@ -2033,17 +2176,6 @@ def record_steering(*, task_ref: str, response_original: str,
     store, canonical = _task_store(task_ref)
     replay_candidate = False
     try:
-        binding_ref, binding_revision, replay_candidate = _pending_binding(
-            store, canonical, decision_type="steer",
-        )
-        if replay_candidate:
-            current = store._read(
-                lambda connection: store._effective_contract_at_revision(
-                    connection, canonical, binding_revision,
-                ).get("items", [])
-            )
-        else:
-            current = ledger.inspect_task(task_ref=task_ref).get("effective_contract", {}).get("items", [])
         if not isinstance(add, list) or not isinstance(retire, list):
             raise V12ServiceError(
                 "steering outcome sets are invalid", code="invalid_argument",
@@ -2066,54 +2198,122 @@ def record_steering(*, task_ref: str, response_original: str,
                 "steering retire names are duplicated", code="invalid_argument",
                 details={"path": "$.retire", "expected": "unique_items", "reason": "duplicate"},
             )
-        observed = _connection_context.get("steering_observed_outcomes", []) if isinstance(_connection_context, dict) else retire
-        if not replay_candidate and any(name not in observed for name in retire):
-            raise V12ServiceError(
-                "steering retirement requires a fresh observed outcome name",
-                code="fresh_state_read_required",
-                details={"path": "$.retire", "expected": "observed_current_semantic_outcome", "reason": "fresh_scope_required"},
+
+        def prepare_delta(*, revision: int | None, replay: bool) -> dict[str, Any]:
+            current = (
+                store._read(
+                    lambda connection: store._effective_contract_at_revision(
+                        connection, canonical, int(revision),
+                    ).get("items", [])
+                )
+                if replay and revision is not None
+                else ledger.inspect_task(task_ref=task_ref).get(
+                    "effective_contract", {},
+                ).get("items", [])
             )
-        retire_refs = _match_outcomes(
-            [item for item in current if isinstance(item, Mapping)],
-            retire, path="$.retire",
-        ) if retire else []
-        additions: list[dict[str, Any]] = []
-        paired_replacement = len(typed_add) == 1 and len(retire_refs) == 1
-        if paired_replacement:
-            item = typed_add[0]
-            target = retire_refs[0]
-            additions.append({
-                "category": "outcome_replacement",
-                "outcome_ref": target,
-                "text": item["outcome"],
-                "acceptance": list(item["acceptance"]),
-                "constraints": list(item["constraints"]),
-                "verification": list(item["verification"]),
-            })
-        else:
-            # Unpaired public additions are complete independent outcomes.
-            # Keep them grouped as private durable atoms so the store never
-            # infers an existing target or merges unrelated additions.
-            additions.extend({
-                "category": "outcome",
-                "text": item["outcome"],
-                "acceptance": list(item["acceptance"]),
-                "constraints": list(item["constraints"]),
-                "verification": list(item["verification"]),
-            } for item in typed_add)
-        steering_delta = {
-            "add": additions,
-            # One exact replacement targets and supersedes its current row.
-            # All other additions remain independent while explicit retires
-            # are committed in the same transaction.
-            "retire_item_refs": [] if paired_replacement else retire_refs,
-        }
-        issued = DecisionAggregate(store).record_steering(
-            task_id=canonical, binding_ref=binding_ref,
-            response_original=response_original, user_language=user_language,
-            steering_delta=steering_delta,
-            supersedes_decision_id=None,
+            observed = (
+                _connection_context.get("steering_observed_outcomes", [])
+                if isinstance(_connection_context, dict) else retire
+            )
+            if not replay and any(name not in observed for name in retire):
+                raise V12ServiceError(
+                    "steering retirement requires a fresh observed outcome name",
+                    code="fresh_state_read_required",
+                    details={"path": "$.retire", "expected": "observed_current_semantic_outcome", "reason": "fresh_scope_required"},
+                )
+            retire_refs = _match_outcomes(
+                [item for item in current if isinstance(item, Mapping)],
+                retire, path="$.retire",
+            ) if retire else []
+            additions: list[dict[str, Any]] = []
+            paired_replacement = len(typed_add) == 1 and len(retire_refs) == 1
+            if paired_replacement:
+                item = typed_add[0]
+                additions.append({
+                    "category": "outcome_replacement",
+                    "outcome_ref": retire_refs[0],
+                    "text": item["outcome"],
+                    "acceptance": list(item["acceptance"]),
+                    "constraints": list(item["constraints"]),
+                    "verification": list(item["verification"]),
+                })
+            else:
+                additions.extend({
+                    "category": "outcome",
+                    "text": item["outcome"],
+                    "acceptance": list(item["acceptance"]),
+                    "constraints": list(item["constraints"]),
+                    "verification": list(item["verification"]),
+                } for item in typed_add)
+            return {
+                "add": additions,
+                "retire_item_refs": [] if paired_replacement else retire_refs,
+            }
+
+        aggregate = DecisionAggregate(store)
+        try:
+            binding_ref, binding_revision, replay_candidate = _pending_binding(
+                store, canonical, decision_type="steer",
+            )
+        except V12ServiceError as exc:
+            if exc.code != "clarification_binding_stale" or (not typed_add and not retire):
+                raise
+            # The user's current message can itself be the steering decision.
+            # Open and consume its durable binding inside this public operation
+            # instead of asking the user to confirm the same instruction again.
+            aggregate.open_steering(
+                task_id=canonical, prompt=response_original,
+                prompt_language=user_language, subject_type="task",
+                subject_id=canonical, assignment_id=None,
+            )
+            binding_ref, binding_revision, replay_candidate = _pending_binding(
+                store, canonical, decision_type="steer",
+            )
+
+        steering_delta = prepare_delta(
+            revision=binding_revision, replay=replay_candidate,
         )
+        try:
+            issued = aggregate.record_steering(
+                task_id=canonical, binding_ref=binding_ref,
+                response_original=response_original, user_language=user_language,
+                steering_delta=steering_delta,
+                supersedes_decision_id=None,
+            )
+        except V12StoreError as exc:
+            direct_binding = store._read(lambda connection: connection.execute(
+                "SELECT b.prompt,d.response_original FROM clarification_bindings b "
+                "LEFT JOIN user_decisions d ON d.decision_id=b.consumed_decision_id "
+                "WHERE b.clarification_binding=? AND b.project_hash=?",
+                (binding_ref, store.project_hash),
+            ).fetchone())
+            prior_was_direct = (
+                direct_binding is not None
+                and str(direct_binding["prompt"]) == str(direct_binding["response_original"])
+            )
+            if not (
+                replay_candidate and prior_was_direct
+                and exc.code == "command_conflict" and (typed_add or retire)
+            ):
+                raise
+            # A different explicit user change follows an earlier consumed
+            # steering decision. Create a fresh binding once; exact retries
+            # continue to reconcile through the consumed receipt above.
+            aggregate.open_steering(
+                task_id=canonical, prompt=response_original,
+                prompt_language=user_language, subject_type="task",
+                subject_id=canonical, assignment_id=None,
+            )
+            binding_ref, binding_revision, replay_candidate = _pending_binding(
+                store, canonical, decision_type="steer",
+            )
+            steering_delta = prepare_delta(revision=binding_revision, replay=False)
+            issued = aggregate.record_steering(
+                task_id=canonical, binding_ref=binding_ref,
+                response_original=response_original, user_language=user_language,
+                steering_delta=steering_delta,
+                supersedes_decision_id=None,
+            )
         if isinstance(_connection_context, dict):
             _connection_context.pop("steering_state_read_task_ref", None)
             _connection_context.pop("steering_observed_outcomes", None)

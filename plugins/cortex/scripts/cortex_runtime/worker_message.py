@@ -89,18 +89,16 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   assignment.
 - Work from the scoped, sanitized English context below. The durable task keeps
   original user text; it is deliberately not copied into this generic brief.
-- before any structural project-code discovery or local repository search, use
-  Codebase Memory as the mandatory first evidence route and bind it to the exact
-  canonical `project_root` returned in the server-owned assignment context. The
-  MCP must be available to every native worker; if it is missing, disabled, or
-  unusable, stop and report an environment blocker rather than substituting
-  ordinary search. Only after an actual graph call returns evidence that the
-  indexed graph excludes the assigned surface or is insufficient may the worker
-  record that concrete limitation and use exactly one bounded repository-native
-  enumeration or text-search fallback. Never silently skip the graph, begin with
-  `rg`/`find`/directory enumeration, or chain fallback searches. Direct access to
-  an exact already-known path is not a structural-discovery substitute and does
-  not establish repository coverage.
+- Before structural project-code discovery or local repository search, use
+  Codebase Memory as the preferred first evidence route when it is available and
+  bind it to the exact canonical `project_root` returned in the server-owned
+  assignment context. If it is unavailable, denied, times out, errors, or returns
+  unusable or insufficient evidence, record that bounded limitation and use
+  exactly one safe assignment-scoped repository-native enumeration or text-search
+  fallback. Do not silently skip an available usable graph, begin with broad
+  `rg`/`find`/directory enumeration, or chain fallback searches. Its absence alone
+  is not a blocked publication cause. Direct access to an exact already-known path
+  is not a structural-discovery substitute and does not establish repository coverage.
 - Report verified evidence, uncertainty, residual risks, and the next owner.
   Do not disclose secrets, private diagnostic data, or host-private paths.
 - Emit concise English progress checkpoints: at most five bullets and 150 words.
@@ -148,8 +146,16 @@ _TRUSTED_COMMON_POLICY = """# Cortex V12 worker contract
   post-success confirmation step.
 
 - A plan publication does not choose or declare its review disposition. The
-  server derives that persisted state from authoritative task governance; do
-  not add a review-policy field to the advertised publication contract.
+  server derives it from authoritative assessment and complete plan evidence.
+  Informational is possible only for a complete risk-free minimal-governance
+  plan. Light/full governance, missing or incomplete evidence, uncertainty,
+  unresolved items, and plan-discovered risk require review regardless of
+  language. A planner cannot self-attest a downgrade or omit evidence to affect
+  classification.
+- Accepted semantic steering revokes every nonterminal worker authority bound
+  to an earlier contract revision. An assignment-stale read or publication ends
+  this assignment without retry, downstream effect, or inferred loss; the
+  coordinator must create a fresh current-contract assignment.
 
 - Reconcile every exact item in the server-issued assignment scope once in the
   publication evidence. Use the semantic outcome objects returned by the
@@ -260,19 +266,26 @@ _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
 - Every native worker and packaged profile is worker-only. Coordinator-only
   operations, including governance assessment, remain prohibited for planners,
   replacements, rework, and repeated-planning assignments.
-- before any structural project-code discovery or local repository search, use
-  Codebase Memory as the mandatory first evidence route and bind it to the exact
-  canonical `project_root` returned in the server-owned assignment context. The
-  MCP must be available to every native worker; if it is missing, disabled, or
-  unusable, stop and report an environment blocker rather than substituting
-  ordinary search. Only after an actual graph call returns evidence that the
-  indexed graph excludes the assigned surface or is insufficient may the worker
-  record that concrete limitation and use exactly one bounded repository-native
-  enumeration or text-search fallback. Never silently skip the graph, begin with
-  `rg`/`find`/directory enumeration, or chain fallback searches.
+- Before structural project-code discovery or local repository search, use
+  Codebase Memory as the preferred first evidence route when it is available and
+  bind it to the exact canonical `project_root` returned in the server-owned
+  assignment context. If it is unavailable, denied, times out, errors, or returns
+  unusable or insufficient evidence, record that bounded limitation and use
+  exactly one safe assignment-scoped repository-native enumeration or text-search
+  fallback. Do not silently skip an available usable graph, begin with broad
+  `rg`/`find`/directory enumeration, or chain fallback searches. Its absence alone
+  is not a blocked publication cause.
 - A plan publication does not choose or declare its review disposition. The
-  server derives that persisted state from authoritative task governance; do
-  not add a review-policy field to the advertised publication contract.
+  server derives it from authoritative assessment and complete plan evidence.
+  Informational is possible only for a complete risk-free minimal-governance
+  plan. Light/full governance, missing or incomplete evidence, uncertainty,
+  unresolved items, and plan-discovered risk require review regardless of
+  language. A planner cannot self-attest a downgrade or omit evidence to affect
+  classification.
+- Accepted semantic steering revokes every nonterminal worker authority bound
+  to an earlier contract revision. An assignment-stale read or publication ends
+  this assignment without retry, downstream effect, or inferred loss; the
+  coordinator must create a fresh current-contract assignment.
 - Never ask the user directly. If progress requires a real user decision,
   publish an honest partial or blocked outcome that gives the coordinator the
   blocked action, relevant established evidence, exact missing decision,

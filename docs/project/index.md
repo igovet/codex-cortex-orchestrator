@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.15.0 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.15.3 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -228,7 +228,10 @@ items assigned to their delegation at the current revision. A user `steer`
 decision creates the next effective-contract revision. Complete unpaired
 additions become independent top-level outcomes, while exactly one retire plus
 one add is an atomic replacement. Unaffected outcomes and evidence remain
-current. One transactional owner is retained per outcome, allowing parallel
+current only when backed by finalized evidence. Nonterminal pre-revision worker
+capabilities are revoked atomically, removed from current continuation and
+ownership projections, and cannot publish or dispatch downstream work; a fresh
+assignment receives the complete current contract. One transactional owner is retained per outcome, allowing parallel
 delivery only across distinct outcomes and rejecting same or ambiguous
 ownership. Aggregate coverage classifies each active item
 as complete, missing, partial, unverified, stale, or contradictory. The

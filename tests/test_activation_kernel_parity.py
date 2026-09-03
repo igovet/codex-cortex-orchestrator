@@ -22,8 +22,11 @@ def test_activation_kernels_define_task_ref_only_llm_owned_orchestration() -> No
     assert "before the first assignment" in orchestrator
     assert "advisory governance assessment" in orchestrator
     assert "authentication, authorization, security, privacy" in orchestrator
-    assert "light or full governance requires a planner-owned immutable plan" in orchestrator
-    assert "backend rejects a delivery assignment" in orchestrator
+    assert "use governance depth to choose proportional discovery" in orchestrator
+    assert "language-independent review boundary" in orchestrator
+    assert "planner cannot self-attest or downgrade" in orchestrator
+    assert "light/full work, incomplete evidence" in orchestrator
+    assert "continue authoritatively derived informational plans immediately" in orchestrator
     assert "assessment must exist before the first assignment" in orchestrator
     assert "record that response before creating plan-dependent delivery assignments" in orchestrator
     assert "never infer approval from the original implementation request" in orchestrator

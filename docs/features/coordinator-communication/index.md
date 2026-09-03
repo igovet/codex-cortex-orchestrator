@@ -4,7 +4,7 @@
 
 ## Purpose and boundary
 
-Cortex 1.15.0 ships a packaged coordinator-to-user communication policy. It
+Cortex 1.15.3 ships a packaged coordinator-to-user communication policy. It
 keeps user-facing commentary, questions, plan summaries, progress, decision
 summaries, artifact summaries, and final answers clear without creating a
 runtime loader, dispatcher, lifecycle hook, tool, or backend gate.
@@ -44,8 +44,10 @@ Questions known in advance to choose product behavior, acceptance, constraints,
 verification, or scope open steering before they are presented; the direct
 answer is the steering answer and is not followed by a redundant confirmation.
 Ordinary clarification is reserved for facts whose possible answers leave every
-current outcome unchanged. If a factual answer unexpectedly reveals a semantic
-change, the coordinator opens steering before any assignment uses it.
+current outcome unchanged. When the user already states a concrete semantic
+change—or a factual answer itself contains one—the coordinator records that
+exact message directly as steering. It never opens another question asking the
+user to confirm the same instruction.
 
 Plan review additionally includes a decision-ready summary of scope, ordered
 stages, intended changes, verification, stop/deploy conditions, and material
@@ -59,6 +61,11 @@ partial or blocked outcome containing the blocked action, established evidence,
 exact missing decision, safe choices, and consequences. The coordinator reads
 that authoritative evidence and renders the complete user-facing question; it
 does not forward a context-free worker request.
+
+A host-confirmed terminal worker stop without a publication is recovered from
+the current responsibility scope through one lineage-linked replacement. The
+coordinator does not replay the original assignment, ask the user to say
+“continue”, or end the turn while that deterministic recovery remains available.
 
 ## Deterministic verification
 

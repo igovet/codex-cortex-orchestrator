@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes Cortex 1.15.0 source, package, installed-host, and
+This page describes Cortex 1.15.3 source, package, installed-host, and
 interactive verification. A command is evidence only when it was actually run.
 Do not infer installed or live-model behavior from a source-only result.
 
@@ -113,9 +113,13 @@ The V12 protocol evidence must prove:
   independent `execution_outcome` evidence;
 - `publish_plan`, `publish_result`, and `publish_documentation` accept the
   corresponding immutable worker evidence. `publish_plan` has no model-selected
-  review-policy field; the server derives `informational` for minimal governance
-  and `required` for light/full governance. Publication is atomic at the
-  semantic operation boundary;
+  review-policy field; the server derives adaptive disposition from the current
+  authoritative assessment and complete plan evidence. A completed exact
+  bounded plan is informational only for risk-free minimal governance.
+  Light/full governance, incomplete or uncertain evidence, unresolved items,
+  and plan-discovered risk require review regardless of language; the planner
+  cannot self-attest a downgrade. Publication
+  is atomic at the semantic operation boundary;
 - private/internal publication bodies support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
   schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas;
   v2 coverage names only effective-contract items assigned to the reporting
@@ -206,6 +210,11 @@ The V12 protocol evidence must prove:
   effective-contract revision as the task, so steering invalidates old-plan
   selection, review, and delivery admission until a replacement plan is
   approved;
+- semantic steering atomically makes every nonterminal earlier-revision worker
+  capability stale. Subsequent assignment reads, publication, wait/resume
+  projection, active ownership, and dispatch reject or omit that authority;
+  immutable history remains auditable and a fresh current-contract assignment
+  is required;
 - coordinator state exposes canonical responsibility-specific assignment
   selectors. Completed terminal owners are absent from `delivery_outcomes`,
   remain present for evidence, and advertise
@@ -402,7 +411,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode sou
 These checks validate the manifest, Marketplace entry, MCP configuration,
 runtime import closure, exact bundled skills and profiles, public documentation
 closure, bundled hook contracts, and release metadata. The installable manifest
-must be `1.15.0+codex.sha256.<digest-prefix>` and its suffix must match the
+must be `1.15.3+codex.sha256.<digest-prefix>` and its suffix must match the
 normalized plugin payload. Validation also rejects a `defaultPrompt` over 128
 UTF-8 bytes or a `SessionEnd` timeout over three seconds.
 `sync-cortex.sh --dry-run` is a repository-development preview, not the public
@@ -463,7 +472,7 @@ Verify the installed plugin version, `multi_agent_v2`, Luna default, exact
 twenty-tool catalog, bundled skill/profile content, schema-v1 path, host-private
 human-view behavior, content-addressed runtime identity, and bounded lifecycle
 hooks. A production stdio smoke must omit `CORTEX_SOURCE_MODE`, receive a
-successful `initialize`, report semantic version `1.15.0` with
+successful `initialize`, report semantic version `1.15.3` with
 `runtimeMode=content_addressed`, and expose the full tool catalogue. Start a new task
 after any install or update.
 
@@ -612,8 +621,10 @@ Exercise several explicit `$cortex:orchestrator` tasks:
     stage, automatic model escalation, or user-approval gate.
 22. For light/full delivery, and whenever minimal work otherwise needs planning,
     the coordinator creates a planner delegation and never writes the solution
-    plan. Light/full delivery is rejected until the planner's current finalized
-    required-review `plan` has an explicit approval bound to its exact digest.
+    plan. Delivery with a current finalized required-review `plan` is rejected
+    until an explicit approval is bound to its exact digest; an informational
+    plan derived from minimal governance and complete risk-free evidence proceeds
+    without manufacturing an approval.
 23. A material report, decision, failed/incomplete check, changed risk,
     contradiction, scope change, or documentation finding loads
     `adaptive-pipeline`; evidence can add, remove, reorder, retry, or
@@ -669,7 +680,7 @@ configuration. Check:
 
 - links and anchors;
 - Mermaid syntax and visual completeness;
-- V12/1.15.0/schema-v1 identifiers;
+- V12/1.15.3/schema-v1 identifiers;
 - exact twenty-tool names;
 - explicit `project_root` only on `open_task`, compact `task_ref` on the
   task-anchored tools, exact task/result contract fields, arbitrary optional

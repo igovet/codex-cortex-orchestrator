@@ -72,10 +72,8 @@ source = Path(sys.argv[1])
 target = Path(sys.argv[2])
 owner_home = Path(sys.argv[3]).resolve(strict=True)
 if not source.exists():
-    raise SystemExit(
-        "error: Codebase Memory MCP is not configured in the stable Codex profile; "
-        "configure mcp_servers.codebase_memory before starting Cortex live-dev"
-    )
+    print("Codebase Memory MCP unavailable; isolated candidate will exercise the bounded worker fallback")
+    raise SystemExit(0)
 if source.is_symlink() or not source.is_file():
     raise SystemExit("error: stable Codex config must be a regular non-symlink file")
 try:
@@ -86,10 +84,8 @@ except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
 servers = payload.get("mcp_servers")
 server = servers.get("codebase_memory") if isinstance(servers, dict) else None
 if not isinstance(server, dict):
-    raise SystemExit(
-        "error: Codebase Memory MCP is not configured in the stable Codex profile; "
-        "configure mcp_servers.codebase_memory before starting Cortex live-dev"
-    )
+    print("Codebase Memory MCP unavailable; isolated candidate will exercise the bounded worker fallback")
+    raise SystemExit(0)
 
 # The allow-list contains routing and executable metadata only.  In
 # particular, never copy TOML env tables or values from the stable profile.
@@ -128,10 +124,8 @@ enabled = server.get("enabled", True)
 if not isinstance(enabled, bool):
     raise SystemExit("error: Codebase Memory MCP enabled must be boolean")
 if enabled is not True:
-    raise SystemExit(
-        "error: Codebase Memory MCP is disabled in the stable Codex profile; "
-        "enable mcp_servers.codebase_memory before starting Cortex live-dev"
-    )
+    print("Codebase Memory MCP disabled; isolated candidate will exercise the bounded worker fallback")
+    raise SystemExit(0)
 cwd = server.get("cwd")
 if cwd is not None and (not isinstance(cwd, str) or not cwd.strip() or "\n" in cwd or "\r" in cwd):
     raise SystemExit("error: Codebase Memory MCP cwd must be a non-empty single-line string")

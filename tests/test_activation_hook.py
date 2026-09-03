@@ -333,6 +333,75 @@ def test_parallel_dispatches_claim_by_exact_native_task_name(tmp_path: Path) -> 
         assert code == 0 and result["hookSpecificOutput"]["additionalContext"]
 
 
+def test_parallel_workers_without_agent_id_keep_thread_scoped_publication_leases(tmp_path: Path) -> None:
+    """Desktop child tool hooks may omit agent_id without aliasing siblings."""
+    session, root_turn = "root", "turn"
+    worker_turn = "shared-worker-turn"
+    refs = ["t_0123456789ab_" + f"{index + 1:032x}" for index in range(2)]
+    threads = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    ]
+    invoke(tmp_path, {
+        "hook_event_name": "UserPromptSubmit", "session_id": session,
+        "turn_id": root_turn, "prompt": "$cortex:orchestrator",
+    })
+    natives = []
+    for index, ref in enumerate(refs):
+        native = native_dispatch(ref, f"worker_{index}")
+        natives.append(native)
+        invoke(tmp_path, {
+            "hook_event_name": "PostToolUse", "session_id": session,
+            "turn_id": root_turn, "tool_name": "mcp__cortex__open_assignment",
+            "tool_input": {"task_ref": "t_0123456789ab"},
+            "tool_response": {"isError": False, "structuredContent": {
+                "native_dispatch": native, "replayed": False,
+            }},
+        })
+        code, spawned = invoke(tmp_path, {
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": root_turn, "tool_use_id": f"spawn-{index}",
+            "tool_name": "collaboration.spawn_agent", "tool_input": native,
+        })
+        assert code == 0 and spawned["hookSpecificOutput"]["additionalContext"]
+
+    for index, ref in enumerate(refs):
+        transcript = f"/tmp/rollout-{threads[index]}.jsonl"
+        invoke(tmp_path, {
+            "hook_event_name": "SubagentStart", "session_id": session,
+            "turn_id": worker_turn, "agent_id": f"agent-{index}",
+            "transcript_path": transcript,
+        })
+        read_input = {"task_ref": ref}
+        code, allowed = invoke(tmp_path, {
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": worker_turn, "agent_id": f"agent-{index}",
+            "transcript_path": transcript,
+            "tool_use_id": f"read-{index}", "tool_name": "mcp__cortex__read_task",
+            "tool_input": read_input,
+        })
+        assert code == 0 and allowed is None
+        invoke(tmp_path, {
+            "hook_event_name": "PostToolUse", "session_id": session,
+            "turn_id": worker_turn, "agent_id": f"agent-{index}",
+            "transcript_path": transcript,
+            "tool_name": "mcp__cortex__read_task", "tool_input": read_input,
+            "tool_response": {"isError": False, "structuredContent": {
+                "task_ref": ref, "data": {}, "has_more": False,
+            }},
+        })
+
+    for index, ref in enumerate(refs):
+        code, allowed = invoke(tmp_path, {
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": worker_turn,
+            "transcript_path": f"/tmp/rollout-{threads[index]}.jsonl",
+            "tool_name": "mcp__cortex__publish_result",
+            "tool_input": {"task_ref": ref},
+        })
+        assert code == 0 and allowed is None
+
+
 def test_assignment_receipt_and_spawn_may_use_different_turns(tmp_path: Path) -> None:
     """A dispatch is session-scoped, not incorrectly coupled to one turn."""
     session = "root"

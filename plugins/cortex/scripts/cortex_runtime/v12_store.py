@@ -4347,9 +4347,16 @@ class V12Store:
             suffix = str(item["item_ref"])[2:]
             item_id = str(connection.execute("SELECT item_id FROM effective_contract_items WHERE task_id=? AND item_id LIKE ?", (task_id, "%" + suffix)).fetchone()[0])
             owner = connection.execute(
-                "SELECT delegation_id FROM delegation_outcome_assignments "
-                "WHERE item_id=? AND assignment_role='owned' AND superseded_by_delegation_id IS NULL",
-                (item_id,),
+                "SELECT a.delegation_id FROM delegation_outcome_assignments a "
+                "LEFT JOIN worker_capabilities c ON c.assignment_id=a.delegation_id "
+                "WHERE a.item_id=? AND a.assignment_role='owned' "
+                "AND a.superseded_by_delegation_id IS NULL "
+                "AND (c.assignment_id IS NULL "
+                "OR (c.contract_revision=? AND c.state IN ('minted','consumed')) "
+                "OR EXISTS (SELECT 1 FROM reports r WHERE r.delegation_id=a.delegation_id "
+                "AND r.assembly_state='finalized')) "
+                "ORDER BY c.created_sequence DESC LIMIT 1",
+                (item_id, int(contract["revision"])),
             ).fetchone()
             all_claims = connection.execute(
                 "SELECT c.status AS claim_status,c.verification_json,r.report_id,r.status AS report_status,r.delegation_id "
@@ -4666,11 +4673,14 @@ class V12Store:
         def read(connection: sqlite3.Connection) -> str:
             self._task(connection, anchor)
             item_ids = [self._outcome_item_id(connection, anchor, item) for item in outcome_items]
+            revision = int(self._effective_contract(connection, anchor)["revision"])
             rows = connection.execute(
-                "SELECT item_id,delegation_id FROM delegation_outcome_assignments "
-                "WHERE assignment_role='owned' AND superseded_by_delegation_id IS NULL "
+                "SELECT a.item_id,a.delegation_id FROM delegation_outcome_assignments a "
+                "LEFT JOIN worker_capabilities c ON c.assignment_id=a.delegation_id "
+                "WHERE a.assignment_role='owned' AND a.superseded_by_delegation_id IS NULL "
+                "AND (c.assignment_id IS NULL OR (c.contract_revision=? AND c.state IN ('minted','consumed'))) "
                 f"AND item_id IN ({','.join('?' for _ in item_ids)})",
-                tuple(item_ids),
+                (revision, *item_ids),
             ).fetchall()
             owners = {str(row["delegation_id"]) for row in rows}
             covered = {str(row["item_id"]) for row in rows}
@@ -4682,7 +4692,7 @@ class V12Store:
             return next(iter(owners))
         return self._read(read)
 
-    def create_delegation(self, *, task_id: Any, objective: Any, role: Any, profile_name: Any, scope: Any, instructions: Any, delegation_id: Any = None, parent_delegation_id: Any = None, input_report_ids: Any = None, input_decision_ids: Any = None, outcome_assignments: Any = None, model: Any = None, reasoning_effort: Any = None, idempotency_key: Any = None, bootstrap_provenance: Mapping[str, Any] | None = None, derive_assignment_scope: bool = False, assignment_policy: Any = None, loss_recovery: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
+    def create_delegation(self, *, task_id: Any, objective: Any, role: Any, profile_name: Any, scope: Any, instructions: Any, delegation_id: Any = None, parent_delegation_id: Any = None, input_report_ids: Any = None, input_decision_ids: Any = None, outcome_assignments: Any = None, model: Any = None, reasoning_effort: Any = None, idempotency_key: Any = None, bootstrap_provenance: Mapping[str, Any] | None = None, derive_assignment_scope: bool = False, assignment_policy: Any = None, loss_recovery: Mapping[str, Any] | None = None, expected_contract_revision: Any = None) -> tuple[dict[str, Any], bool]:
         try:
             selection = validate_model_selection(model, reasoning_effort)
         except ValueError as exc:
@@ -4717,9 +4727,24 @@ class V12Store:
                 "reason": _opaque_text(loss_recovery.get("reason"), label="loss_recovery.reason", maximum=TASK_CONTRACT_ITEM_MAX_LENGTH),
                 "evidence": evidence,
             }
-        payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "outcome_assignments": assignments, "model": selection.model, "reasoning_effort": selection.reasoning_effort, "derive_assignment_scope": derive_assignment_scope, "assignment_policy": resolved_policy, "loss_recovery": normalized_loss}
+        if expected_contract_revision is not None and (
+            isinstance(expected_contract_revision, bool)
+            or not isinstance(expected_contract_revision, int)
+            or expected_contract_revision < 1
+        ):
+            raise V12StoreError("expected contract revision is invalid", code="invalid_argument")
+        payload = {"task_id": self._task_identifier(task_id), "objective": _opaque_text(objective, label="objective"), "role": _opaque_text(role, label="role", maximum=ROLE_MAX_LENGTH), "profile_name": _profile_name(profile_name), "scope": _opaque_text(scope, label="scope"), "instructions": _instructions_text(instructions), "delegation_id": None if delegation_id is None else self._record_identifier(delegation_id, label="delegation_id"), "parent_delegation_id": None if parent_delegation_id is None else self._record_identifier(parent_delegation_id, label="parent_delegation_id"), "input_report_ids": _identifier_list(input_report_ids, label="input_report_ids", maximum=MAX_REPORT_IDS, deduplicate=True), "input_decision_ids": _identifier_list(input_decision_ids, label="input_decision_ids", maximum=MAX_DECISION_IDS, deduplicate=True), "outcome_assignments": assignments, "model": selection.model, "reasoning_effort": selection.reasoning_effort, "derive_assignment_scope": derive_assignment_scope, "assignment_policy": resolved_policy, "loss_recovery": normalized_loss, "expected_contract_revision": expected_contract_revision}
         def write(connection: sqlite3.Connection) -> dict[str, Any]:
             task = self._task(connection, payload["task_id"])
+            current_revision = int(self._effective_contract(connection, str(task["task_id"]))["revision"])
+            if (
+                payload["expected_contract_revision"] is not None
+                and payload["expected_contract_revision"] != current_revision
+            ):
+                raise V12StoreError(
+                    "assignment intent is stale after a contract revision",
+                    code="assignment_stale",
+                )
             # Public/domain assignments carry ``derive_assignment_scope``.
             # Re-check the admission invariant inside this write transaction
             # so a plan revision cannot race the preflight check in the
@@ -4736,7 +4761,7 @@ class V12Store:
                         "governance assessment is required before opening an assignment",
                         code="governance_assessment_required",
                     )
-                if str(payload["assignment_policy"]) == "owner" and str(assessment["mode"]) in {"light", "full"}:
+                if str(payload["assignment_policy"]) == "owner":
                     plan = connection.execute(
                         "SELECT DISTINCT r.report_id,r.content_digest,r.review_policy FROM reports r "
                         "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
@@ -4746,16 +4771,39 @@ class V12Store:
                         "ORDER BY r.created_sequence DESC LIMIT 1",
                         (self.project_hash, task["task_id"]),
                     ).fetchone()
-                    decision = None if plan is None else connection.execute(
-                        "SELECT decision_type,subject_id,subject_digest FROM user_decisions "
-                        "WHERE project_hash=? AND task_id=? AND subject_type='plan' "
-                        "ORDER BY created_sequence DESC LIMIT 1",
+                    any_plan = connection.execute(
+                        "SELECT 1 FROM reports WHERE project_hash=? AND task_id=? "
+                        "AND report_type='plan' AND assembly_state='finalized' LIMIT 1",
                         (self.project_hash, task["task_id"]),
                     ).fetchone()
-                    if (plan is None or str(plan["review_policy"] or "") != "required"
-                            or decision is None or str(decision["decision_type"]) != "approve"
+                    if plan is None:
+                        if str(assessment["mode"]) == "minimal" and any_plan is None:
+                            plan = None
+                        else:
+                            raise V12StoreError(
+                                "a current finalized required-review plan or authoritatively derived informational plan is required before delivery",
+                                code="plan_approval_required",
+                            )
+                    if plan is None:
+                        decision = None
+                    elif str(plan["review_policy"] or "") == "informational":
+                        decision = None
+                    elif str(plan["review_policy"] or "") != "required":
+                        raise V12StoreError(
+                            "the current plan has no valid adaptive review classification",
+                            code="plan_approval_required",
+                        )
+                    else:
+                        decision = connection.execute(
+                            "SELECT decision_type,subject_id,subject_digest FROM user_decisions "
+                            "WHERE project_hash=? AND task_id=? AND subject_type='plan' "
+                            "ORDER BY created_sequence DESC LIMIT 1",
+                            (self.project_hash, task["task_id"]),
+                        ).fetchone()
+                    if (plan is not None and str(plan["review_policy"] or "") == "required"
+                            and (decision is None or str(decision["decision_type"]) != "approve"
                             or str(decision["subject_id"]) != str(plan["report_id"])
-                            or str(decision["subject_digest"]) != str(plan["content_digest"])):
+                            or str(decision["subject_digest"]) != str(plan["content_digest"]))):
                         raise V12StoreError(
                             "the current required-review plan has not been explicitly approved",
                             code="plan_approval_required",
@@ -4914,19 +4962,33 @@ class V12Store:
                 existing = self._delegation(connection, str(logical_match["delegation_id"]), task_id=task["task_id"])
                 brief = self._worker_brief(connection, task, existing)
                 return {"delegation": existing, "dispatch_brief": brief["dispatch_brief"], "renderer": brief["renderer"], "replayed": True}
+            stale_owners: dict[str, str] = {}
             for item_id in assignment_ids["owned"]:
                 current_owner = connection.execute(
-                    "SELECT delegation_id FROM delegation_outcome_assignments WHERE item_id=? AND assignment_role='owned' AND superseded_by_delegation_id IS NULL",
+                    "SELECT a.delegation_id,c.contract_revision,c.state "
+                    "FROM delegation_outcome_assignments a "
+                    "LEFT JOIN worker_capabilities c ON c.assignment_id=a.delegation_id "
+                    "WHERE a.item_id=? AND a.assignment_role='owned' "
+                    "AND a.superseded_by_delegation_id IS NULL "
+                    "ORDER BY c.created_sequence DESC LIMIT 1",
                     (item_id,),
                 ).fetchone()
                 if current_owner is not None and (
                     payload["parent_delegation_id"] is None or str(current_owner["delegation_id"]) != str(payload["parent_delegation_id"])
                 ):
-                    raise V12StoreError(
-                        "outcome item already has an active owner",
-                        code="outcome_assignment_conflict",
-                        details={"path": "$.outcomes", "expected": "non_overlapping_outcome_scope", "reason": "ownership_conflict"},
-                    )
+                    stale_revision = current_owner["contract_revision"]
+                    if (
+                        current_owner["state"] == "stale"
+                        and stale_revision is not None
+                        and int(stale_revision) < int(current_revision)
+                    ):
+                        stale_owners[item_id] = str(current_owner["delegation_id"])
+                    else:
+                        raise V12StoreError(
+                            "outcome item already has an active owner",
+                            code="outcome_assignment_conflict",
+                            details={"path": "$.outcomes", "expected": "non_overlapping_outcome_scope", "reason": "ownership_conflict"},
+                        )
             identifier = str(payload["delegation_id"] or new_sharded_id("delegation", self.project_hash))
             if connection.execute("SELECT 1 FROM delegations WHERE delegation_id=?", (identifier,)).fetchone() is not None:
                 raise V12StoreError("delegation_id already exists", code="delegation_exists")
@@ -4952,6 +5014,32 @@ class V12Store:
             native_name = f"{base_native_name}_d_{hashlib.sha256(dispatch_marker.encode('utf-8')).hexdigest()[:12]}"
             sequence = self._timeline(connection, event_type="delegation_created", entity_type="delegation", entity_id=identifier, payload={"delegation_id": identifier, "task_id": task["task_id"], "native_task_name": native_name}, task_id=task["task_id"], delegation_id=identifier)
             connection.execute("INSERT INTO delegations(delegation_id,project_hash,task_id,parent_delegation_id,native_task_name,dispatch_correlation_marker,dispatch_correlation_digest,objective,role,profile_name,scope,instructions,input_report_ids_json,input_decision_ids_json,model,reasoning_effort,created_at,created_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (identifier, self.project_hash, task["task_id"], payload["parent_delegation_id"], native_name, dispatch_marker, dispatch_marker_digest, payload["objective"], payload["role"], payload["profile_name"], payload["scope"], payload["instructions"], _canonical_json(payload["input_report_ids"], label="input_report_ids"), _canonical_json(payload["input_decision_ids"], label="input_decision_ids"), payload["model"], payload["reasoning_effort"], _now(), sequence))
+            if stale_owners:
+                transfer_sequence = self._timeline(
+                    connection,
+                    event_type="revision_invalidated_ownership_transferred",
+                    entity_type="delegation",
+                    entity_id=identifier,
+                    payload={
+                        "delegation_id": identifier,
+                        "contract_revision": current_revision,
+                        "item_count": len(stale_owners),
+                    },
+                    task_id=task["task_id"], delegation_id=identifier,
+                )
+                for item_id, stale_owner in stale_owners.items():
+                    cursor = connection.execute(
+                        "UPDATE delegation_outcome_assignments "
+                        "SET superseded_by_delegation_id=?,superseded_sequence=? "
+                        "WHERE delegation_id=? AND item_id=? AND assignment_role='owned' "
+                        "AND superseded_by_delegation_id IS NULL",
+                        (identifier, transfer_sequence, stale_owner, item_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise V12StoreError(
+                            "stale outcome ownership changed during reassignment",
+                            code="outcome_assignment_conflict",
+                        )
             transferred = [item_id for item_id in assignment_ids["owned"] if item_id in parent_owned]
             if transferred:
                 transfer_sequence = self._timeline(
@@ -5298,6 +5386,12 @@ class V12Store:
             ).fetchone()
             capability_key = str(row["capability_ref"]) if row is not None else "server-owned-assignment-bootstrap"
             revision = int(row["contract_revision"]) if row is not None else 1
+            current_revision = int(self._effective_contract(connection, task_key)["revision"])
+            if revision != current_revision:
+                raise V12StoreError(
+                    "worker assignment is stale after a contract revision",
+                    code="assignment_stale",
+                )
             return self._consume_worker_bootstrap_row(
                 connection, row=row, capability_key=capability_key,
                 task_key=task_key, assignment_key=assignment_key,
@@ -5306,13 +5400,7 @@ class V12Store:
         return self._write(write)
 
     def resolve_worker_continuation(self, *, continuation: Any) -> dict[str, Any]:
-        """Resolve the immutable assignment revision for a consumed continuation.
-
-        The task's effective revision is intentionally not consulted here:
-        steering can advance that revision while an owned worker is still
-        completing its assignment.  Publication remains bound to the
-        continuation's assignment snapshot and one terminal assignment slot.
-        """
+        """Resolve a consumed continuation only for the current contract."""
         continuation_key = self._worker_capability_ref(continuation, label="continuation")
         def read(connection: sqlite3.Connection) -> dict[str, Any]:
             row = connection.execute(
@@ -5321,6 +5409,12 @@ class V12Store:
             ).fetchone()
             if row is None or str(row["state"]) != "consumed":
                 raise V12StoreError("worker continuation is invalid", code="assignment_stale")
+            current_revision = int(self._effective_contract(connection, str(row["task_id"]))["revision"])
+            if int(row["contract_revision"]) != current_revision:
+                raise V12StoreError(
+                    "worker continuation is stale after a contract revision",
+                    code="assignment_stale",
+                )
             return {"continuation": continuation_key, "task_id": str(row["task_id"]), "assignment_id": str(row["assignment_id"]), "contract_revision": int(row["contract_revision"]), "state": "consumed"}
         return self._read(read)
 
@@ -5373,11 +5467,16 @@ class V12Store:
             self._task(connection, task_key)
             self._delegation(connection, assignment_key, task_id=task_key)
             capability = connection.execute(
-                "SELECT state FROM worker_capabilities "
+                "SELECT state,contract_revision FROM worker_capabilities "
                 "WHERE task_id=? AND assignment_id=?",
                 (task_key, assignment_key),
             ).fetchone()
-            if capability is None or str(capability["state"]) != "consumed":
+            current_revision = int(self._effective_contract(connection, task_key)["revision"])
+            if (
+                capability is None
+                or str(capability["state"]) != "consumed"
+                or int(capability["contract_revision"]) != current_revision
+            ):
                 raise V12StoreError(
                     "assignment page requires consumed worker authority",
                     code="assignment_stale",
@@ -5477,7 +5576,12 @@ class V12Store:
             raise V12StoreError("contract_revision is invalid", code="invalid_argument", details={"field": "contract_revision"}) from exc
         def read(connection: sqlite3.Connection) -> dict[str, Any]:
             row = connection.execute("SELECT task_id,assignment_id,contract_revision,state FROM worker_capabilities WHERE continuation_ref=?", (continuation_key,)).fetchone()
-            if row is None or tuple(row) != (task_key, assignment_key, revision, "consumed"):
+            current_revision = int(self._effective_contract(connection, task_key)["revision"])
+            if (
+                row is None
+                or tuple(row) != (task_key, assignment_key, revision, "consumed")
+                or revision != current_revision
+            ):
                 raise V12StoreError("worker continuation is invalid", code="assignment_stale")
             return {"continuation": continuation_key, "task_id": task_key, "assignment_id": assignment_key, "contract_revision": revision, "state": "consumed"}
         return self._read(read)
@@ -5497,12 +5601,12 @@ class V12Store:
         input_reports = [self._report(connection, item, task_id=str(task["task_id"])) for item in delegation["input_report_ids"]]
         if any(item["assembly_state"] != "finalized" for item in input_reports):
             raise V12StoreError("input handoff report is not finalized", code="report_state_conflict")
-        # A worker brief is an immutable assignment snapshot.  Never rebuild
-        # it from the task's latest revision: steering may advance the task
-        # while this assignment is still in flight.  The private capability
-        # row is authoritative once minted; the assignment rows provide the
-        # creation-time fallback while the brief is being constructed before
-        # that row exists.
+        # A worker brief is an immutable assignment snapshot. Never rebuild it
+        # from the task's latest revision: steering preserves this snapshot as
+        # audit history while the current-revision guards revoke its execution
+        # authority. The private capability row is authoritative once minted;
+        # assignment rows provide the creation-time fallback while the brief is
+        # being constructed before that row exists.
         snapshot_row = connection.execute(
             "SELECT contract_revision FROM worker_capabilities "
             "WHERE assignment_id=? ORDER BY created_sequence LIMIT 1",
@@ -6104,6 +6208,12 @@ class V12Store:
             ).fetchone()
             if continuation is None or tuple(continuation) != (str(task["task_id"]), str(owner["delegation_id"]), revision, "consumed"):
                 raise V12StoreError("worker continuation is invalid", code="assignment_stale")
+            current_revision = int(self._effective_contract(connection, str(task["task_id"]))["revision"])
+            if revision != current_revision:
+                raise V12StoreError(
+                    "worker publication is stale after a contract revision",
+                    code="assignment_stale",
+                )
             existing = connection.execute("SELECT payload_digest,report_id FROM report_operations WHERE delegation_id=? AND kind=?", (owner["delegation_id"], report_kind)).fetchone()
             if existing is not None:
                 if str(existing["payload_digest"]) != payload_digest:
@@ -7150,6 +7260,28 @@ class V12Store:
                         )
                         next_ordinal += 1
                     connection.execute("INSERT INTO effective_contract_revisions(task_id,revision,decision_id,created_sequence) VALUES (?, ?, ?, ?)", (anchor, revision, identifier, sequence))
+                    # Advancing the semantic contract atomically revokes every
+                    # worker lease bound to an earlier revision. The immutable
+                    # assignment, page receipts, reports, and timeline remain
+                    # available for audit, but no old process can read another
+                    # page, publish, resume, or authorize downstream work.
+                    connection.execute(
+                        "UPDATE worker_capabilities SET state='stale',updated_at=? "
+                        "WHERE task_id=? AND contract_revision<? "
+                        "AND state IN ('minted','consumed') "
+                        "AND NOT EXISTS (SELECT 1 FROM reports r "
+                        "WHERE r.delegation_id=worker_capabilities.assignment_id "
+                        "AND r.assembly_state='finalized')",
+                        (_now(), anchor, revision),
+                    )
+                    connection.execute(
+                        "UPDATE clarification_holds SET state='stale',updated_at=? "
+                        "WHERE task_id=? AND assignment_id IN ("
+                        "SELECT assignment_id FROM worker_capabilities "
+                        "WHERE task_id=? AND contract_revision<?"
+                        ") AND state IN ('pending_question','pending_delivery','delivery_claimed')",
+                        (_now(), anchor, anchor, revision),
+                    )
             if approval_handle is not None:
                 cursor = connection.execute("UPDATE approval_handles SET consumed_decision_id=? WHERE approval_handle=? AND consumed_decision_id IS NULL", (identifier, payload["approval_handle"]))
                 if cursor.rowcount != 1:
@@ -7504,9 +7636,14 @@ class V12Store:
             # says nothing about host lifecycle: the coordinator reconciles
             # the exact native name with the host, resumes/waits if present,
             # and may spawn only after absence is independently proven.
+            current_revision = int(self._effective_contract(connection, anchor)["revision"])
             continuation_rows = connection.execute(
-                "SELECT delegation_id FROM delegations WHERE task_id=? AND project_hash=? ORDER BY created_sequence,delegation_id",
-                (anchor, self.project_hash),
+                "SELECT DISTINCT d.delegation_id FROM delegations d "
+                "LEFT JOIN worker_capabilities c ON c.assignment_id=d.delegation_id "
+                "WHERE d.task_id=? AND d.project_hash=? "
+                "AND (c.assignment_id IS NULL OR (c.contract_revision=? AND c.state IN ('minted','consumed'))) "
+                "ORDER BY d.created_sequence,d.delegation_id",
+                (anchor, self.project_hash, current_revision),
             ).fetchall()
             continuations = []
             for row in continuation_rows:

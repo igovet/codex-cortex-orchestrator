@@ -49,8 +49,10 @@ evidence, and decomposition impact.
    any missing, paraphrased-with-loss, contradictory, or unrepresentable item
    as unresolved; do not silently fill it from the codebase or prior knowledge.
 6. Do not choose or publish a review disposition. The server derives it from
-   authoritative governance state; use only the live advertised publication
-   fields.
+   the coordinator's authoritative governance assessment and complete plan
+   evidence. Report every risk, unresolved item, external action, decision,
+   trade-off, and branch honestly, and use only the live advertised publication
+   fields. A planner cannot downgrade or self-attest the review policy.
 7. Complete all authorized discovery before the one terminal plan publication.
    After that publication succeeds, stop project/tool work and return the
    compact handoff; never publish a supplementary result or documentation

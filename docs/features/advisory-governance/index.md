@@ -59,14 +59,15 @@ and normally `full`. Evidence and direct user preference can revise either
 classification or mode. Neither label creates a backend wave, mandatory stage,
 model escalation, or user-approval gate.
 
-Light/full mode selection remains model-owned, but every delivery assignment in
-those modes requires a current finalized plan with server-derived `review_policy=required` and
-an explicit approval bound to that exact report and digest. The backend enforces
-this narrow pre-dispatch integrity relation while leaving planning/evidence
-assignments available; it does not choose a schedule. A minimal plan may use
-server-derived `review_policy=informational` only when
-no material product, scope, external, destructive, security, privacy, or risk
-decision remains. The derived policy is persisted on the immutable plan report.
+Governance mode selection remains model-owned. Every delivery assignment with a
+current plan whose server-derived policy is `required` needs an explicit approval
+bound to that exact report and digest. The backend enforces this narrow
+pre-dispatch integrity relation while leaving planning/evidence assignments
+available; it does not choose a schedule. `review_policy=informational` is
+limited to complete risk-free minimal-governance plans. Light/full governance,
+uncertainty, incomplete evidence, unresolved items, or plan-discovered risk
+requires review regardless of language. A planner cannot self-attest a
+downgrade. The derived policy is persisted on the immutable plan report.
 
 ## Project-level initiatives
 

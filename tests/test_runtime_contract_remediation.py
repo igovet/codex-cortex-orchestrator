@@ -668,6 +668,90 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 )
             self.assertEqual(exhausted.exception.code, "report_cursor_invalid")
 
+    def test_semantic_steering_revokes_assignment_between_read_pages(self) -> None:
+        outcomes = [
+            self._semantic_outcome("Revision-bound evidence A."),
+            self._semantic_outcome("Revision-bound evidence B."),
+        ]
+        added = self._semantic_outcome("New current-revision outcome.")
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task = self._task(root, outcomes)
+            for index, outcome in enumerate(outcomes):
+                _producer, producer_ref = self._assignment(
+                    task["task_ref"], [outcome["outcome"]],
+                    role=f"revision producer {index}", responsibility="delivery",
+                )
+                self._publish(
+                    producer_ref, outcome,
+                    f"Revision evidence {index}: " + "x" * 45_000,
+                )
+            coordinator_evidence_context: dict = {}
+            evidence_first = read_evidence(
+                task_ref=task["task_ref"], report_policy="all_finalized",
+                _connection_context=coordinator_evidence_context,
+            )
+            self.assertTrue(evidence_first["has_more"])
+            _assignment, worker_ref = self._assignment(
+                task["task_ref"], [item["outcome"] for item in outcomes],
+                role="revision paged worker", report_policy="all_finalized",
+            )
+            context: dict = {}
+            first = read_task(task_ref=worker_ref, _connection_context=context)
+            self.assertTrue(first["has_more"])
+
+            open_steering(
+                task_ref=task["task_ref"], prompt="Add the current-revision outcome?",
+                prompt_language="en",
+            )
+            record_steering(
+                task_ref=task["task_ref"], response_original="Add it.",
+                user_language="en", add=[added], retire=[],
+            )
+            with self.assertRaises(V12ServiceError) as stale_page:
+                read_task(
+                    task_ref=worker_ref, continue_=True,
+                    _connection_context=context,
+                )
+            self.assertEqual(stale_page.exception.code, "assignment_stale")
+            with self.assertRaises(V12ServiceError) as stale_restart:
+                read_task(task_ref=worker_ref, _connection_context={})
+            self.assertEqual(stale_restart.exception.code, "assignment_stale")
+            with self.assertRaises(V12ServiceError) as stale_evidence:
+                read_evidence(
+                    task_ref=task["task_ref"], report_policy="all_finalized",
+                    continue_=True, _connection_context=coordinator_evidence_context,
+                )
+            self.assertEqual(stale_evidence.exception.code, "assignment_stale")
+
+            _replacement, replacement_ref = self._assignment(
+                task["task_ref"],
+                [*[item["outcome"] for item in outcomes], added["outcome"]],
+                role="current revision worker",
+            )
+            replacement_context: dict = {}
+            replacement_first = read_task(
+                task_ref=replacement_ref, _connection_context=replacement_context,
+            )
+            self.assertEqual(
+                replacement_first["data"]["effective_contract"]["revision"], 2,
+            )
+            self.assertEqual(
+                [
+                    item["outcome"]
+                    for item in replacement_first["data"]["effective_contract"]["assigned_items"]
+                ],
+                [*[item["outcome"] for item in outcomes], added["outcome"]],
+            )
+            while replacement_first["has_more"]:
+                replacement_first = read_task(
+                    task_ref=replacement_ref, continue_=True,
+                    _connection_context=replacement_context,
+                )
+            self.assertEqual(replacement_context["assignment_complete"], True)
+
     def test_multi_report_assignment_uses_response_limit_not_storage_value_limit(self) -> None:
         outcomes = [
             self._semantic_outcome(f"Independent evidence outcome {index}.")

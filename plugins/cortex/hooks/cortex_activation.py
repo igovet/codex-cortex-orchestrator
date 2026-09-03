@@ -201,27 +201,100 @@ def _state_path(turn_id: object, session_id: object = None) -> Path | None:
         return None
 
 
-def _child_state_path(turn_id: object, session_id: object, agent_id: object = None) -> Path | None:
+def _child_thread_identity(transcript_path: object) -> str | None:
+    """Return the stable native-child thread identity from a hook transcript."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    match = re.search(
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.jsonl)?$",
+        Path(transcript_path).name,
+    )
+    return match.group(1) if match is not None else None
+
+
+def _child_state_path(
+    turn_id: object, session_id: object, agent_id: object = None,
+    transcript_path: object = None,
+) -> Path | None:
     if not isinstance(session_id, str) or not session_id:
         return None
     data_root = os.environ.get("PLUGIN_DATA")
     if not isinstance(data_root, str) or not data_root:
         return None
-    # A native agent may receive follow-up turns without another
-    # SubagentStart.  The host keeps agent_id stable across those turns, while
-    # turn_id changes.  Therefore the authoritative worker lease is keyed by
-    # parent session + agent identity when that identity is available.  The
-    # turn fallback supports older hook payloads which omitted agent_id.
-    identity = agent_id if isinstance(agent_id, str) and agent_id else turn_id
+    # The transcript carries the native child thread and is the strongest
+    # stable discriminator available on every supported child hook event.
+    # Some Desktop Pre/PostToolUse payloads omit ``agent_id``; using the shared
+    # parent turn as the first fallback then aliases concurrent workers and can
+    # reject a correct terminal publication against another worker's lease.
+    # Prefer child thread, then stable agent id, and retain the turn fallback
+    # only for older hosts which expose neither.
+    thread_identity = _child_thread_identity(transcript_path)
+    identity = (
+        thread_identity
+        or (agent_id if isinstance(agent_id, str) and agent_id else None)
+        or turn_id
+    )
     if not isinstance(identity, str) or not identity:
         return None
-    namespace = "agent:" if isinstance(agent_id, str) and agent_id else "turn:"
+    namespace = (
+        "thread:" if thread_identity is not None
+        else "agent:" if isinstance(agent_id, str) and agent_id
+        else "turn:"
+    )
     digest = hashlib.sha256(("child:" + session_id + ":" + namespace + identity).encode("utf-8")).hexdigest()
     try:
         root = Path(data_root); root.mkdir(mode=0o700, parents=True, exist_ok=True)
         return root / "activation" / f"child-{digest}.json"
     except OSError:
         return None
+
+
+def _child_state_paths(event: dict[str, Any]) -> list[Path]:
+    """Return all usable child-state aliases, strongest identity first."""
+    candidates = [
+        _child_state_path(
+            event.get("turn_id"), event.get("session_id"),
+            transcript_path=event.get("transcript_path"),
+        ),
+        _child_state_path(
+            event.get("turn_id"), event.get("session_id"), event.get("agent_id"),
+        ),
+        _child_state_path(event.get("turn_id"), event.get("session_id")),
+    ]
+    result: list[Path] = []
+    for candidate in candidates:
+        if candidate is not None and candidate not in result:
+            result.append(candidate)
+    return result
+
+
+def _resolved_child_state(event: dict[str, Any]) -> tuple[Path | None, dict[str, Any]]:
+    """Resolve an existing child lease without collapsing parallel workers."""
+    for candidate in _child_state_paths(event):
+        state = _read_state(candidate)
+        if state.get("child_mode"):
+            return candidate, state
+    return None, dict(DEFAULT_STATE)
+
+
+def _write_child_state(event: dict[str, Any], state: dict[str, Any]) -> None:
+    """Keep thread/agent/turn aliases coherent for the current child event."""
+    for candidate in _child_state_paths(event):
+        _write_state(candidate, state)
+
+
+def _remove_child_state(event: dict[str, Any], *, turn_only: bool = False) -> None:
+    """Remove bounded child aliases after a turn or terminal publication."""
+    candidates = (
+        [_child_state_path(event.get("turn_id"), event.get("session_id"))]
+        if turn_only else _child_state_paths(event)
+    )
+    for candidate in candidates:
+        if candidate is not None:
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
 
 
 def _read_state(path: Path | None) -> dict[str, Any]:
@@ -295,7 +368,7 @@ def _emit_guard_observation(event: dict[str, Any], *, outcome: str, reason_code:
         generation = Path(code_home) / ".cortex-mcp-observations" / "generations" / str(lease["generation_id"])
         journal = EventJournal.from_generation(generation=generation, build_id=str(lease["build_id"]), code_home=Path(code_home))
         state = _read_state(_state_path(event.get("turn_id"), event.get("session_id")))
-        child_state = _read_state(_child_state_path(event.get("turn_id"), event.get("session_id"), event.get("agent_id")))
+        _child_path, child_state = _resolved_child_state(event)
         if child_state.get("child_mode"):
             state = child_state
         child = state.get("child_mode") is True
@@ -1254,9 +1327,8 @@ def main() -> int:
     path = _state_path(turn_id, session_id)
     state = _read_state(path)
     event_name = event.get("hook_event_name")
-    child_path = _child_state_path(turn_id, session_id, event.get("agent_id"))
+    child_path, child_state = _resolved_child_state(event)
     if event_name != "SubagentStart" and child_path is not None:
-        child_state = _read_state(child_path)
         if child_state.get("child_mode"):
             path, state = child_path, child_state
     if (state.get("child_mode") is True and isinstance(event.get("agent_id"), str)
@@ -1315,7 +1387,9 @@ def main() -> int:
         parent_state = _read_state(parent_path)
         if not isinstance(parent_session_id, str) or not parent_session_id or not parent_state.get("selected"):
             return 0
-        child_path = _child_state_path(turn_id, session_id, event.get("agent_id"))
+        child_path = _child_state_path(
+            turn_id, session_id, event.get("agent_id"), event.get("transcript_path"),
+        )
         existing_child = _read_state(child_path)
         if existing_child.get("child_mode") and existing_child.get("anchored"):
             # Codex may repeat the lifecycle notification while the child is
@@ -1328,18 +1402,14 @@ def main() -> int:
                        "child_auth": _child_auth(parent_session_id, turn_id),
                        "agent_fingerprint": _fingerprint(event.get("agent_id")),
                        "child_mode": True}
-        _write_state(child_path, child_state)
-        turn_alias_path = _child_state_path(turn_id, session_id)
-        if turn_alias_path != child_path:
-            _write_state(turn_alias_path, child_state)
+        _write_child_state(event, child_state)
         bound_context = None
         if child_path is not None:
             bound, bound_context = _bind_worker_dispatch(event, child_path, child_state, parent_session_id)
         else:
             bound = False
         if bound:
-            if turn_alias_path != child_path:
-                _write_state(turn_alias_path, _read_state(child_path))
+            _write_child_state(event, _read_state(child_path))
             if isinstance(bound_context, str) and bound_context:
                 print(_json({"hookSpecificOutput": {
                     "hookEventName": "SubagentStart",
@@ -1357,27 +1427,12 @@ def main() -> int:
         # second SubagentStart. Keep the stable agent lease until a successful
         # terminal publication proves that the assignment is complete. The
         # same-turn compatibility alias is no longer needed after this turn.
-        turn_alias_path = _child_state_path(turn_id, session_id)
-        if turn_alias_path is not None and turn_alias_path != path:
-            try:
-                turn_alias_path.unlink()
-            except OSError:
-                pass
+        _remove_child_state(event, turn_only=True)
         return 0
 
     if (event_name == "PostToolUse" and child and _is_publication(event.get("tool_name"))
             and _is_successful_publication(event)):
-        if path is not None:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        turn_alias_path = _child_state_path(turn_id, session_id)
-        if turn_alias_path is not None and turn_alias_path != path:
-            try:
-                turn_alias_path.unlink()
-            except OSError:
-                pass
+        _remove_child_state(event)
         return 0
 
     # The hook observes worker bootstrap but never gates semantic or project
@@ -1390,7 +1445,7 @@ def main() -> int:
                 child_state.update({"selected": True, "anchored": True,
                                     "bootstrap_in_progress": False,
                                     "turn_fingerprint": _fingerprint(turn_id), "child_mode": True})
-                _write_state(path, child_state)
+                _write_child_state(event, child_state)
                 print(_json({"hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
                     "additionalContext": WORKER_TERMINAL_CONTEXT,
@@ -1408,7 +1463,7 @@ def main() -> int:
                     "turn_fingerprint": _fingerprint(turn_id),
                     "child_mode": True,
                 })
-                _write_state(path, child_state)
+                _write_child_state(event, child_state)
             else:
                 try:
                     plugin_root = os.environ.get("PLUGIN_ROOT")

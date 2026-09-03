@@ -15,8 +15,8 @@ assembly/read recovery, and project isolation.
 
 No server-owned waves, scheduler, native lifecycle state machine, repair
 ladder, closure breaker, or recovery escalation remains in the active V12
-contract. Assignment admission alone requires an assessment and, for light/full
-delivery, the exact current required-plan approval. Assignment-page receipts
+contract. Assignment admission alone requires an assessment and, whenever the
+current plan policy is `required`, the exact current required-plan approval. Assignment-page receipts
 are ledger evidence; separately, the supported host binds a native child to one
 worker MCP connection through a digest-only audience receipt. That receipt is
 not task completion, report evidence, or authority for a replacement process.
@@ -120,7 +120,7 @@ report type. A plan's persisted review policy is server-derived as
 `informational` or `required`; it is not a worker-selected publication field.
 `required` means the coordinator presents the exact finalized plan/digest,
 explains the review, requests an unambiguous approve/revise/cancel response,
-and ends the turn. For light/full delivery the backend then admits only an
+and ends the turn. For required-review delivery the backend then admits only an
 explicit approval bound to that exact current plan and the same
 effective-contract revision; it does not authenticate the chat participant or
 authorize external action. Material steering makes the previous plan and

@@ -141,9 +141,9 @@ exit 0
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "marketplace validation passed" in completed.stdout
         after_version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
-        assert re.fullmatch(r"1\.15\.0\+codex\.sha256\.[0-9a-f]{16}", after_version)
+        assert re.fullmatch(r"1\.15\.3\+codex\.sha256\.[0-9a-f]{16}", after_version)
         assert before_version == after_version
-        staged_versions = list((codex_home / ".cortex-candidates").glob("1.15.0+codex.sha256.*"))
+        staged_versions = list((codex_home / ".cortex-candidates").glob("1.15.3+codex.sha256.*"))
         assert len(staged_versions) == 1
         assert (codex_home / "plugins/cache/cortex/cortex" / staged_versions[0].name).is_dir()
         assert not bytecode.exists()
@@ -379,7 +379,7 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     isolated_codex = stable_home / ".cortex-dev/.codex"
     receipt = json.loads((isolated_codex / ".cortex-candidate-receipt.json").read_text(encoding="utf-8"))
     stamped = receipt["candidate_version"]
-    assert re.fullmatch(r"1\.15\.0\+codex\.sha256\.[0-9a-f]{16}", stamped)
+    assert re.fullmatch(r"1\.15\.3\+codex\.sha256\.[0-9a-f]{16}", stamped)
     assert receipt["candidate_path"] == str(isolated_codex / "plugins/cache/cortex/cortex" / stamped)
     assert f"Cortex candidate version={stamped}" in first.stdout
     assert f"Cortex candidate path={receipt['candidate_path']}" in first.stdout
@@ -393,7 +393,7 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     assert (stable_home / ".codex/config.toml").read_bytes() == stable_config_before
     # The base semantic version is permitted as display metadata only.  Its
     # unstamped cache directory must never be selected or printed as a path.
-    assert f"/plugins/cache/cortex/cortex/1.15.0\n" not in first.stdout
+    assert f"/plugins/cache/cortex/cortex/1.15.3\n" not in first.stdout
     first_receipt = (isolated_codex / ".cortex-candidate-receipt.json").read_bytes()
     second = subprocess.run(
         ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
@@ -404,7 +404,7 @@ printf 'fake ordinary codex candidate=%s build=%s\\n' "${CORTEX_CANDIDATE_PATH:-
     assert (isolated_codex / "fake-add-count").read_text(encoding="utf-8").strip() == "1"
 
 
-def test_cortex_dev_fails_closed_when_codebase_memory_is_not_configured(tmp_path: Path) -> None:
+def test_cortex_dev_treats_missing_codebase_memory_as_advisory(tmp_path: Path) -> None:
     stable_home = tmp_path / "stable-home"
     stable_home.mkdir()
     environment = os.environ.copy()
@@ -419,8 +419,10 @@ def test_cortex_dev_fails_closed_when_codebase_memory_is_not_configured(tmp_path
         ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
         text=True, capture_output=True, check=False, timeout=30,
     )
-    assert completed.returncode != 0
-    assert "Codebase Memory MCP is not configured" in completed.stderr
+    # The non-interactive Codex launch may still fail at the host CLI boundary,
+    # but Codebase Memory absence must not prevent isolated candidate refresh.
+    assert "Codebase Memory MCP unavailable; isolated candidate will exercise the bounded worker fallback" in completed.stdout
+    assert "Cortex isolated candidate target:" in completed.stdout
 
 
 def test_cortex_dev_does_not_copy_inline_codebase_memory_environment_values(tmp_path: Path) -> None:
@@ -452,7 +454,7 @@ def test_cortex_dev_does_not_copy_inline_codebase_memory_environment_values(tmp_
     assert "secret-that-must-not-be-copied" not in combined
 
 
-def test_cortex_dev_fails_closed_when_codebase_memory_is_disabled(tmp_path: Path) -> None:
+def test_cortex_dev_treats_disabled_codebase_memory_as_advisory(tmp_path: Path) -> None:
     stable_home = tmp_path / "stable-home"
     (stable_home / ".codex").mkdir(parents=True)
     (stable_home / ".codex/config.toml").write_text(
@@ -473,8 +475,8 @@ def test_cortex_dev_fails_closed_when_codebase_memory_is_disabled(tmp_path: Path
         ["bash", "scripts/cortex-dev"], cwd=ROOT, env=environment,
         text=True, capture_output=True, check=False, timeout=30,
     )
-    assert completed.returncode != 0
-    assert "Codebase Memory MCP is disabled" in completed.stderr
+    assert "Codebase Memory MCP disabled; isolated candidate will exercise the bounded worker fallback" in completed.stdout
+    assert "Cortex isolated candidate target:" in completed.stdout
 
 
 def test_isolated_sync_fails_when_installed_candidate_cannot_commit_its_receipt(tmp_path: Path) -> None:
@@ -514,5 +516,5 @@ exit 0
     )
     assert completed.returncode != 0
     assert "receipt was not committed" in completed.stdout + completed.stderr
-    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.15.0+codex.sha256.*"))
+    assert list((codex_home / "plugins/cache/cortex/cortex").glob("1.15.3+codex.sha256.*"))
     assert not (codex_home / ".cortex-candidate-receipt.json").exists()

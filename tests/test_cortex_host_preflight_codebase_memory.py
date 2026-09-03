@@ -1,4 +1,4 @@
-"""Host preflight must require the worker-owned Codebase Memory MCP."""
+"""Host preflight treats Codebase Memory availability as advisory and safe."""
 from __future__ import annotations
 
 import importlib.util
@@ -18,11 +18,11 @@ def _module():
     return module
 
 
-def test_preflight_requires_enabled_top_level_codebase_memory_server():
+def test_preflight_reports_missing_or_unusable_codebase_memory_as_advisory():
     inspect = _module().inspect_codebase_memory_config
-    assert inspect({})["status"] == "FAIL"
-    assert inspect({"mcp_servers": {"codebase_memory": {"enabled": False, "command": "memory"}}})["status"] == "FAIL"
-    assert inspect({"mcp_servers": {"codebase_memory": {"enabled": True, "command": ""}}})["status"] == "FAIL"
+    assert inspect({})["status"] == "WARN"
+    assert inspect({"mcp_servers": {"codebase_memory": {"enabled": False, "command": "memory"}}})["status"] == "WARN"
+    assert inspect({"mcp_servers": {"codebase_memory": {"enabled": True, "command": ""}}})["status"] == "WARN"
 
 
 def test_preflight_accepts_only_safe_local_stdio_metadata():

@@ -805,7 +805,7 @@ class CommandReceiptTests(unittest.TestCase):
                             "outcome": outcome["outcome"], "status": "planned",
                             "verification": ["The plan contains a focused check."],
                         }],
-                        "risks": [], "unresolved": [],
+                        "risks": ["The user-visible change requires review."], "unresolved": [],
                     })
                     self.assertFalse(published_plan["result"].get("isError"), published_plan)
 

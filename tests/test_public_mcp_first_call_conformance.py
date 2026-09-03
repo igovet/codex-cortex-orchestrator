@@ -174,7 +174,7 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
             "open_plan_review": ("coordinator-only", "current finalized active plan"),
             "record_plan_review": ("coordinator-only", "direct user decision"),
             "open_steering": ("coordinator-only", "decision opening"),
-            "record_steering": ("coordinator-only", "atomic", "direct user steering"),
+            "record_steering": ("coordinator-only", "atomic", "direct user-authored"),
             "open_assignment": (
                 "coordinator-only", "exactly one", "private worker assignment",
                 "never reads or consumes", "must never call open_assignment",
@@ -233,8 +233,8 @@ class PublicMcpFirstCallConformanceTests(unittest.TestCase):
         self.assertIn("cannot substitute for that contract revision", assignment)
 
         recorded_clarification = PUBLIC_TOOLS["record_clarification"]["description"].lower()
-        self.assertIn("open steering next", recorded_clarification)
-        self.assertIn("do not read assignment scope", recorded_clarification)
+        self.assertIn("record_steering next", recorded_clarification)
+        self.assertIn("without asking for another confirmation", recorded_clarification)
 
         state = PUBLIC_TOOLS["read_state"]["description"].lower()
         self.assertIn("not worker-liveness polling", state)

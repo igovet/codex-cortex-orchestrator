@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.15.0 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.15.3 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -92,14 +92,14 @@ any Git command. An unsupported or non-Git root is recorded as a clean observed
 state and causes Git-dependent inspection to be skipped, not speculatively
 executed with a nonzero failure.
 
-For structural project-code discovery, every worker starts with the enabled
-Codebase Memory MCP bound to the canonical project root. Missing, disabled, or
-unusable Codebase Memory is an environment blocker, not a fallback condition.
-One bounded ordinary-search fallback is permitted only after an actual graph
-call proves that the indexed graph excludes the requested surface or is
-insufficient; the worker records that rationale and scope. Silent or chained
-fallback is a contract violation. The coordinator is denied operational access
-to the shared Codebase Memory namespace.
+For structural project-code discovery, workers prefer Codebase Memory when it is
+available and bind it to the canonical project root. Missing, disabled, denied,
+timed-out, erroneous, unusable, or insufficient graph evidence is a bounded
+limitation, not an environment blocker by itself. The worker then records that
+limitation and may make exactly one assignment-scoped ordinary-search fallback;
+it remains blocked only when that safe fallback cannot establish the assigned
+surface. Silent, broad, or chained fallback is a contract violation. The
+coordinator is denied operational access to the shared Codebase Memory namespace.
 
 ## Public API boundary
 
@@ -392,10 +392,16 @@ the linked conformance projection guide model reasoning but never become a
 backend authorization or lifecycle gate.
 
 Required-review plans are revision-bound evidence. The server exposes a plan as
-active, opens its review, and admits light/full delivery only when the plan's
+active, opens its review, and admits delivery only when the plan's
 planning-assignment snapshot matches the current effective-contract revision.
 A material steering revision therefore invalidates reuse of every earlier plan
 approval without deleting or rewriting its audit history.
+It also atomically revokes every nonterminal worker capability bound to an
+earlier effective-contract revision. Stale workers cannot consume another page,
+publish, resume through the current-continuation projection, retain active
+ownership, or authorize downstream dispatch; immutable assignment and report
+history remains available only as audit evidence. Continued work requires a
+fresh assignment bound to the complete current contract.
 
 The public aggregate projection binds each row to the exact semantic outcome
 and supplies explicit `ownership` plus `delivery_assignability`. `assignable`
@@ -608,15 +614,14 @@ remains effective across later model assessments; those statements are new rows
 that may preserve an evidence-backed warning or recommendation without
 silently replacing the user's choice.
 
-Every light or full delivery assignment requires a current finalized plan with
-server-derived `review_policy=required`; the coordinator opens the matching review, presents
-the verified plan, and records an explicit approval bound to that exact report
-and digest before dispatching delivery work. The backend enforces this narrow
-pre-dispatch relation while leaving planning/evidence assignments available.
-Minimal informational plans are permitted only when no
-material product, scope, external, destructive, security, privacy, or risk
-decision remains. This admission invariant never schedules work or authorizes
-external, destructive, or scope-expanding action.
+Every delivery assignment whose current plan has server-derived
+`review_policy=required` needs the matching review and an explicit approval bound
+to that exact report and digest. Informational plans are permitted only for a
+complete risk-free minimal-governance plan. Light/full governance, incomplete
+or uncertain evidence, unresolved items, and plan-discovered risk require review
+regardless of language; a planner cannot self-attest a downgrade.
+This admission invariant never schedules work or authorizes external,
+destructive, or scope-expanding action.
 
 Initiative status is limited to `proposed`, `active`, `paused`, `completed`,
 `closed`, and `cancelled`. The status is informational. An existing initiative
@@ -739,8 +744,8 @@ invalidates both live results.
 
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.15.0+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.15.0` is
+`1.15.3+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.15.3` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a

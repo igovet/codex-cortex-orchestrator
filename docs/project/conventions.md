@@ -132,9 +132,10 @@
   `synthesis`, and `plan`; public workers use the three matching publication
   operations.
   A plan's review policy is `informational` or `required`; review is a
-  coordinator-owned ordinary-chat hold. For light/full delivery, backend
-  admission also requires explicit approval of the exact current finalized
-  plan; silence, unrelated text, and approval of an older revision do not pass.
+  coordinator-owned ordinary-chat hold. Whenever the current plan policy is
+  `required`, backend admission also requires explicit approval of the exact
+  current finalized plan; silence, unrelated text, and approval of an older
+  revision do not pass.
 - Use the semantic publication operation for one complete terminal publication outcome.
   The server owns storage and derives replay identity from the delegation,
   phase, assembly state, and canonical payload. Exact ambiguous retries replay;
@@ -209,7 +210,7 @@
   recovery, wave/gate state machine, or server-selected native lifecycle.
   Preserve the digest-only supported-host audience receipt, monotonic MCP
   connection roles, explicit blocked/aborted successor lineage, and the narrow
-  pre-dispatch assessment plus exact light/full plan-approval admission
+  pre-dispatch assessment plus exact required-review plan-approval admission
   invariants; none schedules project work.
 - The activation/lifecycle hooks bind native dispatch and enforce the
   coordinator/worker capability boundary. Native wait/stop state remains outside

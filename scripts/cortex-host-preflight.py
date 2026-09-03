@@ -25,7 +25,7 @@ MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-EXPECTED_BASE_VERSION = "1.15.0"
+EXPECTED_BASE_VERSION = "1.15.3"
 EXPECTED_MCP = {
     "mcpServers": {
         "cortex": {
@@ -709,42 +709,30 @@ def inspect_registration(codex_path: Path | None, version: str | None) -> dict[s
 
 
 def inspect_codebase_memory_config(payload: dict[str, Any]) -> dict[str, Any]:
-    """Require a usable, enabled, non-secret stdio Codebase Memory server.
+    """Inspect safe Codebase Memory availability without making it a blocker.
 
     This deliberately validates only safe availability metadata.  It never
     reads or reports environment values, headers, URLs, or other credentials.
     """
     servers = payload.get("mcp_servers")
     server = servers.get("codebase_memory") if isinstance(servers, dict) else None
+    def advisory(detail: str, remediation: str) -> dict[str, Any]:
+        return {
+            "name": "codebase_memory_mcp",
+            "status": "WARN",
+            "detail": detail,
+            "remediation": remediation,
+        }
+
     if not isinstance(server, dict):
-        return check(
-            "codebase_memory_mcp",
-            False,
-            "top-level mcp_servers.codebase_memory is missing",
-            "Configure an enabled local Codebase Memory MCP server for this Codex user, then rerun the preflight.",
+        return advisory(
+            "top-level mcp_servers.codebase_memory is unavailable; workers use one bounded safe fallback when needed",
+            "Configure an enabled local Codebase Memory MCP server to enable preferred graph discovery.",
         )
     if server.get("enabled", True) is not True:
-        return check(
-            "codebase_memory_mcp",
-            False,
-            "top-level mcp_servers.codebase_memory is disabled",
-            "Enable mcp_servers.codebase_memory for this Codex user, then rerun the preflight.",
-        )
-    command = server.get("command")
-    if not isinstance(command, str) or not command.strip() or "\n" in command or "\r" in command:
-        return check(
-            "codebase_memory_mcp",
-            False,
-            "mcp_servers.codebase_memory has no usable local command",
-            "Configure a non-empty single-line command for the Codebase Memory MCP server, then rerun the preflight.",
-        )
-    args = server.get("args", [])
-    if not isinstance(args, list) or any(not isinstance(item, str) or "\n" in item or "\r" in item for item in args):
-        return check(
-            "codebase_memory_mcp",
-            False,
-            "mcp_servers.codebase_memory has malformed command arguments",
-            "Repair the Codebase Memory MCP command arguments, then rerun the preflight.",
+        return advisory(
+            "top-level mcp_servers.codebase_memory is disabled; workers use one bounded safe fallback when needed",
+            "Enable mcp_servers.codebase_memory to enable preferred graph discovery.",
         )
     if any(key in server for key in ("url", "http_url", "headers", "authorization", "env", "environment")):
         return check(
@@ -752,6 +740,18 @@ def inspect_codebase_memory_config(payload: dict[str, Any]) -> dict[str, Any]:
             False,
             "mcp_servers.codebase_memory uses an unsupported credential-bearing or remote form",
             "Configure Codebase Memory as a local stdio MCP server without inline credentials, then rerun the preflight.",
+        )
+    command = server.get("command")
+    if not isinstance(command, str) or not command.strip() or "\n" in command or "\r" in command:
+        return advisory(
+            "mcp_servers.codebase_memory has no usable local command; workers use one bounded safe fallback when needed",
+            "Configure a non-empty single-line local command to enable preferred graph discovery.",
+        )
+    args = server.get("args", [])
+    if not isinstance(args, list) or any(not isinstance(item, str) or "\n" in item or "\r" in item for item in args):
+        return advisory(
+            "mcp_servers.codebase_memory has malformed command arguments; workers use one bounded safe fallback when needed",
+            "Repair the local Codebase Memory MCP command arguments to enable preferred graph discovery.",
         )
     return check("codebase_memory_mcp", True, "enabled local Codebase Memory MCP command is configured")
 
@@ -783,7 +783,7 @@ def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, 
             "Repair the same-user Codex configuration, then rerun the preflight.",
         )
     memory_result = inspect_codebase_memory_config(payload)
-    if memory_result["status"] != "PASS":
+    if memory_result["status"] == "FAIL":
         return memory_result
     plugins = payload.get("plugins")
     registration = plugins.get(CORTEX_PLUGIN_ID) if isinstance(plugins, dict) else None
@@ -837,10 +837,13 @@ def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, 
             f"agents.default_subagent_model must be gpt-5.6-luna (found {observed})",
             "Run the approved Cortex installer to back up and replace the default, then start a new thread.",
         )
+    detail = "same-user Cortex MCP approval, multi_agent_v2, and Luna default configuration are valid"
+    if memory_result["status"] == "WARN":
+        detail += "; Codebase Memory is advisory and unavailable workers retain one bounded safe fallback"
     return check(
         "cortex_mcp_config",
         True,
-        "same-user Cortex MCP approval, multi_agent_v2, and Luna default configuration are valid",
+        detail,
     )
 
 

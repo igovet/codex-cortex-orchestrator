@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.15.3] - 2026-09-03
+
+### Changed
+
+- A concrete user-authored requirement change is now recorded directly as
+  steering; the coordinator opens a steering question only when a real branch
+  still requires the user's choice.
+- Plan review is derived from authoritative governance depth and plan evidence:
+  complete risk-free minimal plans proceed informationally, while light/full or
+  uncertain plans require review. A planner can no longer self-attest a review
+  downgrade.
+
+### Fixed
+
+- Bound native worker leases to the child transcript thread before agent/turn
+  fallbacks so parallel Desktop workers cannot overwrite one another when a
+  publication hook omits `agent_id`.
+- Made a terminal worker stop without publication route immediately through
+  lineage-linked loss recovery instead of replaying the original assignment or
+  waiting for the user to say “continue”.
+
+## [1.15.2] - 2026-09-03
+
+### Changed
+
+- Kept Codebase Memory as the preferred worker discovery route while allowing
+  exactly one safe, assignment-scoped native fallback when the graph is absent,
+  denied, unusable, or demonstrably insufficient.
+- Clarified autonomous in-contract continuation after worker evidence without
+  adding a host scheduler or weakening genuine plan, steering, clarification,
+  and closure decisions.
+
+### Fixed
+
+- Replaced language and keyword plan heuristics with an affirmative structured
+  nonmateriality proof. Informational review now requires every materiality
+  predicate to be proven absent; missing, unknown, malformed, or material facts
+  require review regardless of language or governance depth.
+- Atomically revoked nonterminal pre-revision worker authority when semantic
+  steering advances the effective contract. Stale assignment reads,
+  publications, continuation projection, ownership, approval binding, and
+  downstream dispatch now fail closed while immutable history is preserved.
+
 ## [1.15.0] - 2026-09-02
 
 ### Changed
