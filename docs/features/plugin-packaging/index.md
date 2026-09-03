@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.12 is packaged as a repository-local Codex plugin and distributed to
+Cortex 1.15.0 is packaged as a repository-local Codex plugin and distributed to
 users through the GitHub Marketplace source documented in README. Manifest,
 MCP server, advisory profiles, bundled skills, runtime, tests,
 and release-facing documentation must describe the same V12 contract.
@@ -14,7 +14,7 @@ and release-facing documentation must describe the same V12 contract.
 - [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) carries V12 version and UI metadata.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) defines the GitHub Marketplace entry.
-- [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the fourteen-tool semantic facade.
+- [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the twenty-tool semantic facade.
 - [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the complete registry projected by runtime audience.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) defines bounded task/report constants and report-digest semantics.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 storage.
@@ -23,7 +23,7 @@ and release-facing documentation must describe the same V12 contract.
 - [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the attested native worker message.
 - [profiles.json](../../../plugins/cortex/profiles.json) defines advisory roles and model recommendations.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines the authoritative outcome-first coordinator contract.
-- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative fourteen-tool semantic and nonblocking contract.
+- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative twenty-tool semantic and nonblocking contract.
 - [coordinator-communication/SKILL.md](../../../plugins/cortex/skills/coordinator-communication/SKILL.md) defines the mandatory coordinator-to-user policy.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates repository package structure.
 - [cortex_release_candidate.py](../../../scripts/cortex_release_candidate.py) builds the explicit source candidate and docs closure.
@@ -34,8 +34,8 @@ and release-facing documentation must describe the same V12 contract.
 
 ## Current package contract
 
-The package exposes exactly fourteen semantic tools with identical coordinator and worker
-schemas. `tools/list` advertises the canonical registry's closed input schemas and
+The package exposes exactly twenty semantic tools with audience-specific
+coordinator and worker projections. Initial neutral `tools/list` advertises the canonical registry's closed input schemas and
 complete descriptions in one response below 65,536 bytes. Optional MCP
 `outputSchema` declarations are omitted from discovery. The complete family
 result schemas remain private runtime contracts and are used to
@@ -58,12 +58,14 @@ notice rather than duplicating the same body across both MCP content channels,
 keeping assignment authority and the full response below the physical frame.
 
 The standard MCP `tools/list` response returns the complete unchanged
-fourteen-tool catalogue in one page. A release fails validation if the final
+twenty-tool catalogue in one page. A release fails validation if the final
 JSON-RPC envelope exceeds 65,536 bytes, well below the 256 KiB physical JSONL
-frame bound. If a host uses deferred discovery for a mutation, it must obtain
-the specific intact live declaration required for that operation; an unavailable
-or truncated declaration is a fail-closed condition, and the host must not infer
-or guess a mutation contract.
+frame bound. The MCP companion is required at session startup and declares
+`omit_tools_from: ["code_mode", "deferred"]`; Desktop must project the
+complete catalogue as direct model tools before the first turn or fail
+initialization explicitly. An
+unavailable or truncated declaration is a fail-closed condition, and the host
+must not infer or guess a mutation contract.
 
 Only `open_task` accepts explicit `project_root`; it stores the canonical
 project association and returns a compact `task_ref` for later task-anchored
@@ -87,12 +89,10 @@ advisory verdict, and bounded evidence; private/internal subject and initiative
 ledger identity is never a public argument.
 
 The package keeps finalized-report evidence separate from advisory bookkeeping.
-`read_task` exposes `execution_outcome` with `evidence_status`,
-`finalized_report_count`, `completed_report_count`, `effective_revision`,
-`coverage_status`, and `outcome`. The outcome derives deterministically from
-current effective-contract coverage, not report arrival order or historical
-claims, and makes no native-lifecycle claim. It also exposes
-`advisory_closure` with the current record status. After sufficient evidence,
+`read_state` exposes only scalar execution status, report counts, current
+revision, coverage status/outcome, and closure status/verdict. These values
+derive deterministically from current effective-contract coverage, not report
+arrival order or historical claims, and make no native-lifecycle claim. After sufficient evidence,
 the coordinator selects `ready`, `ready_with_risks`, or `not_ready`, then
 automatically attempts the advisory write and intended bounded inspection;
 `ready_with_risks` never requires user confirmation. The closure result returns
@@ -155,8 +155,9 @@ identity, every connection starts with a neutral complete
 catalogue and foreign pending state cannot select its role. That catalogue
 grants no authority. The process consumes only
 the exact child-bound PreToolUse authorization on the first assignment read,
-then advertises the worker projection through `tools/list_changed`; clients
-that retain the neutral catalogue remain constrained by authoritative server
+then commits worker authority without a mid-turn refresh that could replay the
+Desktop bootstrap. An explicit catalogue read returns the worker projection;
+clients that retain the neutral catalogue remain constrained by authoritative server
 role checks. Native subagent dispatch remains outside
 the MCP server, and hooks never replace server-side ledger authority.
 
@@ -182,11 +183,11 @@ End users add
 Marketplace source, then install `cortex@cortex` through Desktop or CLI.
 
 The source published to that Marketplace already has a content-addressed
-manifest version, `1.14.12+codex.sha256.<digest-prefix>`. The isolated development
+manifest version, `1.15.0+codex.sha256.<digest-prefix>`. The isolated development
 builder uses the identical version rule. At MCP startup the packaged runtime
 recomputes the normalized plugin-tree digest before `initialize`; therefore the
 production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.14.12` manifest is source-mode only and the
+in provenance strength. A plain `1.15.0` manifest is source-mode only and the
 Marketplace validator rejects it. The same gate enforces the host's 128-byte
 `defaultPrompt` and three-second `SessionEnd` timeout limits.
 
@@ -216,8 +217,8 @@ continue to report any residue or catalog drift.
 The release candidate must prove:
 
 - content-addressed manifest/Marketplace parity with semantic base version
-  1.14.12 and a suffix matching the complete normalized plugin payload;
-- exact fourteen-tool registry/runtime parity;
+  1.15.0 and a suffix matching the complete normalized plugin payload;
+- exact twenty-tool registry/runtime parity;
 - uniform participant catalog, closed advertised input schemas, compact public
   result projections with closed operation-specific handles, private
   successful-result schema validation, a complete catalogue below 65,536
@@ -261,7 +262,7 @@ The release candidate must prove:
 - exact inclusion of the activation guard and sanitized lifecycle observer,
   with every callback using the same `python3 -B` runtime contract as the MCP
   server and exact native `Agent` matchers for pre/post tool observation;
-- packaged maintenance-module parity without changing the fourteen-tool registry,
+- packaged maintenance-module parity without changing the twenty-tool registry,
   including task/shard anchoring, confirmation strings, backup validation,
   offline restore, projection safety, canonical-data retention, and zero
   project/V11 writes;

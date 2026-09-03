@@ -273,6 +273,11 @@ _MANDATORY_PROJECT_POLICY = """# Mandatory project-work invariants
 - A plan publication does not choose or declare its review disposition. The
   server derives that persisted state from authoritative task governance; do
   not add a review-policy field to the advertised publication contract.
+- Never ask the user directly. If progress requires a real user decision,
+  publish an honest partial or blocked outcome that gives the coordinator the
+  blocked action, relevant established evidence, exact missing decision,
+  available safe choices, and the material consequence or stopping condition
+  of each choice. Do not emit a context-free question or approval request.
 - A planning worker completes all bounded discovery before publishing one
   terminal plan, then stops project/tool work and never publishes a
   supplementary result or documentation outcome. Later material evidence uses
@@ -403,7 +408,6 @@ def render_worker_message(*, task: Mapping[str, Any], delegation: Mapping[str, A
     bootstrap = {
         "assignment context": {
             "task_ref": worker_task_ref,
-            "worker label": delegation.get("native_task_name"),
         },
     }
     message = "\n\n".join((

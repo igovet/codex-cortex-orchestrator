@@ -25,13 +25,15 @@ MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-EXPECTED_BASE_VERSION = "1.14.12"
+EXPECTED_BASE_VERSION = "1.15.0"
 EXPECTED_MCP = {
     "mcpServers": {
         "cortex": {
             "command": "python3",
             "args": ["-B", "./scripts/cortex.py"],
             "cwd": ".",
+            "required": True,
+            "omit_tools_from": ["code_mode", "deferred"],
             "env_vars": [
                 "CORTEX_SESSION_NONCE",
                 "CORTEX_RAW_DIAGNOSTIC",

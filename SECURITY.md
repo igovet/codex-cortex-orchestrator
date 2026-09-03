@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 1.14.12 Codex plugin. The V12 runtime is
+This repository contains the Cortex 1.15.0 Codex plugin. The V12 runtime is
 explicitly opt-in, runs locally, and stores coordination state in a private,
 project-isolated SQLite schema-v1 ledger. Cortex is a durable coordination
 sidecar, not an authorization service or workflow engine. Canonical
@@ -36,9 +36,9 @@ backend gates. Required plan review and a genuine user decision are owned by
 the coordinator in ordinary chat: a stored decision records the evidence but
 does not authenticate the user, grant authority, or authorize a later action.
 
-The complete semantic registry contains fourteen tools, but every MCP
+The complete semantic registry contains twenty tools, but every MCP
 connection receives an immutable audience projection. Coordinators receive
-coordinator operations plus `read_task`; a signed worker-candidate or committed
+only coordinator operations; a signed worker-candidate or committed
 worker receives only `read_task` and the three worker publication operations.
 The worker spawn receives one compact closed native dispatch; it is neither the
 full worker policy nor ledger authority. The mandatory first assignment read
@@ -109,18 +109,24 @@ and contains exactly:
 
 1. `open_task`
 2. `read_task`
-3. `open_clarification`
-4. `record_clarification`
-5. `open_plan_review`
-6. `record_plan_review`
-7. `open_steering`
-8. `record_steering`
-9. `open_assignment`
-10. `publish_plan`
-11. `publish_result`
-12. `publish_documentation`
-13. `assess_governance`
-14. `close_task`
+3. `read_state`
+4. `read_scope`
+5. `read_outcome`
+6. `read_continuations`
+7. `read_evidence`
+8. `read_timeline`
+9. `open_clarification`
+10. `record_clarification`
+11. `open_plan_review`
+12. `record_plan_review`
+13. `open_steering`
+14. `record_steering`
+15. `open_assignment`
+16. `publish_plan`
+17. `publish_result`
+18. `publish_documentation`
+19. `assess_governance`
+20. `close_task`
 
 Every tool has a closed input object. Runtime validation consumes the same
 schema object advertised by `tools/list`. Unexpected properties, invalid
@@ -210,10 +216,11 @@ receipt cannot select a new root audience.
 child agent/session/assignment, and `PreToolUse` authorizes the exact first
 assignment read without rewriting it. Only that otherwise-uncommitted
 connection may atomically claim the authorization. The server validates the
-read against its worker-candidate schema, fixes the assignment view, and
+read against its worker-candidate schema and
 commits worker role only after successful terminal assignment consumption.
-It then emits the standard `notifications/tools/list_changed` notification;
-a supporting client refresh receives only `read_task` and the three worker
+It deliberately emits no mid-turn catalogue notification because Desktop can
+replay the already-successful assignment read while applying that refresh. An
+explicit later catalogue read receives only `read_task` and the three worker
 publication tools. A client that retains the neutral catalogue remains
 fail-closed because committed server role checks reject every coordinator-only
 worker call without mutation. A confirmed coordinator can never pivot. Pre-consumption
@@ -310,11 +317,15 @@ attempts fail closed before durable mutation.
 The stdio transport bounds one JSON frame at 256 KiB. An oversized frame is
 fully drained and returns a sanitized parse error so the next valid
 `ping`/`tools/list` request can succeed; it must not desynchronize the server.
-The complete fourteen-tool catalogue is additionally constrained to 65,536
+The complete twenty-tool catalogue is additionally constrained to 65,536
 bytes. It advertises the authoritative closed input contracts while keeping
 optional successful-result schemas inside the runtime validation boundary, so
 bounded host discovery receives every complete operation without pagination or
-truncation. Cortex never splits or truncates a definition to fit a frame.
+truncation. The bundled MCP is required at host session startup and excluded
+from both programmatic code mode and deferred discovery. Direct model calls are
+its only valid host surface, so a Desktop turn cannot proceed with the selected
+skill but without the direct Cortex catalogue. Cortex never splits or truncates
+a definition to fit a frame.
 
 ## Data handling
 
@@ -396,12 +407,23 @@ authorization grant: the transactional admission check remains authoritative
 and rejects mixed, stale, retired, duplicate, or otherwise conflicting scope
 without mutation.
 
+When confirmed loss evidence leaves exactly one complete predecessor scope,
+the replacement omits outcome selection and the server derives that immutable
+scope atomically. Explicit exact-name selection is required only to choose
+among multiple recoverable predecessors; this avoids model-side reconstruction
+without weakening lineage or ownership checks.
+
 The current V3 specialist envelope is admitted before terminal finalization.
 It requires an exact one-to-one disposition for every independent outcome in
 the immutable assignment scope, observable evidence, and residual
 risks/deviations/unresolved items. Acceptance, verification, constraints,
 steer additions, and source fragments remain linked metadata instead of
 separate coverage obligations.
+For documentation-impact publication, an omitted duplicate
+`verification_facts` array is reconstructed only from the mandatory
+per-outcome verification entries and their explicit coverage dispositions.
+No text is invented or discarded; plan and result publications retain their
+strict explicit verification-fact requirement.
 worker bootstrap provides a server-owned ordered reconciliation template and
 count/reference receipt, but deliberately supplies no status or verification
 claim. The worker must preserve and complete that row set before its first
@@ -425,10 +447,13 @@ work, and verification. Predictable structural or mapping failures leave the
 same report assembling and consume no terminal result slot; V1/V2 history stays
 immutable and readable.
 
-Ordinary task reads create no receipt or lifecycle fact. `read_task` accepts
-only its advertised task-scoped view (`state`, `assignment`, or `evidence`),
-with `continue=true` for the immediately preceding bounded read. The server
-retains the continuation privately; callers do not supply report refs,
+Coordinator reads create no native lifecycle fact. `read_state` returns one
+small scalar summary; `read_scope`, `read_outcome`, `read_continuations`,
+`read_evidence`, and newest-first `read_timeline` expose only explicitly selected
+detail. Worker-only `read_task` consumes the immutable assignment. Where a read
+is pageable, `continue=true` is valid only after its immediately preceding page
+returned top-level `has_more=true`; the server retains position privately.
+Callers do not supply report refs,
 private assignment/publication references, private cursors, or caller replay keys. Native
 handoffs are routing context, not semantic authority. Private/internal report
 assembly and ledger continuation state remain inaccessible through the public
@@ -492,7 +517,10 @@ may be retained as a same-project initiative warning so the model can assess it;
 that warning does not grant access to another project's data.
 
 Per-task Markdown projections live beside the canonical database under the
-host-private V12 shard, never under `project_root`. A returned Markdown path is
+host-private V12 shard, never under `project_root`. After verifying that source,
+Cortex may create a byte-identical content-addressed user-link copy under
+`~/.codex/cortex/views/`; its complete SHA-256 filename is checked against the
+file bytes before publication. A returned Markdown path is
 publishable only when the active tool returns it `ready` after verifying
 containment, regular-file type, current source sequence, and content digest.
 The task directory is `tasks/<task_ref>/`, never a canonical full task ID;
@@ -507,14 +535,24 @@ final answer. A released `tasks/<task-id>/` directory can move only through the
 runtime's atomic no-replace migration; a destination conflict preserves both
 directories and exposes no ready path.
 
+The terminal coordinator evidence page exposes verified ready links for the
+selected active plan or finalized report set without exposing private report
+identity. These links are withheld until bounded evidence consumption reaches
+its terminal page and are placed before the serialized result for equal CLI and
+Desktop visibility. Successful closure repeats the complete verified finalized
+link set, preventing the immediate final response from reconstructing a stale
+or malformed path from model memory. The renderer does not escape authored Markdown with
+backslashes or character entities. Authored formatting is confined to the
+disposable host-private view and is never parsed back or accepted as ledger,
+approval, identity, recovery, or execution authority.
+
 Only current/immutable plan and finalized-report `.md` files are generated for
 user-facing publication. They are readable Markdown documents with labeled
 headings, normal lists, and paragraphs rather than raw nested field dumps.
-The renderer owns the hierarchy. Ordinary caller-authored strings are treated
-as data and sanitized context-sensitively so headings, lists, tables,
-blockquotes, HTML, rules, and fences cannot inject Markdown structure; readable
-punctuation is retained. Only explicitly typed blocks (such as a code block)
-emit their intended formatting. An optional `cortex/report-view/v1` envelope is
+The renderer owns the standard sections and typed blocks, while ordinary
+authored Markdown—including headings, lists, tables, blockquotes, HTML, rules,
+fences, links, and emphasis—is preserved without renderer-generated escapes.
+An optional `cortex/report-view/v1` envelope is
 interpreted only while rendering; malformed, unknown, or legacy content uses a
 safe generic fallback and never changes report acceptance or persistence. It
 does not place JSON objects, JSON arrays, script blocks, `<pre>` blocks, or opaque
@@ -663,7 +701,7 @@ require a delegated documentation-sync update under `docs/project/` and
 there is no material impact, the coordinator obtains a finalized worker-owned
 report with an explicit English documentation-impact section and
 material/no-impact rationale. The coordinator confirms that finalized evidence
-through the bounded `read_task` evidence view before task closure. Private
+through bounded `read_evidence` before task closure. Private
 report identity may remain in ledger evidence but is not a callable public
 locator. A self-asserted
 `documentation_not_required` value is invalid. The coordinator does not
@@ -692,10 +730,17 @@ non-regular entries. Direct `./scripts/sync-cortex.sh` use remains an explicitly
 authorized local-source operation; source-mode checks do not prove an installed
 cache or interactive host behavior.
 
+Real Desktop live development uses `./scripts/cortex-desktop-dev`. It prepares
+the same isolated candidate, launches the actual Desktop binary with a
+disposable Electron profile, and does not write the stable Codex profile or
+stable Cortex plugin. CLI/Desktop parity evidence is valid only for consecutive
+real-host runs of one unchanged cache-stamped payload; a payload edit
+invalidates both live results.
+
 Production and isolated development installations share one fail-closed package
 identity rule. Their plugin manifest carries
-`1.14.12+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
-normalized plugin-tree digest before answering `initialize`. Plain `1.14.12` is
+`1.15.0+codex.sha256.<digest-prefix>`, and the MCP process recomputes the complete
+normalized plugin-tree digest before answering `initialize`. Plain `1.15.0` is
 accepted only when source mode is explicitly enabled; an explicitly source-mode
 checkout may also retain its last stamped suffix while edited, but reports
 `parityVerified=false`. Installed and candidate runtimes remain strict, and a
@@ -729,9 +774,8 @@ A useful report includes:
 
 ## Release safety checklist
 
-1. Verify the manifest is V12, the complete registry has exactly fourteen
-   tools, and coordinator/worker `tools/list` projections are disjoint except
-   for `read_task`.
+1. Verify the manifest is V12, the complete registry has exactly twenty
+   tools, and committed coordinator/worker `tools/list` projections are disjoint.
 2. Verify the bundled skills make the root coordinator orchestration-only and
    delegate every source/code/config read, analysis, edit, command, test,
    verification, and conditional documentation update to workers, while
@@ -761,7 +805,7 @@ A useful report includes:
    matcher. Verify that hooks carry host lifecycle attestation only and never
    replace the server's independent identity, schema, isolation, or mutation
    checks.
-7. Verify the packaged maintenance CLI remains outside the fourteen-tool semantic catalog,
+7. Verify the packaged maintenance CLI remains outside the twenty-tool semantic catalog,
    uses task/shard-derived host-private targets and exact confirmations,
    validates backups before retention/restore, requires offline `MCP_STOPPED`
    restore acknowledgement, preserves canonical data during projection/backup

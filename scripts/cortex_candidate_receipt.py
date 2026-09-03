@@ -22,8 +22,8 @@ from typing import Any, Mapping
 
 RECEIPT_NAME = ".cortex-candidate-receipt.json"
 SCHEMA_VERSION = 1
-BASE_VERSION = "1.14.12"
-_STAMPED_VERSION = re.compile(r"^1\.14\.12\+codex\.sha256\.([0-9a-f]{16})$")
+BASE_VERSION = "1.15.0"
+_STAMPED_VERSION = re.compile(r"^1\.15\.0\+codex\.sha256\.([0-9a-f]{16})$")
 _RECEIPT_FIELDS = frozenset({
     "schema_version", "isolated_home", "isolated_codex_home",
     "candidate_version", "candidate_path", "source_digest",
@@ -99,7 +99,7 @@ def _isolation(
 
 def _candidate_path(codex_home: Path, version: str) -> Path:
     if not _STAMPED_VERSION.fullmatch(version):
-        raise CandidateReceiptError("candidate version is not the required content-addressed 1.14.12 stamp")
+        raise CandidateReceiptError("candidate version is not the required content-addressed 1.15.0 stamp")
     # This is a validation relation, not candidate discovery.  The only
     # selected path is the byte-for-byte path persisted in the receipt.
     expected = codex_home / "plugins" / "cache" / "cortex" / "cortex" / version

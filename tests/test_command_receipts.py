@@ -372,7 +372,7 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 self.assertIn("publish_documentation", names)
 
             worker_ref = "t_0123456789ab_" + "a" * 32
-            _write_host_worker_receipt(plugin_data, worker_ref)
+            _write_host_worker_receipt(plugin_data, worker_ref, authorize=True)
             with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
                 home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
             ) as worker:
@@ -384,8 +384,11 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     item for item in listed["result"]["tools"]
                     if item["name"] == "read_task"
                 )
-                self.assertIn("report_policy", worker_read["inputSchema"]["properties"])
-                self.assertEqual(worker_read["inputSchema"]["required"], ["task_ref", "view"])
+                self.assertEqual(
+                    set(worker_read["inputSchema"]["properties"]),
+                    {"task_ref", "continue"},
+                )
+                self.assertEqual(worker_read["inputSchema"]["required"], ["task_ref"])
                 self.assertNotIn("const", worker_read["inputSchema"]["properties"]["task_ref"])
                 self.assertFalse(worker_read["inputSchema"]["additionalProperties"])
                 self.assertNotIn("worker_label", json.dumps(worker_read, sort_keys=True))
@@ -420,7 +423,7 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                 self.assertIn("open_assignment", names)
                 self.assertIn("publish_result", names)
                 rejected = candidate("read_task", {
-                    "task_ref": worker_ref, "view": "assignment",
+                    "task_ref": worker_ref,
                 })
                 self.assertEqual(
                     rejected["result"]["structuredContent"]["error"]["code"],
@@ -454,14 +457,14 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                         self.assertIn("open_assignment", names)
                         self.assertIn("publish_result", names)
                     wrong = first("read_task", {
-                        "task_ref": second_ref, "view": "assignment",
+                        "task_ref": second_ref,
                     })
                     self.assertEqual(wrong["result"]["structuredContent"]["error"]["code"], "wrong_connection")
                     first_read = first("read_task", {
-                        "task_ref": first_ref, "view": "assignment",
+                        "task_ref": first_ref,
                     })
                     second_read = second("read_task", {
-                        "task_ref": second_ref, "view": "assignment",
+                        "task_ref": second_ref,
                     })
                     self.assertNotEqual(first_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
                     self.assertNotEqual(second_read["result"]["structuredContent"].get("error", {}).get("code"), "wrong_connection")
@@ -471,7 +474,7 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
             prefix="cortex-candidate-error-data-",
         ) as plugin_data:
             worker_ref = "t_0123456789ab_" + "a" * 32
-            _write_host_worker_receipt(plugin_data, worker_ref)
+            _write_host_worker_receipt(plugin_data, worker_ref, authorize=True)
             with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}), _source_stdio_session(
                 home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
             ) as worker:
@@ -487,7 +490,16 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     malformed["result"]["structuredContent"]["error"]["code"],
                     "validation_error",
                 )
-                self.assertEqual(receipt.read_bytes(), before)
+                self.assertIn(
+                    json.loads(receipt.read_text(encoding="utf-8"))["state"],
+                    {"worker_candidate", "worker_call_authorized"},
+                )
+                from cortex_runtime.audience_attestation import authorize_worker_candidate_call
+                self.assertTrue(authorize_worker_candidate_call(
+                    Path(plugin_data), task_ref=worker_ref,
+                    agent_id="source-worker-a", turn_id="source-worker-turn",
+                    session_id="source-session", tool_use_id="source-read-retry",
+                ))
                 wrong_server_field = worker("read_task", {
                     "task_ref": worker_ref, "view": "state",
                 })
@@ -495,11 +507,13 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     wrong_server_field["result"]["structuredContent"]["error"]["code"],
                     {"validation_error", "task_not_found"},
                 )
-                self.assertEqual(receipt.read_bytes(), before)
+                self.assertIn(
+                    json.loads(receipt.read_text(encoding="utf-8"))["state"],
+                    {"worker_candidate", "worker_call_authorized"},
+                )
                 rejected = worker("read_task", {
                     "task_ref": "t_0123456789ab_" + "b" * 32,
-                    "view": "assignment",
-                })
+                                    })
                 self.assertEqual(
                     rejected["result"]["structuredContent"]["error"]["code"],
                     "wrong_connection",
@@ -586,7 +600,7 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
             delivery_error = complete_delivery_scope["result"]["structuredContent"]["error"]
             self.assertEqual(delivery_error["code"], "task_not_found", complete_delivery_scope)
 
-            missing_recovery_scope = _source_stdio_tool_call(
+            server_derived_recovery_scope = _source_stdio_tool_call(
                 home,
                 "open_assignment",
                 {
@@ -599,10 +613,9 @@ class PublicPublicationFirstCallTests(unittest.TestCase):
                     },
                 },
             )
-            self.assertTrue(missing_recovery_scope["result"].get("isError"), missing_recovery_scope)
-            recovery_error = missing_recovery_scope["result"]["structuredContent"]["error"]
-            self.assertEqual(recovery_error["code"], "validation_error", missing_recovery_scope)
-            self.assertEqual(recovery_error["details"]["path"], "$.outcomes", missing_recovery_scope)
+            self.assertTrue(server_derived_recovery_scope["result"].get("isError"), server_derived_recovery_scope)
+            recovery_error = server_derived_recovery_scope["result"]["structuredContent"]["error"]
+            self.assertEqual(recovery_error["code"], "task_not_found", server_derived_recovery_scope)
 
             rejected = _source_stdio_tool_call(
                 home,
@@ -685,8 +698,207 @@ def _abandon_sqlite_admission_lease(root: str, home: str, ready: object) -> None
 
 
 class CommandReceiptTests(unittest.TestCase):
-    def test_source_stdio_steering_requires_post_open_state_read_on_same_connection(self) -> None:
-        """Nested/programmatic calls cannot record before recovery evidence."""
+    def test_all_public_tools_complete_one_persistent_stdio_flow(self) -> None:
+        """Every advertised operation crosses a real persistent stdio boundary."""
+        outcome = {
+            "outcome": "Deliver and document one checked change.",
+            "acceptance": ["The change and its evidence are durable."],
+            "constraints": ["Keep the test project isolated."],
+            "verification": ["The focused check passes."],
+        }
+
+        def worker_ref(reply: dict) -> str:
+            match = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                reply["result"]["structuredContent"]["native_dispatch"]["message"],
+            )
+            self.assertIsNotNone(match, reply)
+            return match.group(1)
+
+        with tempfile.TemporaryDirectory(prefix="cortex-all-tools-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-all-tools-project-",
+        ) as project:
+            plugin_data = str(Path(home) / "plugins" / "data" / "cortex-cortex")
+            called: set[str] = set()
+
+            with _source_stdio_session(home) as coordinator:
+                catalogue = coordinator.rpc("tools/list", {})  # type: ignore[attr-defined]
+                advertised = {item["name"] for item in catalogue["result"]["tools"]}
+
+                def coordinator_call(name: str, arguments: dict) -> dict:
+                    called.add(name)
+                    reply = coordinator(name, arguments)
+                    self.assertFalse(reply["result"].get("isError"), (name, reply))
+                    return reply
+
+                opened = coordinator_call("open_task", {
+                    "project_root": project,
+                    "request_original": "Deliver and document one checked change.",
+                    "user_language": "en",
+                    "outcomes": [outcome],
+                    "constraints": outcome["constraints"],
+                })
+                task_ref = opened["result"]["structuredContent"]["task_ref"]
+                coordinator_call("read_state", {"task_ref": task_ref})
+                coordinator_call("read_scope", {
+                    "task_ref": task_ref, "responsibility": "delivery",
+                })
+                coordinator_call("read_outcome", {
+                    "task_ref": task_ref, "outcome": outcome["outcome"],
+                })
+                coordinator_call("read_continuations", {"task_ref": task_ref})
+                coordinator_call("read_evidence", {
+                    "task_ref": task_ref, "report_policy": "all_finalized",
+                })
+                coordinator_call("read_timeline", {"task_ref": task_ref})
+                coordinator_call("open_clarification", {
+                    "task_ref": task_ref,
+                    "prompt": "Should the isolated checked change proceed?",
+                    "prompt_language": "en",
+                })
+                coordinator_call("record_clarification", {
+                    "task_ref": task_ref,
+                    "response_original": "Proceed.",
+                    "user_language": "en",
+                })
+                coordinator_call("assess_governance", {
+                    "task_ref": task_ref, "mode": "light",
+                    "rationale": "Exercise the complete public contract.",
+                    "risk_factors": [],
+                })
+                planning = coordinator_call("open_assignment", {
+                    "task_ref": task_ref, "role": "Planner",
+                    "profile_name": "planner", "model": "gpt-5.6-luna",
+                    "reasoning_effort": "high", "responsibility": "planning",
+                    "goal": "Plan the isolated checked change.",
+                    "scope": "The complete current contract.",
+                    "instructions": "Consume the assignment and publish one terminal plan.",
+                    "report_policy": "none",
+                })
+                planning_ref = worker_ref(planning)
+                _write_host_worker_receipt(
+                    plugin_data, planning_ref,
+                    agent_id="all-tools-planner", turn_id="all-tools-plan-turn",
+                    session_id="all-tools-session",
+                )
+                with _source_stdio_session(
+                    home,
+                    host_identity=("all-tools-planner", "all-tools-plan-turn", "all-tools-session"),
+                ) as planner:
+                    called.add("read_task")
+                    consumed = planner("read_task", {"task_ref": planning_ref})
+                    self.assertFalse(consumed["result"].get("isError"), consumed)
+                    called.add("publish_plan")
+                    published_plan = planner("publish_plan", {
+                        "task_ref": planning_ref, "status": "completed",
+                        "summary": "A bounded implementation plan is ready.",
+                        "scope": "The single checked change.",
+                        "stages": [{
+                            "owner": "Implementation worker",
+                            "work": ["Implement and document the checked change."],
+                            "verification": ["Run the focused check."],
+                        }],
+                        "verification_facts": [{
+                            "state": "not_run", "summary": "Implementation has not started.",
+                        }],
+                        "outcome_coverage": [{
+                            "outcome": outcome["outcome"], "status": "planned",
+                            "verification": ["The plan contains a focused check."],
+                        }],
+                        "risks": [], "unresolved": [],
+                    })
+                    self.assertFalse(published_plan["result"].get("isError"), published_plan)
+
+                coordinator_call("read_evidence", {
+                    "task_ref": task_ref, "report_policy": "active_plan",
+                })
+                coordinator_call("open_plan_review", {
+                    "task_ref": task_ref,
+                    "prompt": "Approve the displayed bounded plan?",
+                    "prompt_language": "en",
+                })
+                coordinator_call("record_plan_review", {
+                    "task_ref": task_ref, "response_original": "Approved.",
+                    "user_language": "en", "outcome": "approve",
+                })
+                coordinator_call("open_steering", {
+                    "task_ref": task_ref,
+                    "prompt": "Keep the approved scope unchanged?",
+                    "prompt_language": "en",
+                })
+                coordinator_call("record_steering", {
+                    "task_ref": task_ref, "response_original": "Keep it unchanged.",
+                    "user_language": "en", "add": [], "retire": [],
+                })
+                delivery = coordinator_call("open_assignment", {
+                    "task_ref": task_ref, "role": "Implementation worker",
+                    "profile_name": "fullstack_dev", "model": "gpt-5.6-luna",
+                    "reasoning_effort": "high", "responsibility": "delivery",
+                    "goal": "Deliver and document the checked change.",
+                    "scope": "The single current outcome.",
+                    "instructions": "Consume the assignment, publish the result, then publish documentation impact.",
+                    "report_policy": "active_plan",
+                })
+                delivery_ref = worker_ref(delivery)
+                _write_host_worker_receipt(
+                    plugin_data, delivery_ref,
+                    agent_id="all-tools-worker", turn_id="all-tools-delivery-turn",
+                    session_id="all-tools-session",
+                )
+                with _source_stdio_session(
+                    home,
+                    host_identity=("all-tools-worker", "all-tools-delivery-turn", "all-tools-session"),
+                ) as worker:
+                    called.add("read_task")
+                    consumed = worker("read_task", {"task_ref": delivery_ref})
+                    self.assertFalse(consumed["result"].get("isError"), consumed)
+                    common = {
+                        "task_ref": delivery_ref, "status": "completed",
+                        "verification_facts": [{
+                            "state": "executed", "summary": "The focused check passed.",
+                        }],
+                        "outcome_coverage": [{
+                            "outcome": outcome["outcome"], "status": "complete",
+                            "verification": ["The focused check passed."],
+                        }],
+                        "risks": [], "unresolved": [],
+                    }
+                    called.add("publish_result")
+                    result = worker("publish_result", {
+                        **common, "summary": "The checked change is complete.",
+                        "outcome": "The isolated change works.", "changes": [],
+                        "documentation_impact": "Documentation impact was assessed.",
+                    })
+                    self.assertFalse(result["result"].get("isError"), result)
+                    called.add("publish_documentation")
+                    documentation = worker("publish_documentation", {
+                        **common, "summary": "Documentation impact is complete.",
+                        "documentation_impact": "No additional documentation update is needed.",
+                        "findings": [], "recommendations": [],
+                    })
+                    self.assertFalse(documentation["result"].get("isError"), documentation)
+
+                coordinator_call("read_evidence", {
+                    "task_ref": task_ref, "report_policy": "all_finalized",
+                })
+                coordinator_call("open_clarification", {
+                    "task_ref": task_ref,
+                    "prompt": "Review the current result: revise this task or close it?",
+                    "prompt_language": "en", "purpose": "closure_review",
+                    "options": ["revise", "close"],
+                })
+                coordinator_call("record_clarification", {
+                    "task_ref": task_ref, "response_original": "Close it.",
+                    "user_language": "en", "outcome": "close",
+                })
+                coordinator_call("close_task", {
+                    "task_ref": task_ref, "verdict": "ready",
+                })
+
+                self.assertEqual(called, advertised)
+
+    def test_source_stdio_steering_without_retirement_needs_no_contract_read(self) -> None:
+        """A review answer with no retirement records immediately and exactly once."""
         outcome = {
             "outcome": "Preserve one steering outcome.",
             "acceptance": ["The current outcome remains exact."],
@@ -705,11 +917,7 @@ class CommandReceiptTests(unittest.TestCase):
                 })
                 task_ref = opened["result"]["structuredContent"]["task_ref"]
 
-                # A state read performed before the question opens is stale
-                # admission evidence and must be invalidated by open_steering.
-                before = coordinator("read_task", {
-                    "task_ref": task_ref, "view": "state",
-                })
+                before = coordinator("read_state", {"task_ref": task_ref})
                 self.assertFalse(before["result"].get("isError"), before)
                 pending = coordinator("open_steering", {
                     "task_ref": task_ref,
@@ -718,20 +926,6 @@ class CommandReceiptTests(unittest.TestCase):
                 })
                 self.assertFalse(pending["result"].get("isError"), pending)
 
-                denied = coordinator("record_steering", {
-                    "task_ref": task_ref, "response_original": "Keep it.",
-                    "user_language": "en", "add": [], "retire": [],
-                })
-                self.assertTrue(denied["result"].get("isError"), denied)
-                self.assertEqual(
-                    denied["result"]["structuredContent"]["error"]["code"],
-                    "fresh_state_read_required",
-                )
-
-                refreshed = coordinator("read_task", {
-                    "task_ref": task_ref, "view": "state",
-                })
-                self.assertFalse(refreshed["result"].get("isError"), refreshed)
                 recorded = coordinator("record_steering", {
                     "task_ref": task_ref, "response_original": "Keep it.",
                     "user_language": "en", "add": [], "retire": [],
@@ -742,20 +936,75 @@ class CommandReceiptTests(unittest.TestCase):
                     "steering_recorded",
                 )
 
-                # Admission evidence is one-shot even when durable decision
-                # replay could otherwise reconcile an identical record.
-                replay_without_read = coordinator("record_steering", {
+                replay = coordinator("record_steering", {
                     "task_ref": task_ref, "response_original": "Keep it.",
                     "user_language": "en", "add": [], "retire": [],
                 })
-                self.assertTrue(
-                    replay_without_read["result"].get("isError"),
-                    replay_without_read,
-                )
+                self.assertFalse(replay["result"].get("isError"), replay)
+                self.assertTrue(replay["result"]["structuredContent"]["replayed"])
+
+    def test_source_stdio_point_steering_reads_only_scope_and_selected_outcome(self) -> None:
+        """Retirement observes an exact name; replacement reads only that outcome."""
+        outcome = {
+            "outcome": "Preserve one exact steering outcome.",
+            "acceptance": ["The original criterion remains."],
+            "constraints": ["Do not load the complete contract."],
+            "verification": ["The replacement is committed once."],
+        }
+        refined = {
+            **outcome,
+            "acceptance": [*outcome["acceptance"], "The refined criterion is added."],
+        }
+        with tempfile.TemporaryDirectory(prefix="cortex-point-steer-home-") as home, tempfile.TemporaryDirectory(
+            prefix="cortex-point-steer-project-",
+        ) as project:
+            with _source_stdio_session(home) as coordinator:
+                opened = coordinator("open_task", {
+                    "project_root": project,
+                    "request_original": "Refine one exact outcome.",
+                    "user_language": "en", "outcomes": [outcome],
+                    "constraints": outcome["constraints"],
+                })
+                task_ref = opened["result"]["structuredContent"]["task_ref"]
+                pending = coordinator("open_steering", {
+                    "task_ref": task_ref,
+                    "prompt": "Add the refined criterion to the existing outcome?",
+                    "prompt_language": "en",
+                })
+                self.assertFalse(pending["result"].get("isError"), pending)
+
+                unobserved = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Apply the refinement.",
+                    "user_language": "en", "add": [refined],
+                    "retire": [outcome["outcome"]],
+                })
+                self.assertTrue(unobserved["result"].get("isError"), unobserved)
                 self.assertEqual(
-                    replay_without_read["result"]["structuredContent"]["error"]["code"],
+                    unobserved["result"]["structuredContent"]["error"]["code"],
                     "fresh_state_read_required",
                 )
+                scope = coordinator("read_scope", {
+                    "task_ref": task_ref, "responsibility": "delivery",
+                })
+                self.assertFalse(scope["result"].get("isError"), scope)
+                self.assertEqual(
+                    [item["outcome"] for item in scope["result"]["structuredContent"]["data"]["outcomes"]],
+                    [outcome["outcome"]],
+                )
+                exact = coordinator("read_outcome", {
+                    "task_ref": task_ref, "outcome": outcome["outcome"],
+                })
+                self.assertFalse(exact["result"].get("isError"), exact)
+                self.assertEqual(
+                    exact["result"]["structuredContent"]["data"]["outcome"],
+                    outcome,
+                )
+                recorded = coordinator("record_steering", {
+                    "task_ref": task_ref, "response_original": "Apply the refinement.",
+                    "user_language": "en", "add": [refined],
+                    "retire": [outcome["outcome"]],
+                })
+                self.assertFalse(recorded["result"].get("isError"), recorded)
 
     def test_connection_loss_has_explicit_stdio_replacement_route(self) -> None:
         """A dead consumed worker is replaced only through linked loss evidence."""
@@ -804,21 +1053,21 @@ class CommandReceiptTests(unittest.TestCase):
                         "task_ref": original_ref,
                     })
                     self.assertFalse(consumed["result"].get("isError"), consumed)
-                    self.assertEqual(consumed["result"]["structuredContent"]["view"], "assignment")
+                    self.assertIn("effective_contract", consumed["result"]["structuredContent"]["data"])
 
                 lost = _source_stdio_tool_call(home, "read_task", {
-                    "task_ref": original_ref, "view": "assignment",
+                    "task_ref": original_ref,
                 })
                 self.assertEqual(
                     lost["result"]["structuredContent"]["error"]["code"],
                     "connection_lost",
                 )
-                recovery_state = coordinator("read_task", {
-                    "task_ref": task_ref, "view": "state",
+                recovery_state = coordinator("read_scope", {
+                    "task_ref": task_ref, "responsibility": "delivery",
                 })
                 recovery_items = recovery_state["result"]["structuredContent"][
                     "data"
-                ]["aggregate_coverage"]["items"]
+                ]["outcomes"]
                 self.assertEqual(
                     recovery_items[0]["loss_recovery_outcomes"],
                     [outcome["outcome"]],
@@ -847,7 +1096,7 @@ class CommandReceiptTests(unittest.TestCase):
                     home, host_identity=("source-worker-a", "source-worker-turn", "source-session"),
                 ) as successor:
                     consumed = successor("read_task", {
-                        "task_ref": replacement_ref, "view": "assignment",
+                        "task_ref": replacement_ref,
                     })
                     self.assertFalse(consumed["result"].get("isError"), consumed)
                     published = successor("publish_result", {
@@ -1427,8 +1676,7 @@ class CommandReceiptTests(unittest.TestCase):
             with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}):
                 direct = _source_stdio_tool_call(home, "read_task", {
                     "task_ref": worker_ref,
-                    "view": "assignment",
-                })
+                                    })
             self.assertTrue(direct["result"].get("isError"), direct)
             self.assertEqual(
                 direct["result"]["structuredContent"]["error"]["code"],
@@ -1476,7 +1724,10 @@ class CommandReceiptTests(unittest.TestCase):
                     "task_ref": worker_ref,
                 })
                 self.assertFalse(consumed["result"].get("isError"), consumed)
-                self.assertEqual(consumed["result"]["structuredContent"]["view"], "assignment")
+                self.assertIn(
+                    "effective_contract",
+                    consumed["result"]["structuredContent"]["data"],
+                )
                 # Supported hosts may expose only TextContent to the worker
                 # model while retaining structuredContent in lifecycle events.
                 # The first successful one-shot bootstrap must therefore carry
@@ -1493,7 +1744,7 @@ class CommandReceiptTests(unittest.TestCase):
 
                 with _source_stdio_session(home) as worker_b:
                     copied_read = worker_b("read_task", {
-                        "task_ref": worker_ref, "view": "assignment",
+                        "task_ref": worker_ref,
                     })
                     self.assertTrue(copied_read["result"].get("isError"), copied_read)
                     self.assertEqual(
@@ -1537,9 +1788,8 @@ class CommandReceiptTests(unittest.TestCase):
                 self.assertEqual(publication["state"], "published")
                 self.assertFalse(publication["replayed"])
 
-            evidence = _source_stdio_tool_call(home, "read_task", {
+            evidence = _source_stdio_tool_call(home, "read_evidence", {
                 "task_ref": task_ref,
-                "view": "evidence",
                 "report_policy": "all_finalized",
             })
             self.assertFalse(evidence["result"].get("isError"), evidence)
@@ -1615,7 +1865,7 @@ class CommandReceiptTests(unittest.TestCase):
                 ).group(1)
                 _write_host_worker_receipt(plugin_data, worker_ref)
                 rejected = coordinator("read_task", {
-                    "task_ref": worker_ref, "view": "assignment",
+                    "task_ref": worker_ref,
                 })
                 self.assertTrue(rejected["result"].get("isError"), rejected)
                 self.assertEqual(

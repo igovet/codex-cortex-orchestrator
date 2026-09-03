@@ -1,6 +1,8 @@
 """Focused checks for the policy actually delivered to fresh workers."""
 
 import hashlib
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -67,6 +69,10 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "actually ambiguous transport result" in normalized
     assert "Every native worker and packaged profile is worker-only" in normalized
     assert "including governance assessment" in normalized
+    assert "Never ask the user directly" in policy["common_policy"]
+    assert "available safe choices" in normalized
+    assert "material consequence or stopping condition of each choice" in normalized
+    assert "context-free question or approval request" in normalized
     assert policy["profile_name"] == "explorer"
     assert policy["profile_instructions"]
     assert rendered["renderer"]["common_policy_digest"] == (
@@ -74,6 +80,22 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
             worker_message._MANDATORY_PROJECT_POLICY.encode("utf-8")
         ).hexdigest()
     )
+
+    bootstrap_match = re.search(
+        r"## Server-bound worker context\n\n```json\n(\{.*\})\n```",
+        message,
+    )
+    assert bootstrap_match is not None
+    bootstrap = json.loads(bootstrap_match.group(1))
+    assert bootstrap == {
+        "assignment context": {
+            "task_ref": worker_message._worker_task_ref(
+                _task()["task_id"], _delegation()["delegation_id"],
+            ),
+        },
+    }
+    assert "worker label" not in bootstrap_match.group(1)
+    assert len(re.findall(r"t_[0-9a-f]{12}_[0-9a-f]{32}", message)) == 1
 
 
 def test_common_policy_is_exposed_by_the_assignment_policy_boundary():
@@ -112,3 +134,6 @@ def test_every_packaged_profile_inherits_worker_only_governance_and_terminal_rea
     assert "fresh server-owned reconciliation projection" in normalized
     assert "publish exactly one matching terminal outcome" in normalized
     assert "confirmed successful terminal-publication response ends all worker tool activity" in normalized
+    assert "Never ask the user directly" in policy["common_policy"]
+    assert "available safe choices" in normalized
+    assert "material consequence or stopping condition of each choice" in normalized

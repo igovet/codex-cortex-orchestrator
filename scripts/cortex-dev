@@ -8,12 +8,21 @@ caller_workdir="$(pwd -P)"
 original_home="$(cd -- "${HOME:?HOME is required}" && pwd -P)"
 dev_home="${original_home}/.cortex-dev"
 
+prepare_only=0
+if [[ $# -gt 0 && "${1}" == "--prepare-only" ]]; then
+  prepare_only=1
+  shift
+fi
+
 if [[ $# -gt 0 && "${1}" == "--help" ]]; then
   cat <<'EOF'
-Usage: scripts/cortex-dev [codex arguments]
+Usage: scripts/cortex-dev [--prepare-only] [codex arguments]
 
 Start ordinary interactive Codex with a persistent, isolated Cortex candidate
 runtime at $HOME/.cortex-dev. The stable HOME and CODEX_HOME are not modified.
+
+--prepare-only refreshes and verifies that candidate without starting Codex so
+the repository's Desktop live-dev launcher can use the same exact runtime.
 EOF
   exit 0
 fi
@@ -302,6 +311,14 @@ export CORTEX_CANDIDATE_RECEIPT="${candidate_receipt}"
 export CORTEX_CANDIDATE_DIGEST="${candidate_digest_value}"
 export CORTEX_HOOK_DIAGNOSTIC=1
 export CORTEX_RAW_DIAGNOSTIC=1
+if [[ "${prepare_only}" == "1" ]]; then
+  if [[ $# -ne 0 ]]; then
+    echo "error: --prepare-only does not accept Codex arguments" >&2
+    exit 2
+  fi
+  printf 'Cortex isolated candidate prepared for Desktop live-dev\n'
+  exit 0
+fi
 cd -- "${caller_workdir}"
 # Bind the upcoming Codex exec to the live-dev launch receipt.  exec preserves
 # this PID, allowing the trusted SessionStart observer to correlate one root

@@ -51,6 +51,12 @@ PROGRAMMATIC_CORTEX_CALL = re.compile(
 PROGRAMMATIC_SCAN_MAX_DEPTH = 8
 PROGRAMMATIC_SCAN_MAX_NODES = 256
 PROGRAMMATIC_SCAN_MAX_TEXT = 262_144
+WORKER_TERMINAL_CONTEXT = (
+    "Worker assignment consumption is complete. Continue with the bounded "
+    "role work and exactly one matching terminal publication. Do not read the "
+    "task again in this uninterrupted context; only a later host-declared "
+    "compaction recovery may require a fresh assignment read."
+)
 
 
 def _event() -> dict[str, Any]:
@@ -1176,7 +1182,8 @@ def _is_worker_assignment_read(event: dict[str, Any]) -> bool:
     return (
         _is_consume(event.get("tool_name"))
         and isinstance(supplied, dict)
-        and supplied.get("view") in {None, "assignment"}
+        and isinstance(supplied.get("task_ref"), str)
+        and not (set(supplied) - {"task_ref", "continue"})
     )
 
 
@@ -1207,7 +1214,6 @@ def _is_successful_assignment_page(event: dict[str, Any]) -> bool:
     structured = response.get("structuredContent")
     return (isinstance(structured, dict)
             and structured.get("task_ref") == supplied.get("task_ref")
-            and structured.get("view") == "assignment"
             and isinstance(structured.get("has_more"), bool)
             and isinstance(structured.get("data"), (dict, list)))
 
@@ -1216,7 +1222,8 @@ def _is_successful_state_read(event: dict[str, Any]) -> bool:
     """Recognize a terminal fresh coordinator state read after compaction."""
     response = event.get("tool_response")
     supplied = event.get("tool_input")
-    if (not _is_consume(event.get("tool_name"))
+    if (not isinstance(event.get("tool_name"), str)
+            or event["tool_name"].strip().lower() != "mcp__cortex__read_state"
             or not isinstance(response, dict)
             or response.get("isError") is not False
             or not isinstance(supplied, dict)):
@@ -1224,9 +1231,8 @@ def _is_successful_state_read(event: dict[str, Any]) -> bool:
     structured = response.get("structuredContent")
     return (isinstance(structured, dict)
             and structured.get("task_ref") == supplied.get("task_ref")
-            and supplied.get("view") == "state"
-            and structured.get("view") == "state"
-            and structured.get("has_more") is False
+            and set(supplied) == {"task_ref"}
+            and "has_more" not in structured
             and isinstance(structured.get("data"), (dict, list)))
 
 
@@ -1275,7 +1281,7 @@ def main() -> int:
         return 0
 
     if (event_name == "PostToolUse" and state.get("recovery_read_required")
-            and _is_consume(event.get("tool_name"))):
+            and (_is_consume(event.get("tool_name")) or _is_successful_state_read(event))):
         recovered = (
             _is_successful_consume(event)
             if child else _is_successful_state_read(event)
@@ -1284,6 +1290,12 @@ def main() -> int:
             state = dict(state)
             state["recovery_read_required"] = False
             _write_state(path, state)
+            if child:
+                print(_json({"hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": WORKER_TERMINAL_CONTEXT,
+                }}))
+                return 0
 
     # The host delivery receipt is provisional. Only a successful worker MCP
     # evidence-consumption result proves that the child actually received and
@@ -1379,6 +1391,10 @@ def main() -> int:
                                     "bootstrap_in_progress": False,
                                     "turn_fingerprint": _fingerprint(turn_id), "child_mode": True})
                 _write_state(path, child_state)
+                print(_json({"hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": WORKER_TERMINAL_CONTEXT,
+                }}))
             elif _is_successful_assignment_page(event):
                 # The worker has consumed a valid non-terminal page.  The MCP
                 # process retains the exact server claim and private cursor;
@@ -1464,6 +1480,21 @@ def main() -> int:
     if not state["selected"]:
         return 0
 
+    if (
+        event_name == "PreToolUse"
+        and not child
+        and not state.get("anchored")
+        and isinstance(event.get("tool_name"), str)
+        and event["tool_name"].strip().lower().startswith("mcp__cortex__")
+        and not _is_open_task(event.get("tool_name"))
+    ):
+        _deny(
+            "A fresh Cortex coordinator must call open_task successfully before any other Cortex operation. Call open_task next with one complete payload; never invent or copy a placeholder task_ref.",
+            event,
+            reason_code="route_not_anchored",
+        )
+        return 0
+
     if (event_name == "PreToolUse"
             and _is_programmatic_exec(event.get("tool_name"))
             and _contains_programmatic_cortex_call(event.get("tool_input"))):
@@ -1478,10 +1509,18 @@ def main() -> int:
             and isinstance(event.get("tool_name"), str)
             and event["tool_name"].strip().lower().startswith("mcp__cortex__")):
         supplied = event.get("tool_input")
-        expected_view = "assignment" if child else "state"
-        if (not _is_consume(event.get("tool_name"))
-                or not isinstance(supplied, dict)
-                or supplied.get("view") != expected_view):
+        expected_tool = "mcp__cortex__read_task" if child else "mcp__cortex__read_state"
+        valid_input = (
+            isinstance(supplied, dict)
+            and set(supplied).issubset({"task_ref", "continue"})
+            and isinstance(supplied.get("task_ref"), str)
+            and ("continue" not in supplied or supplied.get("continue") is True)
+        ) if child else (
+            isinstance(supplied, dict) and set(supplied) == {"task_ref"}
+        )
+        if (not isinstance(event.get("tool_name"), str)
+                or event["tool_name"].strip().lower() != expected_tool
+                or not valid_input):
             _deny(
                 "Post-compaction recovery requires a fresh current assignment read."
                 if child else

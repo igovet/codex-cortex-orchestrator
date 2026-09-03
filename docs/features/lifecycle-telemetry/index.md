@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.14.12 ships two bounded native hook components: an activation guard and
+Cortex 1.15.0 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without
@@ -28,8 +28,9 @@ index whose receipt state progresses through `pending`,
 selects an initialize audience because Desktop supplies no trustworthy child
 identity there. Add, claim, bind, server-claim, and
 consume transitions are owner-only and lock-protected; terminal assignment
-consumption removes the receipt from the active index immediately and triggers
-one `tools/list_changed` notification for a worker-catalogue refresh. Hook
+consumption removes the receipt from the active index immediately and commits
+worker authority without a mid-turn catalogue notification. This avoids a
+Desktop replay of the already-successful bootstrap. Hook
 processes locate this directory through `PLUGIN_DATA`; the plugin MCP process
 uses explicit `PLUGIN_DATA`/`CODEX_HOME` when present and otherwise derives the
 same exact directory from its verified installed package topology. This

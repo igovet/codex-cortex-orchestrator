@@ -68,11 +68,11 @@ worktrees, existence/absence or unchanged-state, and `.codex`—are also
 worker-owned, regardless of read-only, plan, report-recovery, or direct user
 framing.
 
-## Audience-projected fourteen-tool registry
+## Audience-projected twenty-tool registry
 
-The private registry exposes exactly fourteen action-specific tools and one
+The private registry exposes exactly twenty action-specific tools and one
 input schema per operation. `tools/list` projects it by immutable connection
-audience: coordinator operations plus `read_task` for coordinators, and only
+audience: coordinator operations for coordinators, and only
 `read_task` plus three publications for signed worker-candidates/workers.
 Runtime authorization independently consumes the same schema/handler registry;
 the discovery projection is not trusted as the sole enforcement boundary.
@@ -138,13 +138,12 @@ evidence selected by `report_policy`; private report IDs remain evidence only.
 Report status and
 receipt presence are not backend acceptance or native lifecycle evidence.
 
-The bounded `read_task` evidence view is the public inspection surface for the
-task's server-produced state, assignment, or evidence. A worker starts with
-the exact assignment view and continues the same bounded read only through
-the server-owned continuation; callers do not supply report references,
-consumer-delegation locators, or reconstructed cursors. The view returns
-semantic data with private ledger identity removed, so durable IDs and any
-continuation values remain evidence rather than capabilities.
+Coordinator inspection is purpose-specific: scalar `read_state`, one-responsibility
+`read_scope`, point `read_outcome`, recovery `read_continuations`, selected
+`read_evidence`, and newest-first `read_timeline`. A worker starts with
+worker-only `read_task` and continues only through its server-owned assignment
+continuation. Callers do not supply report references, consumer-delegation
+locators, or reconstructed cursors.
 
 The matching narrow decision record operation appends a coordinator-asserted ordinary-chat decision
 against an existing task, delegation, plan, report, or same-project initiative.

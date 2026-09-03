@@ -76,8 +76,8 @@
   ambiguous publication retries replay; changed payloads conflict and require
   recovery/rework. The public facade exposes no report-assembly operations;
   private/internal assembly state remains inaccessible to callers.
-- `read_task` is the bounded public evidence view. Workers begin with its
-  server-rendered assignment view, and continue the same read only with the
+- `read_task` is the worker-only bounded assignment read. Workers begin with
+  its server-rendered assignment and continue the same read only with the
   server-owned continuation; no report-reference or consumer-delegation fields
   are accepted by the public facade.
 - Continue a bounded `read_task` only with `continue=true` when its response
@@ -139,12 +139,12 @@
   verdict and automatically attempts the advisory write plus bounded
   inspection. `ready_with_risks` never asks for user confirmation. Do not
   conflate the independent `execution_outcome` with advisory bookkeeping.
-- `read_task.execution_outcome` contains `evidence_status`,
+- `read_state` contains scalar execution evidence status,
   finalized publication counts, `effective_revision`,
   `coverage_status`, and `outcome`. It derives deterministically from current
   effective-contract coverage, not report arrival order or historical claims;
-  it is not a native-lifecycle claim. `advisory_closure` separately reports `record_status` and
-  `latest_record`. Closure bookkeeping cannot change execution evidence.
+  it is not a native-lifecycle claim. Closure status and verdict are separate
+  scalar fields. Closure bookkeeping cannot change execution evidence.
 - `close_task` returns `closure_confirmation` with
   `inspection_status`, `reason`, and `attempts`. The service allows at most one
   server-owned replay reconciliation for a verified transient persistence or inspection
@@ -178,7 +178,7 @@
   creates no meaningless documentation edit. Use a bounded evidence-synthesis
   worker only when existing reports do not already contain that section; the
   coordinator never calls a worker-only `publish_*` operation or self-asserts the result.
-- Before a no-impact close, use the bounded `read_task` evidence view to confirm
+- Before a no-impact close, use bounded `read_evidence` to confirm
   that the finalized documentation-impact publication and every other required
   result are present in task coverage. Private report identities remain ledger
   evidence only; callers close the task without supplying them.

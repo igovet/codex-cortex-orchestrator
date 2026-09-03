@@ -33,7 +33,13 @@ from cortex_runtime.domain_api import (
     publish_documentation,
     publish_plan,
     publish_result,
+    read_continuations,
+    read_outcome,
+    read_evidence,
+    read_scope,
+    read_state,
     read_task,
+    read_timeline,
     open_clarification,
     open_plan_review,
     open_steering,
@@ -41,10 +47,11 @@ from cortex_runtime.domain_api import (
 )
 
 
-SERVER_VERSION = "1.14.12"
+SERVER_VERSION = "1.15.0"
 SERVER_INSTRUCTIONS = (
     "Cortex v12 is a durable coordination ledger with a complete "
     f"{len(OPERATION_NAMES)}-operation registry and immutable host-attested audience projections. "
+    "On a fresh coordinator connection, open_task is the only valid first Cortex operation; do not call any other operation or invent a task_ref before open_task returns one successfully. A native worker instead begins with its advertised read_task assignment bootstrap. "
     "Every Cortex operation is one separate direct MCP call and is never eligible for programmatic tool calling, exec, batching, parallelism, or speculative partial calls; this keeps each complete advertised input contract and result visible to the model. "
     "Use only the tools advertised to this connection. The model owns delegation, model/effort selection, governance, "
     "rework, verification depth, and final-answer decisions. Governance records are "
@@ -55,6 +62,12 @@ SERVER_INSTRUCTIONS = (
 _HANDLERS: Mapping[str, Callable[..., Mapping[str, Any]]] = {
     "open_task": open_task,
     "read_task": read_task,
+    "read_state": read_state,
+    "read_scope": read_scope,
+    "read_outcome": read_outcome,
+    "read_continuations": read_continuations,
+    "read_evidence": read_evidence,
+    "read_timeline": read_timeline,
     "open_clarification": open_clarification,
     "open_plan_review": open_plan_review,
     "open_steering": open_steering,

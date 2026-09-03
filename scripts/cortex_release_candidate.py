@@ -60,6 +60,7 @@ SUPPORT_SCRIPTS = (
     "scripts/cortex_candidate_location.py",
     "scripts/cortex_payload_manifest.py",
     "scripts/cortex_candidate_receipt.py",
+    "scripts/cortex-desktop-dev",
     "scripts/cortex-host-preflight.py",
     "scripts/cortex-live-smoke",
     "scripts/cortex-prompt-lint.py",

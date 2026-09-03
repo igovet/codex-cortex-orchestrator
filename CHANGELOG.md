@@ -1,5 +1,155 @@
 # Changelog
 
+## [1.15.0] - 2026-09-02
+
+### Changed
+
+- Replaced the overloaded coordinator `read_task` views with purpose-specific
+  `read_state`, `read_scope`, `read_outcome`, `read_continuations`,
+  `read_evidence`, and newest-first `read_timeline` operations. Coordinator
+  reads now return only the data needed for the next action; there is no public
+  full-contract read.
+- Restricted `read_task` to worker assignment consumption. A worker receives
+  only its immutable assigned outcomes and the predecessor evidence selected
+  for that assignment; `view` and caller-selected `report_policy` are no longer
+  valid worker inputs.
+- Changed steering retirement to accept exact current outcome names from
+  `read_scope`. Point replacements use `read_outcome` only for the selected
+  outcome, and add-only or no-change steering no longer requires a redundant
+  post-review state read.
+- Expanded the public catalogue from fourteen to twenty operations while
+  keeping the complete serialized `tools/list` response below 65,536 bytes
+  with a tested safety reserve.
+
+### Fixed
+
+- Made a confirmed lost-worker replacement derive its complete outcome scope
+  server-side when exactly one predecessor is recoverable, avoiding fragile
+  model-side repetition of long semantic outcome names while preserving exact
+  selection for ambiguous multi-predecessor recovery.
+- Made `open_plan_review` return the verified active-plan Markdown link in its
+  own success receipt so the immediate user decision packet never reconstructs
+  or shortens a link from an earlier evidence read.
+- Made documentation publication preserve and derive verification facts from
+  the already-required outcome coverage when a worker does not duplicate the
+  same evidence in the optional `verification_facts` array, preventing a
+  first-call validation failure without weakening plan or result evidence.
+- Required post-clarification behavior changes, including changes stated after
+  plan review or recovery, to pass through durable steering before assignment
+  instructions may use them.
+- Replaced very long user-facing shard/report paths with verified short
+  content-addressed plan/report links under the host-private Cortex view root,
+  preventing CLI or Desktop models from dropping identifier fragments.
+- Made the live evidence and plan-review contracts reject a bare path as a
+  substitute for the complete server-provided Markdown link.
+- Made successful task closure repeat every verified finalized plan/report link
+  so the immediate final answer never reconstructs an earlier path from memory.
+- Stopped coordinator state reads from being used as worker-liveness polling
+  between unchanged native waits.
+- Routed coordinator recovery from one scalar `read_state` directly to
+  `read_continuations` when delegated work remains; `read_timeline` is reserved
+  for an explicit chronology or audit need instead of being used as a recovery
+  lookup.
+- Added canonical audience-specific routing state machines: coordinator
+  transitions live in the orchestrator skill, while worker transitions live in
+  `cortex-control` so the automatic compaction hook reloads the correct table
+  for each audience.
+- Routed a question known to choose previously unstated product behavior
+  directly through steering, so the direct answer updates the contract without
+  a redundant clarification/confirmation pair. Ordinary clarification remains
+  factual-only; an unexpected semantic change still opens steering before any
+  assignment can use it.
+- Made plan and finalized-report evidence return verified host-private Markdown
+  links for user-facing review, without renderer-added Markdown backslashes or
+  character-entity substitutions.
+- Added a persistent-stdio conformance flow that successfully invokes every
+  public operation, including planner and delivery worker publications,
+  point steering, evidence inspection, and closure.
+
+## [1.14.17] - 2026-09-02
+
+### Fixed
+
+- Made durable clarification, steering, and plan-review openings explicitly
+  separate from their user-visible presentation. After a hold opens, the
+  coordinator now renders the complete localized decision context, safe
+  choices, and consequences instead of assuming tool arguments are visible in
+  CLI or Desktop.
+- Required plan review to include a decision-ready summary and the verified
+  current-plan link when available; a bare “plan ready” approval request is no
+  longer valid coordinator communication.
+- Required every native worker escalation to publish the blocked action,
+  established evidence, exact missing decision, safe choices, and consequence
+  of each so the coordinator can ask a detailed question without forwarding
+  raw or context-free worker prose.
+- Made terminal coordinator evidence return verified clickable links for the
+  selected active plan and finalized report set, with those links leading the
+  model-visible response in both CLI and Desktop.
+- Preserved authored Markdown in generated plan and report files without
+  renderer-added backslash escapes or character entities.
+- Clarified the ordinary-question input contract so the optional closure-only
+  choices field is omitted rather than sent as an invalid empty array.
+
+## [1.14.16] - 2026-09-02
+
+### Fixed
+
+- Enforced the documented coordinator bootstrap order at the host boundary.
+  After an explicit Cortex route selection, the activation guard now permits
+  `open_task` as the only pre-anchor coordinator Cortex operation; an attempted
+  placeholder governance/task call is denied before it reaches MCP schema
+  validation or the ledger. Native worker assignment bootstrap is unchanged.
+- Made the MCP session instructions and governance tool contract state the
+  fresh-connection precondition adjacent to model tool selection: coordinators
+  call `open_task` first and must never invent a placeholder `task_ref`.
+
+## [1.14.15] - 2026-09-02
+
+### Fixed
+
+- Restricted the bundled Cortex catalogue to direct model-visible calls by
+  excluding it from both programmatic code mode and deferred discovery. Native
+  Desktop workers can no longer receive `read_task` only inside
+  `functions.exec`/`ALL_TOOLS` while another worker in the same host receives
+  the proper direct MCP tool.
+- Made the first late-adopted Desktop worker assignment read tolerate and
+  ignore a copied `report_policy`, including `latest_for_scope`. The immutable
+  assignment evidence policy remains server-owned, while the harmless field no
+  longer causes a bootstrap `validation_error` before the exact receipt is
+  consumed.
+- Applied the existing same-connection active-task fallback before input-schema
+  validation. Task-anchored coordinator calls may therefore omit a repeated
+  `task_ref` after `open_task` without a false missing-field error; the public
+  schema remains complete and required, and connections without an active task
+  still fail closed.
+
+## [1.14.14] - 2026-09-02
+
+### Fixed
+
+- Made the bundled Cortex MCP required at host session startup and excluded
+  its complete fourteen-operation catalogue from deferred discovery. A new
+  Desktop task therefore cannot receive the selected orchestrator skill while
+  silently omitting `open_task`; the host must expose the intact direct
+  catalogue before the first turn or fail session initialization explicitly.
+
+## [1.14.13] - 2026-09-02
+
+### Fixed
+
+- Made coordinator state reads expose one authoritative top-level pagination
+  marker. Timeline pages now continue through the same server-owned
+  `read_task` connection in bounded 16-event slices; nested `data.has_more`
+  and `data.next_sequence` markers are no longer exposed, and fresh-state
+  admission is recorded only after the terminal page. This prevents the model
+  from following a nested `has_more=true` into a server-declared terminal read
+  and preserves the complete ordered state instead of truncating it.
+- Applied the dedicated 224 KiB report-response envelope when assembling
+  multi-report worker handoffs. A valid planner assignment with several
+  finalized predecessor reports no longer fails at the unrelated 65,536-byte
+  single-storage-value limit; complete evidence is returned or paginated
+  through the existing server-owned continuation without truncation.
+
 ## [1.14.12] - 2026-09-02
 
 ### Fixed

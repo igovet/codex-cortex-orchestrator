@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import tempfile
 import unittest
@@ -11,7 +12,8 @@ from cortex import PUBLIC_TOOLS, SERVER_VERSION
 from cortex_runtime.domain_api import (
     assess_governance, close_task, open_assignment, open_clarification,
     open_plan_review, open_steering, open_task, publish_documentation,
-    publish_plan, publish_result, read_task, record_clarification,
+    publish_plan, publish_result, read_continuations, read_evidence, read_outcome,
+    read_scope, read_state, read_task, read_timeline, record_clarification,
     record_plan_review, record_steering,
 )
 from cortex_runtime.v12_service import V12ServiceError
@@ -22,6 +24,18 @@ PROVENANCE = {name: "sha256:" + "a" * 64 for name in ("build_digest", "candidate
 
 
 class DomainPublicApiContractTests(unittest.TestCase):
+    def assert_no_nested_transport_markers(self, value: object) -> None:
+        if isinstance(value, dict):
+            self.assertNotIn("has_more", value)
+            self.assertNotIn("task_ref", value)
+            for key in value:
+                self.assertNotIn("cursor", str(key).lower())
+            for item in value.values():
+                self.assert_no_nested_transport_markers(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.assert_no_nested_transport_markers(item)
+
     def _task(self, root: str, outcomes: list[dict] | None = None) -> tuple[dict, list[dict]]:
         outcomes = outcomes or [{"outcome": "Build the artifact.", "acceptance": ["The artifact works."], "constraints": [], "verification": []}]
         task = open_task(project_root=root, request_original="Build it.", user_language="en", outcomes=outcomes, constraints=["Keep public identity minimal."])
@@ -54,11 +68,103 @@ class DomainPublicApiContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             task, outcomes = self._task(root)
             self.assertEqual(set(task), {"task_ref", "replayed"})
-            state = read_task(task_ref=task["task_ref"], view="state")
-            self.assertEqual(state["data"]["effective_contract"]["items"], outcomes)
-            rendered = repr(state)
+            scope = read_scope(task_ref=task["task_ref"], responsibility="delivery")
+            self.assertEqual([item["outcome"] for item in scope["data"]["outcomes"]], [item["outcome"] for item in outcomes])
+            exact = [read_outcome(task_ref=task["task_ref"], outcome=item["outcome"])["data"]["outcome"] for item in outcomes]
+            self.assertEqual(exact, outcomes)
+            rendered = repr((scope, exact))
             for name in ("item_ref", "report_ref", "decision_ref", "digest", "cursor", "handles"):
                 self.assertNotIn(name, rendered)
+
+    def test_state_is_one_shot_and_timeline_is_newest_first_with_one_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            task, _outcomes = self._task(root)
+            for index in range(20):
+                assess_governance(
+                    task_ref=task["task_ref"], mode="minimal",
+                    rationale=f"Bounded pagination evidence {index}.",
+                )
+
+            context: dict = {}
+            state = read_state(task_ref=task["task_ref"], _connection_context=context)
+            self.assertNotIn("has_more", state)
+            self.assertNotIn("timeline", state["data"])
+            self.assertEqual(set(state["data"]), {
+                "effective_revision", "coverage_status", "outcome_count",
+                "coverage_status_counts", "assignment_counts", "terminal_rework",
+                "conformance_status", "unresolved_evidence_count",
+                "finalized_report_count", "completed_report_count",
+                "execution_evidence_status", "execution_outcome",
+                "closure_record_status", "closure_verdict", "report_manifest_count",
+            })
+            self.assertNotIn("Build it.", repr(state))
+            self.assertNotIn("Build the artifact.", repr(state))
+            self.assertEqual(context["steering_state_read_task_ref"], task["task_ref"])
+
+            page = read_timeline(task_ref=task["task_ref"], _connection_context=context)
+            self.assertTrue(page["has_more"])
+            self.assert_no_nested_transport_markers(page["data"])
+            self.assertNotIn("next_sequence", page["data"])
+
+            timeline = list(page["data"]["timeline"])
+            while page["has_more"]:
+                page = read_timeline(
+                    task_ref=task["task_ref"], continue_=True,
+                    _connection_context=context,
+                )
+                self.assert_no_nested_transport_markers(page["data"])
+                self.assertNotIn("next_sequence", page["data"])
+                timeline.extend(page["data"]["timeline"])
+
+            self.assertEqual(
+                [item["sequence"] for item in timeline],
+                sorted({item["sequence"] for item in timeline}, reverse=True),
+            )
+            with self.assertRaises(V12ServiceError) as rejected:
+                read_timeline(
+                    task_ref=task["task_ref"], continue_=True,
+                    _connection_context=context,
+                )
+            self.assertEqual(rejected.exception.code, "report_cursor_invalid")
+
+    def test_assignment_read_has_only_the_top_level_pagination_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task, outcomes = self._task(root)
+            assignment = self._assignment(task["task_ref"], outcomes[0], "marker audit")
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+            page = read_task(
+                task_ref=worker_ref,
+                _connection_context={},
+            )
+            self.assertFalse(page["has_more"])
+            self.assert_no_nested_transport_markers(page["data"])
+            self.assertEqual(repr(page).count("task_ref"), 1)
+
+    def test_worker_assignment_contains_only_its_selected_outcome(self) -> None:
+        outcomes = [
+            {"outcome": "Inspect the selected surface.", "acceptance": ["Selected evidence exists."], "constraints": [], "verification": []},
+            {"outcome": "Keep the unrelated surface private.", "acceptance": ["It is not sent to this worker."], "constraints": [], "verification": []},
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task, _ = self._task(root, outcomes)
+            assignment = self._assignment(task["task_ref"], outcomes[0], "selected-scope audit")
+            worker_ref = re.search(
+                r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
+                assignment["native_dispatch"]["message"],
+            ).group(1)
+            page = read_task(task_ref=worker_ref, _connection_context={})
+            assigned = page["data"]["effective_contract"]["assigned_items"]
+            self.assertEqual(assigned, [outcomes[0]])
+            self.assertNotIn(outcomes[1]["outcome"], repr(page))
 
     def test_state_binds_exact_outcomes_to_post_steering_delivery_assignability(self) -> None:
         owned = [
@@ -85,7 +191,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 initial["native_dispatch"]["message"],
             ).group(1)
             context: dict = {}
-            read_task(task_ref=initial_ref, view="assignment", _connection_context=context)
+            read_task(task_ref=initial_ref, _connection_context=context)
             publish_result(
                 task_ref=initial_ref, summary="Initial outcomes complete.", outcome="Complete.",
                 changes=[],
@@ -103,12 +209,13 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 task_ref=task["task_ref"], response_original="Add both export outcomes.",
                 user_language="en", add=added, retire=[],
             )
-            state = read_task(task_ref=task["task_ref"], view="state")
+            state = read_state(task_ref=task["task_ref"])
+            evidence_scope = read_scope(task_ref=task["task_ref"], responsibility="evidence")
             dispositions = {
                 item["outcome"]: (
                     item["ownership"], item["status"], item["delivery_assignability"]
                 )
-                for item in state["data"]["aggregate_coverage"]["items"]
+                for item in evidence_scope["data"]["outcomes"]
             }
             self.assertEqual(
                 dispositions,
@@ -119,19 +226,12 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     added[1]["outcome"]: ("unowned", "missing", "assignable"),
                 },
             )
-            assignment_scope = state["data"]["aggregate_coverage"]["assignment_scope"]
-            self.assertEqual(
-                assignment_scope,
-                {
-                    "planning": "complete_current_contract_server_derived",
-                    "delivery_outcomes": [item["outcome"] for item in added],
-                    "evidence_outcomes": [item["outcome"] for item in owned + added],
-                    "terminal_rework": "steering_revision_required",
-                    "terminal_outcomes": [item["outcome"] for item in owned],
-                },
-            )
+            delivery_scope = read_scope(task_ref=task["task_ref"], responsibility="delivery")
+            self.assertEqual([item["outcome"] for item in delivery_scope["data"]["outcomes"]], [item["outcome"] for item in added])
+            self.assertEqual(state["data"]["terminal_rework"], "steering_revision_required")
+            self.assertEqual(state["data"]["assignment_counts"]["terminal"], 2)
 
-            before_conflict = read_task(task_ref=task["task_ref"], view="state")["data"]["aggregate_coverage"]
+            before_conflict = read_state(task_ref=task["task_ref"])["data"]
             with self.assertRaises(V12ServiceError) as conflict:
                 open_assignment(
                     task_ref=task["task_ref"], role="unsafe mixed owner", profile_name="explorer",
@@ -142,7 +242,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 )
             self.assertEqual(conflict.exception.code, "outcome_assignment_conflict")
             self.assertEqual(
-                read_task(task_ref=task["task_ref"], view="state")["data"]["aggregate_coverage"],
+                read_state(task_ref=task["task_ref"])["data"],
                 before_conflict,
             )
 
@@ -178,7 +278,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 owner["native_dispatch"]["message"],
             ).group(1)
             context: dict = {}
-            read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            read_task(task_ref=worker_ref, _connection_context=context)
             publish_result(
                 task_ref=worker_ref, summary="Delivery complete.", outcome="Complete.", changes=[],
                 verification_facts=[{"state": "executed", "summary": "Focused checks passed."}],
@@ -187,14 +287,15 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 status="completed", _connection_context=context,
             )
 
-            state = read_task(task_ref=task["task_ref"], view="state")["data"]
-            scope = state["aggregate_coverage"]["assignment_scope"]
-            self.assertEqual(scope["delivery_outcomes"], [])
-            self.assertEqual(scope["evidence_outcomes"], [outcome["outcome"]])
-            self.assertEqual(scope["terminal_outcomes"], [outcome["outcome"]])
-            self.assertEqual(scope["terminal_rework"], "steering_revision_required")
+            state = read_state(task_ref=task["task_ref"])["data"]
+            delivery_scope = read_scope(task_ref=task["task_ref"], responsibility="delivery")["data"]
+            evidence_scope = read_scope(task_ref=task["task_ref"], responsibility="evidence")["data"]
+            self.assertEqual(delivery_scope["outcomes"], [])
+            self.assertEqual([item["outcome"] for item in evidence_scope["outcomes"]], [outcome["outcome"]])
+            self.assertEqual(state["assignment_counts"]["terminal"], 1)
+            self.assertEqual(state["terminal_rework"], "steering_revision_required")
 
-            before_rework = state["aggregate_coverage"]
+            before_rework = state
             with self.assertRaises(V12ServiceError) as conflict:
                 open_assignment(
                     task_ref=task["task_ref"], role="invalid implicit rework", profile_name="explorer",
@@ -204,7 +305,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 )
             self.assertEqual(conflict.exception.code, "outcome_assignment_conflict")
             self.assertEqual(
-                read_task(task_ref=task["task_ref"], view="state")["data"]["aggregate_coverage"],
+                read_state(task_ref=task["task_ref"])["data"],
                 before_rework,
             )
 
@@ -215,13 +316,13 @@ class DomainPublicApiContractTests(unittest.TestCase):
             open_steering(task_ref=task["task_ref"], prompt="Apply the reviewed correction?", prompt_language="en")
             record_steering(
                 task_ref=task["task_ref"], response_original="Apply the reviewed correction.",
-                user_language="en", add=[replacement], retire=[outcome],
+                user_language="en", add=[replacement], retire=[outcome["outcome"]],
             )
-            revised = read_task(task_ref=task["task_ref"], view="state")["data"]
-            revised_scope = revised["aggregate_coverage"]["assignment_scope"]
-            self.assertEqual(revised_scope["delivery_outcomes"], [replacement["outcome"]])
-            self.assertEqual(revised_scope["terminal_rework"], "not_applicable")
-            self.assertEqual(revised_scope["terminal_outcomes"], [])
+            revised = read_state(task_ref=task["task_ref"])["data"]
+            revised_scope = read_scope(task_ref=task["task_ref"], responsibility="delivery")["data"]
+            self.assertEqual([item["outcome"] for item in revised_scope["outcomes"]], [replacement["outcome"]])
+            self.assertEqual(revised["terminal_rework"], "not_applicable")
+            self.assertEqual(revised["assignment_counts"]["terminal"], 0)
 
             replacement_owner = open_assignment(
                 task_ref=task["task_ref"], role="implicit complete rework", profile_name="explorer",
@@ -286,7 +387,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 )
                 planner_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', planner["native_dispatch"]["message"]).group(1)
                 context: dict = {}
-                read_task(task_ref=planner_ref, view="assignment", _connection_context=context)
+                read_task(task_ref=planner_ref, _connection_context=context)
                 publish_plan(
                     task_ref=planner_ref, summary=f"Required plan {label}.", scope="Secured flow.",
                     stages=[{"owner": "implementer", "work": [f"Implement {label}."], "verification": ["Run security checks."]}],
@@ -352,7 +453,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 planner["native_dispatch"]["message"],
             ).group(1)
             planner_context: dict = {}
-            read_task(task_ref=planner_ref, view="assignment", _connection_context=planner_context)
+            read_task(task_ref=planner_ref, _connection_context=planner_context)
             publish_plan(
                 task_ref=planner_ref, summary="Reset plan.", scope="Current contract.",
                 stages=[{"owner": "implementer", "work": ["Implement reset."], "verification": ["Run reset tests."]}],
@@ -369,7 +470,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             open_steering(task_ref=task["task_ref"], prompt="Replace reset with contains?", prompt_language="en")
             record_steering(
                 task_ref=task["task_ref"], response_original="Use contains instead.", user_language="en",
-                add=[replacement], retire=[original],
+                add=[replacement], retire=[original["outcome"]],
             )
 
             with self.assertRaises(V12ServiceError) as review_error:
@@ -406,7 +507,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 planner["native_dispatch"]["message"],
             ).group(1)
             planner_context: dict = {}
-            read_task(task_ref=planner_ref, view="assignment", _connection_context=planner_context)
+            read_task(task_ref=planner_ref, _connection_context=planner_context)
             publish_plan(
                 task_ref=planner_ref, summary="Current multi-outcome plan.", scope="Current contract.",
                 stages=[{"owner": "developer", "work": ["Implement all outcomes."], "verification": ["Run all checks."]}],
@@ -452,7 +553,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertNotIn("Codebase Memory as the mandatory first evidence route", message)
             self.assertLess(len(message.encode("utf-8")), 1_024)
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', message).group(1)
-            assignment = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            assignment = read_task(task_ref=worker_ref, _connection_context={})
             context = assignment["data"]["assignment_context"]
             self.assertIn("Codebase Memory as the mandatory first evidence route", context["common_policy"])
             self.assertEqual(context["profile_name"], "explorer")
@@ -470,8 +571,8 @@ class DomainPublicApiContractTests(unittest.TestCase):
             worker_refs = [re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', item["native_dispatch"]["message"]).group(1) for item in assignments]
             self.assertEqual(len(set(worker_refs)), 2)
             contexts = [{}, {}]
-            second = read_task(task_ref=worker_refs[1], view="assignment", _connection_context=contexts[1])
-            first = read_task(task_ref=worker_refs[0], view="assignment", _connection_context=contexts[0])
+            second = read_task(task_ref=worker_refs[1], _connection_context=contexts[1])
+            first = read_task(task_ref=worker_refs[0], _connection_context=contexts[0])
             self.assertNotEqual(contexts[0]["assignment_id"], contexts[1]["assignment_id"])
             self.assertIn("Audit A.", repr(first))
             self.assertNotIn("Audit B.", repr(first["data"]["effective_contract"]))
@@ -484,26 +585,22 @@ class DomainPublicApiContractTests(unittest.TestCase):
             assignment = self._assignment(task["task_ref"], outcomes[0], "restart")
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', assignment["native_dispatch"]["message"]).group(1)
             context: dict = {}
-            first = read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            first = read_task(task_ref=worker_ref, _connection_context=context)
             self.assertIn("effective_contract", first["data"])
             with self.assertRaises(V12ServiceError) as fresh:
-                read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+                read_task(task_ref=worker_ref, _connection_context={})
             self.assertEqual(fresh.exception.code, "connection_lost")
-            before = read_task(task_ref=task["task_ref"], view="state")
+            before = read_state(task_ref=task["task_ref"], )
             reconciled = read_task(
-                task_ref=worker_ref, view="assignment",
+                task_ref=worker_ref,
                 _connection_context=context,
             )
-            after = read_task(task_ref=task["task_ref"], view="state")
+            after = read_state(task_ref=task["task_ref"], )
             self.assertEqual(reconciled["data"], first["data"])
             self.assertFalse(reconciled["has_more"])
             self.assertTrue(context["assignment_complete"])
             self.assertEqual(context["assignment_id"], context["bootstrap_assignment_id"])
-            self.assertEqual(
-                after["data"]["consumption_receipts"],
-                before["data"]["consumption_receipts"],
-            )
-            self.assertEqual(after["data"]["timeline"], before["data"]["timeline"])
+            self.assertEqual(after["data"], before["data"])
 
     def test_fresh_connection_cannot_recover_consumed_worker_publication(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch(
@@ -523,7 +620,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
 
             original_context: dict = {}
             read_task(
-                task_ref=worker_ref, view="assignment",
+                task_ref=worker_ref,
                 _connection_context=original_context,
             )
             fresh_context: dict = {}
@@ -532,7 +629,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(copied_publication.exception.code, "assignment_not_consumed")
             with self.assertRaises(V12ServiceError) as copied_read:
                 read_task(
-                    task_ref=worker_ref, view="assignment",
+                    task_ref=worker_ref,
                     _connection_context=fresh_context,
                 )
             self.assertEqual(copied_read.exception.code, "connection_lost")
@@ -551,8 +648,8 @@ class DomainPublicApiContractTests(unittest.TestCase):
             self.assertEqual(published["state"], "published")
             self.assertFalse(published["replayed"])
 
-            evidence = read_task(
-                task_ref=task["task_ref"], view="evidence",
+            evidence = read_evidence(
+                task_ref=task["task_ref"],
                 report_policy="all_finalized", _connection_context={},
             )
             self.assertEqual(len(evidence["data"]["reports"]), 1)
@@ -593,7 +690,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             bound_contexts = [{}, {}]
             for worker_ref, context in zip(worker_refs, bound_contexts):
                 read_task(
-                    task_ref=worker_ref, view="assignment",
+                    task_ref=worker_ref,
                     _connection_context=context,
                 )
 
@@ -633,7 +730,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
                 assignment["native_dispatch"]["message"],
             ).group(1)
-            read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            read_task(task_ref=worker_ref, _connection_context={})
             return task, outcomes[0], worker_ref
 
         with patch(
@@ -684,7 +781,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             ).group(1)
             worker_context: dict = {}
             original = read_task(
-                task_ref=worker_ref, view="assignment",
+                task_ref=worker_ref,
                 _connection_context=worker_context,
             )
             self.assertEqual(original["data"]["effective_contract"]["revision"], 1)
@@ -696,17 +793,17 @@ class DomainPublicApiContractTests(unittest.TestCase):
             )
             record_steering(
                 task_ref=task["task_ref"], response_original="Apply it.",
-                user_language="en", add=[refined], retire=[outcomes[0]],
+                user_language="en", add=[refined], retire=[outcomes[0]["outcome"]],
             )
-            current = read_task(task_ref=task["task_ref"], view="state")
-            self.assertEqual(current["data"]["effective_contract"]["revision"], 2)
+            current = read_state(task_ref=task["task_ref"])
+            self.assertEqual(current["data"]["effective_revision"], 2)
 
             published = self._publish_result(
                 worker_ref, outcomes[0], worker_context,
             )
             self.assertEqual(published["state"], "published")
-            evidence = read_task(
-                task_ref=task["task_ref"], view="evidence",
+            evidence = read_evidence(
+                task_ref=task["task_ref"],
                 report_policy="all_finalized", _connection_context={},
             )
             self.assertEqual(len(evidence["data"]["reports"]), 1)
@@ -732,7 +829,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             task, _ = self._task(root, [outcome])
             assignment = self._assignment(task["task_ref"], outcome, "audit")
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', assignment["native_dispatch"]["message"]).group(1)
-            read = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            read = read_task(task_ref=worker_ref, _connection_context={})
             item = read["data"]["effective_contract"]["assigned_items"][0]
             self.assertEqual(item["outcome"], outcome["outcome"])
             self.assertEqual(item["acceptance"], outcome["acceptance"])
@@ -749,8 +846,8 @@ class DomainPublicApiContractTests(unittest.TestCase):
             assignments = [self._assignment(task["task_ref"], outcome, label) for label, outcome in zip(("a", "b"), outcomes)]
             worker_refs = [re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', item["native_dispatch"]["message"]).group(1) for item in assignments]
             contexts = [{}, {}]
-            read_task(task_ref=worker_refs[0], view="assignment", _connection_context=contexts[0])
-            read_task(task_ref=worker_refs[1], view="assignment", _connection_context=contexts[1])
+            read_task(task_ref=worker_refs[0], _connection_context=contexts[0])
+            read_task(task_ref=worker_refs[1], _connection_context=contexts[1])
 
             def publish(index: int) -> dict:
                 return publish_result(
@@ -784,7 +881,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     assignment["native_dispatch"]["message"],
                 ).group(1)
                 context: dict = {}
-                read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+                read_task(task_ref=worker_ref, _connection_context=context)
                 publish_result(
                     task_ref=worker_ref,
                     summary=f"{label} completed.",
@@ -800,6 +897,24 @@ class DomainPublicApiContractTests(unittest.TestCase):
                     risks=[], unresolved=[], status="completed",
                     _connection_context=context,
                 )
+
+            evidence = read_evidence(
+                task_ref=task["task_ref"],
+                report_policy="all_finalized", _connection_context={},
+            )
+            self.assertFalse(evidence["has_more"])
+            self.assertEqual(len(evidence["data"]["human_views"]), 2)
+            for view in evidence["data"]["human_views"]:
+                self.assertEqual(view["status"], "ready")
+                self.assertEqual(view["kind"], "report")
+                self.assertTrue(view["markdown_link"].startswith("[Open report]("))
+                target = Path(view["markdown_link"].removeprefix("[Open report](").removesuffix(")"))
+                self.assertEqual(target.parent.name, "views")
+                self.assertEqual(target.parent.parent.name, "cortex")
+                self.assertRegex(target.name, r"^report-[0-9a-f]{64}\.md$")
+                self.assertTrue(target.is_file())
+                self.assertEqual(target.stem.removeprefix("report-"), hashlib.sha256(target.read_bytes()).hexdigest())
+                self.assertNotIn("path", view)
 
             # ``all_finalized`` intentionally selects both reports.  Their
             # authors are distinct, so there is no single predecessor to
@@ -871,7 +986,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             )
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', assignment["native_dispatch"]["message"]).group(1)
             context: dict = {}
-            bootstrap = read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            bootstrap = read_task(task_ref=worker_ref, _connection_context=context)
             self.assertEqual(bootstrap["data"]["assignment_context"]["responsibility"], "planning")
             self.assertEqual(bootstrap["data"]["assignment_context"]["project_root"], str(Path(root).resolve()))
             self.assertEqual(len(bootstrap["data"]["effective_contract"]["planning_items"]), 2)
@@ -903,16 +1018,21 @@ class DomainPublicApiContractTests(unittest.TestCase):
             )
             self.assertTrue(replayed["replayed"])
 
-            # A worker may inspect neutral state after its mandatory bootstrap;
-            # this advertised view must not trip a hidden capability gate.
-            worker_state = read_task(task_ref=worker_ref, view="state", _connection_context=context)
-            self.assertEqual(worker_state["view"], "state")
+            # Coordinator reads remain unavailable to a worker-scoped reference.
+            with self.assertRaises(V12ServiceError) as worker_state:
+                read_state(task_ref=worker_ref, _connection_context=context)
+            self.assertEqual(worker_state.exception.code, "wrong_connection")
 
-            handoff = read_task(task_ref=task["task_ref"], view="evidence", report_policy="active_plan", _connection_context={})
+            handoff = read_evidence(task_ref=task["task_ref"],  report_policy="active_plan", _connection_context={})
             self.assertEqual(len(handoff["data"]["reports"]), 1)
             self.assertIn("A bounded plan", repr(handoff["data"]))
             self.assertEqual(handoff["data"]["reports"][0]["review_policy"], "informational")
             self.assertEqual(handoff["data"]["consumption_receipts"][0]["reader_kind"], "coordinator")
+            self.assertEqual(handoff["data"]["human_view"]["status"], "ready")
+            self.assertEqual(handoff["data"]["human_view"]["kind"], "plan")
+            self.assertTrue(handoff["data"]["human_view"]["markdown_link"].startswith("[Open plan revision]("))
+            self.assertEqual(handoff["data"]["human_views"], [handoff["data"]["human_view"]])
+            self.assertNotIn("path", handoff["data"]["human_view"])
             with self.assertRaises(V12ServiceError) as rejected_review:
                 open_plan_review(task_ref=task["task_ref"], prompt="Review informational plan?", prompt_language="en")
             self.assertEqual(rejected_review.exception.code, "approval_view_required")
@@ -940,7 +1060,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 assignment["native_dispatch"]["message"],
             ).group(1)
             context: dict = {}
-            read_task(task_ref=worker_ref, view="assignment", _connection_context=context)
+            read_task(task_ref=worker_ref, _connection_context=context)
             common = {
                 "task_ref": worker_ref,
                 "verification_facts": [{"state": "not_run", "summary": "Planning does not execute delivery."}],
@@ -953,8 +1073,8 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 stages=[{"owner": "implementation", "work": ["Implement."], "verification": ["Run focused tests."]}],
                 **common,
             )
-            before = read_task(
-                task_ref=task["task_ref"], view="evidence", report_policy="all_finalized",
+            before = read_evidence(
+                task_ref=task["task_ref"],  report_policy="all_finalized",
                 _connection_context={},
             )
             self.assertEqual(len(before["data"]["reports"]), 1)
@@ -966,8 +1086,8 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 )
             self.assertEqual(rejected.exception.code, "publication_kind_not_permitted")
 
-            after = read_task(
-                task_ref=task["task_ref"], view="evidence", report_policy="all_finalized",
+            after = read_evidence(
+                task_ref=task["task_ref"],  report_policy="all_finalized",
                 _connection_context={},
             )
             self.assertEqual(len(after["data"]["reports"]), 1)
@@ -1003,7 +1123,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             ).group(1)
             context: dict = {}
             assignment = read_task(
-                task_ref=planner_ref, view="assignment",
+                task_ref=planner_ref,
                 _connection_context=context,
             )
             self.assertEqual(
@@ -1055,7 +1175,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             open_steering(task_ref=task["task_ref"], prompt="Apply the requested refinement?", prompt_language="en")
             record_steering(
                 task_ref=task["task_ref"], response_original="Apply it.", user_language="en",
-                add=[refined], retire=[outcomes[0]],
+                add=[refined], retire=[outcomes[0]["outcome"]],
             )
             assignment = open_assignment(
                 task_ref=task["task_ref"], role="worker", profile_name="explorer",
@@ -1064,15 +1184,37 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 outcomes=[outcomes[0]["outcome"]], report_policy="none",
             )
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', assignment["native_dispatch"]["message"]).group(1)
-            current = read_task(task_ref=worker_ref, view="assignment", _connection_context={})
+            current = read_task(task_ref=worker_ref, _connection_context={})
             self.assertIn("The refined criterion also works.", repr(current))
             self.assertIn("The artifact works.", repr(current["data"]["effective_contract"]))
 
-    def test_all_fourteen_public_operations_follow_llm_selected_flow(self) -> None:
+    def test_all_twenty_public_operations_follow_llm_selected_flow(self) -> None:
         outcome = {"outcome": "Deliver the checked change.", "acceptance": ["The evidence is durable."], "constraints": [], "verification": []}
         with tempfile.TemporaryDirectory() as root, patch("cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE):
             task, _ = self._task(root, [outcome])                       # open_task
-            self.assertEqual(read_task(task_ref=task["task_ref"], view="state")["view"], "state")
+            self.assertEqual(read_state(task_ref=task["task_ref"])["data"]["effective_revision"], 1)
+            self.assertEqual(
+                read_scope(task_ref=task["task_ref"], responsibility="delivery")
+                ["data"]["outcomes"][0]["outcome"],
+                outcome["outcome"],
+            )
+            self.assertEqual(
+                read_outcome(task_ref=task["task_ref"], outcome=outcome["outcome"])
+                ["data"]["outcome"]["outcome"],
+                outcome["outcome"],
+            )
+            self.assertEqual(
+                read_continuations(task_ref=task["task_ref"])["data"]["continuations"],
+                [],
+            )
+            self.assertEqual(
+                read_evidence(task_ref=task["task_ref"], report_policy="all_finalized")
+                ["data"]["reports"],
+                [],
+            )
+            self.assertTrue(
+                read_timeline(task_ref=task["task_ref"])["data"]["timeline"],
+            )
 
             open_clarification(task_ref=task["task_ref"], prompt="Proceed?", prompt_language="en")
             # A pending decision is neutral state, not a backend workflow lock.
@@ -1094,7 +1236,7 @@ class DomainPublicApiContractTests(unittest.TestCase):
             )
             planner_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', planner["native_dispatch"]["message"]).group(1)
             planner_context: dict = {}
-            read_task(task_ref=planner_ref, view="assignment", _connection_context=planner_context)
+            read_task(task_ref=planner_ref, _connection_context=planner_context)
             publish_plan(
                 task_ref=planner_ref, summary="Plan with visible uncertainty.", scope="Bounded.",
                 stages=[{"owner": "worker", "work": ["Implement."], "verification": ["Check."]}],
@@ -1105,7 +1247,13 @@ class DomainPublicApiContractTests(unittest.TestCase):
             )
             # ``unresolved`` is evidence; it does not let the backend veto the
             # LLM's explicit decision to ask for plan review.
-            open_plan_review(task_ref=task["task_ref"], prompt="Approve this plan?", prompt_language="en")
+            review = open_plan_review(task_ref=task["task_ref"], prompt="Approve this plan?", prompt_language="en")
+            self.assertEqual(review["data"]["human_view"]["kind"], "plan")
+            self.assertTrue(
+                review["data"]["human_view"]["markdown_link"].startswith(
+                    "[Open plan revision]("
+                )
+            )
             record_plan_review(task_ref=task["task_ref"], outcome="approve", response_original="Approved.", user_language="en")
 
             open_steering(task_ref=task["task_ref"], prompt="Any scope change?", prompt_language="en")
@@ -1119,10 +1267,8 @@ class DomainPublicApiContractTests(unittest.TestCase):
             )
             worker_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', worker["native_dispatch"]["message"]).group(1)
             worker_context: dict = {}
-            assignment_view = read_task(task_ref=worker_ref, view="assignment", _connection_context=worker_context)
+            assignment_view = read_task(task_ref=worker_ref, _connection_context=worker_context)
             self.assertIn("Plan with visible uncertainty", repr(assignment_view))
-            worker_evidence = read_task(task_ref=worker_ref, view="evidence", report_policy="active_plan", _connection_context=worker_context)
-            self.assertIn("Plan with visible uncertainty", repr(worker_evidence))
             common = {
                 "task_ref": worker_ref,
                 "verification_facts": [{"state": "executed", "summary": "Focused check passed."}],
@@ -1131,6 +1277,31 @@ class DomainPublicApiContractTests(unittest.TestCase):
             }
             self.assertEqual(publish_result(summary="Implemented.", outcome="Complete.", changes=[], documentation_impact="Checked.", **common)["state"], "published")
             self.assertEqual(publish_documentation(summary="Documentation assessed.", findings=[], recommendations=[], documentation_impact="No update required.", **common)["state"], "published")
+
+            derived = open_assignment(
+                task_ref=task["task_ref"], role="documentation reviewer", profile_name="technical_writer",
+                model="gpt-5.6-luna", reasoning_effort="high", responsibility="evidence",
+                goal="Assess documentation.", scope="The semantic outcome.", instructions="Publish documentation evidence.",
+                outcomes=[outcome["outcome"]], report_policy="all_finalized",
+            )
+            derived_ref = re.search(r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"', derived["native_dispatch"]["message"]).group(1)
+            derived_context: dict = {}
+            read_task(task_ref=derived_ref, _connection_context=derived_context)
+            self.assertEqual(
+                publish_documentation(
+                    task_ref=derived_ref,
+                    summary="Documentation independently assessed.",
+                    findings=[], recommendations=[],
+                    documentation_impact="No update required.",
+                    outcome_coverage=[{
+                        "outcome": outcome["outcome"], "status": "complete",
+                        "verification": ["README was inspected against the implemented behavior."],
+                    }],
+                    risks=[], unresolved=[], status="completed",
+                    _connection_context=derived_context,
+                )["state"],
+                "published",
+            )
 
             open_clarification(
                 task_ref=task["task_ref"],
@@ -1141,13 +1312,20 @@ class DomainPublicApiContractTests(unittest.TestCase):
                 task_ref=task["task_ref"], response_original="Close the task.",
                 user_language="en", outcome="close",
             )
-            self.assertEqual(close_task(task_ref=task["task_ref"], verdict="ready")["state"], "closed")
-            closed = read_task(task_ref=task["task_ref"], view="state")
-            self.assertEqual(closed["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
+            closure = close_task(task_ref=task["task_ref"], verdict="ready")
+            self.assertEqual(closure["state"], "closed")
+            self.assertEqual(len(closure["data"]["human_views"]), 4)
+            for view in closure["data"]["human_views"]:
+                self.assertEqual(view["status"], "ready")
+                link = view["markdown_link"]
+                self.assertRegex(link, r"^\[Open (?:plan revision|report)\]\(/.+\.md\)$")
+                self.assertTrue(Path(link[link.index("](") + 2:-1]).is_file())
+            closed = read_state(task_ref=task["task_ref"], )
+            self.assertEqual(closed["data"]["closure_verdict"], "ready")
 
     def test_version_and_catalogue_remain_current(self) -> None:
-        self.assertEqual(SERVER_VERSION, "1.14.12")
-        self.assertEqual(len(PUBLIC_TOOLS), 14)
+        self.assertEqual(SERVER_VERSION, "1.15.0")
+        self.assertEqual(len(PUBLIC_TOOLS), 20)
 
 
 if __name__ == "__main__":

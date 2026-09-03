@@ -39,6 +39,18 @@ def _markdown_link(relative: str, path: str) -> str:
     return f"[Open {label}]({path})"
 
 
+def _compact_view_link(store: Any, relative: str, body: bytes, digest: str) -> str:
+    """Materialize a short content-addressed alias for reliable user links."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise OSError("projection digest is invalid")
+    kind = "plan" if relative.startswith("plans/") else "report"
+    target = store._codex_home / "cortex" / "views" / f"{kind}-{digest.removeprefix('sha256:')}.md"
+    observed = _safe_write(target, body, expected_digest=digest, root=store._codex_home)
+    if observed != digest:
+        raise OSError("compact projection readback failed")
+    return _markdown_link(relative, str(target))
+
+
 def _markdown_text(value: object) -> str:
     """Compatibility wrapper for normalized plain text.
 
@@ -51,7 +63,7 @@ def _markdown_text(value: object) -> str:
 
 
 def _markdown_value(value: object, indent: str = "") -> list[str]:
-    """Compatibility wrapper for safe, heading-free legacy content lines."""
+    """Compatibility wrapper for readable legacy content lines."""
     # Keep the historic argument accepted without allowing callers to create
     # an indented code block accidentally.  Dedicated typed lists own nested
     # indentation; this fallback only emits ordinary list/text lines.
@@ -60,7 +72,7 @@ def _markdown_value(value: object, indent: str = "") -> list[str]:
 
 
 def _inert(value: object) -> str:
-    """Render arbitrary legacy content without letting it create structure."""
+    """Render arbitrary legacy content through the generic typed presenter."""
     lines = _markdown_value(value)
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -76,7 +88,7 @@ def _field_title(value: object) -> str:
 
 
 def _report_content(value: object, heading_level: int = 3, *, ordered: bool = False, compact: bool = False, omit_keys: set[str] | None = None) -> list[str]:
-    """Legacy compatibility helper with safe, heading-free output.
+    """Legacy compatibility helper with readable typed output.
 
     ``heading_level``/``compact``/``omit_keys`` remain accepted for old test
     and plugin callers, but arbitrary JSON depth no longer controls Markdown
@@ -276,9 +288,11 @@ def _view_metadata(store: Any, task_id: str, relative: str, *, require_fresh: bo
         try:
             _regular(path, required=True)
             with path.open("rb") as stream:
-                actual = _digest_bytes(stream.read(_MAX_RENDER_BYTES + 1))
+                body = stream.read(_MAX_RENDER_BYTES + 1)
+                actual = _digest_bytes(body)
             if actual != digest:
                 return {"status": "conflict", "path": None}
+            markdown_link = _compact_view_link(store, relative, body, digest)
         except FileExistsError:
             return {"status": "conflict", "path": None}
         except OSError:
@@ -287,7 +301,7 @@ def _view_metadata(store: Any, task_id: str, relative: str, *, require_fresh: bo
         return {
             "status": "ready",
             "path": verified_path,
-            "markdown_link": _markdown_link(relative, verified_path),
+            "markdown_link": markdown_link,
             "source_sequence": source_sequence,
             "content_digest": digest,
         }

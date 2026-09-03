@@ -77,11 +77,11 @@ replacement for an application domain protocol.
 | Security | Validate inputs, access-control, rate-limit, sanitize outputs, timeouts/logging recommended | Closed schemas, bounded frames/results, isolated candidate provenance, sanitized observation journal | Pass with operational gates; rate limiting is a future deployment concern for stdio |
 | Shutdown | Stdio client closes input, waits, then terminates if needed | Live helper owns exact-session cleanup; MCP process exits with launcher | Pass operationally; add direct stdio shutdown regression if needed |
 
-## Complete fourteen-tool registry and audience projections
+## Complete twenty-tool registry and audience projections
 
-The private registry contains the following fourteen operations, grouped by
-semantic role. Coordinator `tools/list` exposes coordinator operations plus
-`read_task`; worker-candidate/worker `tools/list` exposes only `read_task` and
+The private registry contains the following twenty operations, grouped by
+semantic role. Coordinator `tools/list` exposes only coordinator operations;
+worker-candidate/worker `tools/list` exposes only `read_task` and
 the three publications. The server independently enforces the same boundary.
 The model must use only the schema and descriptions advertised to its audience;
 no skill, prompt, or live workload may teach a call shape.
@@ -89,7 +89,13 @@ no skill, prompt, or live workload may teach a call shape.
 | Tool | MCP classification | Idempotency/domain invariant | Protocol finding |
 |---|---|---|---|
 | `open_task` | command | One task contract per logical request; exact retry replays | Core MCP-compatible; server-owned identity remains domain state |
-| `read_task` | query | Bounded task projection and chronology | Core MCP-compatible; cursor remains opaque |
+| `read_task` | query | Worker assignment consumption and selected predecessor evidence | Core MCP-compatible; server position remains private |
+| `read_state` | query | Scalar current status only | Core MCP-compatible; no growing task body |
+| `read_scope` | query | One responsibility's current names/dispositions | Core MCP-compatible; bounded server paging |
+| `read_outcome` | query | One exact complete current outcome | Core MCP-compatible point lookup |
+| `read_continuations` | query | Worker recovery projections only | Core MCP-compatible; bounded server paging |
+| `read_evidence` | query | Coordinator-selected finalized reports and verified links | Core MCP-compatible; bounded server paging |
+| `read_timeline` | query | Explicit newest-first history | Core MCP-compatible; bounded server paging |
 | `open_clarification` | command | One pending binding per logical question/subject/assignment | Core MCP-compatible; candidate for elicitation adapter, not replacement |
 | `record_clarification` | command | One immutable response; exact replay only; host delivery is explicit | Core MCP-compatible; delivery relation must remain durable Cortex state |
 | `open_plan_review` | command | Server-owned approval binding tied to immutable plan view | Core MCP-compatible; human-in-loop remains host concern |

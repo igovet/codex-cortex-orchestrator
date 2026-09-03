@@ -39,7 +39,7 @@ class ClarificationHoldTests(unittest.TestCase):
             task_ref, current = self._task(root)
             open_steering(task_ref=task_ref, prompt="Replace outcome?", prompt_language="en")
             replacement = {"outcome": "Build safely.", "acceptance": ["Safe."], "constraints": [], "verification": []}
-            result = record_steering(task_ref=task_ref, response_original="Replace it.", user_language="en", add=[replacement], retire=[current])
+            result = record_steering(task_ref=task_ref, response_original="Replace it.", user_language="en", add=[replacement], retire=[current["outcome"]])
             self.assertEqual(result["state"], "steering_recorded")
 
 

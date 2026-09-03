@@ -27,6 +27,7 @@ from cortex_runtime.domain_kernel import DecisionAggregate
 
 
 _WORKER_TASK_REF = re.compile(r"^(t_[0-9a-f]{12})_([0-9a-f]{32})$")
+_STATE_READ_PAGE_LIMIT = 16
 
 
 def _resolve_task_context(value: str) -> tuple[V12Store, str, str | None, str]:
@@ -137,6 +138,22 @@ def _publicize(value: Any) -> Any:
         public_key = "outcome" if key == "text" and "item_ref" in value else str(key)
         result[public_key] = "partial" if item == "rework" else _publicize(item)
     return result
+
+
+def _public_read_data(value: Any) -> Any:
+    """Project read data without duplicating the transport pagination marker."""
+    def strip_markers(item: Any) -> Any:
+        if isinstance(item, list):
+            return [strip_markers(entry) for entry in item]
+        if not isinstance(item, Mapping):
+            return item
+        return {
+            str(key): strip_markers(entry)
+            for key, entry in item.items()
+            if str(key) not in {"has_more", "task_ref"}
+        }
+
+    return strip_markers(_publicize(value))
 
 
 def _reject_private_fields(value: Any, *, path: str = "evidence") -> None:
@@ -287,6 +304,53 @@ def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_re
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
+def _evidence_human_views(
+    store: V12Store, task_id: str, report_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Return verified user-facing links for one fully consumed evidence set.
+
+    Report identity stays private.  The coordinator receives only a stable
+    semantic label and the verified Markdown link produced by the projection
+    layer.  Immutable report views deliberately ignore unrelated later task
+    chronology while still failing closed on an absent, conflicting, or
+    renderer-stale projection.
+    """
+    if not report_ids:
+        return []
+
+    def read(connection: Any) -> list[dict[str, Any]]:
+        return [store._report(connection, report_id, task_id=task_id) for report_id in report_ids]
+
+    reports = store._read(read)
+    views: list[dict[str, Any]] = []
+    for report in reports:
+        report_type = str(report.get("report_type") or "report")
+        report_id = report.get("report_id")
+        if not isinstance(report_id, str) or report.get("assembly_state") != "finalized":
+            continue
+        relative = (
+            f"plans/revisions/{report_id}.md"
+            if report_type == "plan"
+            else f"reports/{report_id}.md"
+        )
+        view = store.human_view(task_id, relative, require_fresh=False)
+        public_view: dict[str, Any] = {
+            "kind": "plan" if report_type == "plan" else "report",
+            "report_type": report_type,
+            "status": view.get("status"),
+        }
+        if isinstance(view.get("source_sequence"), int):
+            public_view["source_sequence"] = view["source_sequence"]
+        if (
+            view.get("status") == "ready"
+            and isinstance(view.get("markdown_link"), str)
+            and view["markdown_link"]
+        ):
+            public_view["markdown_link"] = view["markdown_link"]
+        views.append(public_view)
+    return views
+
+
 def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> None:
     """Enforce the public admission invariant without choosing a schedule.
 
@@ -354,7 +418,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.14.12",
+        "1.15.0",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -430,26 +494,23 @@ def open_task(*, project_root: str, request_original: str, user_language: str,
     return {"task_ref": public_ref, "replayed": bool(result.get("replayed"))}
 
 
-def read_task(*, task_ref: str, view: str, continue_: bool = False,
-              report_policy: str = "all_finalized",
+def read_task(*, task_ref: str, continue_: bool = False,
               _connection_context: dict[str, Any] | None = None, **compat: Any) -> dict[str, Any]:
-    """Read state, assignment bootstrap, or evidence with server-owned paging."""
+    """Consume one worker-owned assignment with server-owned paging."""
     if "continue" in compat:
         continue_ = compat.pop("continue")
     if compat:
         raise V12ServiceError("task read shape is invalid", code="invalid_argument")
     context = _connection_context if isinstance(_connection_context, dict) else {}
-    store, canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
-    bootstrap_pending = (
-        context.get("bootstrap_assignment_id") is not None
-        and context.get("assignment_complete") is not True
-    )
-    if bootstrap_pending and view != "assignment":
+    store, canonical, assignment_id, _coordinator_ref = _resolve_task_context(task_ref)
+    if assignment_id is None:
+        raise V12ServiceError("assignment read requires worker-scoped task_ref", code="wrong_connection")
+    if context.get("_role") == "coordinator":
         raise V12ServiceError(
-            "the current assignment must be consumed through its terminal page",
-            code="report_cursor_invalid",
+            "coordinator connection cannot consume worker authority",
+            code="wrong_connection",
         )
-    page_key = (task_ref, view, report_policy)
+    page_key = ("read_task", task_ref)
     if continue_:
         if context.get("read_key") != page_key or not context.get("has_more"):
             raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
@@ -457,127 +518,375 @@ def read_task(*, task_ref: str, view: str, continue_: bool = False,
     else:
         cursor = None
         context.pop("cursor", None)
-    if view == "state":
-        raw = ledger.inspect_task(task_ref=coordinator_ref, after_sequence=0)
-        data = _publicize(raw)
+    terminal_reconciliation = (
+        context.get("assignment_complete") is True
+        and context.get("_role") == "worker"
+        and context.get("actor") == "worker"
+        and context.get("bootstrap_assignment_id") == assignment_id
+        and context.get("assignment_id") == assignment_id
+        and context.get("task_id") == canonical
+        and context.get("worker_task_ref") == task_ref
+        and isinstance(context.get("continuation_ref"), str)
+    )
+    if (
+        (context.get("assignment_complete") is True and not terminal_reconciliation)
+        or (
+            context.get("bootstrap_assignment_id") is not None
+            and context.get("bootstrap_assignment_id") != assignment_id
+        )
+    ):
+        raise V12ServiceError("worker assignment context is stale", code="assignment_stale")
+    bound_continuation = (
+        context.get("continuation_ref")
+        if context.get("bootstrap_assignment_id") == assignment_id
+        else None
+    )
+    raw = _read_assignment_page(
+        store=store, assignment_id=assignment_id, cursor=cursor,
+        continuation_ref=bound_continuation if isinstance(bound_continuation, str) else None,
+    )
+    if terminal_reconciliation:
+        context.pop("assignment_evidence", None)
+        context.pop("assignment_evidence_pages", None)
+        context["assignment_complete"] = False
+    has_more = bool(raw.get("has_more"))
+    context.update({
+        "bootstrap_assignment_id": assignment_id,
+        "continuation_ref": raw.get("continuation_ref"),
+        "task_id": canonical,
+        "worker_task_ref": task_ref,
+        "read_key": page_key,
+        "cursor": raw.get("next_cursor"),
+        "has_more": has_more,
+    })
+    evidence = raw.get("evidence")
+    if isinstance(evidence, Mapping):
+        context["assignment_evidence"] = evidence
+    page = raw.get("assignment_page")
+    if isinstance(page, Mapping) and page.get("phase") == "evidence":
+        page_evidence = page.get("evidence")
+        if isinstance(page_evidence, Mapping):
+            context.setdefault("assignment_evidence_pages", []).append(dict(page_evidence))
+    if not has_more:
         context.update({
-            "read_key": page_key,
-            "cursor": None,
-            "has_more": False,
-            # Private, same-connection admission evidence.  A successful
-            # steering opening clears this marker, so recording the user's
-            # later answer requires a state read performed after that opening.
-            # This remains effective when Codex invokes Cortex through an
-            # outer programmatic-tool call that host hooks cannot decompose.
-            "steering_state_read_task_ref": task_ref,
+            "actor": "worker",
+            "assignment_id": assignment_id,
+            "assignment_complete": True,
+            "_role": "worker",
         })
-        result = {"task_ref": task_ref, "view": view, "data": data, "has_more": False}
-    elif view == "assignment":
-        if assignment_id is None:
-            raise V12ServiceError("assignment view requires worker-scoped task_ref", code="wrong_connection")
-        if context.get("_role") == "coordinator":
-            raise V12ServiceError(
-                "coordinator connection cannot consume worker authority",
-                code="wrong_connection",
-            )
-        terminal_reconciliation = (
-            context.get("assignment_complete") is True
-            and context.get("_role") == "worker"
-            and context.get("actor") == "worker"
-            and context.get("bootstrap_assignment_id") == assignment_id
-            and context.get("assignment_id") == assignment_id
-            and context.get("task_id") == canonical
-            and context.get("worker_task_ref") == task_ref
-            and isinstance(context.get("continuation_ref"), str)
-        )
-        if (
-            (context.get("assignment_complete") is True and not terminal_reconciliation)
-            or (
-                context.get("bootstrap_assignment_id") is not None
-                and context.get("bootstrap_assignment_id") != assignment_id
-            )
-        ):
-            raise V12ServiceError(
-                "worker assignment context is stale",
-                code="assignment_stale",
-            )
-        bound_continuation = (
-            context.get("continuation_ref")
-            if context.get("bootstrap_assignment_id") == assignment_id
-            else None
-        )
-        raw = _read_assignment_page(
-            store=store, assignment_id=assignment_id, cursor=cursor,
-            continuation_ref=bound_continuation
-            if isinstance(bound_continuation, str) else None,
-        )
-        if terminal_reconciliation:
-            # Context compaction can remove the model-visible exact assignment
-            # projection while the authenticated MCP connection and its
-            # publication authority remain live.  Re-reading that same
-            # terminal assignment on the same bound connection is a read-only
-            # reconciliation: it neither adopts a new worker identity nor
-            # mints a new continuation.  Clear only the assembled page state
-            # after the exact restart succeeds so a paginated reconciliation
-            # must again reach its terminal page before publication.
-            context.pop("assignment_evidence", None)
-            context.pop("assignment_evidence_pages", None)
-            context["assignment_complete"] = False
-        has_more = bool(raw.get("has_more"))
-        context.update({
-            "bootstrap_assignment_id": assignment_id,
-            "continuation_ref": raw.get("continuation_ref"),
-            "task_id": canonical,
-            "worker_task_ref": task_ref,
-            "read_key": page_key,
-            "cursor": raw.get("next_cursor"),
-            "has_more": has_more,
-        })
-        evidence = raw.get("evidence")
-        if isinstance(evidence, Mapping):
-            context["assignment_evidence"] = evidence
-        page = raw.get("assignment_page")
-        if isinstance(page, Mapping) and page.get("phase") == "evidence":
-            page_evidence = page.get("evidence")
-            if isinstance(page_evidence, Mapping):
-                context.setdefault("assignment_evidence_pages", []).append(
-                    dict(page_evidence)
-                )
-        if not has_more:
-            context.update({
-                "actor": "worker",
-                "assignment_id": assignment_id,
-                "assignment_complete": True,
-                "_role": "worker",
-            })
-            if "assignment_evidence" not in context:
-                pages = context.get("assignment_evidence_pages")
-                context["assignment_evidence"] = {
-                    "state": "consumed",
-                    "pages": list(pages) if isinstance(pages, list) else [],
-                }
-        result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
-    elif view == "evidence":
-        if assignment_id is not None:
-            if context.get("assignment_id") != assignment_id:
-                raise V12ServiceError("worker assignment must be read before evidence", code="assignment_not_consumed")
-            if context.get("has_more"):
-                raise V12ServiceError(
-                    "the current assignment page must be continued before another view",
-                    code="report_cursor_invalid",
-                )
-            raw = context.get("assignment_evidence")
-            if not isinstance(raw, Mapping):
-                raise V12ServiceError("worker evidence is unavailable", code="ledger_error")
-        else:
-            report_ids = _select_report_inputs(store, canonical, report_policy, [])
-            raw = store.read_reports(task_id=canonical, report_ids=report_ids, cursor=cursor, max_bytes=65_536, consumer_delegation_id=None) if report_ids else {"reports": [], "has_more": False, "next_cursor": None}
-        has_more = bool(raw.get("has_more"))
-        context.update({"read_key": page_key, "cursor": raw.get("next_cursor"), "has_more": has_more})
-        result = {"task_ref": task_ref, "view": view, "data": _publicize(raw), "has_more": has_more}
+        if "assignment_evidence" not in context:
+            pages = context.get("assignment_evidence_pages")
+            context["assignment_evidence"] = {
+                "state": "consumed",
+                "pages": list(pages) if isinstance(pages, list) else [],
+            }
+    return {"task_ref": task_ref, "data": _public_read_data(raw), "has_more": has_more}
+
+
+def read_state(*, task_ref: str,
+               _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return only bounded scalar facts needed to choose the next read/action."""
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    _store, _canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError("coordinator state requires coordinator task_ref", code="wrong_connection")
+    current = _public_read_data(ledger.inspect_task(
+        task_ref=coordinator_ref, after_sequence=0, limit=1,
+    ))
+    contract = current.get("effective_contract") if isinstance(current.get("effective_contract"), Mapping) else {}
+    coverage = current.get("aggregate_coverage") if isinstance(current.get("aggregate_coverage"), Mapping) else {}
+    coverage_items = coverage.get("items") if isinstance(coverage.get("items"), list) else []
+    scope = coverage.get("assignment_scope") if isinstance(coverage.get("assignment_scope"), Mapping) else {}
+    conformance = current.get("conformance_review") if isinstance(current.get("conformance_review"), Mapping) else {}
+    execution = current.get("execution_outcome") if isinstance(current.get("execution_outcome"), Mapping) else {}
+    closure = current.get("advisory_closure") if isinstance(current.get("advisory_closure"), Mapping) else {}
+    latest_closure = closure.get("latest_record") if isinstance(closure.get("latest_record"), Mapping) else {}
+    status_counts: dict[str, int] = {}
+    for item in coverage_items:
+        status = item.get("status") if isinstance(item, Mapping) else None
+        if isinstance(status, str):
+            status_counts[status] = status_counts.get(status, 0) + 1
+    unresolved = conformance.get("unresolved_evidence")
+    reports = conformance.get("report_manifests")
+    data = {
+        "effective_revision": contract.get("revision"),
+        "coverage_status": coverage.get("status"),
+        "outcome_count": len(coverage_items),
+        "coverage_status_counts": status_counts,
+        "assignment_counts": {
+            "delivery": len(scope.get("delivery_outcomes", [])) if isinstance(scope.get("delivery_outcomes"), list) else 0,
+            "evidence": len(scope.get("evidence_outcomes", [])) if isinstance(scope.get("evidence_outcomes"), list) else 0,
+            "terminal": len(scope.get("terminal_outcomes", [])) if isinstance(scope.get("terminal_outcomes"), list) else 0,
+        },
+        "terminal_rework": scope.get("terminal_rework"),
+        "conformance_status": conformance.get("status"),
+        "unresolved_evidence_count": len(unresolved) if isinstance(unresolved, list) else 0,
+        "finalized_report_count": execution.get("finalized_report_count"),
+        "completed_report_count": execution.get("completed_report_count"),
+        "execution_evidence_status": execution.get("evidence_status"),
+        "execution_outcome": execution.get("outcome"),
+        "closure_record_status": closure.get("record_status"),
+        "closure_verdict": latest_closure.get("verdict"),
+        "report_manifest_count": len(reports) if isinstance(reports, list) else 0,
+    }
+    context.update({
+        "read_key": ("read_state", task_ref),
+        "cursor": None,
+        "has_more": False,
+        "steering_state_read_task_ref": task_ref,
+    })
+    return {"task_ref": task_ref, "data": data}
+
+
+def _bounded_page(values: list[Any], start: int, *, maximum: int = 49_152) -> tuple[list[Any], int]:
+    """Pack whole semantic records without slicing or ellipsizing them."""
+    page: list[Any] = []
+    position = start
+    while position < len(values):
+        candidate = [*page, values[position]]
+        if page and len(_encoded_bytes(candidate)) > maximum:
+            break
+        page = candidate
+        position += 1
+        if len(_encoded_bytes(page)) > maximum:
+            break
+    return page, position
+
+
+def read_scope(*, task_ref: str, responsibility: str, continue_: bool = False,
+               _connection_context: dict[str, Any] | None = None,
+               **compat: Any) -> dict[str, Any]:
+    """Read only one responsibility's current assignment scope."""
+    if "continue" in compat:
+        continue_ = compat.pop("continue")
+    if compat:
+        raise V12ServiceError("scope read shape is invalid", code="invalid_argument")
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    _store, _canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError("coordinator scope requires coordinator task_ref", code="wrong_connection")
+    key = ("read_scope", task_ref, responsibility)
+    if continue_:
+        if context.get("read_key") != key or not context.get("has_more"):
+            raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
+        snapshot = context.get("scope_snapshot")
+        start = context.get("cursor")
+        if not isinstance(snapshot, list) or isinstance(start, bool) or not isinstance(start, int):
+            raise V12ServiceError("scope continuation is unavailable", code="ledger_error")
+        revision = context.get("scope_revision")
+        summary = context.get("scope_summary")
     else:
-        raise V12ServiceError("task view is invalid", code="invalid_argument", details={"field": "view"})
-    return result
+        current = _public_read_data(ledger.inspect_task(
+            task_ref=coordinator_ref, after_sequence=0, limit=1,
+        ))
+        contract = current.get("effective_contract") if isinstance(current.get("effective_contract"), Mapping) else {}
+        coverage = current.get("aggregate_coverage") if isinstance(current.get("aggregate_coverage"), Mapping) else {}
+        scope = coverage.get("assignment_scope") if isinstance(coverage.get("assignment_scope"), Mapping) else {}
+        names = (
+            [] if responsibility == "planning"
+            else scope.get(f"{responsibility}_outcomes", [])
+        )
+        if not isinstance(names, list):
+            names = []
+        if responsibility == "delivery" and isinstance(coverage.get("items"), list):
+            recovery_names = [
+                name
+                for item in coverage["items"]
+                if isinstance(item, Mapping)
+                and item.get("delivery_assignability") == "loss_recovery_only"
+                for name in item.get("loss_recovery_outcomes", [])
+                if isinstance(name, str)
+            ]
+            names = list(dict.fromkeys([*names, *recovery_names]))
+        by_name = {
+            item.get("outcome"): item
+            for item in coverage.get("items", [])
+            if isinstance(item, Mapping) and isinstance(item.get("outcome"), str)
+        } if isinstance(coverage.get("items"), list) else {}
+        snapshot = [dict(by_name.get(name, {"outcome": name})) for name in names if isinstance(name, str)]
+        revision = contract.get("revision")
+        summary = {
+            "coverage_status": coverage.get("status"),
+            "responsibility": responsibility,
+            "outcome_count": len(snapshot),
+            "terminal_rework": scope.get("terminal_rework"),
+            "planning_scope": scope.get("planning") if responsibility == "planning" else None,
+        }
+        start = 0
+        context.update({
+            "scope_snapshot": snapshot,
+            "scope_revision": revision,
+            "scope_summary": summary,
+        })
+    page, position = _bounded_page(snapshot, start)
+    has_more = position < len(snapshot)
+    context.update({"read_key": key, "cursor": position if has_more else None, "has_more": has_more})
+    context["steering_state_read_task_ref"] = task_ref
+    observed = context.setdefault("steering_observed_outcomes", [])
+    if isinstance(observed, list):
+        for item in page:
+            name = item.get("outcome") if isinstance(item, Mapping) else None
+            if isinstance(name, str) and name not in observed:
+                observed.append(name)
+    return {
+        "task_ref": task_ref,
+        "data": {"effective_revision": revision, "summary": summary, "outcomes": page},
+        "has_more": has_more,
+    }
+
+
+def read_outcome(*, task_ref: str, outcome: str,
+                 _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read exactly one current semantic outcome by its unique exact name."""
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    _store, _canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError("coordinator outcome requires coordinator task_ref", code="wrong_connection")
+    raw = ledger.inspect_task(task_ref=coordinator_ref, after_sequence=0, limit=1)
+    contract = raw.get("effective_contract") if isinstance(raw.get("effective_contract"), Mapping) else {}
+    items = contract.get("items") if isinstance(contract.get("items"), list) else []
+    matches = [
+        item for item in items
+        if isinstance(item, Mapping) and _semantic_outcome(item).get("outcome") == outcome
+    ]
+    if len(matches) != 1:
+        raise V12ServiceError(
+            "outcome is missing or ambiguous", code="outcome_item_not_found",
+            details={
+                "path": "$.outcome", "expected": "unique_current_semantic_outcome",
+                "reason": "semantic_outcome_missing" if not matches else "semantic_outcome_ambiguous",
+            },
+        )
+    context.update({
+        "read_key": ("read_outcome", task_ref, outcome),
+        "cursor": None,
+        "has_more": False,
+        "steering_state_read_task_ref": task_ref,
+    })
+    observed = context.setdefault("steering_observed_outcomes", [])
+    if isinstance(observed, list) and outcome not in observed:
+        observed.append(outcome)
+    return {
+        "task_ref": task_ref,
+        "data": {
+            "effective_revision": contract.get("revision"),
+            "outcome": _semantic_outcome(matches[0]),
+        },
+    }
+
+
+def read_continuations(*, task_ref: str, continue_: bool = False,
+                       _connection_context: dict[str, Any] | None = None,
+                       **compat: Any) -> dict[str, Any]:
+    """Read only current worker continuation projections for recovery."""
+    if "continue" in compat:
+        continue_ = compat.pop("continue")
+    if compat:
+        raise V12ServiceError("continuation read shape is invalid", code="invalid_argument")
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    _store, _canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError("coordinator continuations require coordinator task_ref", code="wrong_connection")
+    key = ("read_continuations", task_ref)
+    if continue_:
+        if context.get("read_key") != key or not context.get("has_more"):
+            raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
+        snapshot = context.get("continuation_snapshot")
+        start = context.get("cursor")
+        if not isinstance(snapshot, list) or isinstance(start, bool) or not isinstance(start, int):
+            raise V12ServiceError("continuation is unavailable", code="ledger_error")
+    else:
+        current = _public_read_data(ledger.inspect_task(
+            task_ref=coordinator_ref, after_sequence=0, limit=1,
+        ))
+        raw = current.get("continuations")
+        snapshot = list(raw) if isinstance(raw, list) else []
+        start = 0
+        context["continuation_snapshot"] = snapshot
+    page, position = _bounded_page(snapshot, start)
+    has_more = position < len(snapshot)
+    context.update({"read_key": key, "cursor": position if has_more else None, "has_more": has_more})
+    return {"task_ref": task_ref, "data": {"continuations": page}, "has_more": has_more}
+
+
+def read_evidence(*, task_ref: str, report_policy: str,
+                  continue_: bool = False,
+                  _connection_context: dict[str, Any] | None = None,
+                  **compat: Any) -> dict[str, Any]:
+    """Read coordinator-selected finalized evidence with server-owned paging."""
+    if "continue" in compat:
+        continue_ = compat.pop("continue")
+    if compat:
+        raise V12ServiceError("evidence read shape is invalid", code="invalid_argument")
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    store, canonical, assignment_id, _coordinator_ref = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError("coordinator evidence requires coordinator task_ref", code="wrong_connection")
+    page_key = ("read_evidence", task_ref, report_policy)
+    if continue_:
+        if context.get("read_key") != page_key or not context.get("has_more"):
+            raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
+        cursor = context.get("cursor")
+    else:
+        cursor = None
+    report_ids = _select_report_inputs(store, canonical, report_policy, [])
+    raw = (
+        store.read_reports(
+            task_id=canonical, report_ids=report_ids, cursor=cursor,
+            max_bytes=65_536, consumer_delegation_id=None,
+        )
+        if report_ids else {"reports": [], "has_more": False, "next_cursor": None}
+    )
+    has_more = bool(raw.get("has_more"))
+    context.update({"read_key": page_key, "cursor": raw.get("next_cursor"), "has_more": has_more})
+    public_raw = dict(raw)
+    if not has_more:
+        human_views = _evidence_human_views(store, canonical, report_ids)
+        if human_views:
+            public_raw["human_views"] = human_views
+            if report_policy == "active_plan" and len(human_views) == 1:
+                public_raw["human_view"] = human_views[0]
+    return {"task_ref": task_ref, "data": _public_read_data(public_raw), "has_more": has_more}
+
+
+def read_timeline(*, task_ref: str, continue_: bool = False,
+                  _connection_context: dict[str, Any] | None = None,
+                  **compat: Any) -> dict[str, Any]:
+    """Read coordinator history newest-first with server-owned paging."""
+    if "continue" in compat:
+        continue_ = compat.pop("continue")
+    if compat:
+        raise V12ServiceError("timeline read shape is invalid", code="invalid_argument")
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    store, canonical, assignment_id, _coordinator_ref = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError("coordinator timeline requires coordinator task_ref", code="wrong_connection")
+    page_key = ("read_timeline", task_ref)
+    if continue_:
+        if context.get("read_key") != page_key or not context.get("has_more"):
+            raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
+        before_sequence = context.get("cursor")
+        if isinstance(before_sequence, bool) or not isinstance(before_sequence, int):
+            raise V12ServiceError("timeline continuation is unavailable", code="ledger_error")
+    else:
+        before_sequence = None
+    raw = store.inspect_task_timeline(
+        task_id=canonical, before_sequence=before_sequence,
+        limit=_STATE_READ_PAGE_LIMIT,
+    )
+    has_more = bool(raw.get("has_more"))
+    next_sequence = raw.get("next_sequence")
+    if has_more and (isinstance(next_sequence, bool) or not isinstance(next_sequence, int)):
+        raise V12ServiceError("timeline continuation is unavailable", code="ledger_error")
+    public_raw = dict(raw)
+    public_raw.pop("has_more", None)
+    public_raw.pop("next_sequence", None)
+    context.update({
+        "read_key": page_key,
+        "cursor": next_sequence if has_more else None,
+        "has_more": has_more,
+    })
+    return {"task_ref": task_ref, "data": _public_read_data(public_raw), "has_more": has_more}
 
 
 def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
@@ -617,16 +926,41 @@ def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
         if len(item_refs) != len(typed_items) or not item_refs:
             raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
     elif outcomes is None:
-        if loss_recovery is not None:
-            raise V12ServiceError(
-                "loss recovery requires an exact predecessor outcome scope",
-                code="assignment_loss_scope_conflict",
-                details={"path": "$.outcomes", "expected": "exact_loss_recovery_scope", "reason": "required"},
-            )
         aggregate = task_state.get("aggregate_coverage")
         assignment_scope = aggregate.get("assignment_scope") if isinstance(aggregate, Mapping) else None
-        scope_key = "delivery_outcomes" if responsibility == "delivery" else "evidence_outcomes"
-        advertised = assignment_scope.get(scope_key) if isinstance(assignment_scope, Mapping) else None
+        if loss_recovery is not None:
+            if responsibility != "delivery":
+                raise V12ServiceError(
+                    "only a delivery owner can replace a lost assignment",
+                    code="assignment_loss_scope_conflict",
+                )
+            coverage_items = aggregate.get("items") if isinstance(aggregate, Mapping) else None
+            recovery_scopes: list[tuple[str, ...]] = []
+            if isinstance(coverage_items, list):
+                for item in coverage_items:
+                    if not isinstance(item, Mapping) or item.get("delivery_assignability") != "loss_recovery_only":
+                        continue
+                    candidate = item.get("loss_recovery_outcomes")
+                    if not isinstance(candidate, list) or not candidate or not all(isinstance(name, str) for name in candidate):
+                        continue
+                    recovery_scope = tuple(candidate)
+                    if recovery_scope not in recovery_scopes:
+                        recovery_scopes.append(recovery_scope)
+            if len(recovery_scopes) != 1:
+                raise V12ServiceError(
+                    "loss recovery scope is not uniquely server-derivable",
+                    code="assignment_loss_scope_conflict",
+                    details={
+                        "path": "$.outcomes",
+                        "expected": "one_server_derived_loss_recovery_scope",
+                        "reason": "ambiguous_recovery_scope",
+                    },
+                )
+            advertised = list(recovery_scopes[0])
+            scope_key = "loss_recovery_outcomes"
+        else:
+            scope_key = "delivery_outcomes" if responsibility == "delivery" else "evidence_outcomes"
+            advertised = assignment_scope.get(scope_key) if isinstance(assignment_scope, Mapping) else None
         if not isinstance(advertised, list) or not advertised:
             raise V12ServiceError(
                 "no current outcomes are assignable for this responsibility",
@@ -1056,7 +1390,7 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
             next_cursor: Mapping[str, Any] | None, has_more: bool,
         ) -> dict[str, Any]:
             rendered = {**page, "next_cursor": next_cursor, "has_more": has_more}
-            public_page = _publicize(rendered)
+            public_page = _public_read_data(rendered)
             encoded = _encoded_bytes(public_page)
             if len(encoded) > REPORT_RESPONSE_MAX_BYTES:
                 raise V12ServiceError(
@@ -1460,9 +1794,31 @@ def publish_result(*, task_ref: str, summary: str, outcome: str,
 
 def publish_documentation(*, task_ref: str, summary: str,
                           findings: list[Mapping[str, Any]], recommendations: list[str],
-                          verification_facts: list[Mapping[str, Any]], outcome_coverage: list[Mapping[str, Any]],
+                          verification_facts: list[Mapping[str, Any]] | None = None,
+                          outcome_coverage: list[Mapping[str, Any]],
                           documentation_impact: str, risks: list[str], unresolved: list[str],
                           status: str, _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    if verification_facts is None:
+        verification_facts = []
+        fact_state = {
+            "complete": "executed",
+            "partial": "executed",
+            "planned": "not_run",
+            "unverified": "not_run",
+            "blocked": "failed",
+        }
+        for coverage in outcome_coverage:
+            if not isinstance(coverage, Mapping):
+                continue
+            state = fact_state.get(str(coverage.get("status")), "not_run")
+            entries = coverage.get("verification")
+            if not isinstance(entries, list):
+                continue
+            verification_facts.extend(
+                {"state": state, "summary": entry}
+                for entry in entries
+                if isinstance(entry, str) and entry.strip()
+            )
     evidence = _publication_evidence(schema_kind="documentation", summary=summary, verification_facts=verification_facts,
                                      outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
                                      findings=[dict(item) for item in findings], recommendations=list(recommendations),
@@ -1624,7 +1980,15 @@ def open_plan_review(*, task_ref: str, prompt: str,
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
             subject_type="plan", subject_id=plan_id,
         )
-        return _decision_receipt(task_ref, "pending_plan_review", issued)
+        receipt = _decision_receipt(task_ref, "pending_plan_review", issued)
+        views = _evidence_human_views(store, canonical, [plan_id])
+        if len(views) != 1 or views[0].get("status") != "ready":
+            raise V12ServiceError(
+                "the active plan view is unavailable",
+                code="approval_view_required",
+            )
+        receipt["data"] = {"human_view": views[0]}
+        return receipt
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
@@ -1656,6 +2020,7 @@ def open_steering(*, task_ref: str, prompt: str, prompt_language: str,
         )
         if isinstance(_connection_context, dict):
             _connection_context.pop("steering_state_read_task_ref", None)
+            _connection_context.pop("steering_observed_outcomes", None)
         return _decision_receipt(task_ref, "pending_steering", issued)
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
@@ -1663,17 +2028,8 @@ def open_steering(*, task_ref: str, prompt: str, prompt_language: str,
 
 def record_steering(*, task_ref: str, response_original: str,
                     user_language: str, add: list[Mapping[str, Any]] | None = None,
-                    retire: list[Mapping[str, Any]] | None = None,
+                    retire: list[str] | None = None,
                     _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    if isinstance(_connection_context, dict):
-        fresh_task_ref = _connection_context.pop(
-            "steering_state_read_task_ref", None,
-        )
-        if fresh_task_ref != task_ref:
-            raise V12ServiceError(
-                "steering requires a fresh same-connection task-state read",
-                code="fresh_state_read_required",
-            )
     store, canonical = _task_store(task_ref)
     replay_candidate = False
     try:
@@ -1700,14 +2056,27 @@ def record_steering(*, task_ref: str, response_original: str,
             _validated_public_outcome(item, path=f"$.add[{index}]")
             for index, item in enumerate(add)
         ]
-        typed_retire = [
-            _validated_public_outcome(item, path=f"$.retire[{index}]")
-            for index, item in enumerate(retire)
-        ]
+        if any(not isinstance(item, str) or not item.strip() for item in retire):
+            raise V12ServiceError(
+                "steering retire names are invalid", code="invalid_argument",
+                details={"path": "$.retire", "expected": "exact_current_outcome_names", "reason": "canonical_semantic_invalid"},
+            )
+        if len(set(retire)) != len(retire):
+            raise V12ServiceError(
+                "steering retire names are duplicated", code="invalid_argument",
+                details={"path": "$.retire", "expected": "unique_items", "reason": "duplicate"},
+            )
+        observed = _connection_context.get("steering_observed_outcomes", []) if isinstance(_connection_context, dict) else retire
+        if not replay_candidate and any(name not in observed for name in retire):
+            raise V12ServiceError(
+                "steering retirement requires a fresh observed outcome name",
+                code="fresh_state_read_required",
+                details={"path": "$.retire", "expected": "observed_current_semantic_outcome", "reason": "fresh_scope_required"},
+            )
         retire_refs = _match_outcomes(
             [item for item in current if isinstance(item, Mapping)],
-            typed_retire, path="$.retire",
-        ) if typed_retire else []
+            retire, path="$.retire",
+        ) if retire else []
         additions: list[dict[str, Any]] = []
         paired_replacement = len(typed_add) == 1 and len(retire_refs) == 1
         if paired_replacement:
@@ -1745,6 +2114,9 @@ def record_steering(*, task_ref: str, response_original: str,
             steering_delta=steering_delta,
             supersedes_decision_id=None,
         )
+        if isinstance(_connection_context, dict):
+            _connection_context.pop("steering_state_read_task_ref", None)
+            _connection_context.pop("steering_observed_outcomes", None)
         return _decision_receipt(task_ref, "steering_recorded", issued)
     except V12ServiceError:
         raise
@@ -1762,6 +2134,12 @@ def assess_governance(*, task_ref: str, mode: str, rationale: str = "",
 def close_task(*, task_ref: str, verdict: str, evidence: object | None = None,
                unresolved_risks: object | None = None, follow_ups: object | None = None,
                completion_notes: object | None = None) -> dict[str, Any]:
+    store, canonical, assignment_id, _ = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError(
+            "task closure requires coordinator task_ref",
+            code="wrong_connection",
+        )
     if evidence is None:
         inspected = ledger.inspect_task(task_ref=task_ref)
         evidence = {
@@ -1775,11 +2153,18 @@ def close_task(*, task_ref: str, verdict: str, evidence: object | None = None,
         evidence=evidence, unresolved_risks=unresolved_risks, follow_ups=follow_ups,
         completion_notes=completion_notes, require_closure_review=True,
     )
-    return {"task_ref": task_ref, "state": "closed", "replayed": bool(result.get("replayed"))}
+    report_ids = _select_report_inputs(store, canonical, "all_finalized", [])
+    return {
+        "task_ref": task_ref,
+        "state": "closed",
+        "replayed": bool(result.get("replayed")),
+        "data": {"human_views": _evidence_human_views(store, canonical, report_ids)},
+    }
 
 
 __all__ = [
-    "open_task", "read_task", "open_assignment",
+    "open_task", "read_task", "read_state", "read_scope", "read_outcome",
+    "read_continuations", "read_evidence", "read_timeline", "open_assignment",
     "publish_plan", "publish_result", "publish_documentation",
     "open_clarification", "record_clarification", "open_plan_review", "record_plan_review", "open_steering", "record_steering",
     "assess_governance", "close_task",
