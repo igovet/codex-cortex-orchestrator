@@ -1,10 +1,10 @@
 """Report-specific presentation templates for V12 human-readable views.
 
-Reports are persisted as opaque JSON.  Presenters interpret only known
-semantic fields and turn them into a :mod:`markdown_document` tree.  Unknown,
-legacy, malformed, or future content is always rendered through the safe
-heading-free fallback; it can never alter the canonical report lifecycle or
-make ``submit_report`` fail.
+Reports are persisted as opaque JSON. Presenters interpret only known semantic
+fields and turn them into a :mod:`markdown_document` tree. Unknown, legacy,
+malformed, or future content uses a generic fallback. Authored Markdown remains
+authored Markdown in the derived file; none of it can alter the canonical
+report lifecycle or make ``submit_report`` fail.
 """
 from __future__ import annotations
 
@@ -173,7 +173,7 @@ def _append_contract_evidence(
     sections: list[Section], data: Mapping[str, Any], known: set[str], *, include_standard: bool = True,
     include_deviations: bool = True,
 ) -> None:
-    """Render canonical v2 outcome evidence as named, inert typed sections.
+    """Render canonical v2 outcome evidence as named typed sections.
 
     V2 reports deliberately carry the same evidence shape across result, plan,
     and synthesis reports.  Keeping the rendering here prevents a valid v2
@@ -662,7 +662,7 @@ def present_report(report_type: object, content: object, report: Mapping[str, An
             else content
         )
         document = presenter.present(presentation_content, metadata)
-        # Canonical user source material is one explicitly labeled inert value.
+        # Canonical user source material is one explicitly labeled value.
         # It is never translated, normalized into worker prose, or duplicated.
         if isinstance(source_text, str):
             return Document(

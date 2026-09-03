@@ -15,11 +15,11 @@ orchestrator-owned knowledge route used to compile delegation requirements.
 
 ## Key files
 
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the governance and decision tools, including the three narrow decision operations, in the uniform fourteen-tool semantic catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the governance and decision tools, including the three narrow decision operations, in the uniform twenty-tool semantic catalog.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) exposes action-specific governance operations.
 - [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns append-only assessments, initiative revisions/links, warnings, and closures.
 - [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines outcome-first model behavior.
-- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) summarizes the fourteen public operations and nonblocking invariant.
+- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) summarizes the twenty public operations and nonblocking invariant.
 
 ## Mode assessments and revisions
 
@@ -111,10 +111,10 @@ dependency identifier is retained with `unresolved_dependency`; a dependency
 cycle is retained with `cyclic_dependency`. Warnings are model-visible evidence,
 not rejection reasons. A later private/internal status update remains allowed.
 
-The public `read_task` evidence view uses only the task reference and exposes
-server-produced task evidence with private ledger identity removed. It supports
-the advertised `state`, `assignment`, and `evidence` views; `continue=true`
-continues the immediately preceding bounded read. Private/internal initiative
+Coordinator reads use only the task reference and expose purpose-specific
+server-produced evidence with private ledger identity removed. `read_state`
+returns scalar status, `read_evidence` returns selected reports, and
+`read_timeline` returns explicit newest-first history. Private/internal initiative
 links, revisions, and timeline projections may contribute to that evidence but
 are not public locators or inspection inputs.
 
@@ -240,7 +240,7 @@ evidence-synthesis/documentation-impact worker submits a finalized synthesis;
 `documentation_not_required`.
 
 The no-impact close has a deterministic evidence sequence. After every required
-publication is complete, the coordinator uses task-scoped `read_task` evidence
+publication is complete, the coordinator uses task-scoped `read_evidence`
 to confirm the worker-owned documentation-impact rationale and coverage.
 Private/internal initiative bookkeeping may retain task/publication links, but
 no initiative or publication reference is a public input. `close_task` derives

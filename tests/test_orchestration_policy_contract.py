@@ -118,16 +118,16 @@ def test_first_read_recovery_and_terminal_transition_are_bounded():
 def test_assignment_selection_uses_current_outcomes_and_one_bounded_recovery():
     orchestrator = _text(ORCHESTRATOR)
 
-    assert "Immediately before every assignment, read current task state" in orchestrator
-    assert "aggregate_coverage.assignment_scope" in orchestrator
-    assert "delivery_outcomes" in orchestrator
-    assert "evidence_outcomes" in orchestrator
+    assert "Immediately before every assignment, read only the selected responsibility's current server-owned assignment scope" in orchestrator
+    assert "the coordinator need not continue through remaining exact-name pages" in orchestrator
+    assert "that responsibility's returned names" in orchestrator
+    assert "Planning and evidence work cannot turn their responsibility into delivery ownership" in orchestrator
     assert "omit outcome selection" in orchestrator
-    assert "partition work intentionally" in orchestrator
+    assert "partition intentionally" in orchestrator
     assert "terminal_rework=steering_revision_required" in orchestrator
     assert "first obtain and record explicit user steering" in orchestrator
     assert "Do not reuse a pre-steering snapshot" in orchestrator
-    assert "at most one fresh-state read and one rebuilt assignment" in orchestrator
+    assert "at most one fresh scope read and one rebuilt assignment" in orchestrator
     assert "Never retry the unchanged request or reconstruct a retired outcome" in orchestrator
     assert "spawns exactly once and immediately" in orchestrator
     assert "never creates a duplicate worker" in orchestrator
@@ -139,14 +139,59 @@ def test_native_wait_is_advisory_and_durable_publication_recovers_empty_wait():
 
     for text in (orchestrator, control):
         assert "Native wait output is advisory host coordination" in text
-        assert "every bounded native wait returns" in text
-        assert "an empty result" in text
+        assert "timeout or empty wait" in text
+        assert "without polling the ledger" in text
         assert "finalized worker publication is authoritative durable completion evidence" in text
         assert "without another wait for that child" in text
         assert "lifecycle stop" in text.lower()
         assert "loss/recovery" in text
-        assert "model-only waiting" in text
+        assert "worker-liveness poll" in text
         assert "suppress" in text and "durable evidence" in text
+
+    assert "read active continuations next" in orchestrator
+    assert "never substitute the historical timeline" in orchestrator
+    assert "read active continuations next" in control
+    assert "never use the historical timeline as a continuation lookup" in control
+    assert "question is known in advance to select concrete behavior" in orchestrator
+    assert "open steering before showing that question" in orchestrator
+    assert "direct answer is the steering answer" in control
+    assert "do not route it through ordinary clarification" in control
+
+
+def test_orchestrator_has_one_canonical_routing_state_machine_without_payload_shapes():
+    orchestrator = _text(ORCHESTRATOR)
+    control = _text(CONTROL)
+    start = orchestrator.index("## Routing state machine")
+    end = orchestrator.index("## Delegation", start)
+    routing = orchestrator[start:end]
+
+    assert orchestrator.count("## Routing state machine") == 1
+    assert "Observed coordinator event" in routing
+    assert "read_continuations" in routing
+    assert "Call any Cortex read merely to poll liveness" in routing
+    assert "Use `read_timeline` as a continuation lookup" in routing
+    assert "open_steering" in routing
+    assert "ask for a second confirmation" in routing
+    assert "canonical coordinator router" in control
+
+    worker_start = control.index("## Worker routing state machine")
+    worker_end = control.index("## Anchor boundary", worker_start)
+    worker_routing = control[worker_start:worker_end]
+    assert control.count("## Worker routing state machine") == 1
+    assert "Observed worker event" in worker_routing
+    assert "read_task" in worker_routing
+    assert "exactly one matching terminal publication" in worker_routing
+
+    for payload_token in (
+        '"task_ref"',
+        '"continue"',
+        '"report_policy"',
+        '"outcomes"',
+        "inputSchema",
+        "additionalProperties",
+    ):
+        assert payload_token not in routing
+        assert payload_token not in worker_routing
 
 
 def test_added_policy_does_not_embed_mcp_payload_contracts():

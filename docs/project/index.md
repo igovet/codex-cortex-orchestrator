@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 1.14.16 is an explicit opt-in Codex plugin for durable multi-agent
+Cortex 1.15.0 is an explicit opt-in Codex plugin for durable multi-agent
 coordination. The installable product lives under
 [plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
 documents support development but do not define installed behavior.
@@ -131,19 +131,21 @@ reconciliation, and durable ledger authority.
 
 ## Public contract
 
-The complete private registry contains fourteen tools: `open_task`,
-`read_task`, `open_clarification`, `record_clarification`,
+The complete private registry contains twenty tools: `open_task`,
+`read_task`, `read_state`, `read_scope`, `read_outcome`,
+`read_continuations`, `read_evidence`, `read_timeline`,
+`open_clarification`, `record_clarification`,
 `open_plan_review`, `record_plan_review`, `open_steering`, `record_steering`,
 `open_assignment`, `publish_plan`,
 `publish_result`, `publish_documentation`, `assess_governance`, and
-`close_task`. Coordinator `tools/list` exposes coordinator operations plus
-`read_task`; a signed worker-candidate or worker receives only `read_task` and
+`close_task`. Coordinator `tools/list` exposes only coordinator operations; a
+signed worker-candidate or worker receives only `read_task` and
 the three publication operations. The MCP server authorizes that boundary
 independently of discovery.
 
 The active MCP registry owns exact shapes. `open_task` alone accepts the
 resolved `project_root` and returns preferred compact `task_ref`; its canonical
-`task_id` is durable evidence only. The seven task-anchored tools use `task_ref`
+`task_id` is durable evidence only. Task-anchored tools use `task_ref`
 to locate and validate the project ledger. `open_assignment` returns the
 server-rendered worker bootstrap, and publication calls use the task anchor with
 server-bound worker context; no public call accepts a durable `*_id`.
@@ -165,8 +167,8 @@ the exact six-part knowledge block once, in order, with non-empty values before
 native spawn. A successful `open_assignment` returns one compact closed native
 dispatch plus replay state, including exact effort and an explicit model only
 for non-default Terra or Sol. Codex
-forwards it unchanged to the active host spawn operation. The `read_task`
-assignment view is the server-owned
+forwards it unchanged to the active host spawn operation. Worker-only
+`read_task` is the server-owned
 full-policy/evidence surface and is required as the worker's first task read on
 both healthy and recovery paths.
 Its compact reconciliation header exposes exact public outcome selectors before
@@ -189,12 +191,12 @@ body merely to summarize it. A downstream worker reads finalized evidence only
 when its declared work requires the body. Compact refs, durable IDs, digests,
 and cursors are opaque byte-for-byte return data; only compact refs are
 callable public locators, while durable IDs are non-callable evidence.
-`read_task` is the bounded public task view: it returns server-produced state,
-assignment, or evidence data with private ledger identity removed. A fresh
-worker starts with the exact assignment view and continues only through the
-server-owned continuation. Large evidence is bounded by the advertised read
-contract; callers do not supply report-reference or consumer-delegation
-locators. Derived Markdown rendering similarly preflights its aggregate output
+Coordinator reads are purpose-specific: `read_state` returns scalar status;
+`read_scope` returns one responsibility's exact names; `read_outcome` returns
+one selected complete outcome; and continuations, evidence, and newest-first
+history have separate bounded reads. A fresh worker starts with `read_task` and
+continues only through its server-owned assignment continuation. Callers do not
+supply report-reference or consumer-delegation locators. Derived Markdown rendering similarly preflights its aggregate output
 limits (512 files, 32 MiB total, 10 MiB per file) to avoid partial output.
 Canonical product-facing report bodies support the fixed
 `cortex/report/{progress,result,synthesis,plan}/v1` schemas and the additive
@@ -206,15 +208,16 @@ tag or a translated/original duplicate. Only a finalized completed
 semantic-valid canonical plan receives a ready approval relation. Planner-authored
 implementation microtasks are evidence for the model-owned DAG only, never
 backend jobs, scheduling gates, or worker-subtask To-Do entries.
-Inspection reads use the advertised `read_task` continuation and expose
-semantic data; these reads create no public receipt.
+Coordinator inspection reads expose only their selected semantic data and
+create no public receipt.
 
-For continuation calls, the server-owned continuation returned by `read_task`
-is copied byte-for-byte only to that operation's continuation input. Durable
-IDs, digests, and continuation values are evidence or resumption data, never
-capabilities or substitutes for a callable task reference.
+For pageable reads, continuation is server-owned and the caller supplies only
+`continue=true` immediately after top-level `has_more=true`. Durable IDs,
+digests, and private continuation values are never capabilities or substitutes
+for a callable task reference.
 
-`read_task` also projects the current effective outcome contract. Each stable
+`read_outcome` projects one selected current semantic outcome; `read_scope`
+projects only exact current names and dispositions. Each stable
 `o_` item reference represents one independent user outcome. Acceptance and
 verification criteria, task constraints, steer extensions, and exact source
 fragments remain linked metadata and never become extra coverage items. A
@@ -268,14 +271,12 @@ exact `task_ref`, one advisory `verdict`, and bounded evidence; durable
 `task_id` is evidence only.
 
 The task-facing result separates neutral finalized-report evidence from advisory
-bookkeeping. `read_task` returns `execution_outcome` with
-`evidence_status`, `finalized_report_count`, `completed_report_count`,
-`effective_revision`, `coverage_status`, and `outcome`. The finalized count
+bookkeeping. `read_state` returns scalar execution status, finalized/completed
+report counts, current revision, coverage status, and outcome. The finalized count
 includes every finalized report, while the outcome is derived deterministically
 from current effective-contract coverage, excluding historical/superseded claims
-and report arrival order, without claiming native lifecycle. It returns
-`advisory_closure`
-(`record_status` and `latest_record`, or `null`). After
+and report arrival order, without claiming native lifecycle. Closure record
+status and latest verdict are separate scalar fields. After
 sufficient finalized evidence, the coordinator selects `ready`,
 `ready_with_risks`, or `not_ready`, then automatically attempts the advisory
 write and intended bounded inspection. `ready_with_risks` needs no user

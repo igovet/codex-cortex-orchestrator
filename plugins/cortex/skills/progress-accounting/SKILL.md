@@ -75,13 +75,24 @@ or start downstream work without required report and plan-decision evidence.
 
 When the active tool returns a current contained digest-verified ready plan or
 report Markdown projection, copy its server-provided clickable link
-byte-for-byte, with a localized summary explaining why it
+byte-for-byte, including its Markdown brackets, label, parentheses, and
+destination, with a localized summary explaining why it
 matters. Never publish a bare path, raw
 task/delegation/report/decision ID, guessed location, stale projection, or
 private operational path. Only verified plan/report links are allowed as
 user-facing host-private paths; other records remain SQLite-only. If projection
 verification fails, omit the link, continue from canonical evidence, and
 disclose the human-view limitation only when material.
+
+A decision-opening call stores a durable prompt but does not display that prompt
+to the user. After the call succeeds, the coordinator must still render the
+complete localized decision packet in its final answer. For plan review this
+includes the current verified link when ready plus the plan's scope, ordered
+stages, intended changes, verification, stop conditions, risks, unresolved
+items, and approve/revise/cancel choices. Never compress it to a bare status or
+question. A worker-raised decision is summarized with its evidence, blocked
+action, safe choices, and consequence of each rather than forwarded as raw or
+context-free worker prose.
 
 Use English for coordinator-to-worker and inter-worker messages, report and
 decision-normalization content, and other durable coordination prose. Preserve

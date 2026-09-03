@@ -43,7 +43,7 @@ _WORKER_PUBLICATIONS = frozenset({
     "publish_plan", "publish_result", "publish_documentation",
 })
 _WORKER_AUDIENCE_TOOLS = frozenset({"read_task", *_WORKER_PUBLICATIONS})
-_COORDINATOR_AUDIENCE_TOOLS = frozenset(OPERATION_NAMES) - _WORKER_PUBLICATIONS
+_COORDINATOR_AUDIENCE_TOOLS = frozenset(OPERATION_NAMES) - _WORKER_PUBLICATIONS - {"read_task"}
 # MCP stdio is JSONL.  Enforce this at the byte transport boundary before a
 # JSON parser can allocate for an unbounded physical line.  The terminating
 # newline is part of the physical frame when present.
@@ -107,7 +107,7 @@ def _plugin_data_root(package_root: Path | None = None) -> Path | None:
 
 
 def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]:
-    """Advertise only fields the worker candidate must actually select."""
+    """Advertise the complete narrow worker-assignment input contract."""
     source = contract.get("inputSchema")
     properties = source.get("properties") if isinstance(source, Mapping) else None
     if not isinstance(properties, Mapping) or not isinstance(properties.get("task_ref"), Mapping):
@@ -115,48 +115,14 @@ def _worker_candidate_read_schema(contract: Mapping[str, Any]) -> dict[str, Any]
     candidate_properties: dict[str, Any] = {
         "task_ref": dict(properties["task_ref"]),
     }
-    if not isinstance(properties.get("view"), Mapping):
-        raise RuntimeError("read_task candidate view schema is unavailable")
-    candidate_properties["view"] = {
-        **{
-            key: value for key, value in dict(properties["view"]).items()
-            if key not in {"enum", "default"}
-        },
-        "const": "assignment",
-        "description": (
-            "Optional exact expression of the server-fixed candidate view. "
-            "If supplied it must be assignment; omission has identical semantics."
-        ),
-    }
     if isinstance(properties.get("continue"), Mapping):
         candidate_properties["continue"] = dict(properties["continue"])
-    if isinstance(properties.get("report_policy"), Mapping):
-        # Desktop may initialize the child MCP before SubagentStart and show
-        # the neutral coordinator/worker read schema to the model. A model can
-        # therefore copy the similarly named open_assignment policy onto its
-        # first assignment read. The assignment's evidence policy is already
-        # immutable server state, so accept this bounded compatibility field
-        # and discard it instead of turning a harmless host-ordering artifact
-        # into a failed worker bootstrap.
-        report_policy = dict(properties["report_policy"])
-        advertised_values = report_policy.get("enum")
-        values = list(advertised_values) if isinstance(advertised_values, list) else []
-        if "latest_for_scope" not in values:
-            values.append("latest_for_scope")
-        report_policy["enum"] = values
-        report_policy["description"] = (
-            "Compatibility-only field for an early Desktop assignment read. "
-            "If supplied, it is validated and ignored because the assignment's "
-            "evidence policy is immutable server-owned state. Workers should omit it."
-        )
-        candidate_properties["report_policy"] = report_policy
     return {
         "type": "object",
         "description": (
             "Worker-candidate assignment bootstrap. Supply only the exact server-rendered "
-            "worker-scoped task_ref. The server fixes the view to assignment; an optional "
-            "view field may only express that same value. After a page "
-            "returns has_more=true, repeat with continue=true; otherwise omit continue."
+            "worker-scoped task_ref. After a page returns has_more=true, repeat with "
+            "continue=true; otherwise omit continue."
         ),
         "properties": candidate_properties,
         "required": ["task_ref"],
@@ -501,8 +467,6 @@ def _validate_public_call_shape(tool_name: str, arguments: Mapping[str, Any]) ->
     if tool_name == "open_assignment":
         if arguments.get("responsibility") == "planning":
             forbid("outcomes")
-        elif arguments.get("loss_recovery") is not None:
-            require("outcomes")
     elif tool_name == "submit_report":
         mode = arguments.get("mode")
         plan_fields = ("review_policy", "supersedes_report_ref")
@@ -1047,17 +1011,29 @@ def _handles_for_output_schema(
 def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
     structured = _project_public_views(value)
     serialized = json.dumps(structured, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    leading_view = None
+    leading_views: list[str] = []
+
+    def collect_view(candidate: object) -> None:
+        if not isinstance(candidate, Mapping):
+            return
+        link = candidate.get("markdown_link")
+        if candidate.get("status") == "ready" and isinstance(link, str) and link and link not in leading_views:
+            leading_views.append(link)
+
     for view_name in ("approval_view", "human_view"):
-        view = structured.get(view_name)
-        if isinstance(view, Mapping) and view.get("status") == "ready" and isinstance(view.get("markdown_link"), str):
-            leading_view = view["markdown_link"]
-            break
+        collect_view(structured.get(view_name))
+    data_views = structured.get("data")
+    if isinstance(data_views, Mapping):
+        collect_view(data_views.get("human_view"))
+        report_views = data_views.get("human_views")
+        if isinstance(report_views, list):
+            for report_view in report_views:
+                collect_view(report_view)
     content = []
     data = structured.get("data")
     reconciliation = (
         data.get("publication_reconciliation")
-        if structured.get("view") == "assignment" and isinstance(data, Mapping)
+        if isinstance(data, Mapping)
         else None
     )
     if isinstance(reconciliation, Mapping):
@@ -1070,7 +1046,6 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
         # structured result and survives the large-result fallback below.
         compact_assignment = {
             "task_ref": structured.get("task_ref"),
-            "view": "assignment",
             "publication_reconciliation": dict(reconciliation),
             "has_more": structured.get("has_more"),
         }
@@ -1081,7 +1056,7 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
                 separators=(",", ":"), allow_nan=False,
             ),
         })
-    if leading_view is not None:
+    for leading_view in leading_views:
         content.append({"type": "text", "text": leading_view})
     # Some supported hosts expose only TextContent to the model even though
     # the MCP event retains structuredContent.  In particular, a successful
@@ -1385,11 +1360,10 @@ def serve_stdio(
                     "description": (
                         "Worker-candidate assignment bootstrap with one closed input object. "
                         "The only required property is task_ref, copied exactly from the "
-                        "server-rendered dispatch. The only optional properties are view, "
-                        "which when present must equal assignment, and continue, which is "
+                        "server-rendered dispatch. The only optional property is continue, "
                         "used only after the immediately preceding response says more data "
-                        "remains. Do not send a worker name, worker label, agent identity, "
-                        "role, assignment identifier, cursor, or any other property."
+                        "remains. Do not send a view, report policy, worker name, agent "
+                        "identity, assignment identifier, cursor, or any other property."
                     ),
                     "inputSchema": _worker_candidate_read_schema(public_tools[name]),
                 }
@@ -1696,10 +1670,6 @@ def serve_stdio(
             worker_assignment_read = (
                 name == "read_task"
                 and audience in {"worker_candidate", "worker"}
-                and (
-                    audience == "worker_candidate"
-                    or arguments.get("view") == "assignment"
-                )
             )
             input_schema = (
                 _worker_candidate_read_schema(contract)
@@ -1715,21 +1685,15 @@ def serve_stdio(
             if audience == "worker_candidate" and name in _WORKER_PUBLICATIONS:
                 audience_failure = "assignment_not_consumed"
             elif name not in allowed:
-                if audience in {"coordinator", "unattributed"} and name in _WORKER_PUBLICATIONS:
+                if audience in {"coordinator", "unattributed"} and name == "read_task":
+                    from cortex_runtime.domain_api import worker_assignment_connection_code
+                    audience_failure = worker_assignment_connection_code(arguments.get("task_ref"))
+                elif audience in {"coordinator", "unattributed"} and name in _WORKER_PUBLICATIONS:
                     from cortex_runtime.domain_api import worker_assignment_connection_code
                     audience_failure = worker_assignment_connection_code(
                         arguments.get("task_ref")
                     )
                 else:
-                    audience_failure = "wrong_connection"
-            elif name == "read_task" and isinstance(arguments, Mapping):
-                requested_view = arguments.get("view")
-                if audience in {"coordinator", "unattributed"} and requested_view == "assignment":
-                    from cortex_runtime.domain_api import worker_assignment_connection_code
-                    audience_failure = worker_assignment_connection_code(
-                        arguments.get("task_ref")
-                    )
-                elif audience == "worker" and requested_view == "state":
                     audience_failure = "wrong_connection"
             if audience_failure is not None:
                 failure = {
@@ -1799,14 +1763,6 @@ def serve_stdio(
                         )
                     resolved_arguments["task_ref"] = active_task_ref
                 _validate_schema(input_schema, resolved_arguments)
-                if worker_assignment_read:
-                    # Assignment is server-owned candidate state, not a model-selected
-                    # compatibility default and not a hook rewrite. Its report policy
-                    # was fixed by open_assignment and cannot be changed by this read.
-                    # Validate the optional compatibility value above before discarding
-                    # it so unknown or malformed values remain fail-closed.
-                    resolved_arguments["view"] = "assignment"
-                    resolved_arguments.pop("report_policy", None)
                 if correcting_aggregate and isinstance(corrections, dict):
                     # A complete schema-valid correction has crossed the
                     # pre-dispatch boundary. Durable publication idempotency,
@@ -1862,17 +1818,13 @@ def serve_stdio(
             try:
                 handler_arguments = dict(resolved_arguments)
                 if name in {
-                    "read_task", "open_steering", "record_steering",
+                    "read_task", "read_state", "read_scope", "read_outcome",
+                    "read_continuations", "read_evidence", "read_timeline",
+                    "open_steering", "record_steering",
                     "publish_plan", "publish_result", "publish_documentation",
                 }:
                     handler_arguments["_connection_context"] = connection_context
-                worker_read = (
-                    name == "read_task"
-                    and (
-                        resolved_arguments.get("view") == "assignment"
-                        or role == "worker"
-                    )
-                )
+                worker_read = name == "read_task"
                 worker_publication = name in {
                     "publish_plan", "publish_result", "publish_documentation",
                 }
@@ -1918,7 +1870,7 @@ def serve_stdio(
                         committed_role = "worker"
                         connection_context["_audience"] = "worker"
                         role_committed_now = True
-                    elif name == "read_task" and resolved_arguments.get("view") == "assignment":
+                    elif name == "read_task":
                         # Non-terminal assignment pages deliberately leave the
                         # connection unknown. The terminal page handler is the
                         # sole worker-role commitment boundary.

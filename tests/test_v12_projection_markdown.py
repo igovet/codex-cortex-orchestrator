@@ -27,7 +27,7 @@ from cortex_runtime.mcp_api import _public_view  # noqa: E402
 
 
 class ProjectionMarkdownTests(unittest.TestCase):
-    def test_structured_values_are_readable_markdown_not_embedded_json(self) -> None:
+    def test_structured_values_are_readable_authored_markdown_not_embedded_json(self) -> None:
         rendered = _inert({
             "pages": [{"path": "pages/1-2.md", "events": 2}],
             "message": "# heading <script>alert('x')</script>",
@@ -38,12 +38,12 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertNotIn('"pages"', rendered)
         self.assertIn("- **pages:**", rendered)
         self.assertIn("pages/1-2.md", rendered)
-        self.assertIn("# heading &lt;script&gt;alert('x')&lt;/script&gt;", rendered)
-        self.assertIn("&lt;script&gt;", rendered)
+        self.assertIn("# heading <script>alert('x')</script>", rendered)
+        self.assertIn("<script>", rendered)
         self.assertNotIn("pages/1\\-2\\.md", rendered)
         self.assertNotIn("\n# heading", rendered)
 
-    def test_report_content_is_markdown_and_untrusted_text_is_inert(self) -> None:
+    def test_report_content_preserves_authored_markdown_without_escapes(self) -> None:
         class Store:
             def _read(self, callback):
                 return callback(None)
@@ -68,9 +68,11 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertIn("# Implementation Plan", rendered)
         self.assertIn("**Status:** FINALIZED", rendered)
         self.assertIn("**Review policy:** INFORMATIONAL", rendered)
-        self.assertIn("\\- injected list", rendered)
-        self.assertIn("\\## injected heading", rendered)
-        self.assertNotRegex(rendered, r"(?m)^## injected heading$")
+        self.assertIn("- injected list", rendered)
+        self.assertIn("## injected heading", rendered)
+        self.assertNotIn("\\- injected list", rendered)
+        self.assertNotIn("\\## injected heading", rendered)
+        self.assertRegex(rendered, r"(?m)^## injected heading$")
         self.assertEqual(len(__import__("re").findall(r"(?m)^# ", rendered)), 1)
         self.assertNotIn("<pre>", rendered)
         self.assertNotIn('"summary"', rendered)
@@ -88,6 +90,23 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertIn("**model:** gpt-5.6-luna", rendered)
         self.assertNotIn("delegation\\_id", rendered)
         self.assertNotIn("planner\\_2", rendered)
+
+    def test_inline_markdown_is_preserved_without_visible_escapes(self) -> None:
+        rendered = render_report(
+            report_type="plan",
+            content={
+                "summary": "Inspect `rg --files` before planning.",
+                "verification": ["Run `python3 -m pytest` and review **results**."],
+            },
+            report={"report_type": "plan", "assembly_state": "finalized", "status": "completed"},
+        )
+
+        self.assertIn("Inspect `rg --files` before planning.", rendered)
+        self.assertIn("review **results**.", rendered)
+        self.assertNotIn("\\`", rendered)
+        self.assertNotIn("\\*", rendered)
+        self.assertNotIn("&#96;", rendered)
+        self.assertNotIn("&#42;", rendered)
 
     def test_multiline_instructions_preserve_readable_markdown(self) -> None:
         rendered = _inert({"instructions": "Trusted policy:\n- Keep identifiers readable.\n- Do not add slash escapes."})
@@ -165,7 +184,7 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertNotIn("path", approval)
         self.assertEqual(_public_view(approval, approval=True), approval)
 
-    def test_typed_document_owns_hierarchy_and_spacing(self) -> None:
+    def test_typed_document_owns_sections_while_authored_markdown_is_preserved(self) -> None:
         rendered = render_markdown(Document(
             "Safe ## title",
             status="FINALIZED",
@@ -173,20 +192,20 @@ class ProjectionMarkdownTests(unittest.TestCase):
             sections=[Section("Overview", [Paragraph("A *plain* value"), BulletList(["first", "second"])]), Section("Empty", [])],
         ))
         self.assertEqual(len(__import__("re").findall(r"(?m)^# ", rendered)), 1)
-        self.assertNotRegex(rendered, r"(?m)^#{2,6} not a heading$")
-        self.assertNotRegex(rendered, r"(?m)^- not a list$")
+        self.assertRegex(rendered, r"(?m)^#{2,6} not a heading$")
+        self.assertRegex(rendered, r"(?m)^- not a list$")
         self.assertNotIn("  \n", rendered)
         self.assertTrue(rendered.endswith("\n"))
         self.assertFalse(rendered.endswith("\n\n"))
         self.assertNotIn("## Empty", rendered)
 
-    def test_inline_emphasis_and_null_chunks_cannot_change_structure(self) -> None:
+    def test_inline_emphasis_is_preserved_and_null_chunks_collapse(self) -> None:
         rendered = render_markdown(Document(
             "Safe",
             sections=[Section("Details", [Paragraph("**untrusted** __formatting__")])],
         ))
-        self.assertNotIn("**untrusted**", rendered)
-        self.assertNotIn("__formatting__", rendered)
+        self.assertIn("**untrusted**", rendered)
+        self.assertIn("__formatting__", rendered)
         self.assertEqual(merge_report_payloads([None, {"checks": ["one"]}]), {"checks": ["one"]})
 
     def test_report_types_have_distinct_fixed_sections(self) -> None:
@@ -252,7 +271,7 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertIn("## Checks", rendered)
         self.assertIn("## Additional details", rendered)
 
-    def test_typed_blocks_table_checklist_and_fence_are_safe(self) -> None:
+    def test_typed_blocks_table_checklist_and_fence_preserve_markdown(self) -> None:
         rendered = render_markdown(Document("Blocks", sections=[Section("Details", [
             Checklist([{"text": "ship", "checked": True}, "review"]),
             Table(["Name", "Value"], [["a|b", "1"]]),
@@ -261,7 +280,9 @@ class ProjectionMarkdownTests(unittest.TestCase):
         ])]))
         self.assertIn("- [x] ship", rendered)
         self.assertIn("- [ ] review", rendered)
-        self.assertIn("a\\|b", rendered)
+        self.assertIn("a|b", rendered)
+        self.assertNotIn("a\\|b", rendered)
+        self.assertNotIn("a&#124;b", rendered)
         self.assertIn("````bash", rendered)
         self.assertIn("### Finding", rendered)
 

@@ -113,8 +113,10 @@ def _assert_ordinary_live_workload(prompt: str) -> None:
 
 def test_prompt_fixtures_are_ordinary_requests_with_only_the_skill_token() -> None:
     prompt = (ROOT / "tests/fixtures/live_cortex_stabilization_prompt.txt").read_text(encoding="utf-8")
+    all_tools_prompt = (ROOT / "tests/fixtures/live_cortex_all_tools_prompt.txt").read_text(encoding="utf-8")
     contract = json.loads((ROOT / "tests/fixtures/live_contract_workload.json").read_text(encoding="utf-8"))
     _assert_ordinary_live_workload(prompt)
+    _assert_ordinary_live_workload(all_tools_prompt)
     _assert_ordinary_live_workload(contract["prompt"])
     architecture = ROOT / "docs" / "architecture"
     for path in (
@@ -126,7 +128,33 @@ def test_prompt_fixtures_are_ordinary_requests_with_only_the_skill_token() -> No
     assert "настроек уведомлений" in prompt
     assert "избранное" in contract["prompt"]
     assert "покажи план и дождись" in prompt
+    assert "краткую хронологию" in all_tools_prompt
     assert "покажи план и дождись" in contract["prompt"]
+
+
+def test_all_tools_live_scenario_matches_the_current_catalogue_and_two_hosts() -> None:
+    scripts = ROOT / "plugins" / "cortex" / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from cortex import PUBLIC_TOOLS  # noqa: PLC0415
+
+    scenario = json.loads(
+        (ROOT / "tests/fixtures/live_cortex_all_tools_scenario.json")
+        .read_text(encoding="utf-8")
+    )
+    prompt = (ROOT / scenario["prompt_file"]).read_text(encoding="utf-8")
+    _assert_ordinary_live_workload(prompt)
+    assert scenario["model"] == "gpt-5.6-luna"
+    assert scenario["reasoning_effort"] == "high"
+    assert scenario["required_operations"] == list(PUBLIC_TOOLS)
+    assert len(scenario["required_operations"]) == 20
+    actions = "\n".join(scenario["operator_actions"])
+    assert "--resume-last" in actions
+    assert "CLI and Desktop" in actions
+    assert "retirement uses the exact current outcome" in actions
+    acceptance = "\n".join(scenario["acceptance"])
+    assert "each host" in acceptance
+    assert "No Cortex tool error" in acceptance
 
 
 def test_one_page_workload_is_an_ordinary_feature_request_with_natural_acceptance() -> None:
@@ -595,7 +623,7 @@ def test_events_rejects_resigned_stale_lease(monkeypatch, tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("field,value", [
     ("candidate_path", "/tmp/not-the-candidate"),
-    ("candidate_version", "1.14.16+codex.sha256." + "0" * 16),
+    ("candidate_version", "1.15.0+codex.sha256." + "0" * 16),
     ("build_id", "sha256:" + "0" * 64),
     ("source_digest", "0" * 64),
     ("candidate_digest", "0" * 64),

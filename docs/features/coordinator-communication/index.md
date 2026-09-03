@@ -4,7 +4,7 @@
 
 ## Purpose and boundary
 
-Cortex 1.14.16 ships a packaged coordinator-to-user communication policy. It
+Cortex 1.15.0 ships a packaged coordinator-to-user communication policy. It
 keeps user-facing commentary, questions, plan summaries, progress, decision
 summaries, artifact summaries, and final answers clear without creating a
 runtime loader, dispatcher, lifecycle hook, tool, or backend gate.
@@ -31,6 +31,34 @@ The canonical source is the bundled
 It is integrated with the packaged orchestrator, control, and progress-accounting
 guidance. It does not weaken verified-link publication, worker ownership,
 ordinary approvals, or safety boundaries.
+
+Decision-opening operations create durable holds but do not themselves render
+their prompts in either CLI or Desktop. After a successful opening, the
+coordinator's final answer must give the user a complete localized decision
+packet: why the decision is needed, its concrete subject, the available safe
+choices, and the material consequence or stopping condition of each. A user
+must not need to expand a tool call or inspect worker output to understand what
+is being approved.
+
+Questions known in advance to choose product behavior, acceptance, constraints,
+verification, or scope open steering before they are presented; the direct
+answer is the steering answer and is not followed by a redundant confirmation.
+Ordinary clarification is reserved for facts whose possible answers leave every
+current outcome unchanged. If a factual answer unexpectedly reveals a semantic
+change, the coordinator opens steering before any assignment uses it.
+
+Plan review additionally includes a decision-ready summary of scope, ordered
+stages, intended changes, verification, stop/deploy conditions, and material
+risks or unresolved items. A ready server-verified current-plan link is copied
+byte-for-byte; if it is unavailable, the limitation is disclosed and enough
+plan detail is provided inline. A bare “plan ready — approve?” message is a
+contract violation.
+
+Native workers and other subagents never ask the user directly. They publish a
+partial or blocked outcome containing the blocked action, established evidence,
+exact missing decision, safe choices, and consequences. The coordinator reads
+that authoritative evidence and renders the complete user-facing question; it
+does not forward a context-free worker request.
 
 ## Deterministic verification
 

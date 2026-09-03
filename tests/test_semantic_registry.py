@@ -18,8 +18,8 @@ class SemanticRegistryConformanceTests(unittest.TestCase):
     def test_registry_and_public_catalogue_have_one_ordered_surface(self) -> None:
         contracts = build_public_contracts()
         self.assertEqual(tuple(contracts), OPERATION_NAMES)
-        self.assertEqual(len(OPERATION_NAMES), 14)
-        self.assertEqual(len(set(OPERATION_NAMES)), 14)
+        self.assertEqual(len(OPERATION_NAMES), 20)
+        self.assertEqual(len(set(OPERATION_NAMES)), 20)
         for name, contract in contracts.items():
             self.assertEqual(contract["inputSchema"].get("type"), "object", name)
             self.assertFalse(set(contract["inputSchema"]) - {"$schema", "type", "description", "additionalProperties", "properties", "required", "maxBytes"}, name)

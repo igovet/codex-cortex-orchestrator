@@ -13,6 +13,7 @@ from cortex_runtime.domain_api import (
     open_clarification,
     open_task,
     publish_result,
+    read_state,
     read_task,
     record_clarification,
 )
@@ -67,8 +68,8 @@ class MandatoryClosureReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(V12ServiceError, "closure review") as rejected:
                 close_task(task_ref=task_ref, verdict="ready")
             self.assertEqual(rejected.exception.code, "closure_review_required")
-            state = read_task(task_ref=task_ref, view="state")
-            self.assertEqual(state["data"]["advisory_closure"]["record_status"], "not_recorded")
+            state = read_state(task_ref=task_ref, )
+            self.assertEqual(state["data"]["closure_record_status"], "not_recorded")
 
     def test_revise_keeps_same_task_open_and_allows_follow_up_assignment(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch(
@@ -93,7 +94,7 @@ class MandatoryClosureReviewTests(unittest.TestCase):
                 report_policy="none",
             )
             self.assertIn("native_dispatch", assignment)
-            self.assertNotIn("closed", repr(read_task(task_ref=task_ref, view="state")))
+            self.assertNotIn("closed", repr(read_state(task_ref=task_ref, )))
 
     def test_close_choice_authorizes_close_once(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -101,8 +102,9 @@ class MandatoryClosureReviewTests(unittest.TestCase):
             self._review(task_ref, "close")
             closed = close_task(task_ref=task_ref, verdict="ready")
             self.assertEqual(closed["state"], "closed")
-            state = read_task(task_ref=task_ref, view="state")
-            self.assertEqual(state["data"]["advisory_closure"]["latest_record"]["verdict"], "ready")
+            self.assertEqual(closed["data"], {"human_views": []})
+            state = read_state(task_ref=task_ref, )
+            self.assertEqual(state["data"]["closure_verdict"], "ready")
             self.assertEqual(close_task(task_ref=task_ref, verdict="ready")["state"], "closed")
 
     def test_revision_review_can_be_reopened_on_the_same_task(self) -> None:
@@ -162,7 +164,7 @@ class MandatoryClosureReviewTests(unittest.TestCase):
                 assignment["native_dispatch"]["message"],
             ).group(1)
             worker_context: dict[str, object] = {}
-            read_task(task_ref=worker_ref, view="assignment", _connection_context=worker_context)
+            read_task(task_ref=worker_ref, _connection_context=worker_context)
             self._review(task_ref, "close")
             publish_result(
                 task_ref=worker_ref,

@@ -13,7 +13,7 @@ from cortex_runtime.mcp_api import catalogue_identity, _validate_schema  # noqa:
 
 
 def test_all_public_tools_have_compact_and_closed_runtime_schemas() -> None:
-    assert len(PUBLIC_TOOLS) == 14
+    assert len(PUBLIC_TOOLS) == 20
     for name, contract in PUBLIC_TOOLS.items():
         public = contract["outputSchema"]
         runtime = contract["runtimeOutputSchema"]
@@ -26,12 +26,15 @@ def test_all_public_tools_have_compact_and_closed_runtime_schemas() -> None:
 
 def test_compact_catalogue_is_bounded_and_runtime_rejects_extra_fields() -> None:
     payload = json.dumps(
-        {"tools": [{"name": name, "description": c["description"], "inputSchema": c["inputSchema"]}
-                    for name, c in PUBLIC_TOOLS.items()]},
-        separators=(",", ":"),
-    ).encode()
+        {"jsonrpc": "2.0", "id": 1, "result": {
+            "tools": [{"name": name, "description": c["description"], "inputSchema": c["inputSchema"]}
+                      for name, c in PUBLIC_TOOLS.items()],
+        }},
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
     assert len(payload) < 65536
-    assert catalogue_identity(PUBLIC_TOOLS)["catalogue_count"] == 14
+    assert 65536 - len(payload) >= 4096
+    assert catalogue_identity(PUBLIC_TOOLS)["catalogue_count"] == 20
     runtime = PUBLIC_TOOLS["open_clarification"]["runtimeOutputSchema"]
     try:
         _validate_schema(runtime, {"unexpected": True})

@@ -33,7 +33,7 @@ graph evidence is recorded; silent or chained fallback is invalid.
 ## Key files
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) builds and serves the V12 facade.
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact fourteen-tool semantic catalog.
+- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) owns the exact twenty-tool semantic catalog.
 - [mcp_api.py](../../../plugins/cortex/scripts/cortex_runtime/mcp_api.py) validates requests and serves MCP over stdio.
 - [v12_service.py](../../../plugins/cortex/scripts/cortex_runtime/v12_service.py) maps public calls to the store.
 - [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) owns bounded V12 task/report constants and canonical report digests.
@@ -80,11 +80,12 @@ canonical mutation + timeline + projection job
     └── best-effort host-private Markdown view (never project_root)
 ```
 
-Each semantic mutation appends an ordered private timeline event. Public
-`read_task` accepts `view=state|assignment|evidence` and optionally
-`continue=true` for the immediately preceding bounded read. It returns
-server-produced semantic data with private ledger identity removed; worker
-assignment bootstrap is the evidence route.
+Each semantic mutation appends an ordered private timeline event. Coordinator
+reads are split by purpose: scalar `read_state`, exact-name `read_scope`, point
+`read_outcome`, recovery `read_continuations`, selected `read_evidence`, and
+newest-first `read_timeline`. Worker-only `read_task` consumes the immutable
+assignment. Pageable reads accept `continue=true` only after their immediately
+preceding page returned top-level `has_more=true`.
 Only `open_task` carries the exact resolved `project_root` and stores the
 canonical project association. Every task-anchored public arrow carries the
 14-character `task_ref` (`t_` plus a 12-hex task suffix), which scans only
@@ -97,16 +98,19 @@ metadata, plugin `cwd`, thread identity, or a hook.
 | Tool | Semantic contract |
 | --- | --- |
 | `open_task` | Create a durable task from explicit project root, exact original request/concrete language, English objective, and non-empty meaningful result fields; return preferred `task_ref`. |
-| `read_task` | Use `task_ref` with `view=state|assignment|evidence`; use `continue=true` only to resume the immediately preceding bounded read. |
+| `read_state` | Return only scalar current status needed to choose the next operation. |
+| `read_scope` / `read_outcome` | Return one responsibility's current names or one exact complete outcome. |
+| `read_continuations` / `read_evidence` / `read_timeline` | Return only recovery state, selected reports, or explicit newest-first history. |
+| `read_task` | Consume the current worker's assignment; continue only its immediately preceding page. |
 | `open_assignment` | Use `task_ref` to store objective, role, packaged profile, scope, instructions, evidence inputs, and model/effort; return the host-neutral worker bootstrap. A confirmed lost delivery predecessor requires explicit blocked/aborted reason and evidence; Cortex derives and links the successor atomically. |
-| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref` on the exact host-bound MCP connection; Cortex derives the terminally consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. |
+| `publish_plan` / `publish_result` / `publish_documentation` | The owning worker uses its worker-scoped `task_ref` on the exact host-bound MCP connection; Cortex derives the terminally consumed assignment and continuation privately and publishes immutable plan, result, or documentation evidence. Documentation evidence can omit a duplicate verification-fact array because Cortex preserves the mandatory per-outcome verification entries as derived facts. |
 | `assess_governance` | Use `task_ref` to append a model or user-override assessment. |
 | `close_task` | Record the final advisory closure aggregate from durable evidence. |
 | `open_clarification` → `record_clarification` | Ask and record one clarification through a matching server-owned binding. |
 | `open_plan_review` → `record_plan_review` | Present and record one immutable plan review through a matching server-owned binding. |
 | `open_steering` → `record_steering` | Ask and record one steering change through a matching server-owned binding. |
 
-The catalog is identical for coordinators and workers, but server roles are
+Coordinator and worker catalogs are audience-specific, and server roles are
 monotonic per MCP connection and the host lifecycle binds a child audience
 before assignment consumption. The owner-private receipt contains only bounded
 digests and categories; no locator, native message, assignment body, or bearer
@@ -223,10 +227,10 @@ Workers publish immutable plan, result, or documentation evidence
 and return a concise native `Summary` plus exact `Report ref` in the completion
 handoff. That summary is routing context, not semantic evidence: before
 synthesis, revision, rework, closure, or a final answer, the coordinator reads
-each relevant canonical report body through the bounded `read_task` evidence
-view to completion and retains its immutable digest receipt. Later delegations
+each relevant canonical report body through bounded `read_evidence` to
+completion and retains its immutable digest receipt. Later delegations
 receive only relevant finalized evidence and user-decision refs. A successor
-reads predecessor evidence through the bounded `read_task` evidence view when
+reads predecessor evidence through its bounded `read_task` assignment when
 its declared work requires it. The server rejects evidence outside that
 assignment's declared inputs and preserves the bounded evidence contract;
 coordinator reads are explicitly classified and cannot be mistaken
@@ -330,9 +334,10 @@ publication success ends that worker's tool activity immediately; identical
 reconciliation is reserved for an actually ambiguous transport result and is
 never a post-success confirmation call.
 
-Worker evidence reads are exposed through the bounded `read_task` evidence
-view. The public caller supplies no publication/assignment reference or cursor;
-continuation is retained by the server. Private/internal
+Coordinator report inspection uses bounded `read_evidence`; worker predecessor
+evidence is selected into its bounded `read_task` assignment. The public caller
+supplies no publication/assignment reference or cursor; position is retained by
+the server. Private/internal
 assembly state is never a public capability or recovery input.
 
 The read service preflights the bounded task/evidence response before
@@ -341,8 +346,11 @@ Projection rendering likewise preflights its aggregate output (512 files,
 32 MiB total, and 10 MiB per file) so an over-limit request produces no
 partial artifact set.
 
-`read_task` returns only the selected semantic view and its server-owned
-continuation; it does not infer unlinked private/internal initiative history.
+`read_timeline` returns only explicit newest-first history with server-owned
+continuation; other reads never infer unlinked private/internal history.
+Coordinator recovery uses one scalar state read followed by
+`read_continuations` when delegated work remains; it does not load timeline
+history to locate an active worker.
 Private/internal storage repair may append only missing derived events and
 must never rewrite existing timeline rows or guess ambiguous lineage.
 
@@ -482,7 +490,7 @@ outside the ledger.
 
 ## MCP result transport
 
-Every one of the fourteen registry entries advertises its closed input schema.
+Every one of the twenty registry entries advertises its closed input schema.
 The runtime separately retains the family-specific successful-result schema
 and uses those definitions to validate inputs and successful results. A
 successful call returns canonical JSON as text content and `structuredContent`,

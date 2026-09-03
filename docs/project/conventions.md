@@ -10,7 +10,7 @@
   repository state.
 - Treat activated bundled skill text as host-supplied context. Never call
   `read_mcp_resource`, `resources/read`, or a Cortex tool to fetch a `skill://`
-  URI; the fourteen-tool registry has no skill-resource reader.
+  URI; the twenty-tool registry has no skill-resource reader.
 - Treat Cortex as a durable coordination ledger. The coordinator owns only a
   model-held dynamic orchestration DAG and governance; the backend owns storage
   integrity, immutable evidence, bounded reads, and derived host-private
@@ -67,8 +67,8 @@
 - Before `open_assignment` or native spawn, require those six labels exactly
   once, in order, with non-empty delegation-specific content. Empty, omitted,
   TODO/TBD/unknown, or generic placeholder sections are invalid.
-- Keep the public facade at exactly the fourteen canonical action-specific tools in
-  `public_contracts.py`. Coordinator and worker catalogs are identical.
+- Keep the public facade at exactly the twenty canonical action-specific tools in
+  `public_contracts.py`. Coordinator and worker projections are audience-specific.
 - Let the active MCP schema own exact fields, types, sizes, enumerations, and
   response shapes. Documentation mirrors semantics and the exact tool names but
   is not validator input.
@@ -100,12 +100,17 @@
   attempt the advisory write and inspect the intended record. `ready_with_risks`
   never requires user confirmation. Keep the independent `execution_outcome`
   projection separate from `advisory_closure` bookkeeping.
-- `read_task` exposes the advertised semantic `state`, `assignment`, or
-  `evidence` view and removes private ledger identity. A bounded response may
-  set `has_more`; continue only the immediately preceding read with
-  `continue=true`. A closure cannot change the underlying evidence. If a
+- Use `read_state` only to choose the next action, then select `read_scope`,
+  `read_outcome`, `read_continuations`, `read_evidence`, or newest-first
+  `read_timeline` only for the required detail. Worker-only `read_task` consumes
+  the immutable assignment. A bounded response may set `has_more`; continue
+  only the immediately preceding same read with `continue=true`. A closure
+  cannot change the underlying evidence. If a
   closure confirmation is unavailable, disclose advisory uncertainty without
   changing the evidence projection.
+- On coordinator recovery or compaction, read scalar state once. If it shows
+  active or unfinished delegated work, use `read_continuations` next;
+  `read_timeline` is only for an explicit chronology or audit request.
 - Reuse the exact Cortex-issued `task_ref` byte-for-byte. Durable `*_id`, digest,
   and private/internal cursor values are opaque non-callable ledger evidence, not bearer
   capabilities. Never parse, concatenate, reconstruct, normalize, reformat, or
@@ -120,7 +125,7 @@
   `publish_result`, or `publish_documentation` operation for its plan, result,
   verification, synthesis, or documentation-impact evidence. Its completion
   handoff returns a concise summary; the coordinator consumes the bounded
-  server-produced evidence view through `read_task`. A downstream worker
+  server-produced evidence through `read_evidence`. A downstream worker
   receives finalized evidence only when its assignment report policy selects
   it. A report gap leads to follow-up, rework, or replacement.
 - Private/internal storage may retain immutable report types `progress`, `result`,
@@ -136,10 +141,10 @@
   changed payloads conflict and require an explicit recovery/rework delegation.
   Never restart, overwrite, or publish after terminal completion. Use an explicit
   superseding publication for replacement.
-- Preserve the bounded `read_task` state, assignment, and evidence views. When
-  `has_more` is true, continue only the immediately preceding read with
-  `continue=true`; the server retains the cursor privately. A worker may read
-  only the evidence selected for its consumed assignment.
+- Preserve the narrow read boundaries. When `has_more` is true, continue only
+  the immediately preceding same operation with `continue=true`; the server
+  retains position privately. A worker may read only its immutable assignment
+  and the predecessor evidence selected for it.
 - Use the matching narrow decision record operation only when coordinator policy has identified an
   ordinary-chat response as a direct user decision. Use neutral `prompt`, append
   the exact original-language response in `response_original`, and retain no

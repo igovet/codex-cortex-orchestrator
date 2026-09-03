@@ -1,5 +1,95 @@
 # Changelog
 
+## [1.15.0] - 2026-09-02
+
+### Changed
+
+- Replaced the overloaded coordinator `read_task` views with purpose-specific
+  `read_state`, `read_scope`, `read_outcome`, `read_continuations`,
+  `read_evidence`, and newest-first `read_timeline` operations. Coordinator
+  reads now return only the data needed for the next action; there is no public
+  full-contract read.
+- Restricted `read_task` to worker assignment consumption. A worker receives
+  only its immutable assigned outcomes and the predecessor evidence selected
+  for that assignment; `view` and caller-selected `report_policy` are no longer
+  valid worker inputs.
+- Changed steering retirement to accept exact current outcome names from
+  `read_scope`. Point replacements use `read_outcome` only for the selected
+  outcome, and add-only or no-change steering no longer requires a redundant
+  post-review state read.
+- Expanded the public catalogue from fourteen to twenty operations while
+  keeping the complete serialized `tools/list` response below 65,536 bytes
+  with a tested safety reserve.
+
+### Fixed
+
+- Made a confirmed lost-worker replacement derive its complete outcome scope
+  server-side when exactly one predecessor is recoverable, avoiding fragile
+  model-side repetition of long semantic outcome names while preserving exact
+  selection for ambiguous multi-predecessor recovery.
+- Made `open_plan_review` return the verified active-plan Markdown link in its
+  own success receipt so the immediate user decision packet never reconstructs
+  or shortens a link from an earlier evidence read.
+- Made documentation publication preserve and derive verification facts from
+  the already-required outcome coverage when a worker does not duplicate the
+  same evidence in the optional `verification_facts` array, preventing a
+  first-call validation failure without weakening plan or result evidence.
+- Required post-clarification behavior changes, including changes stated after
+  plan review or recovery, to pass through durable steering before assignment
+  instructions may use them.
+- Replaced very long user-facing shard/report paths with verified short
+  content-addressed plan/report links under the host-private Cortex view root,
+  preventing CLI or Desktop models from dropping identifier fragments.
+- Made the live evidence and plan-review contracts reject a bare path as a
+  substitute for the complete server-provided Markdown link.
+- Made successful task closure repeat every verified finalized plan/report link
+  so the immediate final answer never reconstructs an earlier path from memory.
+- Stopped coordinator state reads from being used as worker-liveness polling
+  between unchanged native waits.
+- Routed coordinator recovery from one scalar `read_state` directly to
+  `read_continuations` when delegated work remains; `read_timeline` is reserved
+  for an explicit chronology or audit need instead of being used as a recovery
+  lookup.
+- Added canonical audience-specific routing state machines: coordinator
+  transitions live in the orchestrator skill, while worker transitions live in
+  `cortex-control` so the automatic compaction hook reloads the correct table
+  for each audience.
+- Routed a question known to choose previously unstated product behavior
+  directly through steering, so the direct answer updates the contract without
+  a redundant clarification/confirmation pair. Ordinary clarification remains
+  factual-only; an unexpected semantic change still opens steering before any
+  assignment can use it.
+- Made plan and finalized-report evidence return verified host-private Markdown
+  links for user-facing review, without renderer-added Markdown backslashes or
+  character-entity substitutions.
+- Added a persistent-stdio conformance flow that successfully invokes every
+  public operation, including planner and delivery worker publications,
+  point steering, evidence inspection, and closure.
+
+## [1.14.17] - 2026-09-02
+
+### Fixed
+
+- Made durable clarification, steering, and plan-review openings explicitly
+  separate from their user-visible presentation. After a hold opens, the
+  coordinator now renders the complete localized decision context, safe
+  choices, and consequences instead of assuming tool arguments are visible in
+  CLI or Desktop.
+- Required plan review to include a decision-ready summary and the verified
+  current-plan link when available; a bare “plan ready” approval request is no
+  longer valid coordinator communication.
+- Required every native worker escalation to publish the blocked action,
+  established evidence, exact missing decision, safe choices, and consequence
+  of each so the coordinator can ask a detailed question without forwarding
+  raw or context-free worker prose.
+- Made terminal coordinator evidence return verified clickable links for the
+  selected active plan and finalized report set, with those links leading the
+  model-visible response in both CLI and Desktop.
+- Preserved authored Markdown in generated plan and report files without
+  renderer-added backslash escapes or character entities.
+- Clarified the ordinary-question input contract so the optional closure-only
+  choices field is omitted rather than sent as an invalid empty array.
+
 ## [1.14.16] - 2026-09-02
 
 ### Fixed

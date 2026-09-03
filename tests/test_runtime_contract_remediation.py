@@ -26,6 +26,10 @@ from cortex_runtime.domain_api import (
     open_steering,
     open_task,
     publish_result,
+    read_evidence,
+    read_outcome,
+    read_scope,
+    read_state,
     read_task,
     record_steering,
 )
@@ -97,7 +101,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
     def _publish(self, worker_ref: str, outcome: dict, summary: str) -> None:
         context: dict = {}
         read_task(
-            task_ref=worker_ref, view="assignment",
+            task_ref=worker_ref,
             _connection_context=context,
         )
         published = publish_result(
@@ -137,8 +141,8 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 task_ref=task["task_ref"], response_original="Add both.",
                 user_language="en", add=[first, second], retire=[],
             )
-            state = read_task(task_ref=task["task_ref"], view="state")
-            names = [item["outcome"] for item in state["data"]["effective_contract"]["items"]]
+            state = read_scope(task_ref=task["task_ref"], responsibility="evidence")
+            names = [item["outcome"] for item in state["data"]["outcomes"]]
             self.assertEqual(names, [original["outcome"], first["outcome"], second["outcome"]])
 
             open_steering(
@@ -147,12 +151,12 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             record_steering(
                 task_ref=task["task_ref"], response_original="Replace it.",
-                user_language="en", add=[replacement], retire=[original],
+                user_language="en", add=[replacement], retire=[original["outcome"]],
             )
-            state = read_task(task_ref=task["task_ref"], view="state")
-            names = [item["outcome"] for item in state["data"]["effective_contract"]["items"]]
+            state = read_scope(task_ref=task["task_ref"], responsibility="evidence")
+            names = [item["outcome"] for item in state["data"]["outcomes"]]
             self.assertEqual(names, [replacement["outcome"], first["outcome"], second["outcome"]])
-            replaced = state["data"]["effective_contract"]["items"][0]
+            replaced = read_outcome(task_ref=task["task_ref"], outcome=replacement["outcome"])["data"]["outcome"]
             self.assertEqual(replaced["acceptance"], replacement["acceptance"])
             self.assertEqual(replaced["constraints"], replacement["constraints"])
             self.assertEqual(replaced["verification"], replacement["verification"])
@@ -188,10 +192,10 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             record_steering(
                 task_ref=task["task_ref"], response_original="Replace it.",
-                user_language="en", add=[replacement], retire=[original],
+                user_language="en", add=[replacement], retire=[original["outcome"]],
             )
-            state = read_task(task_ref=task["task_ref"], view="state")
-            current = state["data"]["effective_contract"]["items"]
+            state = read_scope(task_ref=task["task_ref"], responsibility="evidence")
+            current = [read_outcome(task_ref=task["task_ref"], outcome=item["outcome"])["data"]["outcome"] for item in state["data"]["outcomes"]]
             self.assertEqual(len(current), 1)
             self.assertEqual(current[0]["outcome"], replacement["outcome"])
             self.assertEqual(current[0]["acceptance"], replacement["acceptance"])
@@ -217,8 +221,8 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             replay = record_steering(**arguments)
             self.assertFalse(first["replayed"])
             self.assertTrue(replay["replayed"])
-            state = read_task(task_ref=task["task_ref"], view="state")
-            names = [item["outcome"] for item in state["data"]["effective_contract"]["items"]]
+            state = read_scope(task_ref=task["task_ref"], responsibility="evidence")
+            names = [item["outcome"] for item in state["data"]["outcomes"]]
             self.assertEqual(names.count(added["outcome"]), 1)
 
             changed = dict(arguments)
@@ -268,23 +272,23 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             with self.assertRaises(V12ServiceError) as stale:
                 record_steering(
                     task_ref=task["task_ref"], response_original="Replace it.",
-                    user_language="en", add=[replacement], retire=[remembered],
+                    user_language="en", add=[replacement], retire=[remembered["outcome"]],
                 )
             self.assertEqual(stale.exception.code, "outcome_item_not_found")
             self.assertEqual(stale.exception.details.get("path"), "$.retire[0]")
 
-            fresh = read_task(task_ref=task["task_ref"], view="state")
-            self.assertEqual(fresh["data"]["effective_contract"]["revision"], 1)
-            exact = fresh["data"]["effective_contract"]["items"][0]
+            fresh = read_state(task_ref=task["task_ref"])
+            self.assertEqual(fresh["data"]["effective_revision"], 1)
+            exact = read_outcome(task_ref=task["task_ref"], outcome=current["outcome"])["data"]["outcome"]
             recorded = record_steering(
                 task_ref=task["task_ref"], response_original="Replace it.",
-                user_language="en", add=[replacement], retire=[exact],
+                user_language="en", add=[replacement], retire=[exact["outcome"]],
             )
             self.assertFalse(recorded["replayed"])
-            after = read_task(task_ref=task["task_ref"], view="state")
-            self.assertEqual(after["data"]["effective_contract"]["revision"], 2)
+            after = read_state(task_ref=task["task_ref"])
+            self.assertEqual(after["data"]["effective_revision"], 2)
             self.assertEqual(
-                after["data"]["effective_contract"]["items"], [replacement],
+                read_outcome(task_ref=task["task_ref"], outcome=replacement["outcome"])["data"]["outcome"], replacement,
             )
 
     def test_exact_scope_replay_does_not_collapse_distinct_assignments(self) -> None:
@@ -364,7 +368,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             original_context: dict = {}
             read_task(
-                task_ref=original_ref, view="assignment",
+                task_ref=original_ref,
                 _connection_context=original_context,
             )
             with self.assertRaises(V12ServiceError) as unsafe:
@@ -448,7 +452,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             original_context: dict = {}
             read_task(
-                task_ref=original_ref, view="assignment",
+                task_ref=original_ref,
                 _connection_context=original_context,
             )
 
@@ -483,6 +487,82 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             self.assertEqual(loss_row["assignment_id"], original_context["assignment_id"])
             self.assertEqual(loss_row["successor_assignment_id"], successor_id)
 
+    def test_loss_recovery_derives_one_complete_predecessor_scope_when_outcomes_are_omitted(self) -> None:
+        outcomes = [
+            self._semantic_outcome("Recover the first outcome from one lost owner."),
+            self._semantic_outcome("Recover the second outcome from the same lost owner."),
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task = self._task(root, outcomes)
+            _original, original_ref = self._assignment(
+                task["task_ref"], [item["outcome"] for item in outcomes],
+                role="lost complete-scope owner", responsibility="delivery",
+            )
+            read_task(task_ref=original_ref, _connection_context={})
+
+            replacement = open_assignment(
+                task_ref=task["task_ref"], role="server-derived recovery owner",
+                profile_name="explorer", model="gpt-5.6-luna",
+                reasoning_effort="high", responsibility="delivery",
+                goal="Recover the one complete predecessor scope.",
+                scope="Both outcomes owned by the same confirmed lost worker.",
+                instructions="Consume the server-derived successor scope and publish once.",
+                report_policy="none",
+                loss_recovery={
+                    "state": "aborted",
+                    "reason": "The host explicitly stopped the bound predecessor.",
+                    "evidence": ["The terminal host stop occurred without publication."],
+                },
+            )
+            replacement_ref = WORKER_REF.search(
+                replacement["native_dispatch"]["message"]
+            ).group(1)
+            assignment = read_task(task_ref=replacement_ref, _connection_context={})
+            rendered = repr(assignment["data"]["effective_contract"])
+            for outcome in outcomes:
+                self.assertIn(outcome["outcome"], rendered)
+
+    def test_loss_recovery_without_outcomes_rejects_multiple_predecessor_scopes(self) -> None:
+        outcomes = [
+            self._semantic_outcome("Recover one independently lost owner."),
+            self._semantic_outcome("Recover another independently lost owner."),
+        ]
+        with tempfile.TemporaryDirectory() as root, patch(
+            "cortex_runtime.domain_api._worker_capability_provenance",
+            return_value=PROVENANCE,
+        ):
+            task = self._task(root, outcomes)
+            for index, outcome in enumerate(outcomes):
+                _assignment, worker_ref = self._assignment(
+                    task["task_ref"], [outcome["outcome"]],
+                    role=f"lost owner {index}", responsibility="delivery",
+                )
+                read_task(task_ref=worker_ref, _connection_context={})
+
+            with self.assertRaises(V12ServiceError) as rejected:
+                open_assignment(
+                    task_ref=task["task_ref"], role="ambiguous recovery owner",
+                    profile_name="explorer", model="gpt-5.6-luna",
+                    reasoning_effort="high", responsibility="delivery",
+                    goal="Attempt an ambiguous recovery.",
+                    scope="Multiple predecessor scopes exist.",
+                    instructions="Do not guess which predecessor to replace.",
+                    report_policy="none",
+                    loss_recovery={
+                        "state": "aborted",
+                        "reason": "Both predecessors were explicitly stopped.",
+                        "evidence": ["The host observed two distinct terminal stops."],
+                    },
+                )
+            self.assertEqual(rejected.exception.code, "assignment_loss_scope_conflict")
+            self.assertEqual(
+                rejected.exception.details.get("reason"),
+                "ambiguous_recovery_scope",
+            )
+
     def test_terminal_assignment_receipts_do_not_authorize_a_fresh_context(self) -> None:
         outcome = self._semantic_outcome("Produce predecessor evidence.")
         with tempfile.TemporaryDirectory() as root, patch(
@@ -502,7 +582,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
 
             first_context: dict = {}
             first = read_task(
-                task_ref=consumer_ref, view="assignment",
+                task_ref=consumer_ref,
                 _connection_context=first_context,
             )
             self.assertFalse(first["has_more"])
@@ -520,17 +600,12 @@ class RuntimeContractRemediationTests(unittest.TestCase):
 
             initial_receipts = receipt_rows()
             self.assertEqual(len(initial_receipts), 1)
-            evidence = read_task(
-                task_ref=consumer_ref, view="evidence",
-                report_policy="all_finalized",
-                _connection_context=first_context,
-            )
-            self.assertIn("Producer evidence.", repr(evidence))
+            self.assertIn("Producer evidence.", repr(first))
             self.assertEqual(receipt_rows(), initial_receipts)
 
             with self.assertRaises(V12ServiceError) as restarted:
                 read_task(
-                    task_ref=consumer_ref, view="assignment",
+                    task_ref=consumer_ref,
                     _connection_context={},
                 )
             self.assertEqual(restarted.exception.code, "connection_lost")
@@ -555,7 +630,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             context: dict = {}
             first = read_task(
-                task_ref=consumer_ref, view="assignment",
+                task_ref=consumer_ref,
                 _connection_context=context,
             )
             self.assertTrue(first["has_more"], repr(first["data"]["evidence"]))
@@ -567,7 +642,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 ).fetchall()
             )
             reconciled = read_task(
-                task_ref=consumer_ref, view="assignment",
+                task_ref=consumer_ref,
                 _connection_context=context,
             )
             self.assertEqual(reconciled["data"], first["data"])
@@ -582,13 +657,13 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 [tuple(row) for row in first_receipts],
             )
             second = read_task(
-                task_ref=consumer_ref, view="assignment", continue_=True,
+                task_ref=consumer_ref, continue_=True,
                 _connection_context=context,
             )
             self.assertFalse(second["has_more"])
             with self.assertRaises(V12ServiceError) as exhausted:
                 read_task(
-                    task_ref=consumer_ref, view="assignment", continue_=True,
+                    task_ref=consumer_ref, continue_=True,
                     _connection_context=context,
                 )
             self.assertEqual(exhausted.exception.code, "report_cursor_invalid")
@@ -626,7 +701,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             self.assertIsNotNone(match)
             consumer_ref = match.group(1)
             assignment = read_task(
-                task_ref=consumer_ref, view="assignment",
+                task_ref=consumer_ref,
                 _connection_context={},
             )
 
@@ -659,7 +734,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 role="large authority consumer",
             )
             read = read_task(
-                task_ref=worker_ref, view="assignment",
+                task_ref=worker_ref,
                 _connection_context={},
             )
             reconciliation = read["data"]["publication_reconciliation"]
@@ -677,7 +752,6 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 compact,
                 {
                     "task_ref": worker_ref,
-                    "view": "assignment",
                     "publication_reconciliation": reconciliation,
                     "has_more": False,
                 },
@@ -691,6 +765,29 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 ["publication_reconciliation"]["required_outcomes"],
                 [long_outcome["outcome"]],
             )
+
+    def test_nested_evidence_view_link_leads_the_text_response(self) -> None:
+        link = "[Open plan revision](/private/cortex/tasks/t_example/plans/revisions/plan.md)"
+        rendered = _success_tool_result({
+            "task_ref": "t_0123456789ab",
+            "data": {
+                "reports": [],
+                "human_view": {
+                    "kind": "plan",
+                    "status": "ready",
+                    "markdown_link": link,
+                },
+                "human_views": [{
+                    "kind": "plan",
+                    "status": "ready",
+                    "markdown_link": link,
+                }],
+            },
+            "has_more": False,
+        })
+
+        self.assertEqual(rendered["content"][0]["text"], link)
+        self.assertEqual(rendered["content"].count({"type": "text", "text": link}), 1)
 
     def test_large_authority_is_paginated_and_restarts_exactly(self) -> None:
         outcome = self._semantic_outcome("Paginate the complete worker authority.")
@@ -729,7 +826,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             context: dict = {}
             pages = []
             first = read_task(
-                task_ref=worker_ref, view="assignment",
+                task_ref=worker_ref,
                 _connection_context=context,
             )
             self.assertTrue(first["has_more"])
@@ -745,7 +842,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 ).fetchall()
             ])
             restarted = read_task(
-                task_ref=worker_ref, view="assignment",
+                task_ref=worker_ref,
                 _connection_context=context,
             )
             self.assertEqual(restarted["data"], first["data"])
@@ -760,7 +857,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
 
             while pages[-1]["has_more"]:
                 pages.append(read_task(
-                    task_ref=worker_ref, view="assignment", continue_=True,
+                    task_ref=worker_ref, continue_=True,
                     _connection_context=context,
                 ))
             self.assertGreater(len(pages), 1)
@@ -784,14 +881,14 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 ).fetchall()
             ])
             recovery_pages = [read_task(
-                task_ref=worker_ref, view="assignment",
+                task_ref=worker_ref,
                 _connection_context=context,
             )]
             self.assertTrue(recovery_pages[0]["has_more"])
             self.assertFalse(context["assignment_complete"])
             while recovery_pages[-1]["has_more"]:
                 recovery_pages.append(read_task(
-                    task_ref=worker_ref, view="assignment", continue_=True,
+                    task_ref=worker_ref, continue_=True,
                     _connection_context=context,
                 ))
             self.assertTrue(context["assignment_complete"])
@@ -824,7 +921,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             self.assertEqual(published["state"], "published")
             with self.assertRaises(V12ServiceError) as copied:
                 read_task(
-                    task_ref=worker_ref, view="assignment",
+                    task_ref=worker_ref,
                     _connection_context={},
                 )
             self.assertEqual(copied.exception.code, "connection_lost")
@@ -952,8 +1049,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
 
         large_assignment = _success_tool_result({
             "task_ref": "t_123456789abc_" + "1" * 32,
-            "view": "assignment",
-            "data": {
+                        "data": {
                 "publication_reconciliation": {
                     "coverage_source": "planning_items",
                     "required_item_count": 1,

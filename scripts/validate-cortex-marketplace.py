@@ -29,8 +29,8 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_BASE_VERSION = "1.14.16"
-VERSION_PATTERN = re.compile(r"^1\.14\.16\+codex\.sha256\.[0-9a-f]{16}$")
+EXPECTED_BASE_VERSION = "1.15.0"
+VERSION_PATTERN = re.compile(r"^1\.15\.0\+codex\.sha256\.[0-9a-f]{16}$")
 EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
@@ -229,9 +229,9 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
     version = manifest.get("version")
     valid_version = VERSION_PATTERN.fullmatch(version) if isinstance(version, str) else None
     if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not valid_version:
-        fail("installable plugin manifest must use a content-addressed 1.14.16 version")
+        fail("installable plugin manifest must use a content-addressed 1.15.0 version")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
-        fail("plugin manifest semantic version must be 1.14.16")
+        fail("plugin manifest semantic version must be 1.15.0")
     provenance_path = plugin / "scripts/cortex_runtime/provenance.py"
     spec = importlib.util.spec_from_file_location("cortex_marketplace_provenance", provenance_path)
     if spec is None or spec.loader is None:
@@ -386,6 +386,7 @@ def validate_skills(plugin: Path) -> None:
     if missing_safety_markers:
         fail("orchestrator guidance lacks terminal task-opening/language safeguards: " + ", ".join(missing_safety_markers))
     communication = (plugin / "skills/coordinator-communication/SKILL.md").read_text(encoding="utf-8")
+    communication_semantics = " ".join(communication.split()).lower()
     required_communication_markers = (
         "result, then its user impact, then the next step",
         "latest meaningful user message",
@@ -393,8 +394,16 @@ def validate_skills(plugin: Path) -> None:
         "raw task/delegation/report/decision IDs",
         "Humor is optional",
         "does not add a runtime loader",
+        "complete decision packet",
+        "does not render the question",
+        "without opening a tool call, reading worker output",
+        "Native workers and other subagents never question the user directly",
+        "Never replace this presentation with a bare “plan ready” question",
     )
-    missing_communication_markers = [marker for marker in required_communication_markers if marker not in communication]
+    missing_communication_markers = [
+        marker for marker in required_communication_markers
+        if marker.lower() not in communication_semantics
+    ]
     if missing_communication_markers:
         fail("coordinator communication skill lacks required policy safeguards: " + ", ".join(missing_communication_markers))
 

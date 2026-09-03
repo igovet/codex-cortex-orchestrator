@@ -1182,7 +1182,8 @@ def _is_worker_assignment_read(event: dict[str, Any]) -> bool:
     return (
         _is_consume(event.get("tool_name"))
         and isinstance(supplied, dict)
-        and supplied.get("view") in {None, "assignment"}
+        and isinstance(supplied.get("task_ref"), str)
+        and not (set(supplied) - {"task_ref", "continue"})
     )
 
 
@@ -1213,7 +1214,6 @@ def _is_successful_assignment_page(event: dict[str, Any]) -> bool:
     structured = response.get("structuredContent")
     return (isinstance(structured, dict)
             and structured.get("task_ref") == supplied.get("task_ref")
-            and structured.get("view") == "assignment"
             and isinstance(structured.get("has_more"), bool)
             and isinstance(structured.get("data"), (dict, list)))
 
@@ -1222,7 +1222,8 @@ def _is_successful_state_read(event: dict[str, Any]) -> bool:
     """Recognize a terminal fresh coordinator state read after compaction."""
     response = event.get("tool_response")
     supplied = event.get("tool_input")
-    if (not _is_consume(event.get("tool_name"))
+    if (not isinstance(event.get("tool_name"), str)
+            or event["tool_name"].strip().lower() != "mcp__cortex__read_state"
             or not isinstance(response, dict)
             or response.get("isError") is not False
             or not isinstance(supplied, dict)):
@@ -1230,9 +1231,8 @@ def _is_successful_state_read(event: dict[str, Any]) -> bool:
     structured = response.get("structuredContent")
     return (isinstance(structured, dict)
             and structured.get("task_ref") == supplied.get("task_ref")
-            and supplied.get("view") == "state"
-            and structured.get("view") == "state"
-            and structured.get("has_more") is False
+            and set(supplied) == {"task_ref"}
+            and "has_more" not in structured
             and isinstance(structured.get("data"), (dict, list)))
 
 
@@ -1281,7 +1281,7 @@ def main() -> int:
         return 0
 
     if (event_name == "PostToolUse" and state.get("recovery_read_required")
-            and _is_consume(event.get("tool_name"))):
+            and (_is_consume(event.get("tool_name")) or _is_successful_state_read(event))):
         recovered = (
             _is_successful_consume(event)
             if child else _is_successful_state_read(event)
@@ -1509,10 +1509,18 @@ def main() -> int:
             and isinstance(event.get("tool_name"), str)
             and event["tool_name"].strip().lower().startswith("mcp__cortex__")):
         supplied = event.get("tool_input")
-        expected_view = "assignment" if child else "state"
-        if (not _is_consume(event.get("tool_name"))
-                or not isinstance(supplied, dict)
-                or supplied.get("view") != expected_view):
+        expected_tool = "mcp__cortex__read_task" if child else "mcp__cortex__read_state"
+        valid_input = (
+            isinstance(supplied, dict)
+            and set(supplied).issubset({"task_ref", "continue"})
+            and isinstance(supplied.get("task_ref"), str)
+            and ("continue" not in supplied or supplied.get("continue") is True)
+        ) if child else (
+            isinstance(supplied, dict) and set(supplied) == {"task_ref"}
+        )
+        if (not isinstance(event.get("tool_name"), str)
+                or event["tool_name"].strip().lower() != expected_tool
+                or not valid_input):
             _deny(
                 "Post-compaction recovery requires a fresh current assignment read."
                 if child else

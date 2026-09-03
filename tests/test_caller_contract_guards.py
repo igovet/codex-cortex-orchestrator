@@ -56,13 +56,12 @@ class CallerContractGuardTests(unittest.TestCase):
             _validate_public_call_shape(
                 "open_assignment", {"responsibility": "planning", "outcomes": ["A"]},
             )
-        with self.assertRaisesRegex(ValueError, "missing required property"):
-            _validate_public_call_shape(
-                "open_assignment", {
-                    "responsibility": "delivery",
-                    "loss_recovery": {"state": "blocked", "reason": "Lost", "evidence": ["Confirmed"]},
-                },
-            )
+        _validate_public_call_shape(
+            "open_assignment", {
+                "responsibility": "delivery",
+                "loss_recovery": {"state": "blocked", "reason": "Lost", "evidence": ["Confirmed"]},
+            },
+        )
 
     def test_missing_required_publication_fields_are_reported_together(self) -> None:
         schema = PUBLIC_TOOLS["publish_result"]["inputSchema"]

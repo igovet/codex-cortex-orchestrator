@@ -7457,6 +7457,30 @@ class V12Store:
             timeline.append(item)
         return timeline, int(timeline[-1]["sequence"]) if timeline else after, has_more
 
+    def _timeline_page_reverse(
+        self, connection: sqlite3.Connection, *, before: int | None,
+        limit: int, clause: str, values: Sequence[Any],
+    ) -> tuple[list[dict[str, Any]], int | None, bool]:
+        """Return one newest-first page; the next page moves strictly older."""
+        if before is None:
+            rows = connection.execute(
+                f"SELECT * FROM timeline WHERE ({clause}) ORDER BY sequence DESC LIMIT ?",
+                [*values, limit + 1],
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                f"SELECT * FROM timeline WHERE sequence<? AND ({clause}) ORDER BY sequence DESC LIMIT ?",
+                [before, *values, limit + 1],
+            ).fetchall()
+        has_more, rows = len(rows) > limit, rows[:limit]
+        timeline = []
+        for row in rows:
+            item = _row(row)
+            assert item is not None
+            item["payload"] = _load_json(str(item.pop("payload_json")), label="timeline payload")
+            timeline.append(item)
+        return timeline, int(timeline[-1]["sequence"]) if timeline else before, has_more
+
     @staticmethod
     def _ids(timeline: Sequence[Mapping[str, Any]], field: str) -> list[str]:
         return sorted({str(item[field]) for item in timeline if isinstance(item.get(field), str) and item[field]})
@@ -7514,6 +7538,48 @@ class V12Store:
             decisions = [self._compact_decision(self._decision(connection, item, task_id=anchor)) for item in self._ids(timeline, "decision_id")]
             receipts = self._consumption_receipts(connection, task_id=anchor, sequences=[int(item["sequence"]) for item in timeline])
             return {"task": task, "effective_contract": self._effective_contract(connection, anchor), "aggregate_coverage": self._aggregate_coverage(connection, anchor), "conformance_review": self._conformance_review(connection, anchor), "execution_outcome": self._execution_evidence(connection, anchor), "advisory_closure": self._advisory_closure(connection, anchor), "delegations": delegations, "continuations": continuations, "reports": reports, "decisions": decisions, "consumption_receipts": receipts, "timeline": timeline, "next_sequence": next_sequence, "has_more": has_more}
+        return self._read(read)
+
+    def inspect_task_timeline(
+        self, *, task_id: Any, before_sequence: Any = None,
+        limit: Any = DEFAULT_PAGE_LIMIT,
+    ) -> dict[str, Any]:
+        """Read complete historical event projections newest-first."""
+        anchor, page = self._task_identifier(task_id), self._limit(limit)
+        before = None if before_sequence is None else self._sequence(before_sequence)
+
+        def read(connection: sqlite3.Connection) -> dict[str, Any]:
+            self._task(connection, anchor)
+            timeline, next_sequence, has_more = self._timeline_page_reverse(
+                connection, before=before, limit=page,
+                clause="task_id=?", values=[anchor],
+            )
+            delegations = [
+                self._compact_delegation(self._delegation(connection, item, task_id=anchor))
+                for item in self._ids(timeline, "delegation_id")
+            ]
+            reports = [
+                self._compact_report(self._report(connection, item, task_id=anchor))
+                for item in self._ids(timeline, "report_id")
+            ]
+            decisions = [
+                self._compact_decision(self._decision(connection, item, task_id=anchor))
+                for item in self._ids(timeline, "decision_id")
+            ]
+            receipts = self._consumption_receipts(
+                connection, task_id=anchor,
+                sequences=[int(item["sequence"]) for item in timeline],
+            )
+            return {
+                "delegations": delegations,
+                "reports": reports,
+                "decisions": decisions,
+                "consumption_receipts": receipts,
+                "timeline": timeline,
+                "next_sequence": next_sequence,
+                "has_more": has_more,
+            }
+
         return self._read(read)
 
     def read_delegation(self, *, delegation_id: Any, after_sequence: Any, limit: Any = DEFAULT_PAGE_LIMIT, task_id: Any = None) -> dict[str, Any]:

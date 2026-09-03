@@ -1,18 +1,18 @@
 # Release readiness
 
-Status: content-addressed production and development release contract for Cortex 1.14.16.
+Status: content-addressed production and development release contract for Cortex 1.15.0.
 
 ## Current release identity
 
-- semantic release label: 1.14.16
-- installable identity: `1.14.16+codex.sha256.<digest-prefix>` with runtime
+- semantic release label: 1.15.0
+- installable identity: `1.15.0+codex.sha256.<digest-prefix>` with runtime
   verification against the complete normalized plugin payload
 - source-to-installed synchronization reuses that same canonical plugin
   manifest and digest contract on Linux and macOS; it does not maintain a
   second platform-specific temporary-tree hash
 - coordination contract: V12 durable, nonblocking ledger
 - SQLite schema: v1 in the new V12 namespace
-- public facade: exactly fourteen action-specific MCP tools
+- public facade: exactly twenty action-specific MCP tools
 - public audience: immutable coordinator and four-tool worker projections
 - runtime model contract: bundled `orchestrator` and `cortex-control` skills
 - profiles: advisory role templates
@@ -33,21 +33,27 @@ The complete registry must contain exactly these names, in canonical order:
 
 1. `open_task`
 2. `read_task`
-3. `open_clarification`
-4. `record_clarification`
-5. `open_plan_review`
-6. `record_plan_review`
-7. `open_steering`
-8. `record_steering`
-9. `open_assignment`
-10. `publish_plan`
-11. `publish_result`
-12. `publish_documentation`
-13. `assess_governance`
-14. `close_task`
+3. `read_state`
+4. `read_scope`
+5. `read_outcome`
+6. `read_continuations`
+7. `read_evidence`
+8. `read_timeline`
+9. `open_clarification`
+10. `record_clarification`
+11. `open_plan_review`
+12. `record_plan_review`
+13. `open_steering`
+14. `record_steering`
+15. `open_assignment`
+16. `publish_plan`
+17. `publish_result`
+18. `publish_documentation`
+19. `assess_governance`
+20. `close_task`
 
 `tools/list` projects this registry by immutable connection audience.
-Coordinators receive all coordinator operations plus `read_task`; signed
+Coordinators receive only coordinator operations; signed
 worker-candidates and committed workers receive only `read_task` and the three
 publication operations. Authorization remains independently server-side:
 connection roles are monotonic, and worker assignment reads and publications
@@ -95,7 +101,7 @@ an MCP resource or project copy. Decorative bracket text is not activation.
 The complete catalogue must fit in one `tools/list` JSON-RPC response below
 65,536 bytes. This bounded discovery contract is substantially below the 256
 KiB physical JSONL frame bound and does not use continuation pages, so every
-participant receives all fourteen operation definitions together. The bundled
+participant receives all twenty operation definitions together. The bundled
 MCP is required and excluded from programmatic code mode and deferred discovery,
 leaving direct model calls as its only valid host surface. Desktop must expose
 that intact catalogue before its first model turn. Missing or truncated
@@ -137,7 +143,7 @@ invalid. `open_assignment` also separates exact packaged `profile_name` from
 the human-readable `role`, requires loaded renderer proof, and returns one
 compact closed native dispatch plus replay state. The projection preserves exact
 effort, omits the model only for default Luna, and is forwarded unchanged to one matching active host
-spawn. The mandatory first `read_task` assignment view supplies the complete
+spawn. The mandatory first `read_task` assignment supplies the complete
 policy/profile/task context on healthy and recovery paths.
 The three narrow decision record operations use their matching closed advertised
 contract and task-scoped server binding; callers provide only the task reference,
@@ -241,14 +247,13 @@ Release evidence must prove:
   owner, earlier dependencies, work, and verification; a correctable mapping
   failure remains in the same immutable assembly for corrective append rather
   than creating a terminal semantic-invalid plan or another planner delegation;
-- the public `read_task` operation exposes bounded `state`, `assignment`, and
-  `evidence` views with server-owned continuation through `continue=true`; a
-  fresh worker's first call consumes the assignment view and is its only
-  authoritative route to declared predecessor bodies;
-- coordinator state history uses bounded 16-event pages with one top-level
-  `has_more` marker; nested state data exposes no competing continuation or
-  cursor marker, and terminal state consumption alone establishes fresh-read
-  evidence;
+- `read_state` exposes only bounded scalar status; coordinator detail is split
+  across `read_scope`, `read_outcome`, `read_continuations`, `read_evidence`,
+  and newest-first `read_timeline`; worker-only `read_task` consumes the
+  assignment and is its only authoritative route to predecessor bodies;
+- pageable reads use one top-level `has_more` marker and accept only an
+  immediate same-operation `continue=true`; private position never appears on
+  the wire;
 - the compact assignment reconciliation header retains exact public outcome
   names before the larger policy body, continuation occurs only immediately
   after `has_more=true`, and restarted identical terminal reads reuse existing
@@ -344,7 +349,7 @@ Private/internal initiative status is limited to `proposed`, `active`, `paused`,
 `completed`, `closed`, and `cancelled`. Every transition among those values is
 accepted. Missing or cyclic same-project dependencies persist with warnings.
 Neither warning rejects a later private/internal revision. Initiative
-bookkeeping is not part of the public fourteen-operation facade.
+bookkeeping is not part of the public twenty-operation facade.
 
 `assess_governance` is task-ref-only and records an advisory mode assessment.
 Private/internal initiative links and revisions may be scoped to a task for
@@ -383,7 +388,7 @@ shared worker, missing spawn, or duplicate spawn is acceptable.
 ## Operator maintenance contract
 
 The packaged `cortex_runtime.v12_maintenance` module remains outside
-`tools/list`; it cannot change the fourteen-tool semantic catalog. Every command in this
+`tools/list`; it cannot change the twenty-tool semantic catalog. Every command in this
 separately invoked non-MCP operator module starts from one exact V12 durable
 `task_id`, derives its shard and host-private targets from that ID, accepts no
 root/arbitrary path/V11 target, validates the owner-only
@@ -410,13 +415,13 @@ failure/recovery outcomes.
 ## Package boundary
 
 The installable package must include the manifest, MCP configuration,
-fourteen-tool semantic facade and runtime, schema-v1 store, host-private operator
+twenty-tool semantic facade and runtime, schema-v1 store, host-private operator
 maintenance module, advisory profiles, bundled skills, direct MCP configuration,
 assets, the bounded activation guard, and the sanitized lifecycle observer.
 
-The package and repository metadata must consistently identify Cortex 1.14.16,
+The package and repository metadata must consistently identify Cortex 1.15.0,
 schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
-and the complete fourteen-tool semantic registry plus its two audience
+and the complete twenty-tool semantic registry plus its two audience
 projections. Stale claims about waves, gates, capabilities,
 plan authority, host epochs, server-owned receipt-driven scheduling, required wait/read order,
 lifecycle HMAC, repair escrow, closure breakers, resource locks, required
@@ -483,7 +488,7 @@ requires a delegated documentation-sync update to the harvest documentation
 under `docs/project/` and `docs/features/`, then delegated documentation
 verification. A no-impact task requires a finalized worker-owned report with an
 explicit English documentation-impact section and material/no-impact rationale,
-confirms that finalized evidence through the bounded `read_task` evidence view,
+confirms finalized evidence through bounded `read_evidence`,
 and closes the task from ledger-derived coverage. Private report identity is
 evidence only. A self-asserted
 `documentation_not_required` value is invalid. This
@@ -548,6 +553,13 @@ The current prompt transport contract is literal insertion with one `send-keys -
 For every native worker spawned by live orchestration, the LLM verifier must inspect a bounded sanitized structured event stream as well as the coordinator pane because worker MCP calls/errors may be hidden. The helper may expose events but must not decide pass/fail. Acceptance requires a clean first worker-owned publication success, zero prior hidden validation/tool errors or mutation replays; a public receipt alone is insufficient without the corresponding task-scoped evidence read.
 
 The E2E acceptance case is multi-turn and runs in a separate test project. The LLM observes the pane, answers exactly one product clarification with the predefined safe answer, later approves the visibly rendered plan, and follows planner → implementation → independent verification → documentation-impact assessment → closure. It inspects every native worker event stream and fails on any hidden tool error or unexplained replay. The tmux transport never answers or approves autonomously.
+
+The full live-catalogue gate uses
+`tests/fixtures/live_cortex_all_tools_scenario.json` with Luna High. CLI and real
+Desktop must run consecutively against the same unchanged stamped candidate;
+the external LLM verifier requires one clean task-relevant success for every
+public operation, the specified same-thread CLI resume, and no hidden tool
+error or unexplained mutation replay.
 
 Exercise several explicit `$cortex:orchestrator` tasks:
 
@@ -654,7 +666,7 @@ unchanged `source_text` value (without language or translated/original
 duplicates), evidence-only planner microtasks, textual delegation scope, exact
 `profile_name`/human `role`, loaded proof, one-to-one native dispatch,
 model/effort, English-only worker-authored content, private chunked report modes,
-bounded public `read_task` continuation, plan-review and user-decision binding
+bounded audience-specific read continuation, plan-review and user-decision binding
 semantics, worker-owned documentation-impact evidence, verified host-private human-view links with
 localized summaries and nonblocking fallback, the bounded knowledge-routing
 exception, the coordinator-only boundary, and the conditional documentation

@@ -315,7 +315,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         home, host_identity=evidence_identity,
                     ) as evidence_worker:
                         evidence_read = evidence_worker("read_task", {
-                            "task_ref": evidence_ref, "view": "assignment",
+                            "task_ref": evidence_ref,
                         })
                         assert not evidence_read["result"].get("isError"), evidence_read
                         evidence_published = evidence_worker("publish_result", {
@@ -415,7 +415,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     # a neutral superset until exact bootstrap consumption.
                     _hook(tmp_path, start_event)
 
-                read_input = {"task_ref": worker_ref, "view": "assignment"}
+                read_input = {"task_ref": worker_ref}
                 page_count = 0
                 while True:
                     page_count += 1
@@ -432,7 +432,6 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     consumed = worker("read_task", read_input)
                     assert not consumed["result"].get("isError"), consumed
                     structured = consumed["result"]["structuredContent"]
-                    assert structured["view"] == "assignment"
                     post_read = _hook(tmp_path, {
                         "hook_event_name": "PostToolUse",
                         "session_id": root_session,
@@ -454,8 +453,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         break
                     read_input = {
                         "task_ref": worker_ref,
-                        "view": "assignment",
-                        "continue": True,
+                                                "continue": True,
                     }
                 assert (page_count > 1) is paginated
 
@@ -477,7 +475,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     "turn_id": worker_turn,
                     "agent_id": worker_agent,
                 })
-                recovery_input = {"task_ref": worker_ref, "view": "assignment"}
+                recovery_input = {"task_ref": worker_ref}
                 recovery_pages = 0
                 while True:
                     recovery_pages += 1
@@ -517,8 +515,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         break
                     recovery_input = {
                         "task_ref": worker_ref,
-                        "view": "assignment",
-                        "continue": True,
+                                                "continue": True,
                     }
                 assert recovery_pages == page_count
                 assert worker.notifications == []
@@ -563,29 +560,29 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                 "session_id": root_session,
                 "turn_id": "coordinator-after-compact",
             })
-            coordinator_state_input = {"task_ref": task_ref, "view": "state"}
+            coordinator_state_input = {"task_ref": task_ref}
             assert _hook(tmp_path, {
                 "hook_event_name": "PreToolUse",
                 "session_id": root_session,
                 "turn_id": "coordinator-after-compact",
-                "tool_name": "mcp__cortex__read_task",
+                "tool_name": "mcp__cortex__read_state",
                 "tool_input": coordinator_state_input,
             }) is None
-            coordinator_state = coordinator("read_task", coordinator_state_input)
+            coordinator_state = coordinator("read_state", coordinator_state_input)
             assert not coordinator_state["result"].get("isError"), coordinator_state
             assert _hook(tmp_path, {
                 "hook_event_name": "PostToolUse",
                 "session_id": root_session,
                 "turn_id": "coordinator-after-compact",
-                "tool_name": "mcp__cortex__read_task",
+                "tool_name": "mcp__cortex__read_state",
                 "tool_input": coordinator_state_input,
                 "tool_response": coordinator_state["result"],
             }) is None
 
             reports = []
-            evidence_input = {"task_ref": task_ref, "view": "evidence"}
+            evidence_input = {"task_ref": task_ref, "report_policy": "all_finalized"}
             while True:
-                evidence = coordinator("read_task", evidence_input)
+                evidence = coordinator("read_evidence", evidence_input)
                 assert not evidence["result"].get("isError"), evidence
                 evidence_page = evidence["result"]["structuredContent"]
                 reports.extend(evidence_page["data"]["reports"])
@@ -593,7 +590,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     break
                 evidence_input = {
                     "task_ref": task_ref,
-                    "view": "evidence",
+                    "report_policy": "all_finalized",
                     "continue": True,
                 }
             target_summary = f"{surface.capitalize()} parity fixture completed."
@@ -710,15 +707,9 @@ def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_en
                     **({"tool_response": {"isError": False}} if event_name == "PostToolUse" else {}),
                 })
 
-            # Reproduce the observed Desktop failure exactly. The early neutral
-            # catalogue can lead the model to copy open_assignment's scoped
-            # policy onto the first worker read. It is compatibility-only here:
-            # the server-owned assignment policy remains authoritative.
-            read_input = {
-                "task_ref": worker_ref,
-                "view": "assignment",
-                "report_policy": "latest_for_scope",
-            }
+            # The neutral catalogue advertises a dedicated worker assignment
+            # read with no coordinator view or report-policy selector.
+            read_input = {"task_ref": worker_ref}
             assert hook({
                 "hook_event_name": "PreToolUse", "session_id": root_session,
                 "turn_id": worker_turn, "agent_id": worker_agent,
@@ -727,7 +718,6 @@ def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_en
             }) is None
             consumed = worker("read_task", read_input)
             assert not consumed["result"].get("isError"), consumed
-            assert consumed["result"]["structuredContent"]["view"] == "assignment"
             terminal_context = hook({
                 "hook_event_name": "PostToolUse", "session_id": root_session,
                 "turn_id": worker_turn, "agent_id": worker_agent,
@@ -759,6 +749,6 @@ def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_en
             assert not published["result"].get("isError"), published
             assert published["result"]["structuredContent"]["replayed"] is False
 
-        evidence = coordinator("read_task", {"task_ref": task_ref, "view": "evidence"})
+        evidence = coordinator("read_evidence", {"task_ref": task_ref, "report_policy": "all_finalized"})
         assert not evidence["result"].get("isError"), evidence
         assert len(evidence["result"]["structuredContent"]["data"]["reports"]) == 1

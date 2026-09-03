@@ -4,7 +4,7 @@
 
 ## Purpose and authority
 
-Cortex 1.14.16 projects selected host-private plan and finalized-report evidence
+Cortex 1.15.0 projects selected host-private plan and finalized-report evidence
 into human-readable Markdown views. These views make plan/report content easier
 for a coordinator and user to inspect; they do not create another ledger or
 alter the execution model. Other task records remain SQLite-only and are read
@@ -39,6 +39,10 @@ represented as `<task_ref>` (`t_<12-hex>`), the layout is exactly:
     │   ├── current.md
     │   └── revisions/<plan-report-id>.md
     └── reports/<report-id>.md
+
+~/.codex/cortex/views/
+├── plan-<content-sha256>.md
+└── report-<content-sha256>.md
 ```
 
 Only plan and report links are materialized as user-facing Markdown. `current.md`
@@ -47,6 +51,13 @@ has its own identity-addressable document. Task, decision, delegation,
 initiative, closure, governance, handoff, index, and timeline records remain
 SQLite-only; they are available through bounded inspection tools and are not
 published as Markdown projections.
+
+After verifying the shard-local source, Cortex creates a byte-identical
+content-addressed alias under `~/.codex/cortex/views/` and returns that shorter
+absolute Markdown link. The filename contains the complete content SHA-256;
+an existing alias with different bytes fails closed. This prevents a model from
+having to reproduce a path containing the project hash, task reference, and
+canonical report identifier while keeping all files host-private.
 
 Canonical full task IDs remain in SQLite and rendered evidence, but never in a
 user-facing projection link path. When an existing V12 shard has the released
@@ -95,16 +106,21 @@ Every output path is derived from server-generated validated identifiers rather
 than caller-supplied export paths. Generated files are ordinary, readable
 Markdown: plans and reports are structured human-readable documents with
 labeled headings, normal lists, and paragraphs, not raw nested field dumps.
-The renderer owns the document hierarchy: ordinary authored strings are data,
-not executable Markdown, and are sanitized context-sensitively so headings,
-lists, tables, blockquotes, HTML, rules, and fences cannot inject structure.
-Readable punctuation is retained. Only explicitly typed blocks (such as a code
-block) emit their intended formatting. The optional `cortex/report-view/v1`
+The renderer owns the standard document sections and typed blocks, while
+ordinary authored Markdown remains Markdown. Backticks, lists, links, emphasis,
+HTML, tables, blockquotes, rules, and fences are preserved without backslash
+escapes or character entities. The optional `cortex/report-view/v1`
 envelope is parsed only at render time; malformed, unknown, or legacy content
 uses the safe generic fallback without changing canonical report acceptance or
 persistence. Structured JSON is canonical database data only; it is never dumped as a JSON
 object, script block, `<pre>` block, entity-encoded payload, or opaque blob into
 a human view.
+
+Human views are disposable host-private presentation artifacts. Authored
+formatting can affect only that derived document; it is never parsed back,
+treated as an instruction, or used as ledger, approval, identity, or recovery
+authority. Raw files and host previews therefore contain the authored Markdown
+instead of renderer-generated escape syntax.
 
 The view writer intentionally preserves direct edits. If the on-disk content no
 longer matches the derived artifact that Cortex last verified, it records a
@@ -130,6 +146,27 @@ with a localized summary, whenever it is useful during:
 - decision recording; and
 - the final response.
 
+The terminal coordinator evidence page carries `human_view` for the selected
+active plan and `human_views` for the complete selected finalized evidence set.
+Each ready entry contains the exact verified `markdown_link`; private report
+identity and construction details remain absent. The transport also places
+these links before the serialized evidence body so CLI and Desktop hosts expose
+the same link even when they primarily surface text content. A paginated read
+does not publish the set until its terminal page, preventing an incomplete
+evidence read from being presented as complete.
+
+Successful `close_task` repeats the verified links for every finalized plan and
+report. The immediate final response copies those current server-returned links
+byte-for-byte and does not reconstruct a path remembered from an earlier read.
+
+For plan review, the link and localized summary are rendered in the
+coordinator's final answer after the durable review hold opens. The tool call
+does not display its stored prompt to the user. The summary must be sufficient
+for an informed approve/revision/cancel decision and covers scope, ordered
+stages, intended changes, verification, stop conditions, and material risks or
+unresolved items. A generic “plan ready” question is not a substitute for the
+verified link and decision-ready summary.
+
 It must never publish a bare path, a stale link, or an unverified link. A link
 means the coordinator has confirmed the matching `ready` response and used the
 exact absolute path it returned. The accompanying summary is localized to the
@@ -150,19 +187,14 @@ or completion.
 ## Task inspection and closure bookkeeping
 
 Task, delegation, governance, closure, decision, and timeline records are not
-rendered as Markdown views. Use the bounded `read_task` view for
-human-readable inspection of those records. `read_task` exposes two
-separate projections: `execution_outcome`, which is neutral finalized-report
-evidence, and `advisory_closure`, which describes whether an advisory record is
-present. The execution projection contains `evidence_status`,
-`finalized_report_count`, `completed_report_count`, `effective_revision`,
-`coverage_status`, and `outcome`. It derives deterministically from current
-effective-contract coverage and makes no native-lifecycle claim. The
-closure projection contains `record_status`
-and `latest_record` (or `null`).
-Neither projection is a native-host lifecycle signal.
+rendered as Markdown views. Use scalar `read_state` for current status,
+`read_evidence` for selected finalized reports and their verified links, and
+`read_timeline` only for explicit newest-first history. Execution status derives
+deterministically from current effective-contract coverage and makes no
+native-lifecycle claim. Closure record status and latest verdict remain
+separate scalar fields. Neither is a native-host lifecycle signal.
 
-The state view also exposes an outcome-keyed aggregate coverage list. Each row
+`read_scope` exposes one responsibility's outcome-keyed coverage rows. Each row
 repeats the exact current semantic `outcome` and binds it to coverage
 `status`/`reason`, `ownership`, and `delivery_assignability`. Ordinary delivery
 uses only `assignable` outcomes. `loss_recovery_only` means one nonterminal

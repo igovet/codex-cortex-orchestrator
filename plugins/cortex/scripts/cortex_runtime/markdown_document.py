@@ -1,16 +1,14 @@
-"""Typed, safety-conscious Markdown documents for Cortex human views.
+"""Typed Markdown documents for Cortex human views.
 
 The V12 ledger stores opaque JSON.  This module is the only layer that knows
-how a presentation document becomes Markdown.  In particular, strings are
-data: they are never interpreted as headings, lists, tables, HTML, block
-quotes, rules, or fences.  The small set of typed blocks below is deliberately
-boring so a presenter can describe meaning without taking control of the
-document hierarchy.
+how a presentation document becomes Markdown. The renderer owns the standard
+document sections and typed blocks, while authored Markdown inside semantic
+text is preserved byte-for-byte after newline normalization. Human views are
+derived display artifacts and never become ledger authority.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import html
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, TypeAlias
@@ -31,94 +29,28 @@ def plain_text(value: object) -> str:
     """Expose normalized plain text for callers that need a safe inline value.
 
     This intentionally does not globally escape Markdown punctuation.  The
-    renderer applies only the context-sensitive protection needed by each
-    block below.
+    renderer preserves authored Markdown in each block below.
     """
     return _normalise(value)
 
 
 def _escape_inline_markup(text: str) -> str:
-    """Neutralize inline Markdown only when it has a formatting shape.
-
-    Plain identifiers such as ``snake_case`` and paths remain readable.  A
-    paired emphasis delimiter, a code span, or a link-shaped value is escaped
-    narrowly so ordinary report text cannot smuggle rich Markdown into a
-    renderer-owned block.
-    """
-    if "`" in text:
-        text = text.replace("`", "\\`")
-    # Cover both emphasis and strong-emphasis delimiters.  A single `*` or
-    # `_` used as ordinary prose remains readable; paired delimiters are
-    # escaped so values such as `**untrusted**` cannot become formatting.
-    if re.search(r"(?<!\w)\*{1,3}[^\n*]+\*{1,3}(?!\w)", text):
-        text = text.replace("*", "\\*")
-    if re.search(r"(?<!\w)_{1,3}[^\n_]+_{1,3}(?!\w)", text):
-        text = text.replace("_", "\\_")
-    if re.search(r"!?\[[^\]]*\]\([^)]*\)", text):
-        text = re.sub(r"(?<!\\)(!?\[)", r"\\\1", text)
-    if re.search(r"</?[A-Za-z][^>]*>|<!--|<\?[A-Za-z]", text):
-        text = re.sub(
-            r"</?[A-Za-z][^>]*>|<!--.*?-->|<\?[A-Za-z][^>]*>",
-            lambda match: html.escape(match.group(0), quote=False),
-            text,
-        )
+    """Preserve authored inline Markdown without renderer-added escaping."""
     return text
 
 
-_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
-_BULLET_RE = re.compile(r"^ {0,3}[*+-](?:[ \t]+|$)")
-_ORDERED_RE = re.compile(r"^ {0,3}\d{1,9}\.(?:[ \t]+|$)")
-_FENCE_RE = re.compile(r"^ {0,3}(?:`{3,}|~{3,})")
-_QUOTE_RE = re.compile(r"^ {0,3}>")
-_TABLE_RE = re.compile(r"^ {0,3}\|")
-_HTML_RE = re.compile(
-    r"^ {0,3}</?[A-Za-z][^>]*>|^ {0,3}<!--|^ {0,3}<\?[A-Za-z]"
-)
-_RULE_RE = re.compile(r"^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$")
-
-
 def _escape_structural_line(line: str) -> str:
-    """Make one untrusted line inert in a paragraph/list/callout context.
-
-    A backslash is added only to a leading token that CommonMark could parse as
-    a block.  Ordinary punctuation, including hyphens and underscores inside a
-    sentence, remains untouched.  Leading indentation is removed when it
-    would otherwise create an indented code block.
-    """
-    if not line:
-        return ""
-    leading = len(line) - len(line.lstrip(" "))
-    stripped = line.lstrip(" ")
-    prefix = " " * min(leading, 3)
-    if leading >= 4:
-        # Four leading spaces are a code block in CommonMark.  Keep a visual
-        # hint while ensuring the value cannot escape the paragraph context.
-        prefix = ""
-        stripped = "\\ " + stripped
-    if _HEADING_RE.match(line):
-        return prefix + "\\" + stripped
-    if _BULLET_RE.match(line):
-        return prefix + "\\" + stripped
-    if _ORDERED_RE.match(line):
-        marker = stripped.find(".")
-        return prefix + stripped[:marker] + "\\." + stripped[marker + 1 :]
-    if _FENCE_RE.match(line) or _QUOTE_RE.match(line) or _TABLE_RE.match(line):
-        return prefix + "\\" + stripped
-    if _HTML_RE.match(line):
-        return prefix + "\\" + stripped
-    if _RULE_RE.match(line):
-        # Escaping the first marker is sufficient to prevent a thematic break.
-        return prefix + "\\" + stripped
+    """Preserve authored block Markdown without renderer-added escaping."""
     return line
 
 
 def safe_paragraph_text(value: object) -> str:
-    """Sanitize text for a paragraph while retaining normal line wrapping."""
+    """Normalize paragraph text while preserving authored Markdown."""
     return "\n".join(_escape_structural_line(_escape_inline_markup(line)) for line in _normalise(value).split("\n"))
 
 
 def safe_inline_text(value: object) -> str:
-    """Normalize one-line labels and values without adding raw block syntax."""
+    """Normalize one-line labels and values without escaping inline Markdown."""
     text = _normalise(value)
     # A line break inside a key/value, heading, or table cell must not start a
     # new Markdown block.  Spaces are readable and preserve all words.
@@ -130,8 +62,8 @@ def safe_heading_text(value: object, *, fallback: str = "Section") -> str:
     text = safe_inline_text(value).strip()
     if not text:
         return fallback
-    # The heading token is generated by this module.  A newline is collapsed
-    # above, so untrusted content cannot add a second heading line.
+    # The heading token is generated by this module. A newline is collapsed
+    # above so a label remains one line without rewriting its Markdown.
     return text
 
 
@@ -150,7 +82,7 @@ def _nonempty(value: object) -> bool:
 
 
 def _display_value(value: object) -> str:
-    """Flatten a legacy value for a typed list item without emitting headings."""
+    """Flatten a legacy value for one typed list item."""
     if isinstance(value, Mapping):
         values: list[str] = []
         for key, item in value.items():
@@ -390,9 +322,6 @@ def _render_nested_items(items: Sequence[object]) -> list[str]:
 
 def _table_cell(value: object) -> str:
     text = safe_inline_text(value)
-    # A cell is one line.  Escaping only the table delimiter keeps paths and
-    # ordinary punctuation readable while preventing row injection.
-    text = text.replace("\\", "\\\\").replace("|", "\\|")
     return text or " "
 
 

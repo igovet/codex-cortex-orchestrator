@@ -19,8 +19,8 @@ def main() -> int:
 
     issues: list[str] = []
     contracts = build_public_contracts()
-    if len(contracts) != 14:
-        issues.append("public catalogue must contain exactly 14 operations")
+    if len(contracts) != 20:
+        issues.append("public catalogue must contain exactly 20 operations")
     private = {
         "assignment_ref", "continuation_ref", "binding_ref", "report_ref",
         "plan_ref", "decision_ref", "item_ref", "cursor", "digest", "handles",
@@ -41,19 +41,28 @@ def main() -> int:
         PLUGIN / "skills/orchestrator/SKILL.md",
         PLUGIN / "skills/cortex-control/SKILL.md",
         PLUGIN / "skills/context-compaction/SKILL.md",
+        PLUGIN / "skills/coordinator-communication/SKILL.md",
+        PLUGIN / "skills/progress-accounting/SKILL.md",
     )
-    combined = "\n".join(path.read_text(encoding="utf-8") for path in skill_paths).lower()
+    combined = " ".join(
+        "\n".join(path.read_text(encoding="utf-8") for path in skill_paths).split()
+    ).lower()
     for forbidden in ("consume_assignment_evidence", "next_action", "suggested_", "post-anchor-engine.md"):
         if forbidden in combined:
             issues.append(f"model instructions contain removed protocol term {forbidden}")
     for required in (
-        "dynamic dag", "stores only `task_ref`", "assignment view",
+        "dynamic dag", "stores only `task_ref`", "assignment-read contract",
         "never an imperative workflow command", "no workflow or governance admission",
         "the host supplies this complete skill content",
         "after compaction/reset", "user approval question",
         "additionalcontextlimit=0", "repetition is never forbidden or consumed",
         "first task-specific output or action must be open_task",
         "no activation acknowledgement, commentary, question, plan, or result before its success",
+        "decision-opening tool records the hold; it does not render the question",
+        "without opening a tool call, reading worker output",
+        "scope, ordered stages, intended changes, verification, stop conditions",
+        "workers and other native subagents never ask the user directly",
+        "a bare “plan ready” question is invalid",
     ):
         if required not in combined:
             issues.append(f"model instructions omit required boundary: {required}")
