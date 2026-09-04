@@ -83,15 +83,17 @@ def test_docs_define_llm_owned_multiturn_e2e_acceptance() -> None:
     for text in (
         "multi-turn",
         "separate test project",
-        "exactly one product clarification",
-        "predefined safe answer",
+        "high-risk/material",
+        "API-key/ENV",
         "visibly rendered plan",
         "planner → implementation → independent verification → documentation-impact assessment → closure",
         "every native worker event stream",
         "hidden tool error or unexplained replay",
-        "never answers or approves autonomously",
+        "mandatory final closure review",
     ):
         assert text in docs
+    assert "exactly one product clarification" not in docs
+    assert "predefined safe answer" not in docs
 
 
 def _assert_ordinary_live_workload(prompt: str) -> None:
@@ -146,15 +148,52 @@ def test_all_tools_live_scenario_matches_the_current_catalogue_and_two_hosts() -
     _assert_ordinary_live_workload(prompt)
     assert scenario["model"] == "gpt-5.6-luna"
     assert scenario["reasoning_effort"] == "high"
+    profiles = json.loads((ROOT / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
+    packaged_profiles = [item["name"] for item in profiles["profiles"]]
+    assert scenario["agent_profiles"] == packaged_profiles
+    assert len(scenario["agent_profiles"]) == 22
+    assert len(scenario["stress_turns"]) >= 3
+    assert all(isinstance(turn, str) and turn.strip() for turn in scenario["stress_turns"])
     assert scenario["required_operations"] == list(PUBLIC_TOOLS)
     assert len(scenario["required_operations"]) == 20
     actions = "\n".join(scenario["operator_actions"])
     assert "--resume-last" in actions
     assert "CLI and Desktop" in actions
+    assert "every packaged specialist profile" in actions
+    assert "stress_turn" in actions
     assert "retirement uses the exact current outcome" in actions
+    assert "implementation-dependent audit wave settles" in actions
+    assert "read_state then read_continuations" in actions
+    assert scenario["dag_stages"] == [
+        "research",
+        "planning_and_required_approval",
+        "implementation",
+        "implementation_dependent_audits",
+        "fixes_if_required",
+        "independent_verification",
+        "documentation",
+        "closure_review",
+    ]
+    conditional = scenario["conditional_operation_triggers"]
+    assert set(conditional) == {
+        "read_outcome", "read_continuations", "read_timeline",
+        "open_steering", "open_clarification",
+    }
+    assert "exact current outcome" in conditional["read_outcome"]
+    assert "host restart" in conditional["read_continuations"]
+    assert "explicitly requires" in conditional["read_timeline"]
+    assert "alter product behavior" in conditional["open_steering"]
+    assert "mandatory revise-or-close review" in conditional["open_clarification"]
     acceptance = "\n".join(scenario["acceptance"])
     assert "each host" in acceptance
+    assert "Every packaged agent profile" in acceptance
+    assert "Multiple messages inserted" in acceptance
     assert "No Cortex tool error" in acceptance
+    assert "free slots never bypass predecessor readiness" in acceptance
+    assert "knowingly missing predecessor fails the run" in acceptance
+    assert "mandatory closure review" in actions
+    assert "predefined explicit close choice" in actions
+    assert "close_task is rejected without" in acceptance
 
 
 def test_one_page_workload_is_an_ordinary_feature_request_with_natural_acceptance() -> None:
@@ -172,8 +211,8 @@ def test_one_page_workload_is_an_ordinary_feature_request_with_natural_acceptanc
         "Внешние ресурсы и сетевые зависимости не используй",
         "keyboard focus",
         "reduced motion",
-        "один вопрос о цвете акцента",
         "покажи план и дождись моего одобрения",
+        "существенную развилку или риск",
         "независимо проверь функциональность",
         "короткий README",
     ):
@@ -271,8 +310,9 @@ def test_send_always_delivers_one_submit_key(monkeypatch, tmp_path: Path, length
     prompt.write_text("x" * length, encoding="utf-8")
     assert driver.send_prompt(prompt) == 0
     assert sum(call[-1:] == ("Enter",) for call in calls) == 1
-    assert sleeps[-1] == driver.SUBMIT_DRAIN_SECONDS
-    assert sleeps[:-1] == [driver.PROMPT_CHUNK_DRAIN_SECONDS] * ((length - 1) // driver.PROMPT_CHUNK_CHARS)
+    assert sleeps == [driver.SUBMIT_DRAIN_SECONDS]
+    assert [call for call in calls if call[:2] == ("send-keys", "-l")] == [
+        ("send-keys", "-l", "-t", driver.TARGET, "--", "x" * length)]
 
 
 def test_send_key_count_uses_unicode_characters_not_utf8_bytes(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -291,8 +331,9 @@ def test_send_key_count_uses_unicode_characters_not_utf8_bytes(monkeypatch, tmp_
     prompt.write_text("я" * 1024, encoding="utf-8")
     assert driver.send_prompt(prompt) == 0
     assert sum(call[-1:] == ("Enter",) for call in calls) == 1
-    assert sleeps[-1] == driver.SUBMIT_DRAIN_SECONDS
-    assert sleeps[:-1] == [driver.PROMPT_CHUNK_DRAIN_SECONDS] * ((1024 - 1) // driver.PROMPT_CHUNK_CHARS)
+    assert sleeps == [driver.SUBMIT_DRAIN_SECONDS]
+    assert [call for call in calls if call[:2] == ("send-keys", "-l")] == [
+        ("send-keys", "-l", "-t", driver.TARGET, "--", "я" * 1024)]
     assert "submit-key-sent-count=1" in capsys.readouterr().out
 
 
@@ -326,7 +367,7 @@ def test_start_creates_shell_then_submits_literal_launcher(monkeypatch, tmp_path
     assert calls[2][3] == driver.TARGET
     assert "scripts/cortex-dev" in calls[2][-1]
     assert "CORTEX_EVENT_JOURNAL_PATH" not in calls[2][-1]
-    assert calls[3] == ("send-keys", "-t", driver.TARGET, "C-m")
+    assert calls[3] == ("send-keys", "-t", driver.TARGET, "Enter")
     assert calls.index(calls[1]) < calls.index(calls[2]) < calls.index(calls[3])
 
 
@@ -819,7 +860,7 @@ def test_transport_source_contains_no_profile_or_acceptance_automation() -> None
 
 def test_prompt_transport_uses_literal_send_keys_and_named_enter() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
-    assert 'tmux("send-keys", "-l", "-t", TARGET, "--", chunk)' in source
+    assert 'tmux("send-keys", "-l", "-t", TARGET, "--", prompt)' in source
     assert 'tmux("send-keys", "-t", TARGET, "Enter")' in source
     assert 'tmux("paste-buffer"' not in source
     assert 'tmux("send-keys", "-t", TARGET, "C-m")' not in source[source.index('def send_prompt'):source.index('def send_enter')]
@@ -843,7 +884,7 @@ def test_real_tmux_literal_insert_then_enter_executes_after_delay(tmp_path: Path
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             captured = subprocess.run(["tmux", "capture-pane", "-p", "-t", target], capture_output=True, text=True)
-            if "LIVE_TRANSPORT_OK" in captured.stdout:
+            if "LIVE_TRANSPORT_OK" in captured.stdout.splitlines():
                 break
             time.sleep(0.1)
         else:
@@ -852,7 +893,7 @@ def test_real_tmux_literal_insert_then_enter_executes_after_delay(tmp_path: Path
         subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, text=True)
 
 
-def test_real_tmux_long_literal_prompt_uses_subthreshold_chunks(tmp_path: Path) -> None:
+def test_real_tmux_long_literal_prompt_uses_one_insertion(tmp_path: Path) -> None:
     """A long literal delivery must still submit with one final Enter."""
     import subprocess
     import time
@@ -862,19 +903,15 @@ def test_real_tmux_long_literal_prompt_uses_subthreshold_chunks(tmp_path: Path) 
     try:
         created = subprocess.run(["tmux", "new-session", "-d", "-s", session, "bash"], capture_output=True, text=True)
         assert created.returncode == 0, created.stderr
-        chunks = [prompt[i:i + 512] for i in range(0, len(prompt), 512)]
-        for index, chunk in enumerate(chunks):
-            inserted = subprocess.run(["tmux", "send-keys", "-l", "-t", target, "--", chunk], capture_output=True, text=True)
-            assert inserted.returncode == 0, inserted.stderr
-            if index + 1 < len(chunks):
-                time.sleep(0.1)
+        inserted = subprocess.run(["tmux", "send-keys", "-l", "-t", target, "--", prompt], capture_output=True, text=True)
+        assert inserted.returncode == 0, inserted.stderr
         time.sleep(5)
         submitted = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True)
         assert submitted.returncode == 0, submitted.stderr
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             captured = subprocess.run(["tmux", "capture-pane", "-p", "-t", target], capture_output=True, text=True)
-            if "LONG_TRANSPORT_OK" in captured.stdout:
+            if "LONG_TRANSPORT_OK" in captured.stdout.splitlines():
                 break
             time.sleep(0.1)
         else:

@@ -67,27 +67,6 @@ class RuntimeContractRemediationTests(unittest.TestCase):
         )
         return task
 
-    def _assignment(
-        self, task_ref: str, outcome_names: list[str], *, role: str,
-        responsibility: str = "evidence", report_policy: str = "none",
-        scope: str = "One exact semantic outcome.",
-    ) -> tuple[dict, str]:
-        assignment = open_assignment(
-            task_ref=task_ref,
-            role=role,
-            profile_name="explorer",
-            model="gpt-5.6-luna",
-            reasoning_effort="high",
-            responsibility=responsibility,
-            goal="Exercise this exact outcome scope.",
-            scope=scope,
-            instructions="Consume the assignment and publish bounded evidence.",
-            outcomes=outcome_names,
-            report_policy=report_policy,
-        )
-        match = WORKER_REF.search(assignment["native_dispatch"]["message"])
-        self.assertIsNotNone(match)
-        return assignment, match.group(1)
 
     @staticmethod
     def _semantic_outcome(name: str) -> dict:
@@ -98,30 +77,6 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             "verification": [f"Verify {name}"],
         }
 
-    def _publish(self, worker_ref: str, outcome: dict, summary: str) -> None:
-        context: dict = {}
-        read_task(
-            task_ref=worker_ref,
-            _connection_context=context,
-        )
-        published = publish_result(
-            task_ref=worker_ref,
-            summary=summary,
-            outcome="The assigned outcome is complete.",
-            changes=[{"path": "runtime", "summary": "Focused fixture change."}],
-            verification_facts=[{"state": "executed", "summary": "Focused fixture check passed."}],
-            outcome_coverage=[{
-                "outcome": outcome["outcome"],
-                "status": "complete",
-                "verification": ["Focused fixture check passed."],
-            }],
-            documentation_impact="No documentation update is required for the fixture.",
-            risks=[],
-            unresolved=[],
-            status="completed",
-            _connection_context=context,
-        )
-        self.assertEqual(published["state"], "published")
 
     def test_independent_steering_additions_and_atomic_replacement(self) -> None:
         original = self._semantic_outcome("Original outcome.")
@@ -162,14 +117,15 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             self.assertEqual(replaced["verification"], replacement["verification"])
             self.assertNotIn(original["acceptance"][0], replaced["acceptance"])
             with self.assertRaises(V12ServiceError) as stale:
-                self._assignment(
-                    task["task_ref"], [original["outcome"]], role="stale",
-                )
+                read_outcome(task_ref=task["task_ref"], outcome=original["outcome"])
             self.assertEqual(stale.exception.code, "outcome_item_not_found")
-            self.assertEqual(stale.exception.details.get("path"), "$.outcomes[0]")
-            self._assignment(
-                task["task_ref"], [replacement["outcome"]], role="current",
-            )
+            context = {}
+            scope = read_scope(task_ref=task["task_ref"], responsibility="evidence", _connection_context=context)
+            ready = [node for node in scope["data"]["nodes"] if node["state"] == "ready"]
+            self.assertEqual(len(ready), 1)
+            opened = open_assignment(task_ref=task["task_ref"], nodes=[ready[0]["node"]],
+                profile_name="explorer", model="gpt-5.6-luna", reasoning_effort="high", _connection_context=context)
+            self.assertFalse(opened["replayed"])
 
     def test_same_name_steering_replacement_does_not_merge_retired_contract(self) -> None:
         original = {
@@ -292,514 +248,377 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
 
     def test_exact_scope_replay_does_not_collapse_distinct_assignments(self) -> None:
+        import test_domain_public_api_contract as support
+        fixture = support.DomainPublicApiContractTests()
         outcomes = [self._semantic_outcome("Outcome A."), self._semantic_outcome("Outcome B.")]
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
             task = self._task(root, outcomes)
-            first, first_ref = self._assignment(
-                task["task_ref"], [outcomes[0]["outcome"]],
-                role="same specialist", scope="Same visible scope.",
-            )
-            second, second_ref = self._assignment(
-                task["task_ref"], [outcomes[1]["outcome"]],
-                role="same specialist", scope="Same visible scope.",
-            )
-            self.assertFalse(first["replayed"])
-            self.assertFalse(second["replayed"])
-            self.assertNotEqual(first_ref, second_ref)
-
-            replay_first, replay_first_ref = self._assignment(
-                task["task_ref"], [outcomes[0]["outcome"]],
-                role="same specialist", scope="Same visible scope.",
-            )
-            replay_second, replay_second_ref = self._assignment(
-                task["task_ref"], [outcomes[1]["outcome"]],
-                role="same specialist", scope="Same visible scope.",
-            )
-            self.assertTrue(replay_first["replayed"])
-            self.assertTrue(replay_second["replayed"])
-            self.assertEqual(replay_first_ref, first_ref)
-            self.assertEqual(replay_second_ref, second_ref)
+            fixture._prepared_plan(task["task_ref"], outcomes)
+            ref, worker = fixture._consume_dispatch(fixture._assignment(task["task_ref"], outcomes[0], "validator"))
+            fixture._publish_result(ref, outcomes[0], worker)
+            dispatched = []
+            contexts = []
+            for index in range(2):
+                context = {}
+                current = read_scope(task_ref=task["task_ref"], responsibility="delivery", _connection_context=context)
+                key = f"inspect-{index}"
+                self.assertTrue(any(node["node"] == key and node["state"] == "ready" for node in current["data"]["nodes"]))
+                arguments = dict(task_ref=task["task_ref"], nodes=[key], profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", _connection_context=context)
+                result = open_assignment(**arguments)
+                self.assertFalse(result["replayed"])
+                dispatched.append(result)
+                contexts.append(arguments)
+            self.assertNotEqual(dispatched[0]["native_dispatch"], dispatched[1]["native_dispatch"])
+            # Deliberate ambiguous-transport reconciliation fixture; never a
+            # qualification policy that retries a confirmed successful spawn.
+            for arguments, expected in zip(contexts, dispatched):
+                repeated = open_assignment(**arguments)
+                self.assertTrue(repeated["replayed"])
+                self.assertEqual(repeated["native_dispatch"], expected["native_dispatch"])
 
     def test_parallel_owner_conflict_has_safe_scope_diagnostics(self) -> None:
-        outcome = self._semantic_outcome("Exclusively owned outcome.")
+        from threading import Barrier
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
-            task = self._task(root, [outcome])
-
-            def attempt(role: str) -> tuple[str, object]:
+            task = self._task(root, [self._semantic_outcome("Exclusively owned baseline.")])
+            barrier = Barrier(2)
+            def attempt(index):
+                context = {}
+                current = read_scope(task_ref=task["task_ref"], responsibility="evidence", _connection_context=context)
+                ready = [node for node in current["data"]["nodes"] if node["state"] == "ready"]
+                self.assertEqual(len(ready), 1)
+                barrier.wait(timeout=10)
                 try:
-                    assignment, worker_ref = self._assignment(
-                        task["task_ref"], [outcome["outcome"]], role=role,
-                        responsibility="delivery", scope=f"Owner {role}.",
-                    )
-                    return "success", (assignment, worker_ref)
+                    return "success", open_assignment(task_ref=task["task_ref"], nodes=[ready[0]["node"]],
+                        profile_name="explorer", model="gpt-5.6-luna", reasoning_effort="high" if index else "medium", _connection_context=context)
                 except V12ServiceError as error:
                     return "error", error
-
             with ThreadPoolExecutor(max_workers=2) as pool:
-                results = list(pool.map(attempt, ("owner a", "owner b")))
-            successes = [value for state, value in results if state == "success"]
-            failures = [value for state, value in results if state == "error"]
-            self.assertEqual(len(successes), 1)
-            self.assertEqual(len(failures), 1)
-            failure = failures[0]
-            self.assertEqual(failure.code, "outcome_assignment_conflict")
-            self.assertEqual(failure.details, {
-                "path": "$.outcomes",
-                "expected": "non_overlapping_outcome_scope",
-                "reason": "ownership_conflict",
-            })
+                results = list(pool.map(attempt, range(2)))
+            self.assertEqual(sum(state == "success" for state, _ in results), 1)
+            failure = next(value for state, value in results if state == "error")
+            self.assertEqual(failure.code, "command_conflict")
+            store, _, _, _ = _resolve_task_context(task["task_ref"])
+            self.assertEqual(store._read(lambda c: c.execute("SELECT COUNT(*) FROM execution_assignments").fetchone()[0]), 1)
+            self.assertNotIn("dispatch", repr(failure.details))
+
+    def _recovery_setup(self, root: str, *, grouped: bool = False):
+        import test_domain_public_api_contract as support
+        fixture = support.DomainPublicApiContractTests()
+        outcomes = [self._semantic_outcome(f"Recover surface {index}.") for index in range(2)]
+        task = self._task(root, outcomes)["task_ref"]
+        fixture._prepared_plan(task, outcomes)
+        validator, worker = fixture._consume_dispatch(fixture._assignment(task, outcomes[0], "validator"))
+        fixture._publish_result(validator, outcomes[0], worker)
+        groups = [["inspect-0", "inspect-1"]] if grouped else [["inspect-0"], ["inspect-1"]]
+        owners = []
+        for keys in groups:
+            context = {}
+            read_scope(task_ref=task, responsibility="delivery", _connection_context=context)
+            dispatch = open_assignment(task_ref=task, nodes=keys, profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", _connection_context=context)
+            ref, worker = fixture._consume_dispatch(dispatch)
+            owners.append((ref, worker, keys))
+        store, _, _, _ = _resolve_task_context(task)
+        return fixture, task, store, outcomes, owners
+
+    def _native_observation(self, root, task, *, children=()):
+        from cortex_runtime import native_observation as native
+        plugin_data = Path(root) / "native-observation"
+        self.assertTrue(native.bind_task(plugin_data,
+            task_digest=native.digest(task), session_digest=native.digest("coordinator")))
+        self.assertTrue(native.record_projection(plugin_data,
+            task_digest=native.digest(task), session_digest=native.digest("coordinator"),
+            revision=1, barrier_epoch=0,
+            response={"agents": [{"agent_name": "/root", "agent_status": "running"}, *children]},
+            arguments={}))
+        return {"_native_plugin_data": plugin_data}
+
+    def _reconcile_loss(self, task, store, context, keys):
+        import test_domain_public_api_contract as support
+        from cortex_runtime import graph_ledger
+        from test_typed_publication_transaction import baseline_content
+        read_scope(task_ref=task, responsibility="delivery", _connection_context=context)
+        dispatch = open_assignment(task_ref=task, nodes=keys, profile_name="explorer",
+            model="gpt-5.6-luna", reasoning_effort="high", _connection_context=context)
+        self.assertFalse(dispatch["replayed"])
+        ref, worker = support.DomainPublicApiContractTests._consume_dispatch(dispatch)
+        scope = store._read(lambda c: graph_ledger.assignment_scope(c, worker["assignment_id"]))
+        self.assertTrue(scope["artifact"]["reconciliation"])
+        self.assertEqual(len(scope["nodes"]), 1)
+        self.assertEqual(scope["nodes"][0]["execution_mode"], "read_only")
+        content = baseline_content()
+        node = scope["nodes"][0]
+        content["node_coverage"] = [{"node": node["key"], "coverage": [{
+            **subject, "status": "complete", "verification": [{
+                "check_key": check["key"], "state": "executed",
+                "summary": "Current baseline reconciled without attributing unpublished work.",
+            } for check in node["checks"]],
+        } for subject in node["verifies"]]}]
+        content["artifact"]["baseline_changes"] = content["artifact"]["changes"]
+        self.assertTrue(publish_result(task_ref=ref, _connection_context=worker, **content)["published"])
+        return scope
 
     def test_lost_owner_replacement_records_terminal_evidence_and_lineage(self) -> None:
-        outcome = self._semantic_outcome("Recover one confirmed lost delivery owner.")
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
-            task = self._task(root, [outcome])
-            _original, original_ref = self._assignment(
-                task["task_ref"], [outcome["outcome"]], role="lost owner",
-                responsibility="delivery",
-            )
-            original_context: dict = {}
-            read_task(
-                task_ref=original_ref,
-                _connection_context=original_context,
-            )
-            with self.assertRaises(V12ServiceError) as unsafe:
-                open_assignment(
-                    task_ref=task["task_ref"], role="unsafe replacement",
-                    profile_name="explorer", model="gpt-5.6-luna",
-                    reasoning_effort="high", responsibility="delivery",
-                    goal="Replace without evidence.", scope="Same outcome.",
-                    instructions="Attempt an unsafe replacement.",
-                    outcomes=[outcome["outcome"]], report_policy="none",
-                )
-            self.assertEqual(unsafe.exception.code, "outcome_assignment_conflict")
-
-            replacement = open_assignment(
-                task_ref=task["task_ref"], role="authorized replacement",
-                profile_name="explorer", model="gpt-5.6-luna",
-                reasoning_effort="high", responsibility="delivery",
-                goal="Continue the confirmed lost delivery.",
-                scope="The exact current owned outcome.",
-                instructions="Consume the successor assignment and complete the work.",
-                outcomes=[outcome["outcome"]], report_policy="none",
-                loss_recovery={
-                    "state": "aborted",
-                    "reason": "The bound native worker exited terminally and cannot resume.",
-                    "evidence": [
-                        "The host observed an explicit terminal native-worker failure after bootstrap."
-                    ],
-                },
-            )
-            replacement_ref = WORKER_REF.search(
-                replacement["native_dispatch"]["message"]
-            ).group(1)
-            store, _task_id, successor_id, _coordinator = _resolve_task_context(replacement_ref)
-            with store._connection() as connection:
-                loss = connection.execute(
-                    "SELECT assignment_id,successor_assignment_id,terminal_state,reason,evidence_json "
-                    "FROM assignment_losses"
-                ).fetchone()
-                predecessor = connection.execute(
-                    "SELECT parent_delegation_id FROM delegations WHERE delegation_id=?",
-                    (successor_id,),
-                ).fetchone()
-                capability_state = connection.execute(
-                    "SELECT state FROM worker_capabilities WHERE assignment_id=?",
-                    (original_context["assignment_id"],),
-                ).fetchone()["state"]
-            self.assertEqual(loss["assignment_id"], original_context["assignment_id"])
-            self.assertEqual(loss["successor_assignment_id"], successor_id)
-            self.assertEqual(loss["terminal_state"], "aborted")
-            self.assertIn("terminally", loss["reason"])
-            self.assertIn("terminal native-worker failure", loss["evidence_json"])
-            self.assertEqual(predecessor["parent_delegation_id"], original_context["assignment_id"])
-            self.assertEqual(capability_state, "stale")
-            with self.assertRaises(V12ServiceError) as old_worker:
-                publish_result(
-                    task_ref=original_ref, summary="Late old result.", outcome="Unsafe.",
-                    changes=[], verification_facts=[{"state": "not_run", "summary": "Superseded."}],
-                    outcome_coverage=[{"outcome": outcome["outcome"], "status": "blocked", "verification": ["Superseded."]}],
-                    documentation_impact="None.", risks=[], unresolved=["Superseded."],
-                    status="blocked", _connection_context=original_context,
-                )
-            self.assertEqual(old_worker.exception.code, "assignment_stale")
+            fixture, task, store, outcomes, owners = self._recovery_setup(root, grouped=True)
+            ref, worker, keys = owners[0]
+            coordinator = {}
+            read_scope(task_ref=task, responsibility="delivery", _connection_context=coordinator)
+            with self.assertRaises(V12ServiceError) as unsigned:
+                open_assignment(task_ref=task, nodes=keys, profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", _connection_context=coordinator)
+            self.assertEqual(unsigned.exception.code, "assignment_not_ready")
+            original = worker["assignment_id"]
+            name = store._read(lambda c: c.execute(
+                "SELECT protected_task_name FROM execution_assignments WHERE assignment_id=?", (original,),
+            ).fetchone()[0])
+            coordinator = self._native_observation(root, task,
+                children=[{"agent_name": "/root/" + name, "agent_status": "running"}])
+            read_scope(task_ref=task, responsibility="delivery", _connection_context=coordinator)
+            with self.assertRaises(V12ServiceError) as present:
+                open_assignment(task_ref=task, nodes=keys, profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", _connection_context=coordinator)
+            self.assertEqual(present.exception.details["reason"], "native_worker_present")
+            coordinator = self._native_observation(root, task)
+            self._reconcile_loss(task, store, coordinator, keys)
+            # Confirmed native loss revokes identity capability; unlike a
+            # still-bound steering race, this is not a valid stale publisher.
+            with self.assertRaises(V12ServiceError) as lost_capability:
+                fixture._publish_result(ref, outcomes[0], worker)
+            self.assertEqual(lost_capability.exception.code, "assignment_stale")
+            read_scope(task_ref=task, responsibility="delivery", _connection_context=coordinator)
+            replacement = open_assignment(task_ref=task, nodes=keys, profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", _connection_context=coordinator)
+            _, successor = fixture._consume_dispatch(replacement)
+            parent = store._read(lambda c: c.execute(
+                "SELECT parent_delegation_id FROM delegations WHERE delegation_id=?", (successor["assignment_id"],),
+            ).fetchone()[0])
+            self.assertEqual(parent, original)
+            self.assertEqual(store._read(lambda c: c.execute(
+                "SELECT COUNT(*) FROM execution_publications WHERE assignment_id=?", (original,),
+            ).fetchone()[0]), 0)
 
     def test_loss_recovery_ignores_unrelated_broad_report_authors(self) -> None:
-        completed = self._semantic_outcome("Already completed sibling outcome.")
-        lost = self._semantic_outcome("Recover the interrupted owner outcome.")
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
-            task = self._task(root, [completed, lost])
-            _finished, finished_ref = self._assignment(
-                task["task_ref"], [completed["outcome"]],
-                role="completed sibling owner", responsibility="delivery",
-            )
-            self._publish(finished_ref, completed, "Sibling owner completed.")
-
-            _original, original_ref = self._assignment(
-                task["task_ref"], [lost["outcome"]],
-                role="interrupted owner", responsibility="delivery",
-            )
-            original_context: dict = {}
-            read_task(
-                task_ref=original_ref,
-                _connection_context=original_context,
-            )
-
-            replacement = open_assignment(
-                task_ref=task["task_ref"], role="recovery owner",
-                profile_name="explorer", model="gpt-5.6-luna",
-                reasoning_effort="high", responsibility="delivery",
-                goal="Recover the exact interrupted outcome.",
-                scope="Only the exact lost owner outcome.",
-                instructions="Reconcile existing work and publish one terminal result.",
-                outcomes=[lost["outcome"]], report_policy="all_finalized",
-                loss_recovery={
-                    "state": "aborted",
-                    "reason": "The host explicitly interrupted the bound worker.",
-                    "evidence": [
-                        "The host observed the worker terminate without a publication."
-                    ],
-                },
-            )
-            replacement_ref = WORKER_REF.search(
-                replacement["native_dispatch"]["message"]
-            ).group(1)
+            fixture, task, store, outcomes, owners = self._recovery_setup(root)
+            sibling_ref, sibling, _ = owners[0]
+            fixture._publish_result(sibling_ref, outcomes[0], sibling)
+            original_ref, original, keys = owners[1]
+            before = store._read(lambda c: c.execute("SELECT COUNT(*) FROM execution_publications").fetchone()[0])
+            coordinator = self._native_observation(root, task)
+            self._reconcile_loss(task, store, coordinator, keys)
+            read_scope(task_ref=task, responsibility="delivery", _connection_context=coordinator)
+            dispatch = open_assignment(task_ref=task, nodes=keys, profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high", _connection_context=coordinator)
+            replacement_ref, replacement = fixture._consume_dispatch(dispatch)
             self.assertNotEqual(replacement_ref, original_ref)
-            store, _task_id, successor_id, _coordinator = _resolve_task_context(
-                replacement_ref
-            )
-            with store._connection() as connection:
-                loss_row = connection.execute(
-                    "SELECT assignment_id,successor_assignment_id "
-                    "FROM assignment_losses"
-                ).fetchone()
-            self.assertEqual(loss_row["assignment_id"], original_context["assignment_id"])
-            self.assertEqual(loss_row["successor_assignment_id"], successor_id)
+            parent = store._read(lambda c: c.execute(
+                "SELECT parent_delegation_id FROM delegations WHERE delegation_id=?", (replacement["assignment_id"],),
+            ).fetchone()[0])
+            self.assertEqual(parent, original["assignment_id"])
+            self.assertNotEqual(parent, sibling["assignment_id"])
+            self.assertEqual(store._read(lambda c: c.execute("SELECT COUNT(*) FROM execution_publications").fetchone()[0]), before + 1)
 
-    def test_loss_recovery_derives_one_complete_predecessor_scope_when_outcomes_are_omitted(self) -> None:
-        outcomes = [
-            self._semantic_outcome("Recover the first outcome from one lost owner."),
-            self._semantic_outcome("Recover the second outcome from the same lost owner."),
-        ]
+    def test_loss_recovery_requires_exact_complete_grouped_node_scope(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
-            task = self._task(root, outcomes)
-            _original, original_ref = self._assignment(
-                task["task_ref"], [item["outcome"] for item in outcomes],
-                role="lost complete-scope owner", responsibility="delivery",
-            )
-            read_task(task_ref=original_ref, _connection_context={})
+            fixture, task, store, outcomes, owners = self._recovery_setup(root, grouped=True)
+            coordinator = self._native_observation(root, task)
+            read_scope(task_ref=task, responsibility="delivery", _connection_context=coordinator)
+            with self.assertRaises(V12ServiceError) as omitted:
+                open_assignment(task_ref=task, profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", _connection_context=coordinator)
+            self.assertEqual(omitted.exception.code, "invalid_argument")
+            scope = self._reconcile_loss(task, store, coordinator, owners[0][2])
+            subjects = scope["nodes"][0]["verifies"]
+            self.assertEqual({item["name"] for item in subjects}, {item["outcome"] for item in outcomes})
 
-            replacement = open_assignment(
-                task_ref=task["task_ref"], role="server-derived recovery owner",
-                profile_name="explorer", model="gpt-5.6-luna",
-                reasoning_effort="high", responsibility="delivery",
-                goal="Recover the one complete predecessor scope.",
-                scope="Both outcomes owned by the same confirmed lost worker.",
-                instructions="Consume the server-derived successor scope and publish once.",
-                report_policy="none",
-                loss_recovery={
-                    "state": "aborted",
-                    "reason": "The host explicitly stopped the bound predecessor.",
-                    "evidence": ["The terminal host stop occurred without publication."],
-                },
-            )
-            replacement_ref = WORKER_REF.search(
-                replacement["native_dispatch"]["message"]
-            ).group(1)
-            assignment = read_task(task_ref=replacement_ref, _connection_context={})
-            rendered = repr(assignment["data"]["effective_contract"])
-            for outcome in outcomes:
-                self.assertIn(outcome["outcome"], rendered)
-
-    def test_loss_recovery_without_outcomes_rejects_multiple_predecessor_scopes(self) -> None:
-        outcomes = [
-            self._semantic_outcome("Recover one independently lost owner."),
-            self._semantic_outcome("Recover another independently lost owner."),
-        ]
+    def test_loss_recovery_never_guesses_among_multiple_native_owners(self) -> None:
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
-            task = self._task(root, outcomes)
-            for index, outcome in enumerate(outcomes):
-                _assignment, worker_ref = self._assignment(
-                    task["task_ref"], [outcome["outcome"]],
-                    role=f"lost owner {index}", responsibility="delivery",
-                )
-                read_task(task_ref=worker_ref, _connection_context={})
-
-            with self.assertRaises(V12ServiceError) as rejected:
-                open_assignment(
-                    task_ref=task["task_ref"], role="ambiguous recovery owner",
-                    profile_name="explorer", model="gpt-5.6-luna",
-                    reasoning_effort="high", responsibility="delivery",
-                    goal="Attempt an ambiguous recovery.",
-                    scope="Multiple predecessor scopes exist.",
-                    instructions="Do not guess which predecessor to replace.",
-                    report_policy="none",
-                    loss_recovery={
-                        "state": "aborted",
-                        "reason": "Both predecessors were explicitly stopped.",
-                        "evidence": ["The host observed two distinct terminal stops."],
-                    },
-                )
-            self.assertEqual(rejected.exception.code, "assignment_loss_scope_conflict")
-            self.assertEqual(
-                rejected.exception.details.get("reason"),
-                "ambiguous_recovery_scope",
-            )
+            fixture, task, store, outcomes, owners = self._recovery_setup(root)
+            coordinator = self._native_observation(root, task)
+            read_scope(task_ref=task, responsibility="delivery", _connection_context=coordinator)
+            before = store._read(lambda c: c.execute("SELECT COUNT(*) FROM execution_assignments").fetchone()[0])
+            with self.assertRaises(V12ServiceError) as omitted:
+                open_assignment(task_ref=task, profile_name="explorer",
+                    model="gpt-5.6-luna", reasoning_effort="high", _connection_context=coordinator)
+            self.assertEqual(omitted.exception.code, "invalid_argument")
+            self.assertEqual(store._read(lambda c: c.execute("SELECT COUNT(*) FROM execution_assignments").fetchone()[0]), before)
+            self._reconcile_loss(task, store, coordinator, [key for _, _, keys in owners for key in keys])
+            self.assertEqual(store._read(lambda c: c.execute("SELECT COUNT(*) FROM execution_assignments WHERE state='lost'").fetchone()[0]), 2)
 
     def test_terminal_assignment_receipts_do_not_authorize_a_fresh_context(self) -> None:
-        outcome = self._semantic_outcome("Produce predecessor evidence.")
+        import test_domain_public_api_contract as support
+        fixture = support.DomainPublicApiContractTests()
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
+            outcome = self._semantic_outcome("Produce predecessor evidence.")
             task = self._task(root, [outcome])
-            _producer, producer_ref = self._assignment(
-                task["task_ref"], [outcome["outcome"]], role="producer",
-                responsibility="delivery",
-            )
-            self._publish(producer_ref, outcome, "Producer evidence.")
-            _consumer, consumer_ref = self._assignment(
-                task["task_ref"], [outcome["outcome"]], role="consumer",
-                report_policy="all_finalized",
-            )
-
-            first_context: dict = {}
-            first = read_task(
-                task_ref=consumer_ref,
-                _connection_context=first_context,
-            )
+            baseline, worker = fixture._consume_dispatch(fixture._assignment(task["task_ref"], outcome, "baseline"))
+            fixture._publish_result(baseline, outcome, worker)
+            coordinator = {}
+            read_scope(task_ref=task["task_ref"], responsibility="evidence", _connection_context=coordinator)
+            dispatch = open_assignment(task_ref=task["task_ref"], profile_name="explorer",
+                model="gpt-5.6-luna", reasoning_effort="high",
+                bootstrap={"kind": "discovery", "question": "Inspect the established baseline."},
+                _connection_context=coordinator)
+            consumer_ref = WORKER_REF.search(dispatch["native_dispatch"]["message"]).group(1)
+            context = {}
+            first = read_task(task_ref=consumer_ref, _connection_context=context)
             self.assertFalse(first["has_more"])
-            store, _task_id, assignment_id, _coordinator_ref = _resolve_task_context(consumer_ref)
-
-            def receipt_rows() -> list[tuple[int, int]]:
-                return store._read(lambda connection: [
-                    (int(row["receipt_id"]), int(row["created_sequence"]))
-                    for row in connection.execute(
+            store, _, assignment_id, _ = _resolve_task_context(consumer_ref)
+            def receipts():
+                return store._read(lambda c: [
+                    tuple(row) for row in c.execute(
                         "SELECT receipt_id,created_sequence FROM report_consumption_receipts "
-                        "WHERE consumer_delegation_id=? ORDER BY receipt_id",
-                        (assignment_id,),
+                        "WHERE consumer_delegation_id=? ORDER BY receipt_id", (assignment_id,),
                     ).fetchall()
                 ])
+            before = receipts()
+            self.assertEqual(len(before), 1)
+            self.assertIn("Recovered worker result.", repr(first))
+            with self.assertRaises(V12ServiceError) as copied:
+                read_task(task_ref=consumer_ref, _connection_context={})
+            self.assertEqual(copied.exception.code, "connection_lost")
+            self.assertEqual(receipts(), before)
 
-            initial_receipts = receipt_rows()
-            self.assertEqual(len(initial_receipts), 1)
-            self.assertIn("Producer evidence.", repr(first))
-            self.assertEqual(receipt_rows(), initial_receipts)
-
-            with self.assertRaises(V12ServiceError) as restarted:
-                read_task(
-                    task_ref=consumer_ref,
-                    _connection_context={},
-                )
-            self.assertEqual(restarted.exception.code, "connection_lost")
-            self.assertEqual(receipt_rows(), initial_receipts)
+    def _large_reports(self, root, *, count, details):
+        import test_domain_public_api_contract as support
+        from cortex_runtime import graph_ledger
+        from test_typed_publication_transaction import baseline_content
+        fixture = support.DomainPublicApiContractTests()
+        outcome = self._semantic_outcome("Plan from bounded independent evidence.")
+        task = self._task(root, [outcome])["task_ref"]
+        baseline, worker = fixture._consume_dispatch(fixture._assignment(task, outcome, "baseline"))
+        fixture._publish_result(baseline, outcome, worker)
+        store, _, _, _ = _resolve_task_context(task)
+        for index in range(count):
+            coordinator = {}
+            read_scope(task_ref=task, responsibility="evidence", _connection_context=coordinator)
+            dispatch = open_assignment(task_ref=task, profile_name="explorer", model="gpt-5.6-luna",
+                reasoning_effort="high", bootstrap={"kind": "discovery", "question": f"Inspect distinct surface {index}."},
+                _connection_context=coordinator)
+            ref, worker = fixture._consume_dispatch(dispatch)
+            node = store._read(lambda c: graph_ledger.assignment_scope(c, worker["assignment_id"])["nodes"][0])
+            content = baseline_content()
+            content["summary"] = f"Evidence {index}: " + "s" * 1700
+            content["documentation_impact"] = "Documentation observation: " + "d" * 1700
+            content["outcome"] = "Observed result: " + "o" * 1700
+            content["risks"] = [f"Fixture risk {index}/{item}: " + "r" * 1800 for item in range(details)]
+            content["node_coverage"] = [{"node": node["key"], "coverage": [{
+                **subject, "status": "complete", "verification": [{
+                    "check_key": check["key"], "state": "executed", "summary": "Bounded independent observation.",
+                } for check in node["checks"]],
+            } for subject in node["verifies"]]}]
+            _validate_schema(PUBLIC_TOOLS["publish_result"]["inputSchema"], {"task_ref": ref, **content})
+            self.assertTrue(publish_result(task_ref=ref, _connection_context=worker, **content)["published"])
+        coordinator = {}
+        read_scope(task_ref=task, responsibility="planning", _connection_context=coordinator)
+        dispatch = open_assignment(task_ref=task, profile_name="planner", model="gpt-5.6-terra",
+            reasoning_effort="high", bootstrap={"kind": "planning"}, _connection_context=coordinator)
+        return WORKER_REF.search(dispatch["native_dispatch"]["message"]).group(1), store
 
     def test_large_assignment_evidence_uses_server_owned_continuation(self) -> None:
-        outcomes = [self._semantic_outcome("Large evidence A."), self._semantic_outcome("Large evidence B.")]
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
-            task = self._task(root, outcomes)
-            for index, outcome in enumerate(outcomes):
-                _producer, producer_ref = self._assignment(
-                    task["task_ref"], [outcome["outcome"]],
-                    role=f"large producer {index}", responsibility="delivery",
-                )
-                self._publish(producer_ref, outcome, f"Evidence {index}: " + "x" * 45_000)
-            _consumer, consumer_ref = self._assignment(
-                task["task_ref"], [item["outcome"] for item in outcomes],
-                role="large consumer", report_policy="all_finalized",
-            )
-            context: dict = {}
-            first = read_task(
-                task_ref=consumer_ref,
-                _connection_context=context,
-            )
-            self.assertTrue(first["has_more"], repr(first["data"]["evidence"]))
-            self.assertNotIn("content", first["data"]["evidence"]["reports"][0])
-            first_receipts = _resolve_task_context(consumer_ref)[0]._read(
-                lambda connection: connection.execute(
-                    "SELECT receipt_id,created_sequence FROM assignment_page_receipts "
-                    "ORDER BY receipt_id"
-                ).fetchall()
-            )
-            reconciled = read_task(
-                task_ref=consumer_ref,
-                _connection_context=context,
-            )
-            self.assertEqual(reconciled["data"], first["data"])
-            reconciled_receipts = _resolve_task_context(consumer_ref)[0]._read(
-                lambda connection: connection.execute(
-                    "SELECT receipt_id,created_sequence FROM assignment_page_receipts "
-                    "ORDER BY receipt_id"
-                ).fetchall()
-            )
-            self.assertEqual(
-                [tuple(row) for row in reconciled_receipts],
-                [tuple(row) for row in first_receipts],
-            )
-            second = read_task(
-                task_ref=consumer_ref, continue_=True,
-                _connection_context=context,
-            )
-            self.assertFalse(second["has_more"])
+            consumer, store = self._large_reports(root, count=3, details=24)
+            context = {}
+            first = read_task(task_ref=consumer, _connection_context=context)
+            self.assertTrue(first["has_more"])
+            def receipts():
+                return store._read(lambda c: [
+                    tuple(row) for row in c.execute(
+                        "SELECT receipt_id,created_sequence FROM assignment_page_receipts ORDER BY receipt_id"
+                    ).fetchall()
+                ])
+            before = receipts()
+            repeated = read_task(task_ref=consumer, _connection_context=context)
+            self.assertEqual(repeated["data"], first["data"])
+            self.assertEqual(receipts(), before)
+            pages = [repeated]
+            while pages[-1]["has_more"]:
+                pages.append(read_task(task_ref=consumer, continue_=True, _connection_context=context))
+            self.assertGreater(len(pages), 1)
+            self.assertTrue(context["assignment_complete"])
+            rendered = repr([page["data"] for page in pages])
+            for index in range(3):
+                self.assertIn(f"Evidence {index}:", rendered)
             with self.assertRaises(V12ServiceError) as exhausted:
-                read_task(
-                    task_ref=consumer_ref, continue_=True,
-                    _connection_context=context,
-                )
+                read_task(task_ref=consumer, continue_=True, _connection_context=context)
             self.assertEqual(exhausted.exception.code, "report_cursor_invalid")
 
     def test_semantic_steering_revokes_assignment_between_read_pages(self) -> None:
-        outcomes = [
-            self._semantic_outcome("Revision-bound evidence A."),
-            self._semantic_outcome("Revision-bound evidence B."),
-        ]
-        added = self._semantic_outcome("New current-revision outcome.")
         with tempfile.TemporaryDirectory() as root, patch(
             "cortex_runtime.domain_api._worker_capability_provenance",
             return_value=PROVENANCE,
         ):
-            task = self._task(root, outcomes)
-            for index, outcome in enumerate(outcomes):
-                _producer, producer_ref = self._assignment(
-                    task["task_ref"], [outcome["outcome"]],
-                    role=f"revision producer {index}", responsibility="delivery",
-                )
-                self._publish(
-                    producer_ref, outcome,
-                    f"Revision evidence {index}: " + "x" * 45_000,
-                )
-            coordinator_evidence_context: dict = {}
-            evidence_first = read_evidence(
-                task_ref=task["task_ref"], report_policy="all_finalized",
-                _connection_context=coordinator_evidence_context,
-            )
-            self.assertTrue(evidence_first["has_more"])
-            _assignment, worker_ref = self._assignment(
-                task["task_ref"], [item["outcome"] for item in outcomes],
-                role="revision paged worker", report_policy="all_finalized",
-            )
+            task, selected, worker_ref = self._large_authority(root)
             context: dict = {}
             first = read_task(task_ref=worker_ref, _connection_context=context)
             self.assertTrue(first["has_more"])
-
-            open_steering(
-                task_ref=task["task_ref"], prompt="Add the current-revision outcome?",
-                prompt_language="en",
-            )
+            added = self._semantic_outcome("New current-revision outcome.")
             record_steering(
-                task_ref=task["task_ref"], response_original="Add it.",
+                task_ref=task["task_ref"], response_original="Also implement the new outcome.",
                 user_language="en", add=[added], retire=[],
             )
+            # The static superseded success belongs to publication, not to
+            # an unconsumed assignment: steering revokes paging authority.
             with self.assertRaises(V12ServiceError) as stale_page:
-                read_task(
-                    task_ref=worker_ref, continue_=True,
-                    _connection_context=context,
-                )
+                read_task(task_ref=worker_ref, continue_=True, _connection_context=context)
             self.assertEqual(stale_page.exception.code, "assignment_stale")
             with self.assertRaises(V12ServiceError) as stale_restart:
                 read_task(task_ref=worker_ref, _connection_context={})
             self.assertEqual(stale_restart.exception.code, "assignment_stale")
-            with self.assertRaises(V12ServiceError) as stale_evidence:
-                read_evidence(
-                    task_ref=task["task_ref"], report_policy="all_finalized",
-                    continue_=True, _connection_context=coordinator_evidence_context,
-                )
-            self.assertEqual(stale_evidence.exception.code, "assignment_stale")
-
-            _replacement, replacement_ref = self._assignment(
-                task["task_ref"],
-                [*[item["outcome"] for item in outcomes], added["outcome"]],
-                role="current revision worker",
+            store, _, assignment_id, _ = _resolve_task_context(worker_ref)
+            self.assertEqual(store._read(lambda connection: connection.execute(
+                "SELECT COUNT(*) FROM execution_publications WHERE assignment_id=?",
+                (assignment_id,),
+            ).fetchone()[0]), 0)
+            # Supersession does not prove native quiescence. The coordinator
+            # cannot start a replacement while the old child may still write.
+            coordinator: dict = {}
+            current = read_scope(
+                task_ref=task["task_ref"], responsibility="evidence",
+                _connection_context=coordinator,
             )
-            replacement_context: dict = {}
-            replacement_first = read_task(
-                task_ref=replacement_ref, _connection_context=replacement_context,
-            )
+            self.assertFalse(any(node["state"] == "ready" for node in current["data"]["nodes"]))
             self.assertEqual(
-                replacement_first["data"]["effective_contract"]["revision"], 2,
+                read_outcome(task_ref=task["task_ref"], outcome=added["outcome"])["data"]["outcome"],
+                added,
             )
-            self.assertEqual(
-                [
-                    item["outcome"]
-                    for item in replacement_first["data"]["effective_contract"]["assigned_items"]
-                ],
-                [*[item["outcome"] for item in outcomes], added["outcome"]],
-            )
-            while replacement_first["has_more"]:
-                replacement_first = read_task(
-                    task_ref=replacement_ref, continue_=True,
-                    _connection_context=replacement_context,
-                )
-            self.assertEqual(replacement_context["assignment_complete"], True)
 
     def test_multi_report_assignment_uses_response_limit_not_storage_value_limit(self) -> None:
-        outcomes = [
-            self._semantic_outcome(f"Independent evidence outcome {index}.")
-            for index in range(9)
-        ]
         with tempfile.TemporaryDirectory() as root, patch(
-            "cortex_runtime.domain_api._worker_capability_provenance",
-            return_value=PROVENANCE,
+            "cortex_runtime.domain_api._worker_capability_provenance", return_value=PROVENANCE,
         ):
-            task = self._task(root, outcomes)
-            for index, outcome in enumerate(outcomes):
-                _producer, producer_ref = self._assignment(
-                    task["task_ref"], [outcome["outcome"]],
-                    role=f"independent producer {index}", responsibility="delivery",
-                )
-                self._publish(
-                    producer_ref, outcome,
-                    f"Evidence {index}: " + "x" * 6_300,
-                )
-
-            consumer = open_assignment(
-                task_ref=task["task_ref"], role="multi-report planner",
-                profile_name="planner", model="gpt-5.6-terra",
-                reasoning_effort="high", responsibility="planning",
-                goal="Plan from every independent report.",
-                scope="The complete effective contract.",
-                instructions="Consume all evidence and publish one plan.",
-                report_policy="all_finalized",
-            )
-            match = WORKER_REF.search(consumer["native_dispatch"]["message"])
-            self.assertIsNotNone(match)
-            consumer_ref = match.group(1)
-            assignment = read_task(
-                task_ref=consumer_ref,
-                _connection_context={},
-            )
-
-            self.assertFalse(assignment["has_more"])
-            reports = assignment["data"]["evidence"]["reports"]
-            self.assertEqual(len(reports), len(outcomes))
-            self.assertTrue(all(report["chunks"] for report in reports))
-            self.assertGreater(
-                len(json.dumps(
-                    assignment["data"]["evidence"],
-                    ensure_ascii=False, separators=(",", ":"),
-                ).encode("utf-8")),
-                MCP_OPERATION_MAX_BYTES,
-            )
+            consumer, store = self._large_reports(root, count=4, details=8)
+            context = {}
+            pages = [read_task(task_ref=consumer, _connection_context=context)]
+            while pages[-1]["has_more"]:
+                pages.append(read_task(task_ref=consumer, continue_=True, _connection_context=context))
+            evidence = [page["data"]["evidence"] for page in pages]
+            self.assertEqual(len(evidence[0]["reports"]), 5)  # baseline plus four distinct analyses
+            self.assertGreater(sum(len(_encoded_bytes(item)) for item in evidence), MCP_OPERATION_MAX_BYTES)
+            for index in range(4):
+                self.assertIn(f"Evidence {index}:", repr(evidence))
+            for page in pages:
+                rendered = _success_tool_result(page)
+                self.assertLess(len(_encoded_bytes(rendered)), MAX_PHYSICAL_JSONL_FRAME_BYTES)
+                self.assertEqual(json.loads(rendered["content"][-1]["text"]), rendered["structuredContent"])
 
     def test_large_assignment_is_self_contained_in_first_text_response(self) -> None:
         long_outcome = {
@@ -813,22 +632,20 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             return_value=PROVENANCE,
         ):
             task = self._task(root, [long_outcome])
-            _assignment, worker_ref = self._assignment(
-                task["task_ref"], [long_outcome["outcome"]],
-                role="large authority consumer",
-            )
+            import test_domain_public_api_contract as support
+            assignment = support.DomainPublicApiContractTests()._assignment(task["task_ref"], long_outcome, "baseline")
+            worker_ref = WORKER_REF.search(assignment["native_dispatch"]["message"]).group(1)
             read = read_task(
                 task_ref=worker_ref,
                 _connection_context={},
             )
-            reconciliation = read["data"]["publication_reconciliation"]
+            reconciliation = read["data"]["assignment"]
             self.assertEqual(
-                reconciliation["required_outcomes"],
-                [long_outcome["outcome"]],
+                reconciliation["terminal_publication_kind"], "result",
             )
             self.assertEqual(
-                reconciliation["contract_coverage_template"],
-                [{"outcome": long_outcome["outcome"]}],
+                reconciliation["nodes"][0]["verifies"],
+                [{"kind": "outcome", "name": long_outcome["outcome"]}],
             )
             rendered = _success_tool_result(read)
             compact = json.loads(rendered["content"][0]["text"])
@@ -836,7 +653,7 @@ class RuntimeContractRemediationTests(unittest.TestCase):
                 compact,
                 {
                     "task_ref": worker_ref,
-                    "publication_reconciliation": reconciliation,
+                    "assignment": reconciliation,
                     "has_more": False,
                 },
             )
@@ -846,8 +663,8 @@ class RuntimeContractRemediationTests(unittest.TestCase):
             )
             self.assertEqual(
                 rendered["structuredContent"]["data"]
-                ["publication_reconciliation"]["required_outcomes"],
-                [long_outcome["outcome"]],
+                ["assignment"]["nodes"],
+                reconciliation["nodes"],
             )
 
     def test_nested_evidence_view_link_leads_the_text_response(self) -> None:
@@ -873,141 +690,106 @@ class RuntimeContractRemediationTests(unittest.TestCase):
         self.assertEqual(rendered["content"][0]["text"], link)
         self.assertEqual(rendered["content"].count({"type": "text", "text": link}), 1)
 
+    def _large_authority(self, root: str) -> tuple[dict, dict, str]:
+        """Grow real bounded contracts, never inject historical oversized rows."""
+        outcomes = [
+            {
+                **self._semantic_outcome(f"Large authority requirement {index}."),
+                "acceptance": [
+                    f"Criterion {item}: " + "bounded source evidence " * 75
+                    for item in range(24)
+                ],
+            }
+            for index in range(4)
+        ]
+        task = self._task(root, outcomes[:1])
+        for outcome in outcomes[1:]:
+            record_steering(
+                task_ref=task["task_ref"],
+                response_original=f"Also implement {outcome['outcome']}",
+                user_language="en", add=[outcome], retire=[],
+            )
+        coordinator: dict = {}
+        current = read_scope(task_ref=task["task_ref"], responsibility="evidence", _connection_context=coordinator)
+        ready = [node for node in current["data"]["nodes"] if node["state"] == "ready"]
+        self.assertEqual(len(ready), 1)
+        assignment = open_assignment(
+            task_ref=task["task_ref"], nodes=[ready[0]["node"]],
+            profile_name="explorer", model="gpt-5.6-luna", reasoning_effort="high",
+            _connection_context=coordinator,
+        )
+        worker_ref = WORKER_REF.search(assignment["native_dispatch"]["message"]).group(1)
+        return task, ready[0], worker_ref
+
     def test_large_authority_is_paginated_and_restarts_exactly(self) -> None:
-        outcome = self._semantic_outcome("Paginate the complete worker authority.")
+        from test_typed_publication_transaction import baseline_content
+
         with tempfile.TemporaryDirectory() as root, patch(
             "cortex_runtime.domain_api._worker_capability_provenance",
             return_value=PROVENANCE,
         ):
-            task = self._task(root, [outcome])
-            assignment = open_assignment(
-                task_ref=task["task_ref"], role="large authority worker",
-                profile_name="explorer", model="gpt-5.6-luna",
-                reasoning_effort="high", responsibility="evidence",
-                goal="Consume the complete authority.",
-                scope="The exact selected outcome.",
-                instructions="Consume every page before publication.",
-                outcomes=[outcome["outcome"]],
-                report_policy="none",
-            )
-            worker_ref = WORKER_REF.search(
-                assignment["native_dispatch"]["message"]
-            ).group(1)
-            # Model a durable authority created under a larger historical
-            # ingress budget. The read path must remain bounded even when the
-            # current public writer would admit smaller individual requests.
+            task, selected, worker_ref = self._large_authority(root)
             store, _task_id, assignment_id, _coordinator_ref = _resolve_task_context(worker_ref)
-            with store._connection() as connection:
-                connection.execute(
-                    "UPDATE delegations SET objective=?,scope=?,instructions=? WHERE delegation_id=?",
-                    (
-                        "goal-marker:" + "g" * 55_000,
-                        "scope-marker:" + "s" * 55_000,
-                        "instructions-marker:" + "i" * 55_000,
-                        assignment_id,
-                    ),
-                )
+
+            def receipts():
+                return store._read(lambda connection: [
+                    tuple(row) for row in connection.execute(
+                        "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
+                        "WHERE assignment_id=? ORDER BY private_position", (assignment_id,),
+                    ).fetchall()
+                ])
+
             context: dict = {}
-            pages = []
-            first = read_task(
-                task_ref=worker_ref,
-                _connection_context=context,
-            )
+            first = read_task(task_ref=worker_ref, _connection_context=context)
             self.assertTrue(first["has_more"])
             self.assertEqual(first["data"]["assignment_page"]["phase"], "authority")
             self.assertNotIn("next_cursor", repr(first))
-            pages.append(first)
-
-            before = store._read(lambda connection: [
-                tuple(row) for row in connection.execute(
-                    "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
-                    "WHERE assignment_id=? ORDER BY private_position",
-                    (assignment_id,),
-                ).fetchall()
-            ])
-            restarted = read_task(
-                task_ref=worker_ref,
-                _connection_context=context,
-            )
+            before = receipts()
+            restarted = read_task(task_ref=worker_ref, _connection_context=context)
             self.assertEqual(restarted["data"], first["data"])
-            after = store._read(lambda connection: [
-                tuple(row) for row in connection.execute(
-                    "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
-                    "WHERE assignment_id=? ORDER BY private_position",
-                    (assignment_id,),
-                ).fetchall()
-            ])
-            self.assertEqual(after, before)
-
+            self.assertEqual(receipts(), before)
+            pages = [restarted]
             while pages[-1]["has_more"]:
                 pages.append(read_task(
-                    task_ref=worker_ref, continue_=True,
-                    _connection_context=context,
+                    task_ref=worker_ref, continue_=True, _connection_context=context,
                 ))
             self.assertGreater(len(pages), 1)
             self.assertTrue(context["assignment_complete"])
             self.assertEqual(context["actor"], "worker")
-            fragments = [
-                fragment
-                for page in pages
-                for fragment in page["data"]["assignment_page"].get("fragments", [])
-            ]
-            rendered = repr(fragments)
-            self.assertIn("goal-marker", rendered)
-            self.assertIn("scope-marker", rendered)
-            self.assertIn("instructions-marker", rendered)
+            rendered = repr([page["data"] for page in pages])
+            for index in range(4):
+                self.assertIn(f"Large authority requirement {index}.", rendered)
+            self.assertIn("Criterion 23:", rendered)
 
-            terminal_receipts = store._read(lambda connection: [
-                tuple(row) for row in connection.execute(
-                    "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
-                    "WHERE assignment_id=? ORDER BY private_position",
-                    (assignment_id,),
-                ).fetchall()
-            ])
-            recovery_pages = [read_task(
-                task_ref=worker_ref,
-                _connection_context=context,
-            )]
-            self.assertTrue(recovery_pages[0]["has_more"])
+            terminal_receipts = receipts()
+            recovered = [read_task(task_ref=worker_ref, _connection_context=context)]
+            self.assertTrue(recovered[0]["has_more"])
             self.assertFalse(context["assignment_complete"])
-            while recovery_pages[-1]["has_more"]:
-                recovery_pages.append(read_task(
-                    task_ref=worker_ref, continue_=True,
-                    _connection_context=context,
+            while recovered[-1]["has_more"]:
+                recovered.append(read_task(
+                    task_ref=worker_ref, continue_=True, _connection_context=context,
                 ))
             self.assertTrue(context["assignment_complete"])
-            self.assertEqual(
-                store._read(lambda connection: [
-                    tuple(row) for row in connection.execute(
-                        "SELECT receipt_id,created_sequence,page_digest FROM assignment_page_receipts "
-                        "WHERE assignment_id=? ORDER BY private_position",
-                        (assignment_id,),
-                    ).fetchall()
-                ]),
-                terminal_receipts,
-            )
+            self.assertEqual([page["data"] for page in recovered], [page["data"] for page in pages])
+            self.assertEqual(receipts(), terminal_receipts)
+            content = baseline_content()
+            content["node_coverage"] = [{
+                "node": selected["node"],
+                "coverage": [{
+                    **subject, "status": "complete",
+                    "verification": [{
+                        "check_key": "reconciliation", "state": "executed",
+                        "summary": "Stable baseline observed after complete authority recovery.",
+                    }],
+                } for subject in selected["verifies"]],
+            }]
             published = publish_result(
-                task_ref=worker_ref,
-                summary="Published after exact post-compaction assignment reconciliation.",
-                outcome="The assigned outcome is complete.",
-                changes=[{"path": "runtime", "summary": "Focused fixture change."}],
-                verification_facts=[{
-                    "state": "executed", "summary": "Focused fixture check passed.",
-                }],
-                outcome_coverage=[{
-                    "outcome": outcome["outcome"], "status": "complete",
-                    "verification": ["Focused fixture check passed."],
-                }],
-                documentation_impact="No documentation update is required for the fixture.",
-                risks=[], unresolved=[], status="completed",
-                _connection_context=context,
+                task_ref=worker_ref, _connection_context=context, **content,
             )
-            self.assertEqual(published["state"], "published")
+            self.assertTrue(published["published"])
+            self.assertFalse(published["replayed"])
             with self.assertRaises(V12ServiceError) as copied:
-                read_task(
-                    task_ref=worker_ref,
-                    _connection_context={},
-                )
+                read_task(task_ref=worker_ref, _connection_context={})
             self.assertEqual(copied.exception.code, "connection_lost")
 
     def test_assignment_fragment_boundaries_and_multibyte_integrity(self) -> None:
@@ -1044,47 +826,35 @@ class RuntimeContractRemediationTests(unittest.TestCase):
         output_schema = contract["outputSchema"]
         self.assertIn("replayed", output_schema["required"])
         self.assertIn(
-            "ends worker tool activity immediately",
-            output_schema["description"],
-        )
-        self.assertIn(
-            "no later tool call",
+            "All three states end worker activity",
             output_schema["properties"]["state"]["description"],
         )
         self.assertEqual(schema["maxBytes"], MCP_OPERATION_MAX_BYTES)
-        arguments = {
-            "task_ref": "t_" + "a" * 12 + "_" + "b" * 32,
-            "summary": "",
-            "outcome": "Complete.",
-            "changes": [],
-            "verification_facts": [{"state": "executed", "summary": "Passed."}],
-            "outcome_coverage": [{
-                "outcome": "Bounded outcome.", "status": "complete",
-                "verification": ["Passed."],
-            }],
-            "documentation_impact": "None.",
-            "risks": [],
-            "unresolved": [],
-            "status": "completed",
-        }
+        from test_typed_publication_transaction import baseline_content
+        arguments = {"task_ref": "t_" + "a" * 12 + "_" + "b" * 32, **baseline_content()}
 
         def encoded_bytes(value: dict) -> int:
             return len(json.dumps(
                 value, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
             ).encode("utf-8"))
 
-        overhead = encoded_bytes(arguments)
-        at_limit = dict(arguments)
-        at_limit["summary"] = "x" * (MCP_OPERATION_MAX_BYTES - overhead)
+        # Fill separate schema-valid fields rather than bypassing the 2048
+        # character limit with one oversized summary.
+        from copy import deepcopy
+        at_limit = deepcopy(arguments)
+        at_limit["risks"] = ["r"]
+        while MCP_OPERATION_MAX_BYTES - encoded_bytes(at_limit) > 2047:
+            at_limit["risks"].insert(0, str(len(at_limit["risks"])) + "x" * 1998)
+        at_limit["risks"][-1] += "x" * (MCP_OPERATION_MAX_BYTES - encoded_bytes(at_limit))
         self.assertEqual(encoded_bytes(at_limit), MCP_OPERATION_MAX_BYTES)
-        below_limit = dict(at_limit)
-        below_limit["summary"] = below_limit["summary"][:-1]
+        below_limit = deepcopy(at_limit)
+        below_limit["risks"][-1] = below_limit["risks"][-1][:-1]
         self.assertEqual(encoded_bytes(below_limit), MCP_OPERATION_MAX_BYTES - 1)
         _validate_schema(schema, below_limit)
         _validate_schema(schema, at_limit)
 
-        above = dict(at_limit)
-        above["summary"] += "x"
+        above = deepcopy(at_limit)
+        above["risks"][-1] += "x"
         with self.assertRaises(_SchemaError) as caught:
             _validate_schema(schema, above)
         error = caught.exception
@@ -1099,16 +869,16 @@ class RuntimeContractRemediationTests(unittest.TestCase):
         self.assertNotIn("field", failure["details"])
         self.assertEqual(failure["details"]["actual_bytes"], MCP_OPERATION_MAX_BYTES + 1)
         self.assertEqual(failure["details"]["max_bytes"], MCP_OPERATION_MAX_BYTES)
-        self.assertEqual(failure["details"]["sections"][0]["section"], "summary")
+        self.assertEqual(failure["details"]["sections"][0]["section"], "risks")
         self.assertIn("exactly one", failure["action"])
         rendered_error = _tool_error_result(failure, mutation="publish_result")
         text = rendered_error["content"][0]["text"]
         self.assertNotIn("Field:", text)
         self.assertNotIn("Handle rule:", text)
 
-        unicode_heavy = dict(arguments)
-        unicode_heavy["summary"] = "🔒" * 16_384
-        self.assertLess(len(unicode_heavy["summary"]), MCP_OPERATION_MAX_BYTES)
+        unicode_heavy = deepcopy(arguments)
+        unicode_heavy["risks"] = [str(index) + "🔒" * 1024 for index in range(16)]
+        self.assertLess(sum(map(len, unicode_heavy["risks"])), MCP_OPERATION_MAX_BYTES)
         with self.assertRaises(_SchemaError) as unicode_error:
             _validate_schema(schema, unicode_heavy)
         self.assertEqual(
@@ -1133,12 +903,11 @@ class RuntimeContractRemediationTests(unittest.TestCase):
 
         large_assignment = _success_tool_result({
             "task_ref": "t_123456789abc_" + "1" * 32,
-                        "data": {
-                "publication_reconciliation": {
-                    "coverage_source": "planning_items",
-                    "required_item_count": 1,
-                    "required_outcomes": ["Exact large outcome."],
-                    "contract_coverage_template": [{"outcome": "Exact large outcome."}],
+            "data": {
+                "assignment": {
+                    "terminal_publication_kind": "result",
+                    "nodes": [{"key": "baseline", "verifies": [{"kind": "outcome", "name": "Exact large outcome."}]}],
+                    "artifact": arguments["artifact"],
                 },
                 "large_body": "z" * 130_000,
             },
@@ -1146,9 +915,9 @@ class RuntimeContractRemediationTests(unittest.TestCase):
         })
         compact_assignment = json.loads(large_assignment["content"][0]["text"])
         self.assertEqual(
-            compact_assignment["publication_reconciliation"]
-            ["required_outcomes"],
-            ["Exact large outcome."],
+            compact_assignment["assignment"]
+            ["nodes"][0]["verifies"],
+            [{"kind": "outcome", "name": "Exact large outcome."}],
         )
         self.assertEqual(
             large_assignment["content"][-1]["text"],

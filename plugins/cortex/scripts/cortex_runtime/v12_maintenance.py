@@ -33,35 +33,8 @@ from cortex_runtime.v12_contract import TASK_ID_RE, task_ref, task_shard_hash
 
 _DATABASE_NAME = "cortex.db"
 _APPLICATION_ID = 0x43563132
-_SCHEMA_VERSION = 1
-_MIGRATIONS = (
-    (1, "v12-initial"),
-    (2, "v12-schema-v1-human-views"),
-    (3, "v12-explicit-profile-binding"),
-    (4, "v12-durable-native-task-name"),
-    (5, "v12-report-consumption-receipts"),
-    (6, "v12-durable-governance-gate"),
-    (7, "v12-ready-approval-handles"),
-    (8, "v12-advisory-governance"),
-    (9, "v12-canonical-report-semantics"),
-    (10, "v12-effective-outcome-coverage"),
-    (11, "v12-report-coverage-diagnostics"),
-    (12, "v12-revisioned-outcome-assignments"),
-    (13, "v12-persisted-steering-delta"),
-    (14, "v14-atomic-report-operations"),
-    (15, "v15-durable-clarification-bindings"),
-    (16, "v16-transactional-command-receipts"),
-    (17, "v17-plan-review-bound-relations"),
-    (18, "v18-clarification-holds"),
-    (19, "v19-derived-task-locators"),
-    (20, "v20-dispatch-correlation-marker"),
-    (21, "v21-worker-bootstrap-capabilities"),
-    (22, "v22-dispatch-lease-expiry"),
-    (23, "v23-immutable-assignment-scope"),
-    (24, "v24-outcome-linked-contract"),
-    (25, "v25-assignment-page-receipts"),
-    (26, "v26-explicit-assignment-loss-lineage"),
-)
+_SCHEMA_VERSION = 2
+_MIGRATIONS = ((2, "typed-orchestration-integrity"),)
 _BACKUP_FORMAT = "cortex/v12-maintenance-backup/v1"
 _BACKUP_ID_PREFIX = "backup-"
 _BACKUP_DATABASE_SIDECARS = ("cortex.db-wal", "cortex.db-shm")
@@ -73,6 +46,10 @@ _PRIVATE_FILE_MODE = 0o600
 _CHECKPOINT_MODES = frozenset({"PASSIVE", "FULL", "RESTART", "TRUNCATE"})
 _REQUIRED_TABLES = frozenset(
     {
+        "execution_policies", "execution_graphs", "execution_nodes",
+        "plan_candidate_families", "plan_candidate_selections",
+        "execution_assignments", "execution_publications", "execution_events",
+        "artifact_generations", "project_integrity",
         "schema_migrations",
         "v12_metadata",
         "timeline",
@@ -84,9 +61,6 @@ _REQUIRED_TABLES = frozenset(
         "report_consumption_receipts",
         "report_usage",
         "governance_assessments",
-        "initiatives",
-        "initiative_revisions",
-        "initiative_links",
         "governance_closures",
         "user_decisions",
         "projection_jobs",
@@ -98,12 +72,12 @@ _REQUIRED_TABLES = frozenset(
         "clarification_holds",
         "task_locator_publications",
         "effective_contract_revisions",
+        "source_submissions",
+        "source_consumptions",
         "effective_contract_items",
-        "delegation_outcome_assignments",
         "assignment_scope_snapshots",
         "assignment_page_receipts",
         "assignment_losses",
-        "report_contract_coverage",
         "command_receipts",
         "worker_capabilities",
     }
@@ -124,11 +98,8 @@ _REQUIRED_SCHEMA_OBJECTS = frozenset(
         "projection_jobs_pending",
         "approval_handles_task_report",
         "clarification_bindings_task_pending",
-        "clarification_holds_assignment_state",
         "clarification_holds_task_state",
         "task_locator_publications_suffix",
-        "outcome_owned_current",
-        "outcome_assignment_current",
         "outcome_items_task_current",
         "assignment_scope_task_revision",
         "assignment_scope_no_update",
@@ -148,25 +119,34 @@ _REQUIRED_COLUMNS = {
     "report_consumption_receipts": frozenset({"receipt_id", "project_hash", "task_id", "consumer_delegation_id", "reader_kind", "report_id", "observed_content_digest", "sections_json", "input_cursor", "output_cursor", "chunk_indexes_json", "returned_content_bytes", "has_more", "created_sequence"}),
     "report_usage": frozenset({"task_id", "total_retained_bytes", "assembling_bytes", "assembling_reports"}),
     "timeline": frozenset({"sequence", "task_id", "decision_id", "payload_json"}),
-    "user_decisions": frozenset({"decision_id", "task_id", "subject_type", "subject_id", "decision_type", "prompt_en", "response_original", "response_en", "steering_delta_json"}),
+    "user_decisions": frozenset({"decision_id", "task_id", "subject_type", "subject_id", "decision_type", "prompt", "response_original", "steering_delta_json"}),
     "effective_contract_revisions": frozenset({"task_id", "revision", "decision_id", "created_sequence"}),
+    "source_submissions": frozenset({"arrival", "source_ref", "session_digest", "turn_digest", "body", "signature"}),
+    "source_consumptions": frozenset({"source_ref", "task_id", "purpose"}),
     "effective_contract_items": frozenset({"item_id", "project_hash", "task_id", "category", "ordinal", "text", "created_revision", "retired_revision"}),
     "effective_contract_item_details": frozenset({"item_id", "details_json", "source_decision_id"}),
-    "delegation_outcome_assignments": frozenset({"delegation_id", "item_id", "assignment_role", "revision", "superseded_by_delegation_id", "superseded_sequence"}),
     "assignment_scope_snapshots": frozenset({"assignment_id", "task_id", "item_id", "assignment_role", "contract_revision", "created_sequence"}),
     "assignment_page_receipts": frozenset({"receipt_id", "project_hash", "task_id", "assignment_id", "snapshot_digest", "phase", "private_position", "page_digest", "returned_content_bytes", "has_more", "created_at", "created_sequence"}),
     "assignment_losses": frozenset({"loss_id", "project_hash", "task_id", "assignment_id", "successor_assignment_id", "terminal_state", "reason", "evidence_json", "evidence_digest", "created_at", "created_sequence"}),
-    "report_contract_coverage": frozenset({"report_id", "item_id", "status", "verification_json"}),
     # v17 makes these four fields the authoritative immutable plan-review
     # relation.  Maintenance must reject a shard that claims v17 while any
     # one is absent; it must never repair, infer, or downgrade that relation.
     "clarification_bindings": frozenset({"clarification_binding", "project_hash", "task_id", "subject_type", "subject_id", "decision_type", "prompt_digest", "prompt", "prompt_language", "effective_contract_revision", "issue_sequence", "request_digest", "response_digest", "consumed_decision_id", "plan_content_digest", "plan_approval_handle", "plan_view_content_digest", "plan_view_source_sequence"}),
-    "clarification_holds": frozenset({"clarification_binding", "project_hash", "task_id", "assignment_id", "native_dispatch_digest", "continuation_capability", "state", "response_decision_id", "delivery_claim_digest", "opened_sequence", "answered_sequence", "delivery_sequence", "unavailable_reason", "created_at", "updated_at"}),
+    "clarification_holds": frozenset({"clarification_binding", "project_hash", "task_id", "state", "response_decision_id", "opened_sequence", "answered_sequence", "created_at", "updated_at"}),
     "task_locator_publications": frozenset({"task_id", "project_hash", "suffix", "fingerprint", "created_at"}),
     "projection_jobs": frozenset({"job_id", "task_id", "source_sequence", "status"}),
     "projection_files": frozenset({"task_id", "relative_path", "content_digest", "status"}),
     "worker_capabilities": frozenset({"capability_ref", "project_hash", "task_id", "assignment_id", "contract_revision", "build_digest", "candidate_digest", "source_digest", "catalogue_digest", "dispatch_digest", "capability_digest", "continuation_ref", "state", "created_sequence", "consumed_sequence", "created_at", "updated_at", "lease_expires_at"}),
 }
+
+from cortex_runtime.registry_draft import TABLES as _DRAFT_TABLES, GUARDS as _DRAFT_GUARDS
+_REQUIRED_TABLES = _REQUIRED_TABLES | frozenset(_DRAFT_TABLES)
+_REQUIRED_SCHEMA_OBJECTS = _REQUIRED_SCHEMA_OBJECTS | _DRAFT_GUARDS
+_REQUIRED_COLUMNS.update({table: frozenset(columns) for table, columns in _DRAFT_TABLES.items()})
+from cortex_runtime.verification_journal import TABLES as _FACT_TABLES, GUARDS as _FACT_GUARDS
+_REQUIRED_TABLES = _REQUIRED_TABLES | frozenset(_FACT_TABLES)
+_REQUIRED_SCHEMA_OBJECTS = _REQUIRED_SCHEMA_OBJECTS | _FACT_GUARDS
+_REQUIRED_COLUMNS.update({table: frozenset(columns) for table, columns in _FACT_TABLES.items()})
 
 
 def _codex_home() -> Path:

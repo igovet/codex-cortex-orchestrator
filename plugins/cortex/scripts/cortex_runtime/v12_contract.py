@@ -30,7 +30,7 @@ TASK_REF_RE = re.compile(TASK_REF_PATTERN)
 # ledger and is never exposed as an assignment/report/continuation handle.
 WORKER_TASK_REF_PATTERN = rf"^t_([0-9a-f]{{{TASK_REF_SUFFIX_LENGTH}}})_([0-9a-f]{{{TASK_RANDOM_LENGTH}}})$"
 WORKER_TASK_REF_RE = re.compile(WORKER_TASK_REF_PATTERN)
-SHARDED_RECORD_PATTERN = rf"^(delegation|report|initiative|decision)-([0-9a-f]{{{PROJECT_HASH_LENGTH}}})-([0-9a-f]{{{TASK_RANDOM_LENGTH}}})$"
+SHARDED_RECORD_PATTERN = rf"^(delegation|report|decision)-([0-9a-f]{{{PROJECT_HASH_LENGTH}}})-([0-9a-f]{{{TASK_RANDOM_LENGTH}}})$"
 SHARDED_RECORD_RE = re.compile(SHARDED_RECORD_PATTERN)
 # Public entity references deliberately carry only a type discriminator and
 # the final UUID suffix.  They are locators, never persisted keys.  Resolving
@@ -40,7 +40,6 @@ RECORD_REF_SUFFIX_LENGTH = 12
 RECORD_REF_PREFIXES = {
     "delegation": "d",
     "report": "r",
-    "initiative": "i",
     "decision": "u",
 }
 RECORD_REF_PATTERNS = {
@@ -73,27 +72,6 @@ MAX_LINKS = 100
 MAX_REPORT_IDS = 20
 MAX_DECISION_IDS = 20
 
-REPORT_CONTENT_SCHEMA = "cortex/report-content/v1"
-CANONICAL_REPORT_SCHEMAS = {
-    "progress": "cortex/report/progress/v1",
-    "result": "cortex/report/result/v1",
-    "synthesis": "cortex/report/synthesis/v1",
-    "plan": "cortex/report/plan/v1",
-}
-CANONICAL_REPORT_V2_SCHEMAS = {
-    "result": "cortex/report/result/v2",
-    "synthesis": "cortex/report/synthesis/v2",
-    "plan": "cortex/report/plan/v2",
-}
-# V3 is the current specialist evidence envelope. V1/V2 evidence remains
-# immutable and readable; only new V3 finalization receives completeness
-# admission while its assembly can still be corrected.
-CANONICAL_REPORT_EVIDENCE_SCHEMAS = {
-    "result": "cortex/report/result/v3",
-    "synthesis": "cortex/report/synthesis/v3",
-    "plan": "cortex/report/plan/v3",
-}
-REPORT_SEMANTIC_STATUSES = ("pending", "semantic_valid", "semantic_invalid", "legacy")
 REPORT_CHUNK_MAX_BYTES = 32_768
 REPORT_MAX_CHUNKS = 256
 REPORT_MAX_BYTES = 8 * 1024 * 1024
@@ -133,18 +111,14 @@ TASK_CONTRACT_MAX_ITEMS = 100
 # Human views are entirely host-private derived files.  The renderer version
 # belongs in their metadata so a verified view can be invalidated when the
 # presentation implementation changes.
-PROJECTION_RENDERER_VERSION = "cortex/v12-markdown/v10"
+PROJECTION_RENDERER_VERSION = "cortex/typed-markdown/v1"
 HUMAN_VIEW_STATUSES = ("ready", "stale", "conflict", "unavailable", "disabled")
 
-REPORT_TYPES = ("progress", "result", "synthesis", "plan")
 REPORT_STATUSES = ("partial", "completed", "blocked", "failed")
 GOVERNANCE_MODES = ("minimal", "light", "full")
-GOVERNANCE_SOURCES = ("model", "user_override")
-INITIATIVE_STATUSES = ("proposed", "active", "paused", "completed", "closed", "cancelled")
-CLOSURE_VERDICTS = ("ready", "ready_with_risks", "not_ready")
-CLOSURE_SUBJECTS = ("task", "initiative")
+CLOSURE_VERDICTS = ("ready", "ready_with_risks")
 
-DECISION_SUBJECTS = ("task", "plan", "initiative", "delegation", "report")
+DECISION_SUBJECTS = ("task", "plan", "delegation", "report")
 DECISION_TYPES = (
     "approve", "reject", "request_revision", "clarification", "cancel",
     "accept_risk", "override", "steer",
@@ -152,138 +126,6 @@ DECISION_TYPES = (
 DECISION_ATTRIBUTION = "user_via_coordinator"
 DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 DIGEST_RE = re.compile(DIGEST_PATTERN)
-
-
-def canonical_report_semantic_status(report_type: object, content: object) -> str:
-    """Classify fixed canonical report data without mutating stored evidence."""
-    if not isinstance(report_type, str) or report_type not in CANONICAL_REPORT_SCHEMAS:
-        return "legacy"
-    if not isinstance(content, Mapping):
-        return "legacy"
-    schema = content.get("schema")
-    # V2 is deliberately additive: v1/legacy evidence stays immutable and
-    # readable, while the newer forms carry structured outcome coverage.
-    if schema in {CANONICAL_REPORT_V2_SCHEMAS.get(report_type), CANONICAL_REPORT_EVIDENCE_SCHEMAS.get(report_type)}:
-        base = {
-            "result": ("summary", "outcome", "changes", "verification", "risks"),
-            "synthesis": ("summary", "findings", "recommendations"),
-            "plan": ("summary", "scope", "stages", "verification"),
-        }[report_type]
-        required = {*base, "deviations", "unresolved", "risks", "verification"}
-        current_v3 = schema == CANONICAL_REPORT_EVIDENCE_SCHEMAS.get(report_type)
-        # A planner can prove the proposed work breakdown and its observable
-        # planning checks, but cannot truthfully issue the post-implementation
-        # documentation-impact verdict.  That assessment belongs to result
-        # and synthesis publication after implementation/verification.
-        evidence_required = current_v3 and report_type in {"plan", "result", "synthesis"}
-        if evidence_required:
-            # Current publications must disposition every server-issued scope
-            # item exactly once. The assignment snapshot remains routing
-            # authority; these claims preserve semantic completeness across
-            # worker handoffs and plan revisions.
-            required.add("contract_coverage")
-            required.add("verification_facts")
-            if report_type in {"result", "synthesis"}:
-                required.add("documentation_impact")
-        elif not current_v3:
-            # Historical v2 evidence already stored caller-authored coverage.
-            # Keep those immutable rows readable, but do not admit the field in
-            # the current v3 public contract or use it as current authority.
-            required.add("contract_coverage")
-        # Assignment scope remains server-owned. The worker copies the exact
-        # emitted item refs only to publish a disposition for each item; it
-        # cannot add routing authority or expand its immutable scope.
-        allowed_keys = {"schema", "source_text", *required}
-        # A planner may optionally carry an early impact hypothesis, but it
-        # cannot be required to know the post-implementation verdict. The
-        # explicit authoritative assessment belongs to the later synthesis.
-        if report_type == "plan":
-            allowed_keys.add("documentation_impact")
-        if any(not isinstance(key, str) or key not in allowed_keys for key in content):
-            return "semantic_invalid"
-        if not isinstance(content.get("summary"), str) or not content["summary"].strip():
-            return "semantic_invalid"
-        if "source_text" in content and not isinstance(content["source_text"], str):
-            return "semantic_invalid"
-        if report_type == "result" and not isinstance(content.get("outcome"), str):
-            return "semantic_invalid"
-        # ``outcome`` and plan ``scope`` are scalar narrative fields; the
-        # remaining contract sections are arrays.  Keeping this distinction at
-        # the canonical semantic boundary prevents valid v3 envelopes from
-        # being rejected as incomplete after all of their evidence is present.
-        scalar_fields = {"summary", "outcome"}
-        if report_type == "plan":
-            scalar_fields.add("scope")
-        if any(not isinstance(content.get(key), list) for key in required - scalar_fields - {"documentation_impact"}):
-            return "semantic_invalid"
-        if report_type in {"result", "synthesis"} and evidence_required and (not isinstance(content.get("documentation_impact"), str) or not content["documentation_impact"].strip()):
-            return "semantic_invalid"
-        if "contract_coverage" in required and any(
-            not isinstance(item, Mapping)
-            or not isinstance(item.get("item_ref"), str)
-            or not isinstance(item.get("status"), str)
-            or not isinstance(item.get("verification"), list)
-            or (current_v3 and not item.get("verification"))
-            for item in content["contract_coverage"]
-        ):
-            return "semantic_invalid"
-        if report_type == "plan" and evidence_required:
-            stages = content["stages"]
-            if not stages:
-                return "semantic_invalid"
-            expected_orders = list(range(1, len(stages) + 1))
-            observed_orders: list[int] = []
-            for stage in stages:
-                if not isinstance(stage, Mapping) or set(stage) != {
-                    "order", "owner", "dependencies", "work", "verification",
-                }:
-                    return "semantic_invalid"
-                order = stage.get("order")
-                if not isinstance(order, int) or isinstance(order, bool) or order < 1:
-                    return "semantic_invalid"
-                observed_orders.append(order)
-                if not isinstance(stage.get("owner"), str) or not stage["owner"].strip():
-                    return "semantic_invalid"
-                dependencies = stage.get("dependencies")
-                if (
-                    not isinstance(dependencies, list)
-                    or any(not isinstance(item, int) or isinstance(item, bool) or item < 1 or item >= order for item in dependencies)
-                    or len(set(dependencies)) != len(dependencies)
-                ):
-                    return "semantic_invalid"
-                for field in ("work", "verification"):
-                    values = stage.get(field)
-                    if not isinstance(values, list) or not values or any(not isinstance(item, str) or not item.strip() for item in values):
-                        return "semantic_invalid"
-            if observed_orders != expected_orders:
-                return "semantic_invalid"
-        return "semantic_valid"
-    if schema != CANONICAL_REPORT_SCHEMAS[report_type]:
-        return "legacy" if schema is None else "semantic_invalid"
-    fields: dict[str, tuple[str, ...]] = {
-        "progress": ("summary", "completed", "active", "blocked", "next_steps"),
-        "result": ("summary", "outcome", "changes", "verification", "risks"),
-        "synthesis": ("summary", "findings", "recommendations"),
-        "plan": ("summary", "scope", "stages", "verification"),
-    }
-    required = fields[report_type]
-    # source_text is the only optional user-authored value. The closed field
-    # set rejects language tags and original/translated or en/ru duplicates.
-    if any(not isinstance(key, str) or key not in {"schema", "source_text", *required} for key in content):
-        return "semantic_invalid"
-    if not isinstance(content.get("summary"), str) or not content["summary"].strip():
-        return "semantic_invalid"
-    if "source_text" in content and not isinstance(content["source_text"], str):
-        return "semantic_invalid"
-    for field in required:
-        if field == "summary":
-            continue
-        if report_type == "result" and field == "outcome":
-            if not isinstance(content.get(field), str):
-                return "semantic_invalid"
-        elif not isinstance(content.get(field), list):
-            return "semantic_invalid"
-    return "semantic_valid"
 
 
 def new_task_id(project_hash: str) -> str:
@@ -321,7 +163,7 @@ def task_ref_parts(value: object) -> str | None:
 
 def new_sharded_id(prefix: str, project_hash: str) -> str:
     """Mint an opaque local record ID that can reject foreign-shard references."""
-    if prefix not in {"delegation", "report", "initiative", "decision"}:
+    if prefix not in {"delegation", "report", "decision"}:
         raise ValueError("record prefix is invalid")
     if not isinstance(project_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", project_hash):
         raise ValueError("project hash is invalid")

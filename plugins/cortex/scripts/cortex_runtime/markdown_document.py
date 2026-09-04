@@ -82,7 +82,7 @@ def _nonempty(value: object) -> bool:
 
 
 def _display_value(value: object) -> str:
-    """Flatten a legacy value for one typed list item."""
+    """Flatten a structured value for one typed list item."""
     if isinstance(value, Mapping):
         values: list[str] = []
         for key, item in value.items():
@@ -481,28 +481,6 @@ class MarkdownDocumentBuilder:
         )
 
 
-def legacy_lines(value: object) -> list[str]:
-    """Return safe, heading-free lines for old arbitrary report content."""
-    if isinstance(value, Mapping):
-        lines: list[str] = []
-        for key, item in value.items():
-            if not _nonempty(item):
-                continue
-            label = safe_inline_text(key)
-            if isinstance(item, Mapping):
-                lines.append(f"- **{label}:** {_display_value(item)}")
-            elif _is_sequence(item):
-                lines.append(f"- **{label}:**")
-                lines.extend("    - " + _display_value(child) for child in item if _nonempty(child))
-            else:
-                lines.append(f"- **{label}:** {safe_inline_text(item)}")
-        return lines
-    if _is_sequence(value):
-        return [f"- {_display_value(item)}" for item in value if _nonempty(item)]
-    text = safe_paragraph_text(value)
-    return text.split("\n") if text else []
-
-
 __all__ = [
     "Block",
     "BulletList",
@@ -518,7 +496,6 @@ __all__ = [
     "Paragraph",
     "Section",
     "Table",
-    "legacy_lines",
     "plain_text",
     "render_markdown",
     "safe_heading_text",

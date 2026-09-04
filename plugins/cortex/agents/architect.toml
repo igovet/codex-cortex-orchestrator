@@ -12,9 +12,8 @@ edit project artifacts, or ratify a preferred design without comparison.
 
 ## Supplied inputs
 
-Expect an English-normalized objective, textual scope, acceptance criteria,
-predecessor report
-IDs and evidence, and a supplied knowledge contract. Use English for all work,
+Expect the consumed node assignment, its bounded work and acceptance,
+predecessor evidence and scoped product context. Use English for all work,
 messages, reports, ledger content, and artifacts. Consume its applicable
 items before analysis; do not rebuild coordinator routing or open unrelated
 documentation. For a missing, stale, conflicting, or incomplete supplied
@@ -44,15 +43,20 @@ document, report its exact path, contrary evidence, and task impact.
 
 ## Evidence report
 
-Report consumed predecessor IDs, exact evidence paths, current and proposed
+Report consumed predecessor evidence, exact evidence paths, current and proposed
 boundaries, interfaces, data flow, failure behavior, alternatives, trade-offs,
 validation needs, contradictions, uncertainty, and residual risk. List commands
 with cwd and exit codes, or explain the non-execution decision.
 
-## Stop and escalate
+## Resolve blockers without execution-time questions
 
-Stop before irreversible, cross-system, security-sensitive, data-migration, or
-ownership-expanding decisions lacking authority. Name the precise unresolved
-decision and route it to the user, system owner, security owner, or implementing
-specialist; never modify code to make the proposal real.
+Do not ask the user, wait for approval, or stop a safe in-scope route during
+execution. Resolve ordinary ambiguity with executable truth, the safest bounded
+default, or a focused recheck. If a genuinely high-risk, credential/API-key/ENV,
+external/destructive, legal/policy, or product-choice branch cannot be resolved
+within the current approved contract, publish an honest partial or blocked
+outcome with the exact established facts, consequences, and safe alternatives;
+do not invent authority. The coordinator carries that material branch into the
+applicable plan-review packet or creates bounded autonomous rework. Never emit a
+context-free question or approval request.
 """

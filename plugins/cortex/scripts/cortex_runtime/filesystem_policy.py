@@ -22,6 +22,14 @@ _FILESYSTEM_MODULES = frozenset({"os", "os.path", "pathlib", "shutil"})
 
 # Keys are exact qualified functions, not filename/string-literal exemptions.
 _CAPABILITIES = {
+    "host_boundary.CodexHostProbe.save": "owner-private-exclusive-passive-capability-snapshot",
+    "artifact_fingerprint._entry": "bounded-artifact-nofollow-read",
+    "artifact_fingerprint._archive_directory": "owner-private-artifact-archive-directory",
+    "artifact_fingerprint.save_manifest": "content-addressed-artifact-manifest-create",
+    "artifact_fingerprint.load_manifest": "owner-private-artifact-manifest-read",
+    "native_observation._write": "signed-native-observation-atomic-write",
+    "native_observation.bind_task": "owner-private-native-task-binding-lock",
+    "native_observation.record_projection": "owner-private-native-projection-lock",
     "v12_store.V12Store._directory": "private-state-directory",
     "v12_store.V12Store._write_record_locator_rows": "derived-locator-private-mode",
     "v12_store.V12Store._replace_record_locator_sidecar": "derived-locator-atomic-rebuild",

@@ -1,67 +1,99 @@
-from __future__ import annotations
+"""Current aggregate binding tests; no alternate decision mutation ledger."""
+from concurrent.futures import ThreadPoolExecutor
 
-import os
-import tempfile
-import threading
-import unittest
-from pathlib import Path
-import sys
+import pytest
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
-sys.path.insert(0, str(SCRIPTS))
-
-from cortex_runtime.v12_store import V12Store, V12StoreError
+from cortex_runtime.domain_kernel import DecisionAggregate
+from cortex_runtime.v12_store import V12StoreError
+from test_node_assignment_receipts import node_case
 
 
-class ClarificationBindingTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.home = tempfile.TemporaryDirectory(prefix="cortex-v15-home-")
-        self.root = tempfile.TemporaryDirectory(prefix="cortex-v15-project-")
-        os.environ["CODEX_HOME"] = self.home.name
-        self.store = V12Store(self.root.name)
-        self.task, _ = self.store.create_task(
-            objective="Binding test", user_request_original="Binding test", user_language="en",
-            requirements=["r"], constraints=["c"], acceptance_criteria=["a"],
-            verification_plan=["v"], context={}, idempotency_key="task",
-        )
-        self.task_id = self.task["task"]["task_id"]
-
-    def tearDown(self) -> None:
-        os.environ.pop("CODEX_HOME", None)
-        self.root.cleanup(); self.home.cleanup()
-
-    def test_issue_reissue_and_consume_replay_conflict(self) -> None:
-        first = self.store.issue_clarification_binding(task_id=self.task_id, prompt="Choose theme", prompt_language="en")
-        again = self.store.issue_clarification_binding(task_id=self.task_id, prompt="Choose theme", prompt_language="en")
-        self.assertEqual(first["binding"]["clarification_binding"], again["binding"]["clarification_binding"])
-        token = first["binding"]["clarification_binding"]
-        result, _ = self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="clarification", prompt="Choose theme", response_original="warm", user_language="en", clarification_binding=token, idempotency_key="decision-1")
-        replay, replayed = self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="clarification", prompt="Choose theme", response_original="warm", user_language="en", clarification_binding=token, idempotency_key="decision-2")
-        self.assertTrue(replayed); self.assertEqual(result["decision"]["decision_id"], replay["decision"]["decision_id"])
-        with self.assertRaisesRegex(V12StoreError, "already consumed"):
-            self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="clarification", prompt="Choose theme", response_original="dark", user_language="en", clarification_binding=token, idempotency_key="decision-3")
-
-    def test_stale_revision_and_cross_project_fail_closed(self) -> None:
-        binding = self.store.issue_clarification_binding(task_id=self.task_id, prompt="Choose theme", prompt_language="en")["binding"]["clarification_binding"]
-        self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="steer", prompt="steer", response_original="update", user_language="en", steering_delta={"add": [{"category": "outcome", "text": "new", "acceptance": [], "constraints": [], "verification": []}]}, idempotency_key="steer")
-        with self.assertRaises(V12StoreError) as ctx:
-            self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="clarification", prompt="Choose theme", response_original="warm", user_language="en", clarification_binding=binding, idempotency_key="stale")
-        self.assertIn(ctx.exception.code, {"clarification_binding_mismatch", "clarification_binding_stale"})
-
-    def test_concurrent_consume_has_one_decision(self) -> None:
-        token = self.store.issue_clarification_binding(task_id=self.task_id, prompt="Concurrent?", prompt_language="en")["binding"]["clarification_binding"]
-        results: list[object] = []
-        def consume(index: int) -> None:
-            try:
-                results.append(self.store.record_user_decision(task_id=self.task_id, subject_type="task", subject_id=self.task_id, decision_type="clarification", prompt="Concurrent?", response_original="yes", user_language="en", clarification_binding=token, idempotency_key=f"response-{index}"))
-            except Exception as exc: results.append(exc)
-        threads = [threading.Thread(target=consume, args=(index,)) for index in range(2)]
-        for thread in threads: thread.start()
-        for thread in threads: thread.join()
-        self.assertEqual(len(results), 2)
-        self.assertTrue(all(not isinstance(item, Exception) for item in results))
-        self.assertEqual(len({item[0]["decision"]["decision_id"] for item in results}), 1)
+def question(store, task):
+    return DecisionAggregate(store).open_clarification(task_id=task,
+        prompt="Confirm the observed fact?", prompt_language="en",
+        subject_type="task", subject_id=task)["binding"]["clarification_binding"]
 
 
-if __name__ == "__main__":
-    unittest.main()
+def answer(store, task, binding, response="Confirmed."):
+    return DecisionAggregate(store).record_clarification(task_id=task,
+        binding_ref=binding, response_original=response, user_language="en")
+
+
+def steer(store, task, delta):
+    return DecisionAggregate(store).record_direct_steering(task_id=task,
+        response_original="Change the product contract.", user_language="en",
+        steering_delta=delta, expected_revision=1)
+
+
+def test_issue_consume_replay_and_conflict(node_case):
+    store, args = node_case
+    task = args["task_id"]
+    binding = question(store, task)
+    assert question(store, task) == binding
+    first = answer(store, task, binding)
+    repeated = answer(store, task, binding)
+    assert not first["replayed"] and repeated["replayed"]
+    assert first["decision"] == repeated["decision"]
+    with pytest.raises(V12StoreError) as failure:
+        answer(store, task, binding, "A different answer.")
+    assert failure.value.code == "command_conflict"
+
+
+def test_revision_invalidates_unanswered_binding(node_case):
+    store, args = node_case
+    task = args["task_id"]
+    binding = question(store, task)
+    steer(store, task, {"add": [{"category": "outcome", "text": "New feature",
+        "acceptance": [], "constraints": [], "verification": []}]})
+    with pytest.raises(V12StoreError) as failure:
+        answer(store, task, binding)
+    assert failure.value.code == "clarification_binding_stale"
+    assert store._read(lambda c: store._pending_user_decisions(c, task)) == []
+
+
+def test_complete_delta_rejections_are_atomic(node_case):
+    store, args = node_case
+    task = args["task_id"]
+    item = store._read(lambda c: store._effective_contract(c, task))["items"][0]
+    complete = {"text": "Product", "acceptance": [], "constraints": [], "verification": []}
+    deltas = [
+        {"add": [], "retire_item_refs": [item["item_ref"]]},
+        {"add": [{"category": "outcome", **complete}]},
+        {"add": [{"category": "outcome_replacement", "outcome_ref": item["item_ref"], **complete}]},
+    ]
+    before = store._read(lambda c: list(c.iterdump()))
+    for delta in deltas:
+        with pytest.raises(V12StoreError) as failure:
+            steer(store, task, delta)
+        assert failure.value.code == "invalid_argument"
+        assert store._read(lambda c: list(c.iterdump())) == before
+
+
+def test_concurrent_consumption_commits_one_decision(node_case):
+    store, args = node_case
+    task = args["task_id"]
+    binding = question(store, task)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: answer(store, task, binding), range(2)))
+    assert sorted(result["replayed"] for result in results) == [False, True]
+    assert results[0]["decision"] == results[1]["decision"]
+    assert store._read(lambda c: c.execute("SELECT COUNT(*) FROM user_decisions").fetchone()[0]) == 1
+
+
+@pytest.mark.parametrize("category", ["acceptance", "verification", "constraint", "requirement"])
+def test_obsolete_partial_field_steering_is_rejected(node_case, category):
+    store, args = node_case
+    before = store._read(lambda c: list(c.iterdump()))
+    with pytest.raises(V12StoreError) as failure:
+        steer(store, args["task_id"], {"add": [{"category": category,
+            "text": "Incomplete replacement", "outcome_ref": "o_0123456789ab"}]})
+    assert failure.value.code == "invalid_argument"
+    assert store._read(lambda c: list(c.iterdump())) == before
+
+
+def test_old_service_entry_points_are_absent():
+    from cortex_runtime import v12_service
+    from cortex_runtime.v12_store import V12Store
+    assert not hasattr(v12_service, "record_user_decision")
+    assert not hasattr(v12_service, "set_governance_mode")
+    assert not hasattr(V12Store, "set_governance_mode")

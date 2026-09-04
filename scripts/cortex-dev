@@ -314,6 +314,9 @@ if [[ "${prepare_only}" == "1" ]]; then
   exit 0
 fi
 cd -- "${caller_workdir}"
+export CORTEX_HOST_CAPABILITY_SNAPSHOT
+CORTEX_HOST_CAPABILITY_SNAPSHOT="$(python3 -B "${script_dir}/cortex_host_qualification.py" --owner-home "${original_home}" --host cli)"
+printf 'Cortex passive host snapshot=%s\n' "${CORTEX_HOST_CAPABILITY_SNAPSHOT}"
 # Bind the upcoming Codex exec to the live-dev launch receipt.  exec preserves
 # this PID, allowing the trusted SessionStart observer to correlate one root
 # session without global session-file or timestamp selection.

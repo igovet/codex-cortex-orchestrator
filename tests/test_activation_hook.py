@@ -7,10 +7,20 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "plugins/cortex/hooks/cortex_activation.py"
+
+
+def test_retired_delegation_operation_is_not_a_dispatch_boundary():
+    spec = importlib.util.spec_from_file_location("cortex_activation_contract", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._is_assignment_open("mcp__cortex__open_assignment")
+    assert not module._is_assignment_open("mcp__cortex__create_delegation")
+    assert not hasattr(module, "_capture_live_prompt_binding")
 
 
 def invoke(tmp_path: Path, event: dict) -> tuple[int, dict | None]:
@@ -19,6 +29,7 @@ def invoke(tmp_path: Path, event: dict) -> tuple[int, dict | None]:
         thread_id = f"{seed[:8]}-{seed[8:12]}-4{seed[13:16]}-8{seed[17:20]}-{seed[20:32]}"
         event = dict(event, transcript_path=f"/tmp/rollout-test-{thread_id}.jsonl")
     environment = os.environ.copy()
+    environment["CODEX_HOME"] = str(tmp_path / "codex-home")
     environment["PLUGIN_DATA"] = str(tmp_path / "plugin-data")
     environment["PLUGIN_ROOT"] = str(ROOT / "plugins/cortex")
     completed = subprocess.run([sys.executable, "-B", str(HOOK)], input=json.dumps(event), text=True, capture_output=True, env=environment, check=False)
@@ -224,7 +235,7 @@ def test_compacted_coordinator_must_refresh_state_before_mutation(tmp_path: Path
         "turn_id": "turn-after-compact", "tool_name": "mcp__cortex__read_state",
         "tool_input": state_input,
         "tool_response": {"isError": False, "structuredContent": {
-            "task_ref": task_ref, "data": {},
+            "task_ref": task_ref, "data": {"unfinished_assignment_count": 0},
         }},
     })
     code, allowed = invoke(tmp_path, {
@@ -234,6 +245,37 @@ def test_compacted_coordinator_must_refresh_state_before_mutation(tmp_path: Path
         "tool_input": {"task_ref": task_ref},
     })
     assert code == 0 and allowed is None
+
+
+@pytest.mark.parametrize("source", ["compact", "resume"])
+def test_recovery_requires_all_continuation_pages_for_the_same_task(tmp_path: Path, source: str) -> None:
+    task_ref = "t_0123456789ab"
+    common = {"session_id": "recovery", "turn_id": "turn"}
+    invoke(tmp_path, {**common, "hook_event_name": "UserPromptSubmit", "prompt": "$cortex:orchestrator"})
+    invoke(tmp_path, {**common, "hook_event_name": "PostToolUse", "tool_name": "mcp__cortex__open_task",
+        "tool_response": {"isError": False, "structuredContent": {"task_ref": task_ref, "replayed": False}}})
+    invoke(tmp_path, {**common, "hook_event_name": "SessionStart", "source": source})
+    invoke(tmp_path, {**common, "hook_event_name": "PostToolUse", "tool_name": "mcp__cortex__read_state",
+        "tool_input": {"task_ref": task_ref}, "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": task_ref, "data": {"unfinished_assignment_count": 2},
+        }}})
+    for operation in ("read_scope", "read_timeline", "record_steering", "open_assignment", "close_task"):
+        _, denied = invoke(tmp_path, {**common, "hook_event_name": "PreToolUse",
+            "tool_name": f"mcp__cortex__{operation}", "tool_input": {"task_ref": task_ref}})
+        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    for response_ref, has_more in ((task_ref, True), ("t_abcdef012345", False)):
+        invoke(tmp_path, {**common, "hook_event_name": "PostToolUse", "tool_name": "mcp__cortex__read_continuations",
+            "tool_response": {"isError": False, "structuredContent": {
+                "task_ref": response_ref, "has_more": has_more, "data": {"continuations": []},
+            }}})
+        assert json.loads(state_file(tmp_path, "recovery").read_text())["continuations_read_required"] is True
+    invoke(tmp_path, {**common, "hook_event_name": "PostToolUse", "tool_name": "mcp__cortex__read_continuations",
+        "tool_response": {"isError": False, "structuredContent": {
+            "task_ref": task_ref, "has_more": False, "data": {"continuations": []},
+        }}})
+    _, allowed = invoke(tmp_path, {**common, "hook_event_name": "PreToolUse", "tool_name": "mcp__cortex__read_scope",
+        "tool_input": {"task_ref": task_ref, "responsibility": "delivery"}})
+    assert allowed is None
 
 
 def test_postcompact_is_observation_only_and_does_not_emit_unsupported_context(tmp_path: Path) -> None:
@@ -250,13 +292,13 @@ def test_postcompact_is_observation_only_and_does_not_emit_unsupported_context(t
     assert result is None
 
 
-def test_noncompact_session_start_does_not_repeat_skills(tmp_path: Path) -> None:
+def test_nonrecovery_session_start_does_not_repeat_skills(tmp_path: Path) -> None:
     session, turn = "root", "turn"
     invoke(tmp_path, {
         "hook_event_name": "UserPromptSubmit", "session_id": session,
         "turn_id": turn, "prompt": "$cortex:orchestrator",
     })
-    for source in ("startup", "resume", "clear"):
+    for source in ("startup", "clear"):
         code, result = invoke(tmp_path, {
             "hook_event_name": "SessionStart", "source": source,
             "session_id": session, "turn_id": turn,
@@ -396,6 +438,71 @@ def test_parallel_workers_without_agent_id_keep_thread_scoped_publication_leases
             "hook_event_name": "PreToolUse", "session_id": session,
             "turn_id": worker_turn,
             "transcript_path": f"/tmp/rollout-{threads[index]}.jsonl",
+            "tool_name": "mcp__cortex__publish_result",
+            "tool_input": {"task_ref": ref},
+        })
+        assert code == 0 and allowed is None
+
+
+def test_parallel_workers_bind_by_first_assignment_read_when_lifecycle_order_differs(tmp_path: Path) -> None:
+    """Concurrent SubagentStart order must not swap child assignment leases."""
+    session, root_turn = "root", "turn"
+    worker_turn = "shared-worker-turn"
+    refs = ["t_0123456789ab_" + f"{index + 1:032x}" for index in range(2)]
+    threads = [
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+    ]
+    invoke(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": session, "turn_id": root_turn, "prompt": "$cortex:orchestrator"})
+    for index, ref in enumerate(refs):
+        native = native_dispatch(ref, f"worker_{index}")
+        invoke(tmp_path, {
+            "hook_event_name": "PostToolUse", "session_id": session,
+            "turn_id": root_turn, "tool_name": "mcp__cortex__open_assignment",
+            "tool_input": {"task_ref": "t_0123456789ab"},
+            "tool_response": {"isError": False, "structuredContent": {"native_dispatch": native, "replayed": False}},
+        })
+        code, spawned = invoke(tmp_path, {
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": root_turn, "tool_use_id": f"spawn-{index}",
+            "tool_name": "collaboration.spawn_agent", "tool_input": native,
+        })
+        assert code == 0 and spawned["hookSpecificOutput"]["additionalContext"]
+
+    # Lifecycle notifications intentionally arrive in reverse order.  Each
+    # child then presents its own task_ref; lazy binding must select that
+    # exact receipt rather than the first pending queue entry.
+    for index in (1, 0):
+        transcript = f"/tmp/rollout-{threads[index]}.jsonl"
+        invoke(tmp_path, {
+            "hook_event_name": "SubagentStart", "session_id": session,
+            "turn_id": worker_turn, "agent_id": f"agent-{index}",
+            "transcript_path": transcript,
+        })
+        read_input = {"task_ref": refs[index]}
+        code, allowed = invoke(tmp_path, {
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": worker_turn, "agent_id": f"agent-{index}",
+            # Real follow-up tool hooks do not reliably repeat the transcript
+            # path exposed by SubagentStart.
+            "tool_use_id": f"read-{index}",
+            "tool_name": "mcp__cortex__read_task", "tool_input": read_input,
+        })
+        assert code == 0 and allowed is None
+        invoke(tmp_path, {
+            "hook_event_name": "PostToolUse", "session_id": session,
+            "turn_id": worker_turn, "agent_id": f"agent-{index}",
+            "tool_name": "mcp__cortex__read_task",
+            "tool_input": read_input,
+            "tool_response": {"isError": False, "structuredContent": {"task_ref": refs[index], "data": {}, "has_more": False}},
+        })
+
+    # Each child retains its exact lease for publication even though the
+    # follow-up hook again omits transcript_path and siblings share a turn.
+    for index, ref in enumerate(refs):
+        code, allowed = invoke(tmp_path, {
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "turn_id": worker_turn, "agent_id": f"agent-{index}",
             "tool_name": "mcp__cortex__publish_result",
             "tool_input": {"task_ref": ref},
         })

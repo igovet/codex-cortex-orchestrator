@@ -7,8 +7,6 @@ output location.
 """
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
 import os
@@ -20,8 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_runtime.v12_contract import PROJECTION_RENDERER_VERSION, task_ref
-from cortex_runtime.markdown_document import legacy_lines, plain_text
-from cortex_runtime.report_presenters import merge_report_payloads, render_report
+from cortex_runtime.report_presenters import render_report
 
 
 _MAX_RENDER_BYTES = 10 * 1024 * 1024
@@ -49,54 +46,6 @@ def _compact_view_link(store: Any, relative: str, body: bytes, digest: str) -> s
     if observed != digest:
         raise OSError("compact projection readback failed")
     return _markdown_link(relative, str(target))
-
-
-def _markdown_text(value: object) -> str:
-    """Compatibility wrapper for normalized plain text.
-
-    Older callers imported this private helper while the renderer still
-    emitted hard-breaks for every newline.  Keep the name stable, but delegate
-    to the typed presentation layer's plain-text normalization so a newline is
-    not silently turned into Markdown structure.
-    """
-    return plain_text(value)
-
-
-def _markdown_value(value: object, indent: str = "") -> list[str]:
-    """Compatibility wrapper for readable legacy content lines."""
-    # Keep the historic argument accepted without allowing callers to create
-    # an indented code block accidentally.  Dedicated typed lists own nested
-    # indentation; this fallback only emits ordinary list/text lines.
-    prefix = " " * min(len(indent), 3) if indent else ""
-    return [prefix + line for line in legacy_lines(value)]
-
-
-def _inert(value: object) -> str:
-    """Render arbitrary legacy content through the generic typed presenter."""
-    lines = _markdown_value(value)
-    return "\n".join(lines) + ("\n" if lines else "")
-
-
-def _text(value: object) -> str:
-    return _markdown_text(value or "")
-
-
-def _field_title(value: object) -> str:
-    """Compatibility label helper; it never creates a Markdown heading."""
-    key = _markdown_text(value).strip()
-    return key.replace("_", " ").replace("-", " ").title() or "Detail"
-
-
-def _report_content(value: object, heading_level: int = 3, *, ordered: bool = False, compact: bool = False, omit_keys: set[str] | None = None) -> list[str]:
-    """Legacy compatibility helper with readable typed output.
-
-    ``heading_level``/``compact``/``omit_keys`` remain accepted for old test
-    and plugin callers, but arbitrary JSON depth no longer controls Markdown
-    headings.  The dedicated presenters are the sole structured renderer.
-    """
-    if isinstance(value, Mapping) and omit_keys:
-        value = {key: item for key, item in value.items() if str(key).lower() not in omit_keys}
-    return _markdown_value(value)
 
 
 def _regular(path: Path, *, required: bool = False) -> bool:
@@ -219,60 +168,18 @@ def _projection_task_ref(store: Any, task_id: str) -> str:
     return store._read(read)
 
 
-def _rename_directory_noreplace(source: Path, destination: Path) -> None:
-    """Atomically move a legacy directory without ever replacing a destination."""
-    if os.name != "posix":
-        raise OSError("atomic no-replace directory migration is unavailable")
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError as exc:
-        raise OSError("atomic no-replace directory migration is unavailable") from exc
-    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-    renameat2.restype = ctypes.c_int
-    if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
-        error = ctypes.get_errno()
-        if error == errno.EEXIST:
-            raise FileExistsError("compact projection directory already exists")
-        raise OSError(error, "atomic no-replace directory migration failed", str(source), str(destination))
-
-
-def _migrate_legacy_task_directory(store: Any, task_id: str, task_ref_value: str) -> Path:
-    """Move only the exact legacy task directory to its compact V12 locator.
-
-    The projection tables deliberately retain canonical task IDs plus page-relative
-    paths, so a successful same-shard rename preserves all digest/sequence metadata.
-    A pre-existing compact directory is a conflict, never a merge or cleanup target.
-    """
-    tasks_root = store.root / "tasks"
-    _directory(tasks_root, root=store.root)
-    legacy = tasks_root / task_id
-    compact = tasks_root / task_ref_value
-    try:
-        legacy_info = os.lstat(legacy)
-    except FileNotFoundError:
-        legacy_info = None
-    if legacy_info is None:
-        if compact.exists():
-            _directory(compact, root=store.root)
-        return compact
-    if stat.S_ISLNK(legacy_info.st_mode) or not stat.S_ISDIR(legacy_info.st_mode):
-        raise OSError("legacy projection directory is unsafe")
-    try:
-        compact_info = os.lstat(compact)
-    except FileNotFoundError:
-        compact_info = None
-    if compact_info is not None:
-        raise FileExistsError("compact projection directory already exists")
-    _rename_directory_noreplace(legacy, compact)
-    _directory(compact, root=store.root)
-    return compact
+def _task_directory(store: Any, task_ref_value: str) -> Path:
+    """Use only the current compact task locator, without migrating old paths."""
+    directory = store.root / "tasks" / task_ref_value
+    _directory(directory, root=store.root)
+    return directory
 
 
 def _view_metadata(store: Any, task_id: str, relative: str, *, require_fresh: bool = True) -> dict[str, Any]:
     try:
         task_ref_value = _projection_task_ref(store, task_id)
         fragment = _task_relative(task_ref_value, relative).relative_to(Path("tasks") / task_ref_value)
-        path = _migrate_legacy_task_directory(store, task_id, task_ref_value) / fragment
+        path = _task_directory(store, task_ref_value) / fragment
     except FileExistsError:
         return {"status": "conflict", "path": None}
     except OSError:
@@ -324,34 +231,16 @@ def human_view(store: Any, task_id: str, relative: str, *, require_fresh: bool =
     return _view_metadata(store, task_id, relative, require_fresh=require_fresh)
 
 
-def _task_data(store: Any, task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:
-    def read(connection: Any) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:
+def _task_data(store: Any, task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+    """Read only canonical inputs used by human-report rendering."""
+    def read(connection: Any) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
         task = store._task(connection, task_id)
-        delegations = [store._delegation(connection, row[0], task_id=task_id) for row in connection.execute("SELECT delegation_id FROM delegations WHERE task_id=? ORDER BY created_sequence", (task_id,)).fetchall()]
-        reports = [store._report(connection, row[0], task_id=task_id) for row in connection.execute("SELECT report_id FROM reports WHERE task_id=? ORDER BY created_sequence", (task_id,)).fetchall()]
-        decisions = [store._decision(connection, row[0], task_id=task_id) for row in connection.execute("SELECT decision_id FROM user_decisions WHERE task_id=? ORDER BY created_sequence", (task_id,)).fetchall()]
-        timeline = []
-        for row in connection.execute("SELECT sequence,occurred_at,event_type,entity_type,entity_id,payload_json FROM timeline WHERE task_id=? ORDER BY sequence", (task_id,)).fetchall():
-            timeline.append({"sequence": int(row[0]), "occurred_at": str(row[1]), "event_type": str(row[2]), "entity_type": str(row[3]), "entity_id": str(row[4]), "payload": json.loads(str(row[5]))})
-        initiatives = [store._initiative(connection, initiative_id) for initiative_id in store._task_initiative_ids(connection, task_id)]
-        initiative_ids = [str(item["initiative_id"]) for item in initiatives]
-        closures = []
-        closure_rows = connection.execute(
-            "SELECT closure_id FROM governance_closures WHERE project_hash=? AND "
-            "((subject_type='task' AND subject_id=?) OR "
-            "(subject_type='initiative' AND subject_id IN (" + ",".join("?" for _ in initiative_ids) + "))) "
-            "ORDER BY created_sequence,closure_id",
-            [store.project_hash, task_id, *initiative_ids],
-        ).fetchall() if initiative_ids else connection.execute(
-            "SELECT closure_id FROM governance_closures WHERE project_hash=? AND subject_type='task' AND subject_id=? ORDER BY created_sequence,closure_id",
-            (store.project_hash, task_id),
-        ).fetchall()
-        closures = [store._closure(connection, str(row[0])) for row in closure_rows]
-        receipts = []
-        for row in connection.execute("SELECT receipt_id,consumer_delegation_id,reader_kind,report_id,observed_content_digest,sections_json,input_cursor,output_cursor,chunk_indexes_json,returned_content_bytes,has_more,created_at,created_sequence FROM report_consumption_receipts WHERE task_id=? ORDER BY created_sequence,receipt_id", (task_id,)).fetchall():
-            receipts.append({"receipt_id": int(row[0]), "consumer_delegation_id": row[1], "reader_kind": str(row[2]), "report_id": str(row[3]), "observed_content_digest": str(row[4]), "sections": json.loads(str(row[5])), "input_cursor": row[6], "output_cursor": row[7], "chunk_indexes": json.loads(str(row[8])), "returned_content_bytes": int(row[9]), "has_more": bool(row[10]), "created_at": str(row[11]), "created_sequence": int(row[12])})
-        sequence = int(timeline[-1]["sequence"]) if timeline else int(task["created_sequence"])
-        return task, delegations, reports, decisions, timeline, initiatives, closures, receipts, sequence
+        reports = [store._report(connection, row[0], task_id=task_id) for row in connection.execute(
+            "SELECT report_id FROM reports WHERE task_id=? ORDER BY created_sequence", (task_id,)).fetchall()]
+        sequence = int(connection.execute(
+            "SELECT COALESCE(MAX(sequence), ?) FROM timeline WHERE task_id=?",
+            (task["created_sequence"], task_id)).fetchone()[0])
+        return task, reports, sequence
     return store._read(read)
 
 
@@ -359,10 +248,9 @@ def _render_report(store: Any, report: Mapping[str, Any]) -> bytes:
     def read(connection: Any) -> list[dict[str, Any]]:
         return store._report_chunks(connection, str(report["report_id"]))
     chunks = store._read(read)
-    # Chunk labels are storage metadata, not presentation sections.  Merge all
-    # immutable chunks into one semantic payload before selecting a presenter so
-    # equivalent single- and multi-chunk reports produce the same document.
-    payload = merge_report_payloads([chunk.get("content") for chunk in chunks])
+    if len(chunks) != 1 or chunks[0].get("section") != "body":
+        raise ValueError("current terminal report requires one immutable body")
+    payload = chunks[0]["content"]
     body = render_report(
         report_type=report.get("report_type"),
         content=payload,
@@ -372,7 +260,7 @@ def _render_report(store: Any, report: Mapping[str, Any]) -> bytes:
 
 
 def _render_files(store: Any, task_id: str) -> tuple[dict[str, bytes], int, str]:
-    task, delegations, reports, decisions, timeline, initiatives, closures, receipts, sequence = _task_data(store, task_id)
+    task, reports, sequence = _task_data(store, task_id)
     files: dict[str, bytes] = {}
     # The SQLite ledger is canonical.  Materialize only documents that a
     # coordinator can actually publish to the user: immutable reports and
@@ -406,7 +294,7 @@ def materialize_task(store: Any, task_id: str) -> dict[str, Any]:
         total_bytes = sum(len(body) for body in files.values())
         if total_bytes > _MAX_RENDER_TOTAL_BYTES or any(len(body) > _MAX_RENDER_BYTES for body in files.values()):
             raise OSError("projection output exceeds the aggregate limit")
-        task_directory = _migrate_legacy_task_directory(store, task_id, task_ref_value)
+        task_directory = _task_directory(store, task_ref_value)
         ordered = sorted(files)
         outcomes: dict[str, str] = {}
         for relative in ordered:

@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.15.6] - 2026-09-03
+
+### Changed
+
+- Worker guidance now resolves ordinary execution blockers autonomously: no
+  execution-time user questions, approval loops, or private lineage fields may
+  be emitted in a publication. Plan review remains optional for complete
+  low-risk work and is required only for high-risk/material plans or an
+  explicit user request.
+- Added regression coverage for all 22 packaged profiles, private-publication
+  schema boundaries, and multiple in-flight live-message turns.
+- `close_task` now requires the current user-facing closure review and an
+  explicit `close` choice; `revise`, missing, and stale reviews remain open.
+- Added a deterministic full-facade matrix covering every public operation and
+  all 22 packaged profiles with model/effort assertions.
+
+### Fixed
+
+- Removed stale per-profile escalation text that routed routine blockers back
+  to the user and could cause unsupported publication metadata such as
+  `parent_assignment_ref`.
+- Clarified worker publication contracts so assignment lineage and predecessor
+  references remain server-owned and cannot be supplied by a worker.
+
+## [1.15.5] - 2026-09-03
+
+### Changed
+
+- Made Luna the default route for bounded discovery, implementation, QA, and
+  deterministic rechecks; Terra is reserved for genuinely complex planning or
+  architecture, while Sol is limited to rare very-high-risk security work.
+  Every route supports effort through `max`; `ultra` is never accepted.
+- Added the live qualification fixture for all 22 packaged agent profiles and
+  all 20 public operations; the real CLI/Desktop matrix remains an operator-run
+  gate and is not claimed as completed by this source release.
+
+### Fixed
+
+- Approved plans now authorize bounded in-contract rework automatically. A
+  partial, blocked, stale, unverified, or contradictory delivery result is
+  immediately exposed as `rework_assignable` and linked to its predecessor;
+  no repeated steering question or plan approval is required.
+- Stale worker publications now report the authoritative assignment lifecycle
+  state before resolving current outcome names, preventing misleading
+  `outcome_item_not_found` errors after a contract revision.
+- Synchronized release metadata and documentation with the current model
+  policy and cache-stamped package payload.
+
 ## [1.15.3] - 2026-09-03
 
 ### Changed

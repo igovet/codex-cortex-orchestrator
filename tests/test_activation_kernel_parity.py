@@ -13,22 +13,23 @@ def test_activation_kernels_define_task_ref_only_llm_owned_orchestration() -> No
     assert "never place task opening inside programmatic tool calling" in orchestrator
     assert "invoke every cortex operation as its own direct tool call" in control
     assert "this restriction does not apply to non-cortex tools" in control
-    assert "stores only `task_ref`" in orchestrator
+    assert "retain the server-issued task reference" in orchestrator
     assert "dynamic dag" in combined
     assert "never schedules" in combined
-    assert "no workflow or governance admission" in combined
+    assert "identity, revision, artifact generation, mutation boundaries" in combined
+    assert "immutable consumed node scope and declared publication kind" in combined
     assert "assignment view" in combined
-    assert "flat, closed, and operation-specific" in orchestrator
+    assert "use only the terminal operation declared by the consumed assignment" in orchestrator
     assert "before the first assignment" in orchestrator
     assert "advisory governance assessment" in orchestrator
     assert "authentication, authorization, security, privacy" in orchestrator
-    assert "use governance depth to choose proportional discovery" in orchestrator
-    assert "language-independent review boundary" in orchestrator
-    assert "planner cannot self-attest or downgrade" in orchestrator
-    assert "light/full work, incomplete evidence" in orchestrator
-    assert "continue authoritatively derived informational plans immediately" in orchestrator
-    assert "assessment must exist before the first assignment" in orchestrator
-    assert "record that response before creating plan-dependent delivery assignments" in orchestrator
+    assert "use governance depth for proportional discovery" in orchestrator
+    assert "materially high-risk work is classified explicitly as full" in orchestrator
+    assert "planner cannot self-attest a downgrade" in control
+    assert "minimal and ordinary light plans" in orchestrator
+    assert "continue informationally after their required checks" in orchestrator
+    assert "before the first assignment" in orchestrator
+    assert "record it before creating plan-dependent delivery assignments" in orchestrator
     assert "never infer approval from the original implementation request" in orchestrator
     assert "exact numeric limits" in orchestrator
     assert '"from the attachment" never substitutes' in orchestrator
@@ -36,8 +37,8 @@ def test_activation_kernels_define_task_ref_only_llm_owned_orchestration() -> No
     assert "exact value and meaning" in orchestrator
     assert "silently omit it" in orchestrator
     assert "complete effective contract" in orchestrator
-    assert "never interrupt or cancel a child merely because bounded waits repeated" in orchestrator
-    assert "never open steering merely to re-authorize unfinished work" in orchestrator
+    assert "never interrupt a child because progress is slow or a wait timed out" in orchestrator
+    assert "never open steering to re-authorize unfinished work" in " ".join(orchestrator.split())
     assert "not by itself a scope change" in orchestrator
     planner = (ROOT / "plugins/cortex/agents/planner.toml").read_text(encoding="utf-8").lower()
     assert "requirement-coverage reconciliation" in planner

@@ -3,11 +3,13 @@
 
 The hook is deliberately independent of the Cortex runtime. It keeps bounded
 route state plus owner-only routing categories and correlation digests in
-``PLUGIN_DATA``; it never persists prompt text, task or worker locators, native
+``PLUGIN_DATA``; route state never persists prompt text, task or worker locators, native
 message plaintext, assignment bodies, reports, credentials, or raw tool
 output. Hooks are defense-in-depth guardrails: the model still chooses Cortex
 and makes semantic calls from the live advertised schemas, while the MCP
 server independently enforces monotonic connection roles and ledger authority.
+Selected root UserPromptSubmit events separately enter the private source inbox.
+That exact-source storage is not diagnostic state or human-authorship proof.
 """
 from __future__ import annotations
 
@@ -31,11 +33,12 @@ sys.dont_write_bytecode = True
 
 
 SELECTION = re.compile(r"(?<![A-Za-z0-9_])(?:\$cortex:orchestrator|cortex:orchestrator)(?![A-Za-z0-9_])")
-DESELECTION = re.compile(r"^\s*(?:normal|leave[- ]cortex)\b", re.IGNORECASE)
+DESELECTION = re.compile(r"^\s*(?:\$?cortex:orchestrator\s+)?(?:normal|leave[- ]cortex)\b", re.IGNORECASE)
+HELP_SELECTION = re.compile(r"^\s*\$?cortex:orchestrator\s+help(?:\s|$)", re.IGNORECASE)
 OPEN_TASK_SUFFIX = "__open_task"
 DEFAULT_STATE = {"selected": False, "anchored": False}
 DIAGNOSTIC_FIELDS = ("session_id", "turn_id", "agent_id", "parent_session_id", "tool_name", "tool_input", "tool_response")
-ASSIGNMENT_OPEN_TOOLS = {"mcp__cortex__open_assignment", "mcp__cortex__create_delegation"}
+ASSIGNMENT_OPEN_TOOLS = {"mcp__cortex__open_assignment"}
 NATIVE_SPAWN_TOOLS = {"agent", "collaboration.spawn_agent", "collaborationspawn_agent", "spawn_agent"}
 DISPATCH_STATE_PREFIX = "dispatch-"
 COMPLETED_DISPATCH_HISTORY_LIMIT = 64
@@ -66,7 +69,7 @@ def _event() -> dict[str, Any]:
         return {}
     event = value if isinstance(value, dict) else {}
     try:
-        plugin_root = os.environ.get("PLUGIN_ROOT")
+        plugin_root = os.environ.get("PLUGIN_ROOT") or str(Path(__file__).resolve().parent.parent)
         if isinstance(plugin_root, str) and plugin_root:
             scripts = str(Path(plugin_root) / "scripts")
             if scripts not in sys.path: sys.path.insert(0, scripts)
@@ -75,53 +78,6 @@ def _event() -> dict[str, Any]:
     except Exception:
         pass
     return event
-
-
-def _capture_live_prompt_binding(event: dict[str, Any]) -> bool:
-    """Bind the live coordinator before Cortex semantic work begins."""
-    if event.get("hook_event_name") != "UserPromptSubmit":
-        return True
-    session_id, cwd = event.get("session_id"), event.get("cwd")
-    if not isinstance(session_id, str) or not session_id or not isinstance(cwd, str) or not cwd:
-        return True
-    try:
-        hook = Path(__file__).resolve(); candidate = hook.parent.parent; code_home = candidate.parents[4]
-        if not (hook.parent.name == "hooks" and candidate.parent.name == "cortex" and candidate.parent.parent.name == "cortex" and candidate.parent.parent.parent.name == "cache" and code_home.name == ".codex"):
-            return True
-        receipt = code_home / ".cortex-live-launch.json"
-        if not receipt.is_file() or receipt.is_symlink() or (receipt.stat().st_mode & 0o777) != 0o600:
-            return True
-        launch = json.loads(receipt.read_text(encoding="utf-8"))
-        if not launch.get("active") or launch.get("cwd") != cwd or launch.get("profile_fingerprint") != hashlib.sha256(str(code_home).encode()).hexdigest():
-            return False
-        pid = int(launch.get("pid", 0)); current = os.getpid(); seen = set()
-        for _ in range(16):
-            if current in seen or current <= 1: return False
-            seen.add(current)
-            if current == pid: break
-            match = re.search(r"^PPid:\s+(\d+)$", Path(f"/proc/{current}/status").read_text(encoding="ascii"), re.MULTILINE)
-            if not match: return False
-            current = int(match.group(1))
-        else: return False
-        binding = code_home / ".cortex-live-binding.json"
-        if binding.is_file():
-            if not _safe_private_file(binding):
-                return False
-            existing = json.loads(binding.read_text(encoding="utf-8"))
-            valid = (
-                isinstance(existing, dict)
-                and existing.get("session_id") == session_id
-                and existing.get("cwd") == cwd
-                and existing.get("session_nonce") == launch.get("session_nonce")
-                and existing.get("isolated_codex_fingerprint") == launch.get("profile_fingerprint")
-            )
-            return valid
-        tmp = binding.with_suffix(".tmp")
-        tmp.write_text(_json({"session_id": session_id, "source": "cli", "cwd": cwd, "session_nonce": launch["session_nonce"], "workdir_fingerprint": hashlib.sha256(cwd.encode()).hexdigest(), "isolated_codex_fingerprint": launch["profile_fingerprint"]}))
-        os.chmod(tmp, 0o600); os.replace(tmp, binding); os.chmod(binding, 0o600)
-        return True
-    except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError):
-        return False
 
 
 def _diagnose(event: dict[str, Any]) -> None:
@@ -249,9 +205,32 @@ def _child_state_path(
         return None
 
 
+def _assignment_child_state_path(session_id: object, worker_task_ref: object) -> Path | None:
+    """Stable child lease alias derived from the worker assignment reference."""
+    if not isinstance(session_id, str) or not session_id or not isinstance(worker_task_ref, str) or not worker_task_ref:
+        return None
+    data_root = os.environ.get("PLUGIN_DATA")
+    if not isinstance(data_root, str) or not data_root:
+        return None
+    digest = _value_fingerprint("assignment:" + session_id + ":" + worker_task_ref)
+    if digest is None:
+        return None
+    try:
+        root = Path(data_root); root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return root / "activation" / f"child-assignment-{digest}.json"
+    except OSError:
+        return None
+
+
 def _child_state_paths(event: dict[str, Any]) -> list[Path]:
     """Return all usable child-state aliases, strongest identity first."""
+    supplied = event.get("tool_input")
+    assignment_path = _assignment_child_state_path(
+        event.get("session_id"),
+        supplied.get("task_ref") if isinstance(supplied, dict) else None,
+    )
     candidates = [
+        assignment_path,
         _child_state_path(
             event.get("turn_id"), event.get("session_id"),
             transcript_path=event.get("transcript_path"),
@@ -270,6 +249,30 @@ def _child_state_paths(event: dict[str, Any]) -> list[Path]:
 
 def _resolved_child_state(event: dict[str, Any]) -> tuple[Path | None, dict[str, Any]]:
     """Resolve an existing child lease without collapsing parallel workers."""
+    supplied = event.get("tool_input")
+    supplied_ref = supplied.get("task_ref") if isinstance(supplied, dict) else None
+    # Follow-up host events may omit both agent_id and transcript_path.  Use
+    # the task reference carried by worker Cortex calls to select the exact
+    # assignment-scoped alias before considering the shared turn fallback.
+    if isinstance(supplied_ref, str) and supplied_ref:
+        target = _value_fingerprint(supplied_ref)
+        data_root = os.environ.get("PLUGIN_DATA")
+        session_id = event.get("session_id")
+        if target and isinstance(data_root, str) and isinstance(session_id, str) and session_id:
+            try:
+                matches = []
+                for candidate in (Path(data_root) / "activation").glob("child-*.json"):
+                    state = _read_state(candidate)
+                    if state.get("child_mode") and state.get("worker_task_ref_digest") == target:
+                        matches.append((candidate, state))
+                if matches:
+                    # Lifecycle aliases can briefly diverge during compaction;
+                    # preserve the strictest state (recovery required) rather
+                    # than allowing a stale alias to bypass the refresh gate.
+                    matches.sort(key=lambda item: (item[1].get("recovery_read_required") is True), reverse=True)
+                    return matches[0]
+            except OSError:
+                pass
     for candidate in _child_state_paths(event):
         state = _read_state(candidate)
         if state.get("child_mode"):
@@ -281,6 +284,17 @@ def _write_child_state(event: dict[str, Any], state: dict[str, Any]) -> None:
     """Keep thread/agent/turn aliases coherent for the current child event."""
     for candidate in _child_state_paths(event):
         _write_state(candidate, state)
+    # A compaction/lifecycle event can omit task_ref, so include any existing
+    # assignment-scoped aliases for this already-bound child as well.
+    target = state.get("worker_task_ref_digest")
+    data_root = os.environ.get("PLUGIN_DATA")
+    if isinstance(target, str) and isinstance(data_root, str):
+        try:
+            for candidate in (Path(data_root) / "activation").glob("child-assignment-*.json"):
+                if _read_state(candidate).get("worker_task_ref_digest") == target:
+                    _write_state(candidate, state)
+        except OSError:
+            pass
 
 
 def _remove_child_state(event: dict[str, Any], *, turn_only: bool = False) -> None:
@@ -311,11 +325,17 @@ def _read_state(path: Path | None) -> dict[str, Any]:
         "anchored": value.get("anchored") is True,
         "bootstrap_in_progress": value.get("bootstrap_in_progress") is True,
         "recovery_read_required": value.get("recovery_read_required") is True,
+        "continuations_read_required": value.get("continuations_read_required") is True,
+        "continuations_task_ref_digest": value.get("continuations_task_ref_digest") if isinstance(value.get("continuations_task_ref_digest"), str) else None,
+        "native_task_digest": value.get("native_task_digest") if isinstance(value.get("native_task_digest"), str) and re.fullmatch(r"[0-9a-f]{64}", value["native_task_digest"]) else None,
+        "native_revision": value.get("native_revision") if type(value.get("native_revision")) is int and value["native_revision"] >= 1 else None,
+        "native_barrier_epoch": value.get("native_barrier_epoch") if type(value.get("native_barrier_epoch")) is int and value["native_barrier_epoch"] >= 0 else None,
         "turn_fingerprint": value.get("turn_fingerprint") if isinstance(value.get("turn_fingerprint"), str) else None,
         "child_mode": value.get("child_mode") is True,
         "parent_session_fingerprint": value.get("parent_session_fingerprint") if isinstance(value.get("parent_session_fingerprint"), str) else None,
         "child_auth": value.get("child_auth") if isinstance(value.get("child_auth"), str) else None,
         "agent_fingerprint": value.get("agent_fingerprint") if isinstance(value.get("agent_fingerprint"), str) else None,
+        "worker_thread_digest": value.get("worker_thread_digest") if isinstance(value.get("worker_thread_digest"), str) else None,
         "assignment_ref_digest": value.get("assignment_ref_digest") if isinstance(value.get("assignment_ref_digest"), str) else None,
         "worker_task_ref_digest": value.get("worker_task_ref_digest") if isinstance(value.get("worker_task_ref_digest"), str) else None,
     }
@@ -884,7 +904,9 @@ def _dispatch_records(*, session_id: object, turn_id: object, states: set[str]) 
     return matches
 
 
-def _pending_worker_dispatch(parent_session_id: str) -> tuple[Path, dict[str, Any]] | None:
+def _pending_worker_dispatch(
+    parent_session_id: str, worker_task_ref_digest: str | None = None,
+) -> tuple[Path, dict[str, Any]] | None:
     """Select the next unbound receipt from the authorized spawn-claim queue.
 
     The host does not currently echo `tool_use_id` on SubagentStart.  The
@@ -897,7 +919,18 @@ def _pending_worker_dispatch(parent_session_id: str) -> tuple[Path, dict[str, An
     if matches is None:
         return None
     eligible = [(path, value) for path, value in matches if value.get("spawn_claim_digest")]
+    if worker_task_ref_digest is not None:
+        eligible = [
+            (path, value) for path, value in eligible
+            if value.get("worker_task_ref_digest") == worker_task_ref_digest
+        ]
     if not eligible or any(not isinstance(value.get("claim_order"), int) for _path, value in eligible):
+        return None
+    # Without an assignment discriminator, never bind a child to an
+    # arbitrary receipt while several concurrent workers are starting.  The
+    # first read_task supplies the exact worker task reference and retries
+    # this lookup through the lazy path below.
+    if worker_task_ref_digest is None and len(eligible) != 1:
         return None
     eligible.sort(key=lambda item: item[1]["claim_order"])
     if len(eligible) > 1 and eligible[0][1]["claim_order"] == eligible[1][1]["claim_order"]:
@@ -1058,7 +1091,10 @@ def _claim_native_dispatch(event: dict[str, Any]) -> tuple[Path, dict[str, Any]]
         _release_dispatch_lock(lock)
 
 
-def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: dict[str, Any], parent_session_id: str) -> tuple[bool, str | None]:
+def _bind_worker_dispatch(
+    event: dict[str, Any], child_path: Path, child_state: dict[str, Any],
+    parent_session_id: str, worker_task_ref_digest: str | None = None,
+) -> tuple[bool, str | None]:
     """Bind one native agent to one digest-only host audience receipt.
 
     Semantic evidence consumption belongs to the worker model and the public
@@ -1072,7 +1108,7 @@ def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: 
     if fcntl is not None and parent_lock is None:
         return False, None
     try:
-        found = _pending_worker_dispatch(parent_session_id)
+        found = _pending_worker_dispatch(parent_session_id, worker_task_ref_digest)
         if found is None:
             return False, None
         path, _record = found
@@ -1117,7 +1153,13 @@ def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: 
                 or current.get("context_digest") != current.get("message_digest")
             ):
                 return False, None
-            worker_thread_digest = _worker_thread_digest(event)
+            # SubagentStart exposes the child transcript identity, but later
+            # worker tool hooks may omit transcript_path. Preserve that digest
+            # on the unbound child lease and reuse it for delayed binding.
+            worker_thread_digest = (
+                _worker_thread_digest(event)
+                or child_state.get("worker_thread_digest")
+            )
             if worker_thread_digest is None:
                 return False, None
             bound = {
@@ -1155,6 +1197,7 @@ def _bind_worker_dispatch(event: dict[str, Any], child_path: Path, child_state: 
                 "anchored": False,
                 "assignment_ref_digest": current["assignment_ref_digest"],
                 "worker_task_ref_digest": current.get("worker_task_ref_digest"),
+                "worker_thread_digest": worker_thread_digest,
             })
             _write_state(child_path, correlated)
             if _read_state(child_path).get("assignment_ref_digest") != current["assignment_ref_digest"]:
@@ -1302,11 +1345,13 @@ def _is_successful_state_read(event: dict[str, Any]) -> bool:
             or not isinstance(supplied, dict)):
         return False
     structured = response.get("structuredContent")
+    data = structured.get("data") if isinstance(structured, dict) else None
+    unfinished = data.get("unfinished_assignment_count") if isinstance(data, dict) else None
     return (isinstance(structured, dict)
             and structured.get("task_ref") == supplied.get("task_ref")
             and set(supplied) == {"task_ref"}
             and "has_more" not in structured
-            and isinstance(structured.get("data"), (dict, list)))
+            and type(unfinished) is int and unfinished >= 0)
 
 
 def _is_successful_publication(event: dict[str, Any]) -> bool:
@@ -1317,6 +1362,47 @@ def _is_successful_publication(event: dict[str, Any]) -> bool:
     return (isinstance(structured, dict)
             and structured.get("state") == "published"
             and isinstance(structured.get("task_ref"), str))
+
+
+def _observe_native_projection(event: dict[str, Any], state: dict[str, Any], path: Path | None) -> None:
+    """Observe native state without deciding readiness or interrupting agents."""
+    if event.get("hook_event_name") != "PostToolUse" or not state.get("selected") or state.get("child_mode"):
+        return
+    data_root, session = os.environ.get("PLUGIN_DATA"), event.get("session_id")
+    if not data_root or not isinstance(session, str) or not session:
+        return
+    try:
+        from cortex_runtime import native_observation as native
+        root, session_digest = Path(data_root), native.digest(session)
+        tool, response = event.get("tool_name"), event.get("tool_response")
+        if isinstance(response, dict) and response.get("isError") is False:
+            result = response.get("structuredContent")
+            ref = result.get("task_ref") if isinstance(result, dict) else None
+            if isinstance(ref, str) and re.fullmatch(r"t_[0-9a-f]{12}", ref):
+                task_digest = native.digest(ref)
+                if _is_open_task(tool):
+                    if native.bind_task(root, task_digest=task_digest, session_digest=session_digest):
+                        state.update(native_task_digest=task_digest, native_revision=1, native_barrier_epoch=0)
+                        _write_state(path, state)
+                    return
+                if tool in {"mcp__cortex__read_state", "mcp__cortex__record_steering"} and native.owns_task(root,
+                        task_digest=task_digest, session_digest=session_digest):
+                    projection = result.get("effect") if tool == "mcp__cortex__record_steering" else result.get("data")
+                    if isinstance(projection, dict):
+                        revision, epoch = projection.get("effective_revision"), projection.get("reconciliation_epoch")
+                        if type(revision) is int and revision >= 1 and type(epoch) is int and epoch >= 0:
+                            state.update(native_task_digest=task_digest, native_revision=revision, native_barrier_epoch=epoch)
+                            _write_state(path, state)
+                    return
+        if tool in {"collaboration.list_agents", "list_agents", "collaborationlist_agents"}:
+            task_digest, revision, epoch = (state.get(key) for key in ("native_task_digest", "native_revision", "native_barrier_epoch"))
+            if isinstance(task_digest, str):
+                native.record_projection(root, task_digest=task_digest, session_digest=session_digest,
+                    revision=revision, barrier_epoch=epoch, response=response, arguments=event.get("tool_input"))
+    except (OSError, ValueError, TypeError, RuntimeError):
+        # Missing or invalid observations grant no authority. The backend
+        # exposes that absence; this observer neither retries nor schedules.
+        return
 
 
 def main() -> int:
@@ -1337,8 +1423,9 @@ def main() -> int:
         state = dict(DEFAULT_STATE)
         path = _state_path(turn_id, session_id)
     child = state.get("child_mode") is True
+    _observe_native_projection(event, state, path)
 
-    if (event_name == "SessionStart" and event.get("source") == "compact"
+    if (event_name == "SessionStart" and event.get("source") in {"compact", "resume"}
             and state.get("selected")):
         if state.get("anchored"):
             recovery_state = dict(state)
@@ -1361,6 +1448,12 @@ def main() -> int:
         if recovered:
             state = dict(state)
             state["recovery_read_required"] = False
+            if not child:
+                structured = event.get("tool_response", {}).get("structuredContent", {})
+                data = structured.get("data", {})
+                unfinished = data.get("unfinished_assignment_count") if isinstance(data, dict) else None
+                state["continuations_read_required"] = isinstance(unfinished, int) and not isinstance(unfinished, bool) and unfinished > 0
+                state["continuations_task_ref_digest"] = _fingerprint(structured.get("task_ref"))
             _write_state(path, state)
             if child:
                 print(_json({"hookSpecificOutput": {
@@ -1368,6 +1461,18 @@ def main() -> int:
                     "additionalContext": WORKER_TERMINAL_CONTEXT,
                 }}))
                 return 0
+
+    if event_name == "PostToolUse" and not child and state.get("continuations_read_required"):
+        response = event.get("tool_response")
+        structured = response.get("structuredContent") if isinstance(response, dict) else None
+        if (event.get("tool_name") == "mcp__cortex__read_continuations"
+                and isinstance(response, dict) and response.get("isError") is False
+                and isinstance(structured, dict) and structured.get("has_more") is False
+                and _fingerprint(structured.get("task_ref")) == state.get("continuations_task_ref_digest")):
+            state = dict(state)
+            state["continuations_read_required"] = False
+            state["continuations_task_ref_digest"] = None
+            _write_state(path, state)
 
     # The host delivery receipt is provisional. Only a successful worker MCP
     # evidence-consumption result proves that the child actually received and
@@ -1401,6 +1506,7 @@ def main() -> int:
                        "parent_session_fingerprint": _fingerprint(parent_session_id),
                        "child_auth": _child_auth(parent_session_id, turn_id),
                        "agent_fingerprint": _fingerprint(event.get("agent_id")),
+                       "worker_thread_digest": _worker_thread_digest(event),
                        "child_mode": True}
         _write_child_state(event, child_state)
         bound_context = None
@@ -1493,21 +1599,28 @@ def main() -> int:
         # Codex loads skills through its normal mechanism and the backend owns
         # the authoritative first mutation (open_task).
         prompt = event.get("prompt")
+        if isinstance(prompt, str) and HELP_SELECTION.match(prompt):
+            return 0
         if isinstance(prompt, str) and DESELECTION.search(prompt):
             state = dict(DEFAULT_STATE)
             _write_state(path, state)
             return 0
         if isinstance(prompt, str) and SELECTION.search(prompt):
-            # Binding is a transport/resume aid, not a UserPromptSubmit
-            # permission override.  Codex rejects decision fields on this
-            # hook event; a failed optional capture must therefore remain a
-            # bounded observation while route state is still recorded.
-            _capture_live_prompt_binding(event)
+            # The lifecycle observer exclusively owns live resume identity.
+            # Input capture never rewrites that independent host relation.
             state = {"selected": True, "anchored": False,
                      "turn_fingerprint": _fingerprint(turn_id)}
             _write_state(path, state)
         elif state["selected"] and isinstance(session_id, str) and session_id and isinstance(turn_id, str) and turn_id:
             state["turn_fingerprint"] = _fingerprint(turn_id)
+            _write_state(path, state)
+        if state.get("selected") and not child and os.environ.get("PLUGIN_DATA"):
+            try:
+                from cortex_runtime.source_input_observer import capture_prompt
+                state["input_observation"] = capture_prompt(event, selected=True, child=child,
+                    plugin_data=Path(os.environ["PLUGIN_DATA"]))
+            except (ImportError, OSError, ValueError, RuntimeError):
+                state["input_observation"] = "unavailable"
             _write_state(path, state)
         return 0
 
@@ -1585,6 +1698,17 @@ def main() -> int:
             )
             return 0
 
+    if (event_name == "PreToolUse" and not child and state.get("continuations_read_required")
+            and isinstance(event.get("tool_name"), str)
+            and event["tool_name"].strip().lower().startswith("mcp__cortex__")):
+        supplied = event.get("tool_input")
+        if (event["tool_name"].strip().lower() != "mcp__cortex__read_continuations"
+                or not isinstance(supplied, dict)
+                or _fingerprint(supplied.get("task_ref")) != state.get("continuations_task_ref_digest")):
+            _deny("Consume the recovered task's active continuations before another Cortex operation.", event,
+                  reason_code="recovery_continuations_required")
+            return 0
+
     if event_name == "PreToolUse" and not child and (
         _is_worker_assignment_read(event)
         or _is_publication(event.get("tool_name"))
@@ -1600,6 +1724,31 @@ def main() -> int:
         supplied = event.get("tool_input")
         supplied_ref = supplied.get("task_ref") if isinstance(supplied, dict) else None
         expected_digest = state.get("worker_task_ref_digest")
+        # With concurrent native children, SubagentStart may arrive in an
+        # order unrelated to the coordinator's spawn calls and may not carry
+        # a task name.  Defer the lease binding until the child's first
+        # assignment read, whose opaque task_ref is the exact discriminator.
+        # The parent/receipt locks keep two children from claiming one lease.
+        if (
+            child and not state.get("anchored") and not state.get("bootstrap_in_progress")
+            and _is_consume(event.get("tool_name"))
+            and isinstance(supplied_ref, str) and supplied_ref
+            and expected_digest is None and child_path is not None
+        ):
+            parent_session_id = event.get("parent_session_id") or event.get("session_id")
+            if isinstance(parent_session_id, str) and parent_session_id:
+                binding_path = _assignment_child_state_path(
+                    event.get("session_id"), supplied_ref,
+                ) or child_path
+                bound, _bound_context = _bind_worker_dispatch(
+                    event, binding_path, state, parent_session_id,
+                    _value_fingerprint(supplied_ref),
+                )
+                if bound:
+                    child_path = binding_path
+                    path = binding_path
+                    state = _read_state(binding_path)
+                    expected_digest = state.get("worker_task_ref_digest")
         if (
             not isinstance(supplied_ref, str)
             or _value_fingerprint(supplied_ref) != expected_digest

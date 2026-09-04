@@ -1,10 +1,7 @@
-"""Domain Kernel foundation for Cortex semantic commands and queries.
+"""Semantic command/query boundary with atomic decision aggregates.
 
-The kernel is deliberately an intent boundary in this migration step.  It
-validates coordinator intent and defines receipt integration points, but does
-not select workers/models, construct a DAG, ask users questions, or decide
-governance/rework.  Existing domain_api handlers remain authoritative until a
-vertical slice explicitly moves behind this interface.
+The kernel validates intent and owns command receipts. It does not select
+workers or models, construct semantic plans, ask questions or schedule work.
 """
 from __future__ import annotations
 
@@ -67,7 +64,8 @@ class KernelResult(Generic[T]):
 class ReceiptStore(Protocol):
     """Persistence seam implemented by the command-receipt store."""
 
-    def lookup_command_receipt(self, logical_slot: object) -> Mapping[str, Any] | None: ...
+    def lookup_command_receipt(self, logical_slot: object, *, aggregate_type: object,
+                               aggregate_id: object, command_name: object) -> Mapping[str, Any] | None: ...
 
     def run_command_receipt(
         self, *, aggregate_type: object, aggregate_id: object, command_name: object,
@@ -171,7 +169,8 @@ class DomainKernel:
                 command_name=operation, logical_slot=slot,
                 request=normalized, mutate=mutate, build_id=build_id,
             )
-            receipt = self.receipt_store.lookup_command_receipt(slot)
+            receipt = self.receipt_store.lookup_command_receipt(
+                slot, aggregate_type=aggregate_type, aggregate_id=aggregate_id, command_name=operation)
             receipt_ref = str(receipt["command_ref"]) if receipt and receipt.get("command_ref") else None
             return KernelResult(value=value, receipt_ref=receipt_ref, replayed=replayed)
         except Exception as exc:  # store normalizes operational failures to typed errors
@@ -209,12 +208,7 @@ class DomainKernel:
 
 
 class DecisionAggregate:
-    """Transactional decision aggregate over the historical V12 ledger.
-
-    The aggregate is the semantic cut-over point: callers provide intent and
-    the kernel resolves the durable binding.  The legacy tables remain the
-    source of historical evidence, but decision commands and their receipts
-    now share one ``BEGIN IMMEDIATE`` transaction.
+    """Resolve intent, binding, decision and receipt in one transaction.
     """
 
     def __init__(self, store: Any) -> None:
@@ -242,7 +236,7 @@ class DecisionAggregate:
     def open(
         self, *, task_id: str, prompt: str, prompt_language: str,
         subject_type: str = "task", subject_id: str | None = None,
-        assignment_id: str | None = None, decision_type: str = "clarification",
+        decision_type: str = "clarification",
         family: str = "clarification",
     ) -> dict[str, Any]:
         def resolve(connection: Any) -> tuple[str, Mapping[str, Any], Callable[[Any], Mapping[str, Any]]]:
@@ -251,6 +245,10 @@ class DecisionAggregate:
             # and the persisted binding revision therefore share one snapshot.
             revision = int(self.store._effective_contract(connection, task_id)["revision"])
             closure_generation = None
+            plan_snapshot = None
+            if family == "plan_review":
+                from cortex_runtime import graph_ledger
+                plan_snapshot = graph_ledger.plan_review_snapshot(connection, task_id, subject_id)
             if family == "closure_review":
                 row = connection.execute(
                     "SELECT COALESCE(MAX(sequence),0) AS sequence FROM timeline WHERE task_id=?",
@@ -260,22 +258,24 @@ class DecisionAggregate:
             request = {
                 "task_id": task_id, "prompt": prompt, "prompt_language": prompt_language,
                 "subject_type": subject_type, "subject_id": subject_id,
-                "assignment_id": assignment_id, "decision_type": decision_type,
+                "decision_type": decision_type,
                 "contract_revision": revision,
                 **({"closure_generation": closure_generation} if closure_generation is not None else {}),
+                **({"plan_snapshot": plan_snapshot} if plan_snapshot is not None else {}),
             }
             slot = self._slot("decision/pending", {
                 "task_id": task_id, "subject_type": subject_type,
-                "subject_id": subject_id or task_id, "assignment_id": assignment_id,
+                "subject_id": subject_id or task_id,
                 "decision_type": decision_type, "prompt": prompt,
                 "prompt_language": prompt_language, "contract_revision": revision,
                 **({"closure_generation": closure_generation} if closure_generation is not None else {}),
+                **({"plan_snapshot": plan_snapshot} if plan_snapshot is not None else {}),
             })
             def mutate(active: Any) -> Mapping[str, Any]:
                 issued = self.store.issue_clarification_binding(
                     task_id=task_id, prompt=prompt, prompt_language=prompt_language,
                     subject_type=subject_type, subject_id=subject_id,
-                    assignment_id=assignment_id, decision_type=decision_type,
+                    decision_type=decision_type,
                     _connection=active,
                 )
                 # A clarification hold is a typed lifecycle relation, not a
@@ -289,7 +289,7 @@ class DecisionAggregate:
                     value = dict(issued)
                     value["clarification_hold"] = self.store.open_clarification_hold(
                         task_id=task_id, binding_ref=str(binding["clarification_binding"]),
-                        assignment_id=assignment_id, connection=active,
+                        connection=active,
                     )
                     return value
                 return issued
@@ -336,7 +336,7 @@ class DecisionAggregate:
         kwargs["decision_type"] = self._family_operation("steering", 2)
         return self.open(**kwargs)
 
-    def record(
+    def _record_components(
         self, *, task_id: str, binding_ref: str, response_original: str,
         user_language: str, subject_digest: str | None = None,
         decision_type_override: str | None = None,
@@ -345,8 +345,9 @@ class DecisionAggregate:
         approval_view_source_sequence: int | None = None,
         supersedes_decision_id: str | None = None,
         steering_delta: Mapping[str, Any] | None = None,
+        branch_key: str | None = None,
         family: str = "clarification",
-    ) -> dict[str, Any]:
+    ) -> tuple[str, dict[str, Any], Callable[[Any], Mapping[str, Any]]]:
         slot = "decision/consumed/" + binding_ref
         request = {
             "task_id": task_id, "binding_ref": binding_ref,
@@ -361,6 +362,7 @@ class DecisionAggregate:
             # covers the complete semantic steering intent, including nested
             # additions and the supersession relation.
             "steering_delta": steering_delta,
+            "branch_key": branch_key,
         }
         def mutate(connection: Any) -> Mapping[str, Any]:
             # Resolve the binding inside the same BEGIN IMMEDIATE transaction
@@ -394,7 +396,7 @@ class DecisionAggregate:
                     resolved_subject_digest = str(self.store._report(
                         connection, str(row["subject_id"]), task_id=task_id,
                     )["content_digest"])
-            value, _ = self.store.record_user_decision(
+            value = self.store.record_user_decision(
                 task_id=task_id, subject_type=str(row["subject_type"]),
                 subject_id=str(row["subject_id"]), decision_type=decision_type_override or str(row["decision_type"]),
                 prompt=str(row["prompt"]), response_original=response_original,
@@ -405,6 +407,7 @@ class DecisionAggregate:
                 approval_view_source_sequence=resolved_view_sequence,
                 supersedes_decision_id=supersedes_decision_id,
                 steering_delta=steering_delta,
+                branch_key=branch_key,
                 _connection=connection,
             )
             if family in {"clarification", "closure_review"}:
@@ -418,14 +421,40 @@ class DecisionAggregate:
                 )
                 return result
             return value
+        return slot, request, mutate
+
+    def record(self, **kwargs: Any) -> dict[str, Any]:
+        slot, request, mutate = self._record_components(**kwargs)
         result, replayed = self.store.run_command_receipt(
-            aggregate_type="task", aggregate_id=task_id,
-            command_name=self._family_operation(family, 1),
+            aggregate_type="task", aggregate_id=kwargs["task_id"],
+            command_name=self._family_operation(kwargs.get("family", "clarification"), 1),
             logical_slot=slot, request=request, mutate=mutate,
         )
-        value = dict(result)
-        value["replayed"] = replayed
-        return value
+        return dict(result, replayed=replayed)
+
+    def record_direct_steering(
+        self, *, task_id: str, response_original: str, user_language: str,
+        steering_delta: Mapping[str, Any], expected_revision: int,
+    ) -> dict[str, Any]:
+        """Opening, applying and receipting a direct change are one transaction."""
+        def resolve(connection: Any):
+            revision = self.store._effective_contract(connection, task_id)["revision"]
+            if revision != expected_revision:
+                raise V12StoreError("contract changed before steering", code="clarification_binding_stale")
+            issued = self.store.issue_clarification_binding(
+                task_id=task_id, subject_type="task", subject_id=task_id,
+                prompt=response_original, prompt_language=user_language,
+                decision_type="steer", _connection=connection, _direct_steering=True,
+            )
+            binding = issued["binding"]["clarification_binding"]
+            return self._record_components(
+                task_id=task_id, binding_ref=binding, response_original=response_original,
+                user_language=user_language, steering_delta=steering_delta, family="steering",
+            )
+        result, replayed = self.store.run_command_receipt_resolved(
+            aggregate_type="task", aggregate_id=task_id, command_name="record_steering", resolve=resolve,
+        )
+        return dict(result, replayed=replayed)
 
     def record_clarification(self, **kwargs: Any) -> dict[str, Any]:
         return self.record(family="clarification", **kwargs)

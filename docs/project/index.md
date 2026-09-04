@@ -1,352 +1,142 @@
 # Project overview
 
-<!-- GENERATED:START -->
-
 ## Purpose
 
-Cortex 1.15.3 is an explicit opt-in Codex plugin for durable multi-agent
-coordination. The installable product lives under
-[plugins/cortex](../../plugins/cortex/). Repository-root scripts, tests, and
-documents support development but do not define installed behavior.
+Cortex 1.15.6 is an explicitly activated Codex plugin for typed, durable
+multi-agent coordination. Runtime authority lives under
+[plugins/cortex](../../plugins/cortex/). Repository scripts, tests and documents
+support development; they are not an installed orchestration contract.
 
-V12 is a coordination ledger, not a workflow engine. The backend stores exact
-versioned task/result contracts, delegations, immutable reports, ordinary-chat
-user-decision evidence, governance assessments, project-level initiatives,
-links, revisions, warnings, closures, and derived human-readable views. Workers
-own project decomposition; the coordinator owns only orchestration parallelism,
-profile/model/effort selection, mode revisions, verification depth,
-documentation-impact decisions, rework, genuine user questions, interaction
-holds, and the final decision. The root coordinator
-is an orchestration-only control plane: every project action and substantive
-domain analysis is worker-owned; its sole project-read exception is the bounded
-orchestrator-owned knowledge route used to compile delegation requirements.
+The implementation contract and outstanding work are tracked in
+[Typed orchestration integrity](typed-orchestration-integrity.md).
+Its Completion checklist distinguishes implementation, source/wire checks,
+native CLI and actual Desktop qualification.
 
-The core invariant is nonblocking governance: mode, initiative status,
-dependency warnings, report state, closure verdict, or missing closure can
-inform reasoning but cannot prohibit the next safe meaningful step.
+## Responsibility split
 
-The coordinator owns only a model-owned dynamic orchestration DAG. It persists
-the current projection and evidence-backed revisions through the existing
-task-linked initiative revision and delegation/report/decision graph, without
-adding a tool or creating a backend workflow engine. It does not write a project
-solution plan. Planning is optional for genuinely minimal work. Light/full
-delivery requires a `planner` worker stage whose finalized required-review
-`plan` report and exact approval are predecessors for every delivery worker.
-Evidence may add, remove, reorder, retry, or parent-link rework stages without
-rewriting completed reports. The model uses retained
-advisory C1/C2/C3 baselines—bounded low-risk / multi-step or cross-surface /
-high-risk or cross-domain—normally mapped to `minimal` / `light` / `full`
-governance depth. They are neither backend waves nor user-approval gates.
+The coordinator chooses intent, decomposition, profiles, model/effort,
+ready-node parallelism, evidence interpretation, bounded remediation and user
+communication. Workers own project investigation, planning, implementation,
+commands, tests and documentation. The backend persists typed graphs,
+revisions, receipts, actor bindings, reports and decisions, and rejects invalid
+transitions. It never chooses or spawns the next worker.
 
-## Architecture
+The coordinator's project-read exception is the bundled skill's exact
+knowledge-routing allowlist. Missing paths and substantive source discovery
+remain worker work; mentioning project state does not expand coordinator
+authority. A normal repository coding task does not automatically activate
+Cortex.
 
-```text
-explicit user activation
-        │
-        ▼
-coordinator model ── classify/revise C1 | C2 | C3 and minimal | light | full
-        │
-        ├── create exact task/result contract and advisory assessments
-        ├── route bounded knowledge and compile delegation contracts
-        ├── construct/follow/adapt a worker-owned-stage DAG
-        ├── planner worker → durable plan report → plan-dependent nodes
-        ├── choose exact profile/model/effort per worker
-        ├── pass server-selected predecessor evidence through worker context
-        ├── adapt, delegate verification/rework, or request a real decision
-        ├── conditionally delegate docs sync + docs verification
-        └── submit advisory closure and synthesize the user answer
-        │
-        ╰── never inspect source/code, author a project plan, edit, build, test,
-            or directly verify
-                          │
-                          ▼
-        project-isolated SQLite schema-v1 sidecar
-```
+## Execution integrity
 
-Workers own all project discovery, source/code/configuration access, domain
-analysis, implementation, documentation edits, commands, builds, tests,
-reviews, and verification. Before delegating project work, the host-injected
-`AGENTS.md` context already governs the task. The coordinator reads
-`docs/project/index.md`, `docs/features/index.md`, and only the
-task-relevant pages linked from those indexes for routing. The bundled
-orchestrator alone defines that route and compiles the six-part per-delegation
-knowledge contract: documents to consume first, applicable requirements,
-verification contract, ownership constraints, known documentation state, and
-the explicit further-discovery boundary. Profiles consume that supplied contract
-without independently rerouting or reconstructing the route. Otherwise the
-coordinator reasons from user input, ledger records, and worker reports; missing
-evidence creates another focused delegation, never direct project investigation.
-Ordinary delegations select an exact packaged `profile_name` and verify loaded
-renderer proof plus digest. The separate human-readable `role` is not profile
-proof; unavailable fallback is limited to a degraded non-durable dispatch and
-explicitly carries a complete role contract.
+The graph records semantic nodes, dependencies, required/provided capabilities,
+contributions, verified outcomes, checks, mutation domains and finite repair
+policies. Current readiness is a computed projection, not a prose stage list.
 
-That exception is a closed direct-read allowlist: each read names an
-already-known exact allowed path and uses a non-shell direct reader. Shell,
-commands, `rg`, `find`, globs, graph/source/repository search, directory listing,
-and candidate-path probing are never coordinator routing operations. Unknown
-roots or paths are delegated. Workers also own Git/manifests/caches/worktrees,
-existence/absence or unchanged-state, and project-local `.codex` checks,
-including when the user asks the coordinator to perform one.
+Baseline observations precede artifact-dependent discovery/planning. Planned
+delivery requires an independently validated current graph and any required
+review. Audits of implementation wait for acceptable terminal predecessor
+evidence on the current artifact generation. Native capacity and readiness
+are separate: free slots cannot make an unready node executable.
 
-The sidecar enforces strict schemas, reference existence, project isolation,
-idempotency, transactions, uniqueness, SQLite integrity, monotonic connection
-audiences, exact SubagentStart/PreToolUse-bound worker bootstrap, replay-safe
-worker catalogue commitment, foreign-candidate isolation, ordered assignment-page receipts,
-and immutable lost-assignment successor lineage. It does not enforce waves,
-model-owned gates, profile-based capability admission, governance promotion, or
-a server-selected recovery ladder. Exact packaged `profile_name` validation is
-a prompt-integrity check.
+Shared-checkout writes are serialized by the mutation gate. Compatible
+read-only audits may run in parallel; artifact-independent work is distinct.
+No native worktree isolation is assumed.
 
-## Stack and entry points
+Each successful new assignment returns an exact native dispatch. Its child
+first consumes one typed assignment authority, including node scope, expected
+checks, execution mode, artifact procedure and terminal kind. Complete scoped
+product requirements are separate context, not a second assignment contract.
+The child uses the assigned publication kind and one cross-kind terminal slot.
 
-- MCP facade: [cortex.py](../../plugins/cortex/scripts/cortex.py)
-- Public catalog: [public_contracts.py](../../plugins/cortex/scripts/cortex_runtime/public_contracts.py)
-- V12 service: [v12_service.py](../../plugins/cortex/scripts/cortex_runtime/v12_service.py)
-- Schema-v1 store: [v12_store.py](../../plugins/cortex/scripts/cortex_runtime/v12_store.py)
-- Model transport: [model_routing.py](../../plugins/cortex/scripts/cortex_runtime/model_routing.py)
-- Operator maintenance: [v12_maintenance.py](../../plugins/cortex/scripts/cortex_runtime/v12_maintenance.py)
-- Advisory profile registry: [profiles.json](../../plugins/cortex/profiles.json)
-- Orchestration skill: [orchestrator/SKILL.md](../../plugins/cortex/skills/orchestrator/SKILL.md)
-- Control semantics: [cortex-control/SKILL.md](../../plugins/cortex/skills/cortex-control/SKILL.md)
-- Coordinator communication: [coordinator-communication/SKILL.md](../../plugins/cortex/skills/coordinator-communication/SKILL.md)
-- User installation: GitHub Marketplace flow in [README.md](../../README.md)
-- Contributor source synchronization: [sync-cortex.sh](../../scripts/sync-cortex.sh)
-- Isolated candidate launcher: [cortex-dev](../../scripts/cortex-dev)
-- Candidate reset helper: [cortex-dev-reset](../../scripts/cortex-dev-reset)
+Observed node coverage is canonical verification evidence. Artifact observations
+identify the checked generation without duplicating that narrative. Every
+result supplies observations or explicit null only for artifact-independent
+work. Workers keep hash-only comparison manifests in owner-private system-temp
+scratch, separated by user, Codex home and project; the ledger never reads
+project files or grants workers write access to its private database tree.
 
-## Runtime requirements
+## Decisions, recovery and closure
 
-- Python 3.11+ with the standard library only;
-- Codex Plugins and multi-agent support;
-- `features.multi_agent_v2 = true`;
-- `agents.default_subagent_model = "gpt-5.6-luna"`;
-- macOS or Linux, with WSL recommended on Windows.
+Complete low-risk minimal/light plans are informational unless the user
+requested review or a genuine material decision requires it. High-risk/material
+plans and external authority branches require the exact current decision packet.
+An approval binds the current plan and verified human view, not future revisions.
 
-V12 ships the Cortex activation guard and sanitized lifecycle observer. Review
-and trust only the hook callbacks declared by the installed package. They are
-host-side ordering, audience-correlation, and observation guardrails; the MCP
-server independently owns connection roles, assignment evidence, publication,
-reconciliation, and durable ledger authority.
+Direct semantic steering is already authorization for its concrete change.
+It atomically revises the contract, invalidates affected authority and preserves
+historical evidence. The coordinator observes/interrupts stale native work as
+required, establishes quiescence and reconciles the actual artifact boundary.
+It does not ask for a second confirmation of the same change.
 
-## Public contract
+Recovery reads current state and, when delegated work is unfinished, active
+continuations. Timeline is for a real chronology need, not worker recovery.
+Timeout and silence do not prove loss. Finite in-contract repair and independent
+verification continue without manufactured permission questions.
 
-The complete private registry contains twenty tools: `open_task`,
-`read_task`, `read_state`, `read_scope`, `read_outcome`,
-`read_continuations`, `read_evidence`, `read_timeline`,
-`open_clarification`, `record_clarification`,
-`open_plan_review`, `record_plan_review`, `open_steering`, `record_steering`,
-`open_assignment`, `publish_plan`,
-`publish_result`, `publish_documentation`, `assess_governance`, and
-`close_task`. Coordinator `tools/list` exposes only coordinator operations; a
-signed worker-candidate or worker receives only `read_task` and
-the three publication operations. The MCP server authorizes that boundary
-independently of discovery.
+Before closure, present the verified result, documentation impact, risks and
+unrun checks. Open the mandatory current revise/close review and record the
+direct choice. Only close permits closure; earlier plan approval is insufficient.
+A revision keeps the same task.
 
-The active MCP registry owns exact shapes. `open_task` alone accepts the
-resolved `project_root` and returns preferred compact `task_ref`; its canonical
-`task_id` is durable evidence only. Task-anchored tools use `task_ref`
-to locate and validate the project ledger. `open_assignment` returns the
-server-rendered worker bootstrap, and publication calls use the task anchor with
-server-bound worker context; no public call accepts a durable `*_id`.
-No host
-metadata, hook, thread identity, or plugin working directory supplies the root.
-The task persists the exact `user_request_original` and `user_language` beside
-the English `objective`, active contract version, independent outcomes,
-constraints, linked acceptance criteria, a non-derived verification plan, and
-optional arbitrary-JSON `context`.
-The native worker brief is a compact bootstrap carrying only delivery context;
-the mandatory first assignment read supplies the full common policy, profile
-guidance, task evidence, and assignment scope. The saved root is used only for
-project working context.
-Each task outcome has a non-empty meaningful English requirement and linked
-acceptance criteria before task creation; acceptance is not copied into a
-standalone verification obligation, and optional context cannot replace an
-outcome. Every delegation carries
-the exact six-part knowledge block once, in order, with non-empty values before
-native spawn. A successful `open_assignment` returns one compact closed native
-dispatch plus replay state, including exact effort and an explicit model only
-for non-default Terra or Sol. Codex
-forwards it unchanged to the active host spawn operation. Worker-only
-`read_task` is the server-owned
-full-policy/evidence surface and is required as the worker's first task read on
-both healthy and recovery paths.
-Its compact reconciliation header exposes exact public outcome selectors before
-the potentially large policy body, and medium or large structured results are
-not redundantly copied into text. Evidence pagination is server-owned;
-continuation is legal only immediately after the identical prior page returned
-`has_more=true`. Terminal replay reconciles the existing receipt without a
-second receipt or timeline mutation.
+## Runtime and storage
 
-`publish_plan`, `publish_result`, and `publish_documentation` record immutable
-worker-owned evidence through semantic publication operations. The server owns storage,
-completion, and replay identity; each delegation/report-kind slot has one
-terminal outcome, and changed payloads require recovery/rework. Plans persist a
-server-derived `informational` or `required` review policy; the worker
-publication does not choose or supply it.
-Only the native worker that owns the delegation calls the applicable `publish_*` operation; its
-completion handoff returns a concise `Summary` and exact `Report ref`. The
-coordinator dispatches, waits, and consumes that handoff without rereading the
-body merely to summarize it. A downstream worker reads finalized evidence only
-when its declared work requires the body. Compact refs, durable IDs, digests,
-and cursors are opaque byte-for-byte return data; only compact refs are
-callable public locators, while durable IDs are non-callable evidence.
-Coordinator reads are purpose-specific: `read_state` returns scalar status;
-`read_scope` returns one responsibility's exact names; `read_outcome` returns
-one selected complete outcome; and continuations, evidence, and newest-first
-history have separate bounded reads. A fresh worker starts with `read_task` and
-continues only through its server-owned assignment continuation. Callers do not
-supply report-reference or consumer-delegation locators. Derived Markdown rendering similarly preflights its aggregate output
-limits (512 files, 32 MiB total, 10 MiB per file) to avoid partial output.
-Canonical product-facing report bodies support the fixed
-`cortex/report/{progress,result,synthesis,plan}/v1` schemas and the additive
-`cortex/report/{result,synthesis,plan}/v2` schemas. V2 adds structured
-`contract_coverage`, deviations, unresolved items, risks, and verification;
-v1 and storage-valid legacy evidence remain readable and immutable. A canonical
-body may carry one optional unchanged `source_text` value, without a language
-tag or a translated/original duplicate. Only a finalized completed
-semantic-valid canonical plan receives a ready approval relation. Planner-authored
-implementation microtasks are evidence for the model-owned DAG only, never
-backend jobs, scheduling gates, or worker-subtask To-Do entries.
-Coordinator inspection reads expose only their selected semantic data and
-create no public receipt.
+- Python 3.11+, standard-library runtime; supported hosts are Linux and macOS.
+- Codex Plugins and native multi-agent support.
+- Luna through the configured default (no native model override), explicit
+  effort no higher than max. Terra is for genuinely complex architecture or
+  planning; Sol is rare and security-risk-specific. Ultra is prohibited.
+- Twenty audience-authorized MCP tools. Their live advertised schemas alone
+  define call arguments; skills and workload prompts do not duplicate shapes.
+- Current SQLite schema **2**, created directly per canonical project root.
+  Old/unknown storage is rejected without migration or compatibility fallback.
+- Canonical state is host-private; no database, report or projection is written
+  inside the target project. Derived Markdown links are returned only after
+  current digest verification.
+- Atomic mutation receipts are identity-bound, not authorization. Identical
+  ambiguous reconciliation preserves a receipt; unexplained successful replay
+  is not a valid workflow.
+- Maintenance is a separate explicitly invoked CLI; restore is offline.
 
-For pageable reads, continuation is server-owned and the caller supplies only
-`continue=true` immediately after top-level `has_more=true`. Durable IDs,
-digests, and private continuation values are never capabilities or substitutes
-for a callable task reference.
+## Main source surfaces
 
-`read_outcome` projects one selected current semantic outcome; `read_scope`
-projects only exact current names and dispositions. Each stable
-`o_` item reference represents one independent user outcome. Acceptance and
-verification criteria, task constraints, steer extensions, and exact source
-fragments remain linked metadata and never become extra coverage items. A
-delegation assigns each relevant outcome as owned, contributing, or
-evidence-producing; current ownership is
-non-overlapping. Finalized v2 reports may claim structured coverage only for
-items assigned to their delegation at the current revision. A user `steer`
-decision creates the next effective-contract revision. Complete unpaired
-additions become independent top-level outcomes, while exactly one retire plus
-one add is an atomic replacement. Unaffected outcomes and evidence remain
-current only when backed by finalized evidence. Nonterminal pre-revision worker
-capabilities are revoked atomically, removed from current continuation and
-ownership projections, and cannot publish or dispatch downstream work; a fresh
-assignment receives the complete current contract. One transactional owner is retained per outcome, allowing parallel
-delivery only across distinct outcomes and rejecting same or ambiguous
-ownership. Aggregate coverage classifies each active item
-as complete, missing, partial, unverified, stale, or contradictory. The
-conformance projection relates that current revision, user decisions,
-finalized-report manifests, completed coordinator-read digests, and aggregate
-coverage. These are advisory evidence for model-owned rework and closure
-reasoning, never a backend lifecycle or permission gate.
+- [MCP facade](../../plugins/cortex/scripts/cortex.py)
+- [Advertised contracts](../../plugins/cortex/scripts/cortex_runtime/public_contracts.py)
+- [Domain operations](../../plugins/cortex/scripts/cortex_runtime/domain_api.py)
+- [Execution graph](../../plugins/cortex/scripts/cortex_runtime/execution_graph.py)
+- [Graph ledger](../../plugins/cortex/scripts/cortex_runtime/graph_ledger.py)
+- [Typed publication schemas](../../plugins/cortex/scripts/cortex_runtime/typed_publications.py)
+- [Private store](../../plugins/cortex/scripts/cortex_runtime/v12_store.py)
+- [Worker fingerprint procedure](../../plugins/cortex/scripts/cortex_runtime/artifact_fingerprint.py)
+- [Model routing](../../plugins/cortex/scripts/cortex_runtime/model_routing.py)
+- [Packaged profiles](../../plugins/cortex/profiles.json)
+- [Orchestrator skill](../../plugins/cortex/skills/orchestrator/SKILL.md)
+- [Worker control skill](../../plugins/cortex/skills/cortex-control/SKILL.md)
 
-For current V3 worker publications, assignment bootstrap also emits a
-server-owned ordered reconciliation receipt. Its template names every required
-scope item without supplying a status or verification claim; the worker must
-preserve the rows and match their count and ordered references before the first
-publication attempt. This prevents a report handoff from silently dropping a
-scope item while leaving every disposition evidence-owned by the worker.
-Steering additions name an active outcome and create a replacement revision
-whose linked metadata includes the new user fragment and decision relation;
-they do not create parallel coverage obligations.
+## Development and qualification
 
-Private/internal decision references may match an `u_[0-9a-f]{12}` storage
-pattern, but they remain non-callable evidence and never replace the public
-task reference.
+Use [README](../../README.md), [conventions](conventions.md) and
+[verification](verification.md). The semantic version is frozen at 1.15.6 for
+this repair; only its content-addressed cache suffix changes.
+`./scripts/cortex-dev` refreshes only the isolated candidate.
+Do not synchronize or replace the user's stable plugin.
 
-The matching narrow decision record operation appends coordinator-asserted ordinary-chat evidence, not
-backend authority. Its public request is task-ref-only: it carries the exact
-response and user language, plus steering outcome changes where applicable. The
-original response is retained exactly; there are no translated duplicate fields.
-Private subject, revision, digest, and ready-view bindings are resolved by the
-server. Missing, renamed, extra, or cross-mixed fields are rejected before
-mutation.
-
-The native dispatch projection does not select an isolated worktree or
-workspace. Physical concurrent-writer isolation is therefore an unconfirmed
-host capability outside the ledger; Cortex does not implement or claim
-collision prevention until a supported host mechanism and lifecycle owner are
-supplied.
-Delegation `scope` is required non-empty text defining the concise
-worker-ownership boundary, while execution detail belongs in `instructions`;
-object-shaped scope is invalid. `close_task` is task-anchored and accepts the
-exact `task_ref`, one advisory `verdict`, and bounded evidence; durable
-`task_id` is evidence only.
-
-The task-facing result separates neutral finalized-report evidence from advisory
-bookkeeping. `read_state` returns scalar execution status, finalized/completed
-report counts, current revision, coverage status, and outcome. The finalized count
-includes every finalized report, while the outcome is derived deterministically
-from current effective-contract coverage, excluding historical/superseded claims
-and report arrival order, without claiming native lifecycle. Closure record
-status and latest verdict are separate scalar fields. After
-sufficient finalized evidence, the coordinator selects `ready`,
-`ready_with_risks`, or `not_ready`, then automatically attempts the advisory
-write and intended bounded inspection. `ready_with_risks` needs no user
-confirmation. The closure result returns `closure_confirmation` with
-`inspection_status`, `reason`, and `attempts`; only one same-idempotency retry
-is allowed for a verified transient persistence or inspection failure. An
-`unconfirmed` result is advisory uncertainty only and does not change
-`execution_outcome` evidence.
-
-Closure review is distinct from ordinary clarification. After the current
-result is presented, exactly two localized choices are offered: revise the
-same task or close it. Revision preserves the same `task_ref`; any later
-assignment, report, or decision stales a previously consumed close choice. The
-public `close_task` path atomically requires the current consumed close choice,
-while internal advisory storage may remain policy-neutral. This boundary rule
-does not schedule work or block a truthful final answer.
-
-After a worker verifies the project result, the coordinator evaluates
-documentation impact from reports. Material behavior, architecture, interface,
-command, verification, convention, or feature-ownership changes require a
-documentation-sync worker and a separate documentation verifier for the
-harvest pages under `docs/project/` and `docs/features/`. Otherwise the
-coordinator uses a finalized worker-owned report with an explicit English
-documentation-impact section and material/no-impact rationale and does not
-create an empty documentation edit. When existing finalized reports do not
-contain that section, one bounded evidence-synthesis worker submits it. The
-private/internal initiative bookkeeping links the exact task and documentation-impact
-evidence; closure evidence remains task-scoped and cites server-produced evidence.
-A
-self-asserted `documentation_not_required` value is invalid. This stage
-precedes closure; missing documentation evidence may
-cause model-owned rework, replacement, or disclosed risk, never a backend gate.
-
-Mutation replay identity is server-owned. Callers do not supply a replay key;
-the ledger reconciles identical semantic writes and rejects
-conflicting writes without treating replay as authentication or permission.
-
-## Storage
-
-Each resolved project root uses:
-
-```text
-~/.codex/cortex/v12/projects/p-<sha256-of-resolved-project-root>/cortex.db
-```
-
-The new schema is version 1. V11 databases remain byte-for-byte untouched and
-are not migration inputs. V11 tools and unfinished V11 tasks are incompatible
-with V12.
-
-The canonical database can produce only derived, host-private Markdown task
-views beside its shard. No Cortex database, report, decision, projection, or
-other state is written beneath `project_root`, including project-local `.codex`.
-Only a current digest-verified `ready` view exposes its returned absolute path
-as a clickable link with a localized summary and next step; `stale`, `conflict`,
-`unavailable`, and `disabled` never do. See
-[Human-readable task views](../features/human-readable-task-views/index.md).
+Qualify local contracts, all profiles, DAG, steering and recovery before a short
+real CLI run. Then complete full all-tools/all-profiles CLI and actual Desktop
+on the same stamped payload. Any payload edit invalidates both live results.
+Current readiness and unrun gates are in
+[release readiness](../release-readiness.md), not inferred from source test counts.
 
 ## Feature registry
 
 - [Orchestration ledger](../features/orchestration-ledger/index.md)
-- [Advisory governance and initiatives](../features/advisory-governance/index.md)
-- [Plugin packaging and validation](../features/plugin-packaging/index.md)
+- [Advisory governance](../features/advisory-governance/index.md)
+- [Plugin packaging](../features/plugin-packaging/index.md)
 - [Coordinator communication](../features/coordinator-communication/index.md)
-- [Knowledge-route contract](../features/knowledge-route-contract/index.md)
-- [Human-readable task views](../features/human-readable-task-views/index.md)
+- [Knowledge routing](../features/knowledge-route-contract/index.md)
+- [Human-readable views](../features/human-readable-task-views/index.md)
+- [Lifecycle observation](../features/lifecycle-telemetry/index.md)
 - [Operator maintenance](../features/operator-maintenance/index.md)
-- [Release readiness](../release-readiness.md)
 
 ## Project references
 
@@ -356,5 +146,3 @@ as a clickable link with a localized summary and next step; `stale`, `conflict`,
 - [Gotchas](gotchas.md)
 - [Verification](verification.md)
 - [Security policy](../../SECURITY.md)
-
-<!-- GENERATED:END -->

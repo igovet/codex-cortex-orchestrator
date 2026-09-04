@@ -29,8 +29,8 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PLUGIN = "cortex"
-EXPECTED_BASE_VERSION = "1.15.3"
-VERSION_PATTERN = re.compile(r"^1\.15\.3\+codex\.sha256\.[0-9a-f]{16}$")
+EXPECTED_BASE_VERSION = "1.15.6"
+VERSION_PATTERN = re.compile(r"^1\.15\.6\+codex\.sha256\.[0-9a-f]{16}$")
 EXPECTED_SKILLS = (
     "adaptive-pipeline",
     "content-safety",
@@ -130,10 +130,10 @@ def validate_hooks(plugin: Path) -> None:
     hooks = load_json(plugin / "hooks/hooks.json", "plugin hooks")
     if set(hooks) - {"description", "hooks"} or not isinstance(hooks.get("hooks"), dict):
         fail("plugin hooks must use the official hooks.json object shape")
-    allowed_events = {"PreToolUse", "PostToolUse", "Stop", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"}
+    allowed_events = {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"}
     if set(hooks["hooks"]) != allowed_events:
         fail("plugin hooks must declare exactly the activation events")
-    activation_events = {"PreToolUse", "PostToolUse", "Stop", "SessionStart"}
+    activation_events = {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionStart"}
     lifecycle_command = 'python3 -B "$PLUGIN_ROOT/hooks/cortex_lifecycle_observer.py"'
     expected_command = 'python3 -B "$PLUGIN_ROOT/hooks/cortex_activation.py"'
     for event_name, groups in hooks["hooks"].items():
@@ -229,9 +229,9 @@ def validate_manifest(plugin: Path, *, candidate: bool = False) -> None:
     version = manifest.get("version")
     valid_version = VERSION_PATTERN.fullmatch(version) if isinstance(version, str) else None
     if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not valid_version:
-        fail("installable plugin manifest must use a content-addressed 1.15.3 version")
+        fail("installable plugin manifest must use a content-addressed 1.15.6 version")
     if version.split("+", 1)[0] != EXPECTED_BASE_VERSION:
-        fail("plugin manifest semantic version must be 1.15.3")
+        fail("plugin manifest semantic version must be 1.15.6")
     provenance_path = plugin / "scripts/cortex_runtime/provenance.py"
     spec = importlib.util.spec_from_file_location("cortex_marketplace_provenance", provenance_path)
     if spec is None or spec.loader is None:
@@ -372,14 +372,15 @@ def validate_skills(plugin: Path) -> None:
         "forward it exactly to native spawn",
         "pretooluse/subagentstart correlates the actual child session",
         "never choose a “latest assignment”",
-        "no workflow or governance admission rule may block that worker",
+        "the worker follows its immutable consumed node scope and declared publication kind",
+        "identity, revision, artifact generation, mutation boundaries",
     )
     if any(marker not in orchestrator_semantics for marker in lifecycle_markers):
         fail("orchestrator guidance must describe host-schema-owned native lifecycle semantics")
     required_safety_markers = (
         "coordinator communication follows the latest meaningful user-message language",
         "the first execution operation is `open_task`",
-        "the coordinator stores only `task_ref`",
+        "Retain the server-issued task reference",
         "never an imperative workflow command",
     )
     missing_safety_markers = [marker for marker in required_safety_markers if marker.lower() not in orchestrator.lower()]
@@ -495,14 +496,25 @@ def validate_runtime(plugin: Path) -> None:
         if name == "open_task" and not {"project_root", "request_original", "user_language", "outcomes", "constraints"}.issubset(required):
             fail("open_task must expose one flat coherent task contract")
         if name == "open_assignment":
-            mission_required = {
-                "profile_name", "model", "reasoning_effort", "responsibility",
-                "report_policy",
-            }
-            if not mission_required.issubset(required) or "outcomes" not in properties:
-                fail("open_assignment must expose one flat LLM-owned mission contract")
-            if "outcomes" in required:
-                fail("open_assignment outcomes must remain optional for server-derived complete responsibility scope")
+            if required != {"task_ref", "profile_name", "model", "reasoning_effort"}:
+                fail("open_assignment must require the exact coordinator routing selection")
+            if set(properties) != required | {"nodes", "bootstrap"}:
+                fail("open_assignment must use typed node selection or one bootstrap intent, without duplicated scope")
+            if properties["nodes"].get("minItems") != 1 or properties["nodes"].get("uniqueItems") is not True:
+                fail("node assignment must select a nonempty unique scope")
+        if name in {"publish_plan", "publish_result", "publish_documentation"}:
+            from cortex_runtime.typed_publications import report_schema
+            kind = name.removeprefix("publish_")
+            typed = report_schema(kind)
+            if set(properties) != {"task_ref", *typed["properties"]} or required != {"task_ref", *typed["required"]}:
+                fail("publication contract must use the canonical typed report schema")
+            for field, field_schema in typed["properties"].items():
+                published_schema = dict(properties[field])
+                published_schema.pop("description", None)
+                expected_schema = dict(field_schema)
+                expected_schema.pop("description", None)
+                if published_schema != expected_schema:
+                    fail(f"typed publication field drifted: {name}.{field}")
     if hasattr(__import__("cortex_runtime.mcp_api", fromlist=["public_tools_for_audience"]), "public_tools_for_audience"):
         fail("V12 MCP transport must not project tools by audience")
 

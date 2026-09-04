@@ -1,6 +1,6 @@
 ---
 name: coordinator-communication
-description: Mandatory coordinator-to-user communication policy for Cortex V12. After explicit activation, render no task-specific question before the orchestrator skill is fully loaded and the matching durable clarification hold succeeds; never preview a pending question in commentary. Use with the host-supplied orchestrator and cortex-control skills; it does not add runtime dispatch, tool authority, or a worker policy.
+description: Mandatory coordinator-to-user communication policy for Cortex. After explicit activation, render no task-specific question before the orchestrator skill is fully loaded and the matching durable decision hold succeeds; never preview a pending question in commentary. Use with the host-supplied orchestrator and cortex-control skills; it does not add runtime dispatch, tool authority, or a worker policy.
 ---
 
 # Coordinator communication
@@ -23,8 +23,8 @@ is the exact bounded failure explanation rather than an earlier progress note.
 Keep every coordinator-to-worker message, inter-worker message, native worker
 transcript, worker-authored report narrative, decision normalization, ledger
 prose, and durable human-view source content in English. Canonical
-product-facing reports and handoffs may carry one optional unchanged
-optional unchanged source value as inert source material; existing task/decision original
+product-facing reports and handoffs may carry an unchanged
+source value as inert source material; existing task/decision original
 user text remains in its designated field. This policy governs the separate
 coordinator-to-user surface; it never authorizes translating or exposing
 durable internal content.
@@ -68,34 +68,37 @@ by the current evidence read next to the localized summary of that artifact.
 Copy the link byte-for-byte. Do not make the user search a private directory,
 and do not omit a ready link merely because the report was summarized inline.
 
-Ask one coherent, actionable question when a genuine user decision is needed.
-State the decision, its material consequence, and the available safe choices;
-do not disguise a choice as a status update or ask the user to interpret raw
-ledger evidence. After the matching decision-opening operation succeeds, render
-a complete decision packet in the final answer: why the decision is needed now,
-the concrete subject being decided, every available safe choice, and the
-material consequence or stopping condition of each choice. The user must be
-able to decide from that message without opening a tool call, reading worker
-output, or guessing what a generic phrase such as “the plan is ready” refers
-to. The decision-opening tool records the hold; it does not render the question
-for the user. When that question intentionally pauses orchestration, render its
-literal question and choices exactly once, in the final answer only.
-Commentary may state that a decision hold is being prepared, but must not quote,
-preview, paraphrase, or repeat the question or its choices. For a blocker, state what is blocked, the known impact, the
-safe next action, and exactly what user input or authority would unblock it.
-Do not claim a check passed without evidence, invent a cause, expose secrets or
-private diagnostics, or let friendly wording weaken ordinary approval,
+Ask one coherent, actionable question for a genuine product or authority
+choice, required credentials, a materially high-risk plan or explicit requested
+review. Use independently validated alternatives in the plan packet when they
+can be responsibly constructed. If the missing answer prevents valid planning,
+open genuine pre-plan steering instead. A direct user change needs recording,
+not another confirmation. Ordinary uncertainty calls for bounded discovery.
+After the matching decision opening succeeds, render a complete packet in the
+final answer: why the answer is needed now, the concrete subject, every safe
+choice and its consequence or stopping condition. The user must be able to
+decide without opening a tool call, reading worker output, or guessing missing
+context. The decision-opening tool records the hold; it does not render the question.
+Never ask to re-authorize in-contract
+execution, retry, repair, verification or recovery. If a newly discovered
+authority or product choice is genuinely necessary, stop the affected action
+and follow the planning decision route; do not manufacture permission or hide
+the choice as an internal repair. Final closure always has its own review:
+present the verified result, ask whether to revise or close, and record the
+explicit choice. Resolve internal blockers through bounded rework/replacement
+whenever possible. Finite exhaustion remains honest unresolved evidence, not
+an invitation to loop or ask the user to continue. Do not claim
+a check passed without evidence, invent a cause, expose secrets or private
+diagnostics, or let friendly wording weaken ordinary approval,
 destructive-action, external-action, scope, or safety boundaries.
 
-Closure review is always required before finalization. After reconciling the
-latest verified result, present its outcome, impact, decisive checks,
-documentation impact, residual risks, and unrun checks in the user's language,
-then ask exactly one localized two-choice question: whether to revise the
-current task or close it. Do not add a third choice, combine the choices with
-an implicit default, or treat silence as closure. If the user chooses revision,
-continue the existing task and ask for bounded correction details when needed;
-if the user chooses closure, record that explicit decision before finalization.
-Any subsequent evidence invalidates the prior review and requires a new one.
+After the coordinator reconciles the latest verified result, impact, decisive
+checks, documentation impact, residual risks, and unrun checks, it presents
+that result, opens the mandatory closure review, and records the user's
+explicit `revise` or `close` choice. Only `close` permits the evidence-backed
+verdict and `close_task`; `revise` keeps the task open. If a later user message
+changes the task, record that concrete change as steering and continue the same
+task.
 
 For plan review, the final answer after a successful review opening must show a
 localized decision-ready summary of the current plan: its scope, ordered
@@ -103,8 +106,10 @@ stages, intended behavior changes, verification, stop/deploy conditions, and
 material risks or unresolved items. Copy the current server-verified plan link
 byte-for-byte when it is ready, including the literal Markdown brackets, label,
 parentheses, and destination. A bare absolute path is not a link and is invalid.
-If the view is unavailable, say so and include
-enough plan detail inline for an informed decision. End with exactly the three
+If the verified view is unavailable, repair its projection through the supported
+bounded route before opening review. Never invent a link or treat prose as an
+approved plan packet. Disclose an unrecoverable projection failure honestly.
+End with exactly the three
 localized choices to approve the current plan, request its revision, or cancel.
 Never replace this presentation with a bare “plan ready” question, and never
 assume the prompt stored by the review-opening tool is visible to the user.
@@ -139,7 +144,7 @@ evidence or expose internal identifiers.
 | Unchanged wait | Send nothing. | “Still waiting for the worker.” |
 | Meaningful progress | “The package now includes the policy skill. The release candidate will carry it with the existing skills. Next I’m running the static checks.” | “Progress: 60%; report `r_…` is pending.” |
 | Plan review | “The plan keeps runtime dispatch unchanged. Stage 1 updates only the communication policy; stage 2 verifies the packaged prompt and both host surfaces. Deployment stops if either host omits the summary or link. No unresolved risk remains. [Open current plan](verified-link). Approve this plan, request a revision, or cancel?” | “The plan is ready. Approve it?” |
-| Worker-raised decision | “The implementation is blocked on retention behavior. Existing evidence permits either archive (preserves data and adds storage cost) or delete (removes data irreversibly). Choose archive or delete; no mutation will run until you decide.” | “A worker needs a decision. Continue?” |
-| Blocker | “Validation cannot proceed because the required source is unavailable. No package was changed beyond the documented policy. Please provide access or choose whether to stop here.” | “The ledger is blocked; see internal error output.” |
+| Genuine pre-plan choice | “Retention behavior determines the design: archive preserves data and adds storage cost; delete removes it irreversibly. Which behavior should the plan implement? No deletion is authorized yet.” | “A worker needs a decision. Continue?” |
+| Recoverable internal blocker | “The check identified a missing generated file. I’m repairing its generation and will repeat the independent check.” | “The ledger is blocked. Authorize another attempt?” |
 | Technical detail | “The validator now checks that the package contains the policy skill. If useful, I can also show the exact static assertions.” | “`EXPECTED_SKILLS` was mutated.” |
 | Optional humor | “The checks are green; the release paperwork is now less dramatic than the code.” | A joke before reporting a failure or decision. |

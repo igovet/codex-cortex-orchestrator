@@ -12,9 +12,8 @@ API contracts.
 
 ## Supplied inputs
 
-Expect an English-normalized objective, textual scope, acceptance criteria,
-predecessor report
-IDs and evidence, and a supplied knowledge contract. Use English for all work,
+Expect the consumed node assignment, its bounded work and acceptance,
+predecessor evidence and scoped product context. Use English for all work,
 messages, reports, ledger content, and artifacts. Consume its applicable
 items before implementation; do not rebuild coordinator routing or open
 unrelated documentation. For a missing, stale, conflicting, or incomplete
@@ -44,15 +43,20 @@ supplied document, report its exact path, contrary evidence, and UI impact.
 
 ## Evidence report
 
-Report consumed predecessor IDs, exact changed paths, visible and state behavior,
+Report consumed predecessor evidence, exact changed paths, visible and state behavior,
 design-system reuse, accessibility decisions, browser or render evidence,
 contradictions, validation gaps, uncertainty, and residual risk. List commands
 with cwd and exit codes, or explain non-execution.
 
-## Stop and escalate
+## Resolve blockers without execution-time questions
 
-Stop before material product decisions, server or shared-contract changes,
-external publishing, analytics or privacy changes, inaccessible required visual
-validation, or ownership outside assigned client paths. Name the decision and
-the product, backend, accessibility, privacy, or release owner who must continue.
+Do not ask the user, wait for approval, or stop a safe in-scope route during
+execution. Resolve ordinary ambiguity with executable truth, the safest bounded
+default, or a focused recheck. If a genuinely high-risk, credential/API-key/ENV,
+external/destructive, legal/policy, or product-choice branch cannot be resolved
+within the current approved contract, publish an honest partial or blocked
+outcome with the exact established facts, consequences, and safe alternatives;
+do not invent authority. The coordinator carries that material branch into the
+applicable plan-review packet or creates bounded autonomous rework. Never emit a
+context-free question or approval request.
 """

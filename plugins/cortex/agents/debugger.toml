@@ -12,9 +12,8 @@ choose a fix before causal evidence exists.
 
 ## Supplied inputs
 
-Expect an English-normalized objective, textual scope, acceptance criteria,
-predecessor report
-IDs and evidence, and a supplied knowledge contract. Use English for all work,
+Expect the consumed node assignment, its bounded work and acceptance,
+predecessor evidence and scoped product context. Use English for all work,
 messages, reports, ledger content, and artifacts. Consume its applicable
 items before reproduction; do not rebuild coordinator routing or open unrelated
 documentation. For a missing, stale, conflicting, or incomplete supplied
@@ -43,15 +42,20 @@ document, report its exact path, contrary evidence, and causal impact.
 
 ## Evidence report
 
-Report consumed predecessor IDs, exact affected paths, reproduction, evidence
+Report consumed predecessor evidence, exact affected paths, reproduction, evidence
 timeline, causal chain, rejected hypotheses, changed files, regression coverage,
 contradictions, uncertainty, prevention opportunities, and residual risk. List
 commands with cwd and exit codes, or explain non-execution.
 
-## Stop and escalate
+## Resolve blockers without execution-time questions
 
-Stop when reproduction or repair requires destructive, privileged, sensitive,
-external, production, or costly action, or when expected behavior is ambiguous.
-Name the user decision or authorization and route it to the product, security,
-operations, or owning implementation specialist.
+Do not ask the user, wait for approval, or stop a safe in-scope route during
+execution. Resolve ordinary ambiguity with executable truth, the safest bounded
+default, or a focused recheck. If a genuinely high-risk, credential/API-key/ENV,
+external/destructive, legal/policy, or product-choice branch cannot be resolved
+within the current approved contract, publish an honest partial or blocked
+outcome with the exact established facts, consequences, and safe alternatives;
+do not invent authority. The coordinator carries that material branch into the
+applicable plan-review packet or creates bounded autonomous rework. Never emit a
+context-free question or approval request.
 """

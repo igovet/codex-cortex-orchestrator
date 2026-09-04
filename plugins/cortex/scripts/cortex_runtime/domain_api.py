@@ -136,7 +136,7 @@ def _publicize(value: Any) -> Any:
         ):
             continue
         public_key = "outcome" if key == "text" and "item_ref" in value else str(key)
-        result[public_key] = "partial" if item == "rework" else _publicize(item)
+        result[public_key] = _publicize(item)
     return result
 
 
@@ -154,59 +154,6 @@ def _public_read_data(value: Any) -> Any:
         }
 
     return strip_markers(_publicize(value))
-
-
-def _reject_private_fields(value: Any, *, path: str = "evidence") -> None:
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _reject_private_fields(item, path=f"{path}[{index}]")
-    elif isinstance(value, Mapping):
-        for key, item in value.items():
-            lowered = str(key).lower()
-            if (lowered == "handles" or lowered.endswith("_id") or lowered.endswith("_ids")
-                    or lowered.endswith("_ref") or lowered.endswith("_refs")
-                    or "digest" in lowered or "cursor" in lowered or "continuation" in lowered):
-                raise V12ServiceError("private identifier fields are not accepted", code="invalid_argument", details={"field": f"{path}.{key}"})
-            _reject_private_fields(item, path=f"{path}.{key}")
-
-
-def _internalize_publication_evidence(store: V12Store, assignment_id: str, evidence: object) -> object:
-    _reject_private_fields(evidence)
-    if not isinstance(evidence, Mapping):
-        return evidence
-    result = dict(evidence)
-    coverage = result.get("contract_coverage")
-    if not isinstance(coverage, list):
-        return result
-    projection = store.read_delegation(delegation_id=assignment_id, after_sequence=0, limit=1)
-    worker = projection.get("worker_brief") if isinstance(projection, Mapping) else None
-    effective = worker.get("effective_contract") if isinstance(worker, Mapping) else None
-    items = (effective.get("planning_items") or effective.get("assigned_items")) if isinstance(effective, Mapping) else None
-    typed_items = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
-    public_rows: list[Mapping[str, Any]] = []
-    outcome_names: list[str] = []
-    for row in coverage:
-        if not isinstance(row, Mapping) or not isinstance(row.get("outcome"), str):
-            raise V12ServiceError("publication coverage requires a semantic outcome name", code="invalid_argument", details={"field": "evidence.contract_coverage"})
-        public_rows.append(row)
-        outcome_names.append(str(row["outcome"]))
-    # Resolve the complete ordered coverage in one call. Resolving each row as
-    # a one-element list reset every diagnostic to index zero, so a mismatch in
-    # the seventh planner outcome misleadingly reported
-    # ``$.outcome_coverage[0]``. The single ordered match also applies duplicate
-    # and overlap validation to the publication as a whole.
-    matches = _match_outcomes(
-        typed_items, outcome_names, path="$.outcome_coverage",
-    )
-    internal = [
-        {
-            "item_ref": item_ref,
-            **{key: value for key, value in row.items() if key != "outcome"},
-        }
-        for row, item_ref in zip(public_rows, matches, strict=True)
-    ]
-    result["contract_coverage"] = internal
-    return result
 
 
 def _match_outcomes(
@@ -233,10 +180,7 @@ def _match_outcomes(
                 },
             )
         matches = [item for item in current_items if _semantic_outcome(item) == normalized] if len(normalized) > 1 else []
-        if not matches and isinstance(normalized["outcome"], str):
-            # Semantic child fields are useful evidence but are routinely
-            # paraphrased by an LLM between reads.  A unique outcome title is
-            # sufficient identity; only zero or multiple matches are unsafe.
+        if len(normalized) == 1 and isinstance(normalized["outcome"], str):
             matches = [
                 item for item in current_items
                 if _semantic_outcome(item).get("outcome") == normalized["outcome"]
@@ -264,7 +208,7 @@ def _match_outcomes(
     return selected
 
 
-def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_refs: list[str]) -> list[str]:
+def _select_report_inputs(store: V12Store, task_id: str, policy: object) -> list[str]:
     if policy == "none":
         return []
     def select(connection):
@@ -273,27 +217,10 @@ def _select_report_inputs(store: V12Store, task_id: str, policy: object, item_re
         elif policy == "active_plan":
             rows = connection.execute(
                 "SELECT DISTINCT r.report_id FROM reports r "
-                "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
+                "JOIN execution_graphs g ON g.plan_report_id=r.report_id "
                 "WHERE r.task_id=? AND r.report_type='plan' AND r.assembly_state='finalized' "
-                "AND s.assignment_role='planning' "
-                "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=?) "
-                "ORDER BY r.created_sequence DESC LIMIT 1", (task_id, task_id),
-            ).fetchall()
-        elif policy == "latest_for_scope":
-            # Coverage identity stays private. Choose the latest finalized
-            # report touching any selected semantic outcome.
-            if not item_refs:
-                raise V12StoreError(
-                    "latest-for-scope evidence requires an assignment outcome scope",
-                    code="invalid_argument",
-                    details={"field": "report_policy"},
-                )
-            internal = [store._outcome_item_id(connection, task_id, ref_value) for ref_value in item_refs]
-            placeholders = ",".join("?" for _ in internal)
-            rows = connection.execute(
-                "SELECT DISTINCT r.report_id,r.created_sequence FROM reports r JOIN report_contract_coverage c ON c.report_id=r.report_id "
-                f"WHERE r.task_id=? AND r.assembly_state='finalized' AND c.item_id IN ({placeholders}) ORDER BY r.created_sequence DESC LIMIT 1",
-                (task_id, *internal),
+                "AND g.revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=?) "
+                "ORDER BY g.rowid DESC LIMIT 1", (task_id, task_id),
             ).fetchall()
         else:
             raise V12StoreError("report policy is invalid", code="invalid_argument", details={"field": "mission.report_policy"})
@@ -351,175 +278,6 @@ def _evidence_human_views(
     return views
 
 
-def _admit_assignment(store: V12Store, task_id: str, assignment_policy: str) -> None:
-    """Enforce the public admission invariant without choosing a schedule.
-
-    Governance is deliberately advisory in the ledger, but an assignment is
-    still not admissible until the coordinator has recorded its assessment.
-    Owner work honors the latest current plan's server-derived adaptive review
-    policy.  Informational plans proceed without manufacturing an approval;
-    required-review plans need an approval bound to that exact plan.  A
-    light/full assessment still requires a current plan, while minimal work may
-    proceed directly only when no earlier plan has become stale.
-    """
-    def read(connection):
-        assessment = connection.execute(
-            "SELECT mode FROM governance_assessments WHERE project_hash=? AND task_id=? "
-            "ORDER BY CASE WHEN source='user_override' THEN 0 ELSE 1 END, "
-            "created_sequence DESC LIMIT 1",
-            (store.project_hash, task_id),
-        ).fetchone()
-        if assessment is None:
-            raise V12ServiceError(
-                "governance assessment is required before opening an assignment",
-                code="governance_assessment_required",
-            )
-        mode = str(assessment["mode"])
-        if assignment_policy != "owner":
-            return
-        plan = connection.execute(
-            "SELECT DISTINCT r.report_id,r.content_digest,r.review_policy FROM reports r "
-            "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
-            "WHERE r.project_hash=? AND r.task_id=? AND r.report_type='plan' "
-            "AND s.assignment_role='planning' "
-            "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=r.task_id) "
-            "AND r.assembly_state='finalized' ORDER BY r.created_sequence DESC LIMIT 1",
-            (store.project_hash, task_id),
-        ).fetchone()
-        any_plan = connection.execute(
-            "SELECT 1 FROM reports WHERE project_hash=? AND task_id=? "
-            "AND report_type='plan' AND assembly_state='finalized' LIMIT 1",
-            (store.project_hash, task_id),
-        ).fetchone()
-        if plan is None:
-            if mode == "minimal" and any_plan is None:
-                return
-            raise V12ServiceError(
-                "a current finalized required-review plan or authoritatively derived informational plan is required before delivery",
-                code="plan_approval_required",
-            )
-        policy = str(plan["review_policy"] or "")
-        if policy == "informational":
-            return
-        if policy != "required":
-            raise V12ServiceError(
-                "the current plan has no valid adaptive review classification",
-                code="plan_approval_required",
-            )
-        decision = connection.execute(
-            "SELECT decision_type,subject_id,subject_digest FROM user_decisions "
-            "WHERE project_hash=? AND task_id=? AND subject_type='plan' "
-            "ORDER BY created_sequence DESC LIMIT 1",
-            (store.project_hash, task_id),
-        ).fetchone()
-        if (decision is None or str(decision["decision_type"]) != "approve"
-                or str(decision["subject_id"]) != str(plan["report_id"])
-                or str(decision["subject_digest"]) != str(plan["content_digest"])):
-            raise V12ServiceError(
-                "the current required-review plan has not been explicitly approved",
-                code="plan_approval_required",
-            )
-    store._read(read)
-
-
-def _plan_review_policy(
-    store: V12Store, assignment_id: str, evidence: Mapping[str, Any], status: str,
-) -> str:
-    """Classify a current plan from authoritative assessment and plan evidence.
-
-    Informational is deliberately the narrow case: the coordinator classified
-    the complete user contract as minimal, recorded no risk factors, and the
-    plan itself is complete with no risks or unresolved items. A planner cannot
-    downgrade review by self-attesting that its own choices are nonmaterial.
-    Light/full governance and every uncertain or incomplete plan fail closed to
-    required review independently of the plan's natural language.
-    """
-    def classifier_evidence(connection: Any) -> tuple[Any, list[Any]]:
-        assessment = connection.execute(
-            "SELECT g.mode,g.risk_factors_json FROM delegations d JOIN governance_assessments g "
-            "ON g.task_id=d.task_id AND g.project_hash=d.project_hash "
-            "WHERE d.delegation_id=? AND d.project_hash=? "
-            "ORDER BY CASE WHEN g.source='user_override' THEN 0 ELSE 1 END, "
-            "g.created_sequence DESC LIMIT 1",
-            (assignment_id, store.project_hash),
-        ).fetchone()
-        contract = connection.execute(
-            "SELECT i.text,d.details_json FROM assignment_scope_snapshots s "
-            "JOIN effective_contract_items i ON i.item_id=s.item_id "
-            "LEFT JOIN effective_contract_item_details d ON d.item_id=i.item_id "
-            "WHERE s.assignment_id=? AND s.assignment_role='planning' "
-            "ORDER BY i.ordinal,i.item_id",
-            (assignment_id,),
-        ).fetchall()
-        return assessment, list(contract)
-
-    assessment, contract_rows = store._read(classifier_evidence)
-    if assessment is None:
-        raise V12ServiceError(
-            "governance assessment is required before plan publication",
-            code="governance_assessment_required",
-        )
-
-    try:
-        risk_factors = json.loads(str(assessment["risk_factors_json"] or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        risk_factors = ["unreadable governance risk evidence"]
-    if not isinstance(risk_factors, list) or risk_factors:
-        return "required"
-    if str(assessment["mode"] or "") != "minimal":
-        return "required"
-    if status != "completed":
-        return "required"
-    if evidence.get("risks") or evidence.get("unresolved"):
-        return "required"
-
-    coverage = evidence.get("contract_coverage")
-    if (
-        not isinstance(coverage, list)
-        or not coverage
-        or any(
-            not isinstance(item, Mapping)
-            or item.get("status") not in {"planned", "complete"}
-            for item in coverage
-        )
-    ):
-        return "required"
-    stages = evidence.get("stages")
-    if not isinstance(stages, list) or not stages or not contract_rows:
-        return "required"
-
-    for stage in stages:
-        if not isinstance(stage, Mapping):
-            return "required"
-        owner = stage.get("owner")
-        work = stage.get("work")
-        verification = stage.get("verification")
-        if (
-            not isinstance(owner, str) or not owner.strip()
-            or not isinstance(work, list) or not work
-            or not isinstance(verification, list) or not verification
-            or any(not isinstance(value, str) or not value.strip() for value in work)
-            or any(not isinstance(value, str) or not value.strip() for value in verification)
-        ):
-            return "required"
-    for row in contract_rows:
-        text = row["text"]
-        if not isinstance(text, str) or not text.strip():
-            return "required"
-        try:
-            details = json.loads(str(row["details_json"] or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return "required"
-        if not isinstance(details, Mapping):
-            return "required"
-        for field in ("acceptance_criteria", "constraints", "verification_criteria"):
-            values = details.get(field, [])
-            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-                return "required"
-
-    return "informational"
-
-
 def _worker_capability_provenance() -> dict[str, str]:
     """Return the running package identity used to bind worker bootstrap.
 
@@ -532,7 +290,7 @@ def _worker_capability_provenance() -> dict[str, str]:
     package_root = Path(__file__).resolve().parents[2]
     identity = verify_runtime(
         package_root,
-        "1.15.3",
+        "1.15.6",
         allow_source_mode=os.environ.get("CORTEX_SOURCE_MODE") == "1",
     )
     catalogue = tuple(
@@ -568,7 +326,6 @@ def open_task(*, project_root: str, request_original: str, user_language: str,
     if not isinstance(outcomes, list):
         raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
     requirements: list[object] = []
-    acceptance_criteria: list[object] = []
     outcome_contracts: list[dict[str, object]] = []
     for outcome in outcomes:
         if not isinstance(outcome, Mapping):
@@ -577,7 +334,6 @@ def open_task(*, project_root: str, request_original: str, user_language: str,
         acceptance = outcome.get("acceptance")
         if not isinstance(acceptance, list):
             raise V12ServiceError("task outcomes are invalid", code="invalid_argument", details={"field": "task"})
-        acceptance_criteria.extend(acceptance)
         outcome_contracts.append({
             "requirement": outcome.get("outcome"),
             "acceptance": list(acceptance),
@@ -597,7 +353,7 @@ def open_task(*, project_root: str, request_original: str, user_language: str,
     payload = {"project_root": project_root, "objective": user_request_original,
                "user_request_original": user_request_original, "user_language": user_language,
                "requirements": requirements, "constraints": constraints,
-               "acceptance_criteria": acceptance_criteria,
+               "acceptance_criteria": [],
                "outcome_contracts": outcome_contracts, "context": context}
     result = ledger.create_task(**payload)
     created = result.get("task") if isinstance(result, Mapping) else None
@@ -697,60 +453,60 @@ def read_task(*, task_ref: str, continue_: bool = False,
     return {"task_ref": task_ref, "data": _public_read_data(raw), "has_more": has_more}
 
 
+def _current_native_projection(connection, task_id, task_ref, context):
+    """One signed host observation shared by current read projections."""
+    root = context.get("_native_plugin_data")
+    if root is None:
+        return None
+    from cortex_runtime import graph_ledger
+    from cortex_runtime.native_observation import verified_projection, digest
+    epoch = connection.execute("SELECT barrier_epoch FROM project_integrity WHERE singleton=1").fetchone()[0]
+    return verified_projection(Path(root), task_digest=digest(task_ref),
+        revision=graph_ledger._current_revision(connection, task_id), barrier_epoch=epoch)
+
+
 def read_state(*, task_ref: str,
                _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return only bounded scalar facts needed to choose the next read/action."""
+    """Return scalar current graph facts and the recovery-order boundary."""
+    from cortex_runtime import graph_ledger
     context = _connection_context if isinstance(_connection_context, dict) else {}
-    _store, _canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
-    if assignment_id is not None:
+    store, task_id, assignment, _ = _resolve_task_context(task_ref)
+    if assignment is not None:
         raise V12ServiceError("coordinator state requires coordinator task_ref", code="wrong_connection")
-    current = _public_read_data(ledger.inspect_task(
-        task_ref=coordinator_ref, after_sequence=0, limit=1,
-    ))
-    contract = current.get("effective_contract") if isinstance(current.get("effective_contract"), Mapping) else {}
-    coverage = current.get("aggregate_coverage") if isinstance(current.get("aggregate_coverage"), Mapping) else {}
-    coverage_items = coverage.get("items") if isinstance(coverage.get("items"), list) else []
-    scope = coverage.get("assignment_scope") if isinstance(coverage.get("assignment_scope"), Mapping) else {}
-    conformance = current.get("conformance_review") if isinstance(current.get("conformance_review"), Mapping) else {}
-    execution = current.get("execution_outcome") if isinstance(current.get("execution_outcome"), Mapping) else {}
-    closure = current.get("advisory_closure") if isinstance(current.get("advisory_closure"), Mapping) else {}
-    latest_closure = closure.get("latest_record") if isinstance(closure.get("latest_record"), Mapping) else {}
-    status_counts: dict[str, int] = {}
-    for item in coverage_items:
-        status = item.get("status") if isinstance(item, Mapping) else None
-        if isinstance(status, str):
-            status_counts[status] = status_counts.get(status, 0) + 1
-    unresolved = conformance.get("unresolved_evidence")
-    reports = conformance.get("report_manifests")
+    def read(c):
+        state = graph_ledger.task_projection(c, task_id,
+            native_observation=_current_native_projection(c, task_id, task_ref, context))
+        reports = c.execute("SELECT COUNT(*),COALESCE(SUM(status='completed'),0) FROM reports WHERE task_id=? AND assembly_state='finalized'", (task_id,)).fetchone()
+        closure = c.execute("SELECT verdict,evidence_json FROM governance_closures WHERE subject_type='task' AND subject_id=? ORDER BY created_sequence DESC LIMIT 1", (task_id,)).fetchone()
+        current_closure = closure[0] if closure and json.loads(closure[1]).get("revision") == state["revision"] else None
+        return state, tuple(reports), current_closure
+    current, reports, closure = store._read(read)
+    counts, node_counts = {}, {}
+    for outcome in current["outcomes"]:
+        counts[outcome["status"]] = counts.get(outcome["status"], 0) + 1
+    for node in current["nodes"]:
+        node_counts[node["state"]] = node_counts.get(node["state"], 0) + 1
+    unfinished = len(current["unfinished"])
+    recovering = context.get("_role") == "unknown" or context.get("_recovery_required") is True
+    if recovering and unfinished:
+        context["_required_next_operation"] = ("read_continuations", task_ref)
     data = {
-        "effective_revision": contract.get("revision"),
-        "coverage_status": coverage.get("status"),
-        "outcome_count": len(coverage_items),
-        "coverage_status_counts": status_counts,
-        "assignment_counts": {
-            "delivery": len(scope.get("delivery_outcomes", [])) if isinstance(scope.get("delivery_outcomes"), list) else 0,
-            "evidence": len(scope.get("evidence_outcomes", [])) if isinstance(scope.get("evidence_outcomes"), list) else 0,
-            "terminal": len(scope.get("terminal_outcomes", [])) if isinstance(scope.get("terminal_outcomes"), list) else 0,
-        },
-        "terminal_rework": scope.get("terminal_rework"),
-        "conformance_status": conformance.get("status"),
-        "unresolved_evidence_count": len(unresolved) if isinstance(unresolved, list) else 0,
-        "finalized_report_count": execution.get("finalized_report_count"),
-        "completed_report_count": execution.get("completed_report_count"),
-        "execution_evidence_status": execution.get("evidence_status"),
-        "execution_outcome": execution.get("outcome"),
-        "closure_record_status": closure.get("record_status"),
-        "closure_verdict": latest_closure.get("verdict"),
-        "report_manifest_count": len(reports) if isinstance(reports, list) else 0,
+        "effective_revision": current["revision"], "outcome_count": len(current["outcomes"]),
+        "coverage_status_counts": counts, "node_state_counts": node_counts,
+        "coverage_status": "complete" if counts.get("complete", 0) == len(current["outcomes"]) else "incomplete",
+        "finalized_report_count": reports[0], "completed_report_count": reports[1],
+        "unfinished_assignment_count": unfinished, "recovery_required": bool(recovering and unfinished),
+        "reconciliation_required": current["reconciliation_required"],
+        "reconciliation_epoch": current["barrier_epoch"],
+        "artifact_generation_present": current["generation_present"],
+        "closure_record_status": "recorded" if closure is not None else "not_recorded",
+        "closure_verdict": closure,
+        "admissible_operations": ["read_continuations"] if recovering and unfinished else
+            ["read_scope", "read_evidence", "read_outcome", "read_timeline", "read_continuations"],
     }
-    context.update({
-        "read_key": ("read_state", task_ref),
-        "cursor": None,
-        "has_more": False,
-        "steering_state_read_task_ref": task_ref,
-    })
+    context.update(read_key=("read_state", task_ref), cursor=None, has_more=False,
+        steering_state_read_task_ref=task_ref)
     return {"task_ref": task_ref, "data": data}
-
 
 def _bounded_page(values: list[Any], start: int, *, maximum: int = 49_152) -> tuple[list[Any], int]:
     """Pack whole semantic records without slicing or ellipsizing them."""
@@ -768,96 +524,99 @@ def _bounded_page(values: list[Any], start: int, *, maximum: int = 49_152) -> tu
 
 
 def read_scope(*, task_ref: str, responsibility: str, continue_: bool = False,
-               _connection_context: dict[str, Any] | None = None,
-               **compat: Any) -> dict[str, Any]:
-    """Read only one responsibility's current assignment scope."""
-    if "continue" in compat:
-        continue_ = compat.pop("continue")
-    if compat:
+               _connection_context: dict[str, Any] | None = None, **keywords: Any) -> dict[str, Any]:
+    """Read revision-bound graph selectors, never reconstruct outcome owners."""
+    if "continue" in keywords:
+        continue_ = keywords.pop("continue")
+    if keywords or responsibility not in {"delivery", "evidence", "planning"}:
         raise V12ServiceError("scope read shape is invalid", code="invalid_argument")
+    from cortex_runtime import graph_ledger
     context = _connection_context if isinstance(_connection_context, dict) else {}
-    _store, _canonical, assignment_id, coordinator_ref = _resolve_task_context(task_ref)
+    store, task_id, assignment_id, _ = _resolve_task_context(task_ref)
     if assignment_id is not None:
         raise V12ServiceError("coordinator scope requires coordinator task_ref", code="wrong_connection")
     key = ("read_scope", task_ref, responsibility)
     if continue_:
         if context.get("read_key") != key or not context.get("has_more"):
-            raise V12ServiceError("no bounded read is available to continue", code="report_cursor_invalid")
-        snapshot = context.get("scope_snapshot")
-        start = context.get("cursor")
-        if not isinstance(snapshot, list) or isinstance(start, bool) or not isinstance(start, int):
-            raise V12ServiceError("scope continuation is unavailable", code="ledger_error")
-        revision = context.get("scope_revision")
-        summary = context.get("scope_summary")
-        current_revision = _store._read(
-            lambda connection: _store._effective_contract(connection, _canonical)["revision"]
-        )
-        if revision != current_revision:
-            context.update({"cursor": None, "has_more": False})
-            raise V12ServiceError(
-                "scope continuation is stale after a contract revision",
-                code="assignment_stale",
-            )
+            raise V12ServiceError("no scope page remains", code="report_cursor_invalid")
+        snapshot = context["scope_snapshot"]
+        start = context["cursor"]
+        current_revision = store._read(lambda c: graph_ledger._current_revision(c, task_id))
+        if current_revision != context["scope_revision"]:
+            raise V12ServiceError("scope revision is stale", code="assignment_stale")
     else:
-        current = _public_read_data(ledger.inspect_task(
-            task_ref=coordinator_ref, after_sequence=0, limit=1,
-        ))
-        contract = current.get("effective_contract") if isinstance(current.get("effective_contract"), Mapping) else {}
-        coverage = current.get("aggregate_coverage") if isinstance(current.get("aggregate_coverage"), Mapping) else {}
-        scope = coverage.get("assignment_scope") if isinstance(coverage.get("assignment_scope"), Mapping) else {}
-        names = (
-            [] if responsibility == "planning"
-            else scope.get(f"{responsibility}_outcomes", [])
-        )
-        if not isinstance(names, list):
-            names = []
-        if responsibility == "delivery" and isinstance(coverage.get("items"), list):
-            recovery_names = [
-                name
-                for item in coverage["items"]
-                if isinstance(item, Mapping)
-                and item.get("delivery_assignability") == "loss_recovery_only"
-                for name in item.get("loss_recovery_outcomes", [])
-                if isinstance(name, str)
-            ]
-            names = list(dict.fromkeys([*names, *recovery_names]))
-        by_name = {
-            item.get("outcome"): item
-            for item in coverage.get("items", [])
-            if isinstance(item, Mapping) and isinstance(item.get("outcome"), str)
-        } if isinstance(coverage.get("items"), list) else {}
-        snapshot = [dict(by_name.get(name, {"outcome": name})) for name in names if isinstance(name, str)]
-        revision = contract.get("revision")
-        summary = {
-            "coverage_status": coverage.get("status"),
-            "responsibility": responsibility,
-            "outcome_count": len(snapshot),
-            "terminal_rework": scope.get("terminal_rework"),
-            "planning_scope": scope.get("planning") if responsibility == "planning" else None,
-        }
+        def read(c):
+            revision = graph_ledger._current_revision(c, task_id)
+            contract = store._effective_contract(c, task_id)
+            rows = c.execute("SELECT graph_id,graph_kind FROM execution_graphs WHERE task_id=? AND revision=? ORDER BY rowid DESC",
+                (task_id, revision)).fetchall()
+            chosen = []
+            candidate_seen = False
+            for row in rows:
+                if row["graph_kind"] != "bootstrap":
+                    if candidate_seen:
+                        continue
+                    candidate_seen = True
+                chosen.append(row)
+            snapshot, admissions, mapping = [], {}, {}
+            integrity = c.execute("SELECT generation_key,barrier_epoch FROM project_integrity WHERE singleton=1").fetchone()
+            generation = integrity[0]
+            native = _current_native_projection(c, task_id, task_ref, context)
+            bootstrap_id = None
+            for row in chosen:
+                graph_id = row["graph_id"]
+                record, graph = graph_ledger._graph(c, graph_id)
+                definitions = {item[0]: json.loads(item[1]) for item in c.execute(
+                    "SELECT node_key,content_json FROM execution_nodes WHERE graph_id=?", (graph_id,))}
+                admissions[graph_id] = {"graph": graph_id, "digest": graph.digest, "revision": revision,
+                    "native_observation": native, "barrier_epoch": integrity["barrier_epoch"],
+                    "generation": generation, "owners": {item[0]: item[1] for item in c.execute(
+                        "SELECT node_key,assignment_id FROM execution_nodes WHERE graph_id=?", (graph_id,))}}
+                if row["graph_kind"] == "bootstrap":
+                    bootstrap_id = graph_id
+                for projection in graph_ledger.state_projection(c, graph_id, native_observation=native):
+                    node = definitions[projection["node"]]
+                    if node["responsibility"] != responsibility:
+                        continue
+                    if projection["state"] == "active":
+                        from cortex_runtime.execution_graph import GraphError
+                        owner = admissions[graph_id]["owners"][node["key"]]
+                        owned = [key for key, value in admissions[graph_id]["owners"].items() if value == owner]
+                        try:
+                            lost_owner = graph_ledger.recoverable_owner(c, graph_id=graph_id, node_keys=owned, observation=native)
+                        except GraphError as exc:
+                            projection["loss_evidence"] = {"confirmed": False, "reason": exc.reason}
+                        else:
+                            projection["loss_evidence"] = {"confirmed": True, "complete_scope_size": len(owned),
+                                "budget_exhausted": lost_owner["budget_exhausted"]}
+                    if node["key"] in mapping:
+                        raise V12StoreError("current graph node selectors are ambiguous", code="ledger_error")
+                    mapping[node["key"]] = graph_id
+                    snapshot.append({**projection, "kind": node["kind"], "execution_mode": node["execution_mode"]})
+            bootstrap_state = {"available": False, "reasons": []} if bootstrap_id is None else graph_ledger.bootstrap_readiness(
+                c, bootstrap_id, "planning" if responsibility == "planning" else "discovery" if responsibility == "evidence" else "none")
+            return revision, snapshot, admissions, mapping, bootstrap_id, [item["text"] for item in contract["items"]], bootstrap_state
+        try:
+            revision, snapshot, admissions, mapping, bootstrap_id, names, bootstrap_state = store._read(read)
+        except V12StoreError as exc:
+            raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+        context.update(scope_snapshot=snapshot, scope_revision=revision, scope_admissions=admissions,
+            scope_node_graphs=mapping, scope_bootstrap=bootstrap_id, scope_observed_nodes=[],
+            scope_outcome_names=names, scope_task=task_ref, scope_responsibility=responsibility,
+            scope_bootstrap_state=bootstrap_state)
         start = 0
-        context.update({
-            "scope_snapshot": snapshot,
-            "scope_revision": revision,
-            "scope_summary": summary,
-        })
     page, position = _bounded_page(snapshot, start)
     has_more = position < len(snapshot)
-    context.update({"read_key": key, "cursor": position if has_more else None, "has_more": has_more})
+    context.update(read_key=key, cursor=position if has_more else None, has_more=has_more)
+    context["scope_observed_nodes"].extend(item["node"] for item in page)
     context["steering_state_read_task_ref"] = task_ref
-    observed = context.setdefault("steering_observed_outcomes", [])
-    if isinstance(observed, list):
-        for item in page:
-            name = item.get("outcome") if isinstance(item, Mapping) else None
-            if isinstance(name, str) and name not in observed:
-                observed.append(name)
-    return {
-        "task_ref": task_ref,
-        "data": {"effective_revision": revision, "summary": summary, "outcomes": page},
-        "has_more": has_more,
-    }
-
-
+    context["steering_observed_outcomes"] = list(context["scope_outcome_names"])
+    return {"task_ref": task_ref, "data": {
+        "effective_revision": context["scope_revision"], "responsibility": responsibility,
+        "nodes": page, "outcomes": [{"outcome": name} for name in context["scope_outcome_names"]],
+        "bootstrap_available": context["scope_bootstrap_state"]["available"],
+        "bootstrap_reasons": context["scope_bootstrap_state"]["reasons"],
+    }, "has_more": has_more}
 def read_outcome(*, task_ref: str, outcome: str,
                  _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Read exactly one current semantic outcome by its unique exact name."""
@@ -928,20 +687,19 @@ def read_continuations(*, task_ref: str, continue_: bool = False,
                 code="assignment_stale",
             )
     else:
-        current = _public_read_data(ledger.inspect_task(
-            task_ref=coordinator_ref, after_sequence=0, limit=1,
-        ))
-        raw = current.get("continuations")
-        snapshot = list(raw) if isinstance(raw, list) else []
+        from cortex_runtime import graph_ledger
+        revision, snapshot = store._read(lambda c: (
+            graph_ledger._current_revision(c, canonical), graph_ledger.continuations(c, canonical,
+                native_observation=_current_native_projection(c, canonical, task_ref, context))))
         start = 0
         context["continuation_snapshot"] = snapshot
-        contract = current.get("effective_contract") if isinstance(current, Mapping) else None
-        context["continuation_revision"] = (
-            contract.get("revision") if isinstance(contract, Mapping) else None
-        )
+        context["continuation_revision"] = revision
     page, position = _bounded_page(snapshot, start)
     has_more = position < len(snapshot)
     context.update({"read_key": key, "cursor": position if has_more else None, "has_more": has_more})
+    if not has_more and context.get("_required_next_operation") == ("read_continuations", task_ref):
+        context.pop("_required_next_operation", None)
+        context.pop("_recovery_required", None)
     return {"task_ref": task_ref, "data": {"continuations": page}, "has_more": has_more}
 
 
@@ -977,7 +735,7 @@ def read_evidence(*, task_ref: str, report_policy: str,
         context["evidence_revision"] = store._read(
             lambda connection: store._effective_contract(connection, canonical)["revision"]
         )
-    report_ids = _select_report_inputs(store, canonical, report_policy, [])
+    report_ids = _select_report_inputs(store, canonical, report_policy)
     raw = (
         store.read_reports(
             task_id=canonical, report_ids=report_ids, cursor=cursor,
@@ -1037,157 +795,62 @@ def read_timeline(*, task_ref: str, continue_: bool = False,
     return {"task_ref": task_ref, "data": _public_read_data(public_raw), "has_more": has_more}
 
 
-def open_assignment(*, task_ref: str, role: str, profile_name: str, model: str,
-                    reasoning_effort: str,
-                    responsibility: str, goal: str, scope: str,
-                    instructions: str, outcomes: list[str] | None = None,
-                    report_policy: str = "none",
-                    loss_recovery: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Atomically bind a worker assignment to its current effective contract."""
-    from cortex_runtime.model_routing import validate_model_selection
-    assignment_policy = {
-        "delivery": "owner",
-        "evidence": "review",
-        "planning": "planning",
-    }.get(responsibility)
-    if assignment_policy is None:
-        raise V12ServiceError("assignment responsibility is invalid", code="invalid_argument", details={"field": "mission.responsibility"})
-    store, canonical = _task_store(task_ref)
-    _admit_assignment(store, canonical, assignment_policy)
-    task_state = ledger.inspect_task(task_ref=task_ref)
-    current = task_state.get("effective_contract")
-    current_items = current.get("items") if isinstance(current, Mapping) else None
-    if not isinstance(current_items, list):
-        raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
-    expected_contract_revision = current.get("revision")
-    if isinstance(expected_contract_revision, bool) or not isinstance(expected_contract_revision, int):
-        raise V12ServiceError("task outcome revision is unavailable", code="ledger_error")
-    typed_items = [item for item in current_items if isinstance(item, Mapping)]
-    if responsibility == "planning":
-        if outcomes is not None:
-            raise V12ServiceError(
-                "planning outcome scope is server-derived",
-                code="invalid_argument",
-                details={"path": "$.outcomes", "reason": "unsupported_property"},
-            )
-        item_refs = [
-            str(item["item_ref"]) for item in typed_items
-            if isinstance(item.get("item_ref"), str)
-        ]
-        if len(item_refs) != len(typed_items) or not item_refs:
-            raise V12ServiceError("task outcome scope is unavailable", code="ledger_error")
-    elif outcomes is None:
-        aggregate = task_state.get("aggregate_coverage")
-        assignment_scope = aggregate.get("assignment_scope") if isinstance(aggregate, Mapping) else None
-        if loss_recovery is not None:
-            if responsibility != "delivery":
-                raise V12ServiceError(
-                    "only a delivery owner can replace a lost assignment",
-                    code="assignment_loss_scope_conflict",
-                )
-            coverage_items = aggregate.get("items") if isinstance(aggregate, Mapping) else None
-            recovery_scopes: list[tuple[str, ...]] = []
-            if isinstance(coverage_items, list):
-                for item in coverage_items:
-                    if not isinstance(item, Mapping) or item.get("delivery_assignability") != "loss_recovery_only":
-                        continue
-                    candidate = item.get("loss_recovery_outcomes")
-                    if not isinstance(candidate, list) or not candidate or not all(isinstance(name, str) for name in candidate):
-                        continue
-                    recovery_scope = tuple(candidate)
-                    if recovery_scope not in recovery_scopes:
-                        recovery_scopes.append(recovery_scope)
-            if len(recovery_scopes) != 1:
-                raise V12ServiceError(
-                    "loss recovery scope is not uniquely server-derivable",
-                    code="assignment_loss_scope_conflict",
-                    details={
-                        "path": "$.outcomes",
-                        "expected": "one_server_derived_loss_recovery_scope",
-                        "reason": "ambiguous_recovery_scope",
-                    },
-                )
-            advertised = list(recovery_scopes[0])
-            scope_key = "loss_recovery_outcomes"
-        else:
-            scope_key = "delivery_outcomes" if responsibility == "delivery" else "evidence_outcomes"
-            advertised = assignment_scope.get(scope_key) if isinstance(assignment_scope, Mapping) else None
-        if not isinstance(advertised, list) or not advertised:
-            raise V12ServiceError(
-                "no current outcomes are assignable for this responsibility",
-                code="outcome_assignment_conflict",
-                details={"path": "$.outcomes", "expected": f"non_empty_{scope_key}", "reason": "no_assignable_scope"},
-            )
-        item_refs = _match_outcomes(typed_items, advertised, path="$.outcomes")
-    elif isinstance(outcomes, list):
-        item_refs = _match_outcomes(typed_items, outcomes, path="$.outcomes")
+def open_assignment(*, task_ref: str, profile_name: str, model: str,
+                    reasoning_effort: str, nodes: list[str] | None = None,
+                    bootstrap: Mapping[str, Any] | None = None,
+                    _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Claim only selectors from the current connection's last graph scope."""
+    context = _connection_context if isinstance(_connection_context, dict) else {}
+    store, task_id = _task_store(task_ref)
+    if context.get("scope_task") != task_ref or context.get("read_key") != (
+            "read_scope", task_ref, context.get("scope_responsibility")):
+        raise V12ServiceError("read the current graph scope before assigning", code="assignment_stale")
+    if (nodes is None) == (bootstrap is None):
+        raise V12ServiceError("select nodes or one bootstrap intent", code="invalid_argument")
+    recover = False
+    kind = question = None
+    if bootstrap is not None:
+        if not isinstance(bootstrap, Mapping) or set(bootstrap) - {"kind", "question"}:
+            raise V12ServiceError("bootstrap intent is invalid", code="invalid_argument")
+        kind, question = bootstrap.get("kind"), bootstrap.get("question")
+        if kind not in {"discovery", "planning"}:
+            raise V12ServiceError("bootstrap intent is invalid", code="invalid_argument")
+        expected = "planning" if kind == "planning" else "evidence"
+        if context["scope_responsibility"] != expected:
+            raise V12ServiceError("bootstrap scope responsibility mismatch", code="assignment_stale")
+        graph_id = context.get("scope_bootstrap")
+        selected = []
     else:
-        raise V12ServiceError(
-            "assignment outcome scope is invalid",
-            code="invalid_argument",
-            details={"path": "$.outcomes", "expected": "array", "reason": "type"},
-        )
-    outcome_assignments = {
-        "owned": list(item_refs) if responsibility == "delivery" else [],
-        "contributing": list(item_refs) if responsibility in {"evidence", "planning"} else [],
-        "evidence_producing": list(item_refs) if responsibility == "evidence" else [],
-    }
+        if not isinstance(nodes, list) or not nodes or len(set(nodes)) != len(nodes) or any(
+                node not in context["scope_observed_nodes"] for node in nodes):
+            raise V12ServiceError("node selection was not observed in current scope", code="assignment_stale")
+        graph_ids = {context["scope_node_graphs"][node] for node in nodes}
+        if len(graph_ids) != 1:
+            raise V12ServiceError("selected nodes belong to different graphs", code="invalid_argument")
+        graph_id = next(iter(graph_ids))
+        selected = nodes
+        # The observed owner state fixes the transition. A ready reconciliation
+        # node is an ordinary claim; selecting an unpublished active owner asks
+        # the store to verify loss and reconcile it atomically. The caller must
+        # not guess a second mode for the same server-owned selection.
+        recover = any(item["node"] in selected and item["state"] == "active"
+                      for item in context["scope_snapshot"])
+    admission = context["scope_admissions"].get(graph_id)
+    if admission is None:
+        raise V12ServiceError("current graph admission is unavailable", code="assignment_stale")
     try:
-        selection = validate_model_selection(model, reasoning_effort)
-    except ValueError as exc:
-        raise V12ServiceError("model selection is invalid", code="invalid_model_selection") from exc
-    input_report_ids = _select_report_inputs(store, canonical, report_policy, item_refs)
-    input_report_refs = [record_ref(item) for item in input_report_ids]
-    if any(item is None for item in input_report_refs):
-        raise V12ServiceError("report policy resolution failed", code="ledger_error")
-    input_decision_refs: list[str] = []
-    parent_delegation_ref = None
-    if loss_recovery is not None:
-        if responsibility != "delivery":
-            raise V12ServiceError(
-                "only a delivery owner can replace a lost assignment",
-                code="assignment_loss_scope_conflict",
-            )
-        try:
-            parent_id = store.active_owner_for_outcomes(
-                task_id=canonical,
-                outcome_items=item_refs,
-            )
-        except V12StoreError as exc:
-            raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
-        parent_delegation_ref = record_ref(parent_id)
-        if parent_delegation_ref is None:
-            raise V12ServiceError(
-                "lost assignment lineage could not be resolved",
-                code="ledger_error",
-            )
-    payload = {"task_ref": task_ref, "objective": goal, "role": role,
-               "profile_name": profile_name, "scope": scope, "instructions": instructions,
-               "model": selection.model, "reasoning_effort": selection.reasoning_effort,
-               "input_report_refs": input_report_refs, "input_decision_refs": input_decision_refs}
-    provenance = _worker_capability_provenance()
-    try:
-        result = ledger.create_delegation(
-            task_ref=task_ref, objective=payload["objective"], role=payload["role"], profile_name=payload["profile_name"],
-            scope=payload["scope"], instructions=payload["instructions"], model=selection.model, reasoning_effort=selection.reasoning_effort,
-            input_report_refs=list(input_report_refs), input_decision_refs=input_decision_refs,
-            outcome_assignments=outcome_assignments,
-            parent_delegation_ref=parent_delegation_ref,
-            bootstrap_provenance=provenance,
-            derive_assignment_scope=True,
-            assignment_policy=assignment_policy,
-            loss_recovery=dict(loss_recovery) if loss_recovery is not None else None,
-            expected_contract_revision=expected_contract_revision,
-        )
-    except V12ServiceError as exc:
-        private_fields = {"input_report_refs", "input_decision_refs", "parent_assignment_ref"}
-        field = exc.details.get("field") if isinstance(exc.details, Mapping) else None
-        if field in private_fields:
-            raise V12ServiceError(
-                "server-owned assignment evidence could not be resolved",
-                code="ledger_error",
-            ) from None
-        raise
+        result, replayed = store.open_node_assignment(task_id=task_id, graph_id=graph_id,
+            recover=recover,
+            graph_digest=admission["digest"], node_keys=selected, profile_name=profile_name,
+            model=model, reasoning_effort=reasoning_effort, bootstrap_provenance=_worker_capability_provenance(),
+            admission=admission, bootstrap_kind=kind, bootstrap_question=question,
+            native_plugin_data=context.get("_native_plugin_data"), native_task_ref=task_ref)
+    except V12StoreError as exc:
+        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+    return _native_assignment_response(dict(result, replayed=replayed))
+
+
+def _native_assignment_response(result: Mapping[str, Any]) -> dict[str, Any]:
     delegation = result.get("delegation")
     if isinstance(delegation, Mapping) and isinstance(delegation.get("delegation_id"), str):
         result = dict(result)
@@ -1428,12 +1091,12 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
         brief = store.read_delegation(delegation_id=delegation_id, after_sequence=0, limit=1)
         worker = brief.get("worker_brief")
         delegation_view = brief.get("delegation")
-        effective_contract = worker.get("effective_contract") if isinstance(worker, Mapping) else None
-        if not isinstance(effective_contract, Mapping):
+        contract_context = worker.get("contract_context") if isinstance(worker, Mapping) else None
+        if not isinstance(contract_context, Mapping):
             raise V12ServiceError("assignment scope is unavailable", code="ledger_error")
         assignment_context = {}
         if isinstance(delegation_view, Mapping):
-            for key in ("role", "profile_name", "objective", "scope", "instructions"):
+            for key in ("profile_name",):
                 value = delegation_view.get(key)
                 if isinstance(value, str):
                     assignment_context[key] = value
@@ -1445,54 +1108,11 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
         if store.project_root is None:
             raise V12ServiceError("assignment project root is unavailable", code="ledger_error")
         assignment_context["project_root"] = str(store.project_root)
-        assigned_items = effective_contract.get("assigned_items")
-        assigned_roles = {
-            item.get("assignment_role")
-            for item in assigned_items
-            if isinstance(item, Mapping)
-        } if isinstance(assigned_items, list) else set()
-        planning_items = effective_contract.get("planning_items")
-        assignment_context["responsibility"] = (
-            "planning"
-            if isinstance(planning_items, list)
-            else "delivery"
-            if "owned" in assigned_roles
-            else "evidence"
-        )
-        coverage_source = (
-            "planning_items"
-            if assignment_context["responsibility"] == "planning"
-            else "assigned_items"
-        )
-        coverage_items = effective_contract.get(coverage_source)
-        if not isinstance(coverage_items, list) or not coverage_items:
-            raise V12ServiceError("assignment publication scope is unavailable", code="ledger_error")
-        required_item_refs = [
-            item.get("item_ref")
-            for item in coverage_items
-            if isinstance(item, Mapping) and isinstance(item.get("item_ref"), str)
-        ]
-        if len(required_item_refs) != len(coverage_items) or len(set(required_item_refs)) != len(required_item_refs):
-            raise V12ServiceError("assignment publication scope is invalid", code="ledger_error")
-        publication_reconciliation = {
-            "coverage_source": coverage_source,
-            "required_item_count": len(required_item_refs),
-            # Keep the exact public outcome selectors in a compact block that
-            # is rendered before the potentially large contract/policy body.
-            # Workers can retain terminal-publication authority even when a
-            # host abbreviates later diagnostic presentation. Private item
-            # references remain server-owned and never cross the projection.
-            "required_outcomes": [
-                str(item.get("text"))
-                for item in coverage_items
-                if isinstance(item, Mapping) and isinstance(item.get("text"), str)
-            ],
-            "contract_coverage_template": [
-                {"outcome": str(item.get("text"))}
-                for item in coverage_items
-                if isinstance(item, Mapping) and isinstance(item.get("text"), str)
-            ],
-        }
+        node_scope = worker.get("assignment")
+        if not isinstance(node_scope, Mapping):
+            raise V12ServiceError("typed assignment scope is unavailable", code="ledger_error")
+        # The consumed graph is the only publication authority. Never infer
+        # ownership or publication type from old outcome lists or profile text.
         predecessor_evidence = []
         for item in (worker.get("input_report_refs", []) if isinstance(worker, Mapping) else []):
             if not isinstance(item, Mapping):
@@ -1509,13 +1129,13 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
                 decision_evidence.append({
                     "decision_ref": compact, "decision_type": item.get("decision_type"),
                     "subject_type": item.get("subject_type"), "subject_digest": item.get("subject_digest"),
-                    "prompt": item.get("prompt_en"), "response_original": item.get("response_original"),
+                    "prompt": item.get("prompt"), "response_original": item.get("response_original"),
                     "user_language": item.get("user_language"),
                 })
         authority = {
-            "publication_reconciliation": publication_reconciliation,
+            "assignment": dict(node_scope),
             "assignment_context": assignment_context,
-            "effective_contract": dict(effective_contract),
+            "contract_context": dict(contract_context),
             "predecessor_evidence": predecessor_evidence if isinstance(predecessor_evidence, list) else [],
             "decision_evidence": decision_evidence if isinstance(decision_evidence, list) else [],
         }
@@ -1720,91 +1340,6 @@ def _read_assignment_page(*, store: V12Store, assignment_id: str,
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
-def _public_plan_publication(published: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the closed compact plan capability emitted by public publication.
-
-    The ledger report remains canonical evidence.  The public publication
-    result intentionally contains only the immutable report capability and its
-    already-bound review relation, so clients never receive canonical record,
-    task, or delegation identifiers to copy into later calls.
-    """
-    report = published.get("report")
-    approval = published.get("approval_view")
-    if not isinstance(report, Mapping) or not isinstance(approval, Mapping):
-        raise V12ServiceError("plan publication relation is unavailable", code="ledger_error")
-    report_ref = record_ref(report.get("report_id"))
-    delegation_ref = record_ref(report.get("delegation_id"))
-    if report_ref is None or delegation_ref is None:
-        raise V12ServiceError("plan publication relation is unavailable", code="ledger_error")
-    report_digest = report.get("content_digest")
-    relation_digest = approval.get("report_content_digest")
-    if not isinstance(report_digest, str) or relation_digest != report_digest:
-        raise V12ServiceError("plan publication relation is unavailable", code="ledger_error")
-    view_digest = approval.get("content_digest")
-    handle = approval.get("approval_handle")
-    sequence = approval.get("source_sequence")
-    if (not isinstance(view_digest, str) or not isinstance(handle, str)
-            or not isinstance(sequence, int) or isinstance(sequence, bool)):
-        raise V12ServiceError("plan publication relation is unavailable", code="ledger_error")
-    review_policy = report.get("review_policy")
-    if review_policy not in {"informational", "required"}:
-        raise V12ServiceError("plan publication relation is unavailable", code="ledger_error")
-    compact_supersedes = record_ref(report.get("supersedes_report_id"))
-    return {
-        "report": {
-            "report_ref": report_ref,
-            "report_type": "plan",
-            "status": str(report.get("status")),
-            "semantic_status": str(report.get("semantic_status")),
-            "review_policy": review_policy,
-            "content_digest": report_digest,
-            **({"supersedes_report_ref": compact_supersedes} if compact_supersedes is not None else {}),
-        },
-        "approval_view": {
-            "report_ref": report_ref,
-            "delegation_ref": delegation_ref,
-            "report_content_digest": report_digest,
-            "status": "ready",
-            "source_sequence": sequence,
-            "content_digest": view_digest,
-            "approval_handle": handle,
-        },
-        "replayed": bool(published.get("replayed")),
-    }
-
-
-def _publish(*, continuation_ref: str, assignment_ref: str, kind: str, evidence: object,
-             status: str = "completed", review_policy: str | None = None) -> dict[str, Any]:
-    """Publish one complete immutable assignment outcome through the v14 store."""
-    try:
-        if not isinstance(continuation_ref, str) or not continuation_ref:
-            raise V12ServiceError("worker continuation is invalid", code="invalid_argument", details={"field": "continuation_ref"})
-        store, delegation_id = V12Store.for_record_ref(assignment_ref, label="delegation_id")
-        delegation_projection = store.read_delegation(delegation_id=delegation_id, after_sequence=0, limit=1)
-        delegation = delegation_projection.get("delegation") if isinstance(delegation_projection, Mapping) else None
-        task_id = delegation.get("task_id") if isinstance(delegation, Mapping) else None
-        if not isinstance(task_id, str):
-            raise V12ServiceError("worker continuation is invalid", code="assignment_stale")
-        continuation = store.resolve_worker_continuation(continuation=continuation_ref)
-        if continuation.get("task_id") != task_id or continuation.get("assignment_id") != delegation_id:
-            raise V12ServiceError("worker continuation is invalid", code="assignment_stale")
-        revision = int(continuation["contract_revision"])
-        published = store.publish_domain_report(
-            delegation_id=delegation_id, continuation_ref=continuation_ref,
-            contract_revision=revision,
-            publication_kind="synthesis" if kind == "documentation" else kind,
-            content=evidence, status=status, review_policy=review_policy,
-        )
-        # ``publish_domain_report`` commits a plan's immutable rendered view
-        # and approval relation in the same ledger transaction as its terminal
-        # report operation.  Do not post-process it through the historical
-        # best-effort projection path: that would create an observable
-        # published-plan-without-ready-relation interval.
-        return _public_plan_publication(published) if kind == "plan" else published
-    except V12StoreError as exc:
-        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
-
-
 _WORKER_PUBLICATION_BINDING_KEYS = frozenset({
     "actor", "task_id", "assignment_id", "worker_task_ref",
     "continuation_ref", "assignment_complete",
@@ -1841,132 +1376,78 @@ def _worker_publication_binding(
     return store, assignment_id, continuation_ref
 
 
-def _publish_from_task(*, task_ref: str, kind: str, evidence: Mapping[str, Any], status: str,
-                       review_policy: str | None = None,
-                       _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    context = _connection_context if isinstance(_connection_context, dict) else {}
-    store, assignment_id, continuation_ref = _worker_publication_binding(
-        task_ref=task_ref, context=context,
-    )
-    if kind == "plan":
-        # Review disposition is task-state, not a planner-authored semantic
-        # choice. Derive it from the current authoritative assessment and the
-        # complete plan evidence. Governance depth alone never forces review.
-        review_policy = _plan_review_policy(store, assignment_id, evidence, status)
-    internal_evidence = _internalize_publication_evidence(store, assignment_id, evidence)
-    published = _publish(
-        continuation_ref=continuation_ref, assignment_ref=record_ref(assignment_id),
-        kind=kind, evidence=internal_evidence, status=status,
-        review_policy=review_policy,
-    )
-    return {"task_ref": task_ref, "state": "published", "replayed": bool(published.get("replayed"))}
+def _preflight_worker_publication(
+    *, store: V12Store, assignment_id: str, continuation_ref: str,
+) -> bool:
+    """Recognize supersession before resolving public coverage names.
+
+    Coverage is resolved against the immutable assignment snapshot.  If a
+    later steering revision has already revoked that assignment, resolving
+    the worker's submitted names first can report ``outcome_item_not_found``
+    (or another coverage diagnostic) instead of the authoritative
+    superseded non-publication state. Resolve the consumed continuation up front;
+    ``publish_node_report``
+    repeats the check atomically to cover a revision race after this read.
+    """
+    try:
+        continuation = store.publication_authority(
+            continuation=continuation_ref, assignment_id=assignment_id,
+        )
+    except V12StoreError as exc:
+        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+    if continuation.get("assignment_id") != assignment_id:
+        raise V12ServiceError(
+            "worker continuation is invalid", code="assignment_stale",
+        )
+    return bool(continuation.get("superseded"))
 
 
-def _publication_evidence(*, schema_kind: str, summary: str,
-                          verification_facts: list[Mapping[str, Any]],
-                          outcome_coverage: list[Mapping[str, Any]], risks: list[str],
-                          unresolved: list[str], **specific: Any) -> dict[str, Any]:
-    schema = "synthesis" if schema_kind == "documentation" else schema_kind
-    return {
-        "schema": f"cortex/report/{schema}/v3",
-        "summary": summary,
-        "verification": [str(item.get("summary")) for item in verification_facts if isinstance(item, Mapping)],
-        "risks": list(risks), "deviations": [], "unresolved": list(unresolved),
-        "verification_facts": [dict(item) for item in verification_facts],
-        "contract_coverage": [dict(item) for item in outcome_coverage],
-        **specific,
-    }
+def _publish_typed(*, task_ref: str, kind: str, content: Mapping[str, Any],
+                   context: dict[str, Any] | None) -> dict[str, Any]:
+    store, assignment, continuation = _worker_publication_binding(task_ref=task_ref, context=context or {})
+    if _preflight_worker_publication(store=store, assignment_id=assignment, continuation_ref=continuation):
+        return {"task_ref": task_ref, "state": "superseded", "published": False, "replayed": False}
+    if len(_encoded_bytes({"task_ref": task_ref, **content})) > MCP_OPERATION_MAX_BYTES:
+        raise V12ServiceError("publication exceeds aggregate size", code="validation_error",
+            details={"path": "$", "reason": "encoded_size", "max_bytes": MCP_OPERATION_MAX_BYTES,
+                     "actual_bytes": len(_encoded_bytes({"task_ref": task_ref, **content}))})
+    try:
+        published = store.publish_node_report(delegation_id=assignment, continuation_ref=continuation,
+            kind=kind, content=content)
+    except V12StoreError as exc:
+        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+    return {"task_ref": task_ref, "state": published["state"], "published": published["published"],
+            "replayed": published["replayed"]}
 
 
-def publish_plan(*, task_ref: str, summary: str, scope: str,
-                 stages: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
-                 outcome_coverage: list[Mapping[str, Any]], risks: list[str], unresolved: list[str],
-                 status: str,
+def publish_plan(*, task_ref: str, summary: str, scope: str, candidates: list[Mapping[str, Any]],
+                 artifact: Mapping[str, Any], risks: list[str], unresolved: list[str], status: str,
                  _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    specific: dict[str, Any] = {
-        "scope": scope,
-        "stages": [dict(item) for item in stages],
-    }
-    evidence = _publication_evidence(schema_kind="plan", summary=summary, verification_facts=verification_facts,
-                                     outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
-                                     **specific)
-    return _publish_from_task(
-        task_ref=task_ref, kind="plan", evidence=evidence, status=status,
-        _connection_context=_connection_context,
-    )
+    return _publish_typed(task_ref=task_ref, kind="plan", context=_connection_context, content={
+        "summary": summary, "scope": scope, "candidates": candidates, "artifact": artifact,
+        "risks": risks, "unresolved": unresolved, "status": status})
 
 
 def publish_result(*, task_ref: str, summary: str, outcome: str,
-                   changes: list[Mapping[str, Any]], verification_facts: list[Mapping[str, Any]],
-                   outcome_coverage: list[Mapping[str, Any]], documentation_impact: str,
-                   risks: list[str], unresolved: list[str], status: str,
+                   changes: list[Mapping[str, Any]], node_coverage: list[Mapping[str, Any]],
+                   documentation_impact: str, risks: list[str], unresolved: list[str], status: str,
+                   artifact: Mapping[str, Any] | None,
                    _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    public_arguments = {
-        "task_ref": task_ref, "summary": summary, "outcome": outcome,
-        "changes": changes, "verification_facts": verification_facts,
-        "outcome_coverage": outcome_coverage,
-        "documentation_impact": documentation_impact,
-        "risks": risks, "unresolved": unresolved, "status": status,
-    }
-    try:
-        actual_bytes = len(json.dumps(
-            public_arguments, ensure_ascii=False, separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8"))
-    except (TypeError, ValueError) as exc:
-        raise V12ServiceError(
-            "result publication is not finite JSON", code="content_invalid",
-            details={"path": "$", "expected": "bounded_json_value"},
-        ) from exc
-    if actual_bytes > MCP_OPERATION_MAX_BYTES:
-        raise V12ServiceError(
-            "result publication exceeds the aggregate encoded size",
-            code="validation_error",
-            details={
-                "path": "$", "expected": "bounded_json_value",
-                "reason": "encoded_size", "actual_bytes": actual_bytes,
-                "max_bytes": MCP_OPERATION_MAX_BYTES,
-            },
-        )
-    evidence = _publication_evidence(schema_kind="result", summary=summary, verification_facts=verification_facts,
-                                     outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
-                                     outcome=outcome, changes=[dict(item) for item in changes],
-                                     documentation_impact=documentation_impact)
-    return _publish_from_task(task_ref=task_ref, kind="result", evidence=evidence, status=status, _connection_context=_connection_context)
+    return _publish_typed(task_ref=task_ref, kind="result", context=_connection_context, content={
+        "summary": summary, "outcome": outcome, "changes": changes, "node_coverage": node_coverage,
+        "documentation_impact": documentation_impact, "risks": risks, "unresolved": unresolved,
+        "status": status, "artifact": artifact})
 
 
-def publish_documentation(*, task_ref: str, summary: str,
-                          findings: list[Mapping[str, Any]], recommendations: list[str],
-                          verification_facts: list[Mapping[str, Any]] | None = None,
-                          outcome_coverage: list[Mapping[str, Any]],
-                          documentation_impact: str, risks: list[str], unresolved: list[str],
-                          status: str, _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    if verification_facts is None:
-        verification_facts = []
-        fact_state = {
-            "complete": "executed",
-            "partial": "executed",
-            "planned": "not_run",
-            "unverified": "not_run",
-            "blocked": "failed",
-        }
-        for coverage in outcome_coverage:
-            if not isinstance(coverage, Mapping):
-                continue
-            state = fact_state.get(str(coverage.get("status")), "not_run")
-            entries = coverage.get("verification")
-            if not isinstance(entries, list):
-                continue
-            verification_facts.extend(
-                {"state": state, "summary": entry}
-                for entry in entries
-                if isinstance(entry, str) and entry.strip()
-            )
-    evidence = _publication_evidence(schema_kind="documentation", summary=summary, verification_facts=verification_facts,
-                                     outcome_coverage=outcome_coverage, risks=risks, unresolved=unresolved,
-                                     findings=[dict(item) for item in findings], recommendations=list(recommendations),
-                                     documentation_impact=documentation_impact)
-    return _publish_from_task(task_ref=task_ref, kind="documentation", evidence=evidence, status=status, _connection_context=_connection_context)
+def publish_documentation(*, task_ref: str, summary: str, findings: list[Mapping[str, Any]],
+                          recommendations: list[str], node_coverage: list[Mapping[str, Any]],
+                          documentation_impact: str, risks: list[str], unresolved: list[str], status: str,
+                          artifact: Mapping[str, Any] | None,
+                          _connection_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _publish_typed(task_ref=task_ref, kind="documentation", context=_connection_context, content={
+        "summary": summary, "findings": findings, "recommendations": recommendations, "node_coverage": node_coverage,
+        "documentation_impact": documentation_impact, "risks": risks, "unresolved": unresolved,
+        "status": status, "artifact": artifact})
 
 
 def _decision_binding(
@@ -1982,12 +1463,8 @@ def _decision_binding(
     """
     predicate = " AND decision_type=?" if decision_type is not None else ""
     parameters: tuple[object, ...] = (task_id, decision_type) if decision_type is not None else (task_id,)
-    rows = store._read(lambda connection: connection.execute(
-        "SELECT clarification_binding,decision_type,effective_contract_revision "
-        "FROM clarification_bindings WHERE task_id=?" + predicate
-        + " AND consumed_decision_id IS NULL ORDER BY issue_sequence",
-        parameters,
-    ).fetchall())
+    rows = store._read(lambda connection: [row for row in store._pending_user_decisions(connection, task_id)
+        if decision_type is None or row["decision_type"] == decision_type])
     if len(rows) == 1:
         row = rows[0]
         return (
@@ -2032,7 +1509,8 @@ def _sole_pending_binding(store: V12Store, task_id: str) -> tuple[str, str, bool
 
 
 def _decision_receipt(task_ref: str, state: str, issued: Mapping[str, Any]) -> dict[str, Any]:
-    return {"task_ref": task_ref, "state": state, "replayed": bool(issued.get("replayed"))}
+    return {"task_ref": task_ref, "state": state, "replayed": bool(issued.get("replayed")),
+            **({"effect": issued["effect"]} if "effect" in issued else {})}
 
 
 def open_clarification(*, task_ref: str, prompt: str, prompt_language: str,
@@ -2048,7 +1526,7 @@ def open_clarification(*, task_ref: str, prompt: str, prompt_language: str,
                 )
             issued = DecisionAggregate(store).open_closure_review(
                 task_id=canonical, prompt=prompt, prompt_language=prompt_language,
-                subject_type="task", subject_id=canonical, assignment_id=None,
+                subject_type="task", subject_id=canonical,
             )
             return _decision_receipt(task_ref, "pending_closure_review", issued)
         if purpose != "clarification" or options is not None:
@@ -2058,7 +1536,7 @@ def open_clarification(*, task_ref: str, prompt: str, prompt_language: str,
             )
         issued = DecisionAggregate(store).open_clarification(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
-            subject_type="task", subject_id=canonical, assignment_id=None,
+            subject_type="task", subject_id=canonical,
         )
         return _decision_receipt(task_ref, "pending_clarification", issued)
     except V12ServiceError:
@@ -2106,19 +1584,10 @@ def open_plan_review(*, task_ref: str, prompt: str,
                      prompt_language: str) -> dict[str, Any]:
     store, canonical = _task_store(task_ref)
     try:
-        plans = store._read(lambda connection: connection.execute(
-            "SELECT DISTINCT r.report_id FROM reports r "
-            "JOIN assignment_scope_snapshots s ON s.assignment_id=r.delegation_id "
-            "WHERE r.task_id=? AND r.report_type='plan' AND r.assembly_state='finalized' "
-            "AND r.review_policy='required' "
-            "AND s.assignment_role='planning' "
-            "AND s.contract_revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=r.task_id) "
-            "ORDER BY r.created_sequence DESC LIMIT 1",
-            (canonical,),
-        ).fetchall())
+        plans = _select_report_inputs(store, canonical, "active_plan")
         if len(plans) != 1:
             raise V12ServiceError("an active finalized plan is required", code="approval_view_required")
-        plan_id = str(plans[0]["report_id"])
+        plan_id = plans[0]
         issued = DecisionAggregate(store).open_plan_review(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
             subject_type="plan", subject_id=plan_id,
@@ -2131,13 +1600,23 @@ def open_plan_review(*, task_ref: str, prompt: str,
                 code="approval_view_required",
             )
         receipt["data"] = {"human_view": views[0]}
+        from cortex_runtime.candidate_family import read_family
+        def alternatives(connection):
+            row = connection.execute("SELECT graph_id FROM execution_graphs WHERE task_id=? AND plan_report_id=? AND revision=(SELECT MAX(revision) FROM effective_contract_revisions WHERE task_id=?)", (canonical, plan_id, canonical)).fetchone()
+            family = read_family(connection, row[0]) if row else None
+            return [{"key": item["definition"]["key"], "consequences": item["definition"]["consequences"]} for item in family.data()["candidates"]] if family else []
+        branches = store._read(alternatives)
+        if branches:
+            receipt["data"]["alternatives"] = branches
         return receipt
     except V12StoreError as exc:
         raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
 
 
 def record_plan_review(*, task_ref: str, outcome: str,
-                       response_original: str, user_language: str) -> dict[str, Any]:
+                       response_original: str, user_language: str,
+                       branch_key: str | None = None) -> dict[str, Any]:
+    from cortex_runtime.execution_graph import GraphError
     store, canonical = _task_store(task_ref)
     replay_candidate = False
     try:
@@ -2147,10 +1626,13 @@ def record_plan_review(*, task_ref: str, outcome: str,
         issued = DecisionAggregate(store).record_plan_review(
             task_id=canonical, binding_ref=binding_ref, outcome=outcome,
             response_original=response_original, user_language=user_language,
+            branch_key=branch_key,
         )
         return _decision_receipt(task_ref, "plan_review_recorded", issued)
     except V12StoreError as exc:
         _stale_replay_conflict(exc, replay_candidate)
+    except GraphError as exc:
+        raise V12ServiceError("plan selection is not admissible", code="invalid_argument", details={"reason": exc.reason}) from None
 
 
 def open_steering(*, task_ref: str, prompt: str, prompt_language: str,
@@ -2159,7 +1641,7 @@ def open_steering(*, task_ref: str, prompt: str, prompt_language: str,
     try:
         issued = DecisionAggregate(store).open_steering(
             task_id=canonical, prompt=prompt, prompt_language=prompt_language,
-            subject_type="task", subject_id=canonical, assignment_id=None,
+            subject_type="task", subject_id=canonical,
         )
         if isinstance(_connection_context, dict):
             _connection_context.pop("steering_state_read_task_ref", None)
@@ -2182,6 +1664,16 @@ def record_steering(*, task_ref: str, response_original: str,
                 details={
                     "path": "$.add" if not isinstance(add, list) else "$.retire",
                     "expected": "array", "reason": "type",
+                },
+            )
+        if not add and not retire:
+            raise V12ServiceError(
+                "steering requires a semantic outcome change",
+                code="invalid_argument",
+                details={
+                    "path": "$",
+                    "expected": "non_empty_add_or_retire",
+                    "reason": "semantic_noop",
                 },
             )
         typed_add = [
@@ -2251,6 +1743,20 @@ def record_steering(*, task_ref: str, response_original: str,
             }
 
         aggregate = DecisionAggregate(store)
+
+        def finish(issued: Mapping[str, Any]) -> dict[str, Any]:
+            if isinstance(_connection_context, dict):
+                _connection_context.pop("steering_state_read_task_ref", None)
+                _connection_context.pop("steering_observed_outcomes", None)
+            return _decision_receipt(task_ref, "steering_recorded", issued)
+
+        def record_direct() -> dict[str, Any]:
+            revision = store._read(lambda connection: store._effective_contract(connection, canonical)["revision"])
+            delta = prepare_delta(revision=revision, replay=False)
+            return aggregate.record_direct_steering(
+                task_id=canonical, response_original=response_original, user_language=user_language,
+                steering_delta=delta, expected_revision=revision,
+            )
         try:
             binding_ref, binding_revision, replay_candidate = _pending_binding(
                 store, canonical, decision_type="steer",
@@ -2261,14 +1767,46 @@ def record_steering(*, task_ref: str, response_original: str,
             # The user's current message can itself be the steering decision.
             # Open and consume its durable binding inside this public operation
             # instead of asking the user to confirm the same instruction again.
-            aggregate.open_steering(
-                task_id=canonical, prompt=response_original,
-                prompt_language=user_language, subject_type="task",
-                subject_id=canonical, assignment_id=None,
+            return finish(record_direct())
+
+        if replay_candidate and (typed_add or retire):
+            # The most recent consumed steering binding is a valid replay
+            # candidate after compaction, but it is not an authority for a
+            # later direct user change.  Compare the semantic delta that the
+            # bound revision would reconstruct with the immutable consumed
+            # delta before deciding whether this is that exact replay.  When
+            # the delta differs (including a target introduced by a newer
+            # contract revision), create one fresh direct binding and record
+            # the user's already-stated change without asking for a duplicate
+            # confirmation.  A response-only mutation with the same delta is
+            # still left to receipt conflict handling and remains stale.
+            try:
+                replay_delta = prepare_delta(
+                    revision=binding_revision, replay=True,
+                )
+            except V12ServiceError:
+                replay_delta = None
+            persisted = store._read(lambda connection: connection.execute(
+                "SELECT d.steering_delta_json FROM clarification_bindings b "
+                "LEFT JOIN user_decisions d ON d.decision_id=b.consumed_decision_id "
+                "WHERE b.clarification_binding=? AND b.project_hash=?",
+                (binding_ref, store.project_hash),
+            ).fetchone())
+            persisted_delta: object = None
+            if persisted is not None and persisted["steering_delta_json"] is not None:
+                try:
+                    persisted_delta = json.loads(str(persisted["steering_delta_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    persisted_delta = None
+            delta_matches = replay_delta is not None and json.dumps(
+                replay_delta, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ) == json.dumps(
+                persisted_delta, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
             )
-            binding_ref, binding_revision, replay_candidate = _pending_binding(
-                store, canonical, decision_type="steer",
-            )
+            if not delta_matches:
+                return finish(record_direct())
 
         steering_delta = prepare_delta(
             revision=binding_revision, replay=replay_candidate,
@@ -2299,25 +1837,8 @@ def record_steering(*, task_ref: str, response_original: str,
             # A different explicit user change follows an earlier consumed
             # steering decision. Create a fresh binding once; exact retries
             # continue to reconcile through the consumed receipt above.
-            aggregate.open_steering(
-                task_id=canonical, prompt=response_original,
-                prompt_language=user_language, subject_type="task",
-                subject_id=canonical, assignment_id=None,
-            )
-            binding_ref, binding_revision, replay_candidate = _pending_binding(
-                store, canonical, decision_type="steer",
-            )
-            steering_delta = prepare_delta(revision=binding_revision, replay=False)
-            issued = aggregate.record_steering(
-                task_id=canonical, binding_ref=binding_ref,
-                response_original=response_original, user_language=user_language,
-                steering_delta=steering_delta,
-                supersedes_decision_id=None,
-            )
-        if isinstance(_connection_context, dict):
-            _connection_context.pop("steering_state_read_task_ref", None)
-            _connection_context.pop("steering_observed_outcomes", None)
-        return _decision_receipt(task_ref, "steering_recorded", issued)
+            return finish(record_direct())
+        return finish(issued)
     except V12ServiceError:
         raise
     except V12StoreError as exc:
@@ -2325,13 +1846,21 @@ def record_steering(*, task_ref: str, response_original: str,
 
 
 def assess_governance(*, task_ref: str, mode: str, rationale: str = "",
-                      risk_factors: list[str] | None = None) -> dict[str, Any]:
-    payload = {"task_ref": task_ref, "mode": mode, "rationale": rationale, "risk_factors": risk_factors}
-    result = ledger.set_governance_mode(**payload, source="model")
-    return {"task_ref": task_ref, "state": "governance_assessed", "replayed": bool(result.get("replayed"))}
+                      risk_factors: list[str] | None = None, execution_route: str = "planned",
+                      minimal_mode: str | None = None, user_review_requested: bool | None = None) -> dict[str, Any]:
+    store, canonical, assignment_id, _ = _resolve_task_context(task_ref)
+    if assignment_id is not None:
+        raise V12ServiceError("governance requires coordinator task_ref", code="wrong_connection")
+    try:
+        _, replayed = store.assess_execution_governance(task_id=canonical, mode=mode, rationale=rationale,
+            risk_factors=risk_factors, execution_route=execution_route, minimal_mode=minimal_mode,
+            user_review_requested=user_review_requested)
+    except V12StoreError as exc:
+        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+    return {"task_ref": task_ref, "state": "governance_assessed", "replayed": replayed}
 
 
-def close_task(*, task_ref: str, verdict: str, evidence: object | None = None,
+def close_task(*, task_ref: str, verdict: str,
                unresolved_risks: object | None = None, follow_ups: object | None = None,
                completion_notes: object | None = None) -> dict[str, Any]:
     store, canonical, assignment_id, _ = _resolve_task_context(task_ref)
@@ -2340,24 +1869,16 @@ def close_task(*, task_ref: str, verdict: str, evidence: object | None = None,
             "task closure requires coordinator task_ref",
             code="wrong_connection",
         )
-    if evidence is None:
-        inspected = ledger.inspect_task(task_ref=task_ref)
-        evidence = {
-            "source": "server_derived_task_state",
-            "effective_contract": inspected.get("effective_contract"),
-            "aggregate_coverage": inspected.get("aggregate_coverage"),
-            "conformance_review": inspected.get("conformance_review"),
-        }
-    result = ledger.submit_governance_closure(
-        task_ref=task_ref, subject_type="task", subject_ref=task_ref, verdict=verdict,
-        evidence=evidence, unresolved_risks=unresolved_risks, follow_ups=follow_ups,
-        completion_notes=completion_notes, require_closure_review=True,
-    )
-    report_ids = _select_report_inputs(store, canonical, "all_finalized", [])
+    try:
+        _, replayed = store.close_execution_task(task_id=canonical, verdict=verdict,
+            unresolved_risks=unresolved_risks, follow_ups=follow_ups, completion_notes=completion_notes)
+    except V12StoreError as exc:
+        raise V12ServiceError(str(exc), code=exc.code, details=exc.details) from None
+    report_ids = _select_report_inputs(store, canonical, "all_finalized")
     return {
         "task_ref": task_ref,
         "state": "closed",
-        "replayed": bool(result.get("replayed")),
+        "replayed": replayed,
         "data": {"human_views": _evidence_human_views(store, canonical, report_ids)},
     }
 

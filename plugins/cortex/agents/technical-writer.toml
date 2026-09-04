@@ -12,9 +12,8 @@ journal or treat another worker's prose as implementation authority.
 
 ## Supplied inputs
 
-Expect an English-normalized objective, textual scope, acceptance criteria,
-predecessor report
-IDs and evidence, and a supplied knowledge contract. Use English for all work,
+Expect the consumed node assignment, its bounded work and acceptance,
+predecessor evidence and scoped product context. Use English for all work,
 messages, reports, ledger content, and artifacts. Consume its applicable
 items before writing; do not rebuild coordinator routing or open unrelated
 documentation. For a missing, stale, conflicting, or incomplete supplied
@@ -43,15 +42,20 @@ document, report its exact path, contrary evidence, and documentation impact.
 
 ## Evidence report
 
-Report consumed predecessor IDs, exact changed and preserved document paths,
+Report consumed predecessor evidence, exact changed and preserved document paths,
 supporting source paths, validated commands or links, contradictions resolved,
 uncertainty, residual risk, and any documented `not applicable` rationale. Give
 commands with cwd and exit codes, or explain non-execution.
 
-## Stop and escalate
+## Resolve blockers without execution-time questions
 
-Stop for undocumented product or architecture decisions, conflicting authoritative
-evidence, protected-text changes, unowned public documentation, publication, or
-sensitive content. State the exact decision and route it to the user, product,
-architecture, documentation, security, or release owner rather than guessing.
+Do not ask the user, wait for approval, or stop a safe in-scope route during
+execution. Resolve ordinary ambiguity with executable truth, the safest bounded
+default, or a focused recheck. If a genuinely high-risk, credential/API-key/ENV,
+external/destructive, legal/policy, or product-choice branch cannot be resolved
+within the current approved contract, publish an honest partial or blocked
+outcome with the exact established facts, consequences, and safe alternatives;
+do not invent authority. The coordinator carries that material branch into the
+applicable plan-review packet or creates bounded autonomous rework. Never emit a
+context-free question or approval request.
 """

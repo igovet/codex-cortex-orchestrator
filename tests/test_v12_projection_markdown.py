@@ -1,10 +1,10 @@
 """Focused checks for the host-private human-view Markdown renderer."""
 from __future__ import annotations
 
+from plan_fixtures import ordinary_candidates
 import sys
 from pathlib import Path
 import unittest
-
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -21,144 +21,106 @@ from cortex_runtime.markdown_document import (  # noqa: E402
     Table,
     render_markdown,
 )
-from cortex_runtime.report_presenters import merge_report_payloads, render_report  # noqa: E402
-from cortex_runtime.v12_projections import _inert, _markdown_link, _render_report  # noqa: E402
+from cortex_runtime.report_presenters import render_report  # noqa: E402
+from cortex_runtime.v12_projections import _markdown_link, _render_report  # noqa: E402
 from cortex_runtime.mcp_api import _public_view  # noqa: E402
+from cortex_runtime.execution_graph import GraphError
+from test_execution_graph_integrity import graph
+from test_graph_ledger import observation
+from test_typed_publication_transaction import baseline_content
+import pytest
 
+
+def plan_content():
+    return dict(status="completed", summary="Implement the verified product.", scope="Product only.",
+                candidates=ordinary_candidates(graph()), artifact=observation(), risks=[], unresolved=[])
+
+
+def test_plan_renders_every_current_node_edge_check_and_strategy():
+    content = plan_content()
+    rendered = render_report("plan", content, {"review_policy": "required"})
+    assert rendered.startswith("# Implementation Plan")
+    assert "**Review policy:** REQUIRED" in rendered
+    assert "## Execution dependencies" in rendered
+    assert "## Outcome acceptance composition" in rendered
+    for node in content["candidates"][0]["graph"]["nodes"]:
+        assert "## Node: " + node["key"] in rendered
+        for key in ("work", "acceptance", "requires", "provides", "mutation_domains"):
+            for value in node[key]:
+                assert value in rendered
+        for check in node["checks"]:
+            assert check["description"] in rendered and check["key"] in rendered
+        for edge in node["dependencies"]:
+            assert edge["node"] in rendered
+        for strategy in node["remediation"]["strategies"]:
+            assert "## Repair strategy: " + node["key"] + " / " + strategy["key"] in rendered
+            assert strategy["work"][0] in rendered
+    assert "Expected check" in rendered
+    assert "Observed coverage" not in rendered
+    assert "## Finite workflow budgets" in rendered
+    assert "## Unresolved items" in rendered
+    assert content["artifact"]["end"] in rendered
+    assert render_report("plan", content, {"review_policy": "required"}) == rendered
+
+
+def test_result_displays_only_observed_node_coverage_and_documentation():
+    content = baseline_content()
+    content["summary"] = "Inspect `src/main.py` and **verify** the boundary."
+    content["changes"] = [{"path": "src/main.py", "summary": "Implemented bounded behavior."}]
+    rendered = render_report("result", content)
+    assert "# Implementation Result" in rendered
+    assert content["summary"] in rendered
+    assert "## Observed coverage: baseline" in rendered
+    assert "## Documentation impact" in rendered
+    assert "src/main.py" in rendered
+    for row in content["node_coverage"][0]["coverage"]:
+        for fact in row["verification"]:
+            assert fact["summary"] in rendered
+    assert "verification_facts" not in rendered
+
+
+def test_documentation_has_its_own_sections_not_generic_synthesis():
+    result = baseline_content()
+    content = {k: v for k, v in result.items() if k not in {"outcome", "changes"}}
+    content.update(findings=[{"area": "README", "summary": "Commands match implementation."}],
+                   recommendations=["Recheck commands after interface changes."])
+    rendered = render_report("documentation", content)
+    for value in ("# Documentation Impact", "## Documentation findings", "README",
+                  "Commands match implementation.", "## Recommendations",
+                  "## Observed coverage: baseline"):
+        assert value in rendered
+    assert "Additional details" not in rendered
+
+
+@pytest.mark.parametrize("kind,content", [
+    ("progress", {"completed": ["Old progress"]}),
+    ("synthesis", {"findings": []}),
+    ("plan", {"stages": [], "summary": "Old plan"}),
+    ("result", {"schema": "cortex/report/result/v2", "outcome": "Old result"}),
+    ("unknown", {"payload": "Arbitrary body"}),
+])
+def test_obsolete_and_unknown_formats_do_not_get_verified_views(kind, content):
+    with pytest.raises(GraphError):
+        render_report(kind, content)
+
+
+def test_report_projection_requires_one_current_body():
+    class Store:
+        def _read(self, callback):
+            return callback(None)
+        def _report_chunks(self, connection, report_id):
+            return self.chunks
+    store = Store()
+    report = {"report_id": "private", "report_type": "result", "assembly_state": "finalized"}
+    body = baseline_content()
+    store.chunks = [{"section": "body", "content": body}]
+    assert _render_report(store, report).decode() == render_report("result", body, report)
+    for chunks in ([], [{"section": "old", "content": body}], store.chunks * 2):
+        store.chunks = chunks
+        with pytest.raises(ValueError, match="one immutable body"):
+            _render_report(store, report)
 
 class ProjectionMarkdownTests(unittest.TestCase):
-    def test_structured_values_are_readable_authored_markdown_not_embedded_json(self) -> None:
-        rendered = _inert({
-            "pages": [{"path": "pages/1-2.md", "events": 2}],
-            "message": "# heading <script>alert('x')</script>",
-        })
-
-        self.assertNotIn("<pre>", rendered)
-        self.assertNotIn("</pre>", rendered)
-        self.assertNotIn('"pages"', rendered)
-        self.assertIn("- **pages:**", rendered)
-        self.assertIn("pages/1-2.md", rendered)
-        self.assertIn("# heading <script>alert('x')</script>", rendered)
-        self.assertIn("<script>", rendered)
-        self.assertNotIn("pages/1\\-2\\.md", rendered)
-        self.assertNotIn("\n# heading", rendered)
-
-    def test_report_content_preserves_authored_markdown_without_escapes(self) -> None:
-        class Store:
-            def _read(self, callback):
-                return callback(None)
-
-            def _report_chunks(self, _connection, _report_id):
-                return [{"section": "User *section*", "chunk_index": 0, "content": {
-                    "summary": "- injected list\n## injected heading",
-                }}]
-
-            def _compact_report(self, report):
-                return {"report_id": report["report_id"], "content": "opaque"}
-
-        report = {
-            "report_id": "r_test",
-            "assembly_state": "finalized",
-            "report_type": "plan",
-            "status": "completed",
-            "review_policy": "informational",
-        }
-        rendered = _render_report(Store(), report).decode("utf-8")
-
-        self.assertIn("# Implementation Plan", rendered)
-        self.assertIn("**Status:** FINALIZED", rendered)
-        self.assertIn("**Review policy:** INFORMATIONAL", rendered)
-        self.assertIn("- injected list", rendered)
-        self.assertIn("## injected heading", rendered)
-        self.assertNotIn("\\- injected list", rendered)
-        self.assertNotIn("\\## injected heading", rendered)
-        self.assertRegex(rendered, r"(?m)^## injected heading$")
-        self.assertEqual(len(__import__("re").findall(r"(?m)^# ", rendered)), 1)
-        self.assertNotIn("<pre>", rendered)
-        self.assertNotIn('"summary"', rendered)
-        self.assertNotIn("r_test", rendered)
-
-    def test_profile_names_and_identifiers_remain_readable(self) -> None:
-        rendered = _inert({
-            "delegation_id": "delegation-fde6f5fc-abcdef",
-            "native_task_name": "planner_2",
-            "model": "gpt-5.6-luna",
-        })
-
-        self.assertIn("**delegation_id:** delegation-fde6f5fc-abcdef", rendered)
-        self.assertIn("**native_task_name:** planner_2", rendered)
-        self.assertIn("**model:** gpt-5.6-luna", rendered)
-        self.assertNotIn("delegation\\_id", rendered)
-        self.assertNotIn("planner\\_2", rendered)
-
-    def test_inline_markdown_is_preserved_without_visible_escapes(self) -> None:
-        rendered = render_report(
-            report_type="plan",
-            content={
-                "summary": "Inspect `rg --files` before planning.",
-                "verification": ["Run `python3 -m pytest` and review **results**."],
-            },
-            report={"report_type": "plan", "assembly_state": "finalized", "status": "completed"},
-        )
-
-        self.assertIn("Inspect `rg --files` before planning.", rendered)
-        self.assertIn("review **results**.", rendered)
-        self.assertNotIn("\\`", rendered)
-        self.assertNotIn("\\*", rendered)
-        self.assertNotIn("&#96;", rendered)
-        self.assertNotIn("&#42;", rendered)
-
-    def test_multiline_instructions_preserve_readable_markdown(self) -> None:
-        rendered = _inert({"instructions": "Trusted policy:\n- Keep identifiers readable.\n- Do not add slash escapes."})
-
-        self.assertIn("Trusted policy: - Keep identifiers readable. - Do not add slash escapes.", rendered)
-        self.assertNotIn("\\- Keep identifiers", rendered)
-
-    def test_plan_body_uses_headings_for_structured_work_and_lists_for_checks(self) -> None:
-        class Store:
-            def _read(self, callback):
-                return callback(None)
-
-            def _report_chunks(self, _connection, _report_id):
-                return [{
-                    "section": "plan",
-                    "chunk_index": 0,
-                    "content": {
-                        "implementation_work_breakdown": [{
-                            "stage": "Build",
-                            "owner": "backend_dev",
-                            "work": "Implement the API",
-                            "acceptance": "The focused test passes",
-                        }],
-                        "ordered_verification": ["Run unit tests", "Run the release gate"],
-                        "test_acceptance_matrix": [{
-                            "test": "projection rendering",
-                            "acceptance": "No JSON dump is emitted",
-                        }],
-                        "observed_baseline": {
-                            "branch": "feature/rendering",
-                            "evidence": "Focused regression test",
-                        },
-                    },
-                }]
-
-        rendered = _render_report(Store(), {"report_id": "r_plan", "assembly_state": "finalized", "report_type": "plan"}).decode("utf-8")
-
-        self.assertIn("## Implementation stages", rendered)
-        self.assertIn("### Stage 1 — Build", rendered)
-        self.assertIn("**Owner:** backend_dev", rendered)
-        self.assertIn("## Verification", rendered)
-        self.assertIn("1. Run unit tests", rendered)
-        self.assertIn("2. Run the release gate", rendered)
-        self.assertIn("- Test Acceptance Matrix: test: projection rendering; acceptance: No JSON dump is emitted", rendered)
-        self.assertIn("**Observed Baseline:** branch: feature/rendering; evidence: Focused regression test", rendered)
-        self.assertNotIn("####", rendered)
-        self.assertNotIn("\n-\n", rendered)
-        self.assertNotIn("\n  #", rendered)
-        self.assertNotIn("<pre>", rendered)
-        self.assertNotIn('"implementation_work_breakdown"', rendered)
-        self.assertNotIn("&lt;", rendered)
-        self.assertNotIn("  \n", rendered)
 
     def test_ready_view_exposes_exact_server_link_and_non_ready_view_does_not(self) -> None:
         canonical = "/private/tasks/t_ref/plans/revisions/report-full-canonical-id.md"
@@ -199,78 +161,6 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertFalse(rendered.endswith("\n\n"))
         self.assertNotIn("## Empty", rendered)
 
-    def test_inline_emphasis_is_preserved_and_null_chunks_collapse(self) -> None:
-        rendered = render_markdown(Document(
-            "Safe",
-            sections=[Section("Details", [Paragraph("**untrusted** __formatting__")])],
-        ))
-        self.assertIn("**untrusted**", rendered)
-        self.assertIn("__formatting__", rendered)
-        self.assertEqual(merge_report_payloads([None, {"checks": ["one"]}]), {"checks": ["one"]})
-
-    def test_report_types_have_distinct_fixed_sections(self) -> None:
-        report = {"assembly_state": "finalized", "status": "completed"}
-        progress = render_report(report_type="progress", content={"completed": ["A"], "active": ["B"], "blocked": ["C"], "next": ["D"]}, report={**report, "report_type": "progress"})
-        result = render_report(report_type="result", content={"outcome": "Done", "changes": ["A"], "checks": ["test"]}, report={**report, "report_type": "result"})
-        self.assertLess(progress.index("## Completed"), progress.index("## Active"))
-        self.assertLess(progress.index("## Active"), progress.index("## Blocked"))
-        self.assertLess(result.index("## Outcome"), result.index("## Changes"))
-        self.assertIn("## Checks", result)
-        self.assertNotIn("## Completed", result)
-
-    def test_canonical_source_text_is_inert_and_not_duplicated(self) -> None:
-        source = "Пользовательский текст — unchanged"
-        rendered = render_report(
-            report_type="plan",
-            content={
-                "schema": "cortex/report/plan/v1", "summary": "English summary",
-                "scope": [], "stages": [], "verification": [], "source_text": source,
-            },
-            report={"report_type": "plan", "assembly_state": "finalized", "status": "completed"},
-        )
-        self.assertIn("## Source material", rendered)
-        self.assertEqual(rendered.count(source), 1)
-        self.assertNotIn("source_text_en", rendered)
-        self.assertNotIn("source_text_ru", rendered)
-
-    def test_review_envelope_and_hostile_values_are_safe(self) -> None:
-        content = {
-            "schema": "cortex/report-view/v1",
-            "presentation_kind": "code_review",
-            "title": "Review",
-            "summary": "Readable summary",
-            "sections": [{
-                "title": "Findings",
-                "blocks": [{"type": "finding", "title": "Danger", "severity": "high", "location": "src/app.py:1", "evidence": "## hostile\n```oops```"}],
-            }],
-        }
-        rendered = render_report(report_type="synthesis", content=content, report={"report_type": "synthesis", "assembly_state": "finalized", "status": "completed"})
-        self.assertIn("## Findings", rendered)
-        self.assertIn("### Danger", rendered)
-        self.assertIn("**Severity:** high", rendered)
-        self.assertNotRegex(rendered, r"(?m)^## hostile$")
-        self.assertNotRegex(rendered, r"(?m)^```oops```$")
-        self.assertEqual(len(__import__("re").findall(r"(?m)^# ", rendered)), 1)
-
-    def test_chunk_labels_do_not_create_sections_and_merge_is_deterministic(self) -> None:
-        chunks = [
-            {"section": "first", "content": {"summary": "same", "checks": ["one"]}},
-            {"section": "injected ## heading", "content": {"checks": ["two"], "unknown": "value"}},
-        ]
-        class Store:
-            def _read(self, callback):
-                return callback(None)
-
-            def _report_chunks(self, _connection, _report_id):
-                return chunks
-
-        rendered = _render_report(Store(), {"report_id": "r_chunk", "assembly_state": "finalized", "report_type": "result", "status": "completed"}).decode()
-        single = render_report(report_type="result", content=merge_report_payloads([item["content"] for item in chunks]), report={"report_type": "result", "assembly_state": "finalized", "status": "completed"})
-        self.assertEqual(rendered, single)
-        self.assertNotIn("injected ## heading", rendered)
-        self.assertIn("## Checks", rendered)
-        self.assertIn("## Additional details", rendered)
-
     def test_typed_blocks_table_checklist_and_fence_preserve_markdown(self) -> None:
         rendered = render_markdown(Document("Blocks", sections=[Section("Details", [
             Checklist([{"text": "ship", "checked": True}, "review"]),
@@ -285,60 +175,6 @@ class ProjectionMarkdownTests(unittest.TestCase):
         self.assertNotIn("a&#124;b", rendered)
         self.assertIn("````bash", rendered)
         self.assertIn("### Finding", rendered)
-
-    def test_golden_presentations_are_stable(self) -> None:
-        fixture_root = Path(__file__).resolve().parent / "fixtures" / "markdown"
-        report = {"assembly_state": "finalized", "status": "completed"}
-        cases = {
-            "plan": (
-                "plan",
-                {"summary": "Renderer-owned plan.", "scope": "Build stable views.", "stages": [{"stage": "Presentation layer", "work": ["Typed blocks"], "acceptance": ["One H1"]}], "dependencies": ["Explorer evidence"], "verification": ["Run focused tests"], "risks": ["Legacy content"], "decisions_needed": ["Approve rollout"], "definition_of_done": ["Golden snapshots"]},
-            ),
-            "progress": (
-                "progress",
-                {"summary": "Renderer is in progress.", "completed": ["Document model"], "active": ["Presenter templates"], "next": ["Run QA"], "current_checks": ["Projection unit tests"], "changed_risks": ["Legacy Markdown is sanitized"]},
-            ),
-            "result": (
-                "result",
-                {"outcome": "Typed views are available.", "changes": ["Added presenters"], "verified_behavior": ["Chunk labels remain invisible"], "checks": ["Unit tests"], "deviations": ["No live smoke"], "limitations": ["Old custom Markdown is rendered safely"], "residual_risk": ["Some historical semantics are generic"]},
-            ),
-            "synthesis": (
-                "synthesis",
-                {"schema": "cortex/report-view/v1", "presentation_kind": "discovery", "title": "Discovery synthesis", "summary": "Mapped projection ownership.", "scope": "Presentation code", "observed_baseline": ["Recursive headings"], "dependencies": ["V12 store"], "recommendations": ["Use typed blocks"], "coverage": "Focused source and test audit"},
-            ),
-            "code-review": (
-                "synthesis",
-                {"schema": "cortex/report-view/v1", "presentation_kind": "code_review", "title": "Code review", "summary": "One finding remains.", "findings": [{"title": "Unsafe Markdown projection", "severity": "high", "location": "v12_projections.py", "impact": "Report text can change hierarchy.", "evidence": "Heading injection reproduces.", "recommendation": "Use typed presenters.", "coverage": "Focused fixture", "residual_risk": "Legacy reports use fallback.", "conclusion": "Fix required"}], "coverage": "Renderer tests", "residual_risk": "None after fix", "conclusion": "Ready"},
-            ),
-            "legacy-fallback": (
-                "future",
-                {"schema": "unknown", "legacy_key": "value", "nested": {"message": "## hostile"}, "items": ["one", "two"]},
-            ),
-        }
-        for name, (report_type, content) in cases.items():
-            rendered = render_report(report_type=report_type, content=content, report={**report, "report_type": report_type})
-            self.assertEqual(rendered, (fixture_root / f"{name}.md").read_text(encoding="utf-8"), name)
-
-    def test_v2_contract_evidence_has_dedicated_safe_sections(self) -> None:
-        common = {
-            "contract_coverage": [{"item_ref": "o_0123456789ab", "status": "complete", "verification": ["Focused test"]}],
-            "deviations": ["No migration was needed."],
-            "unresolved": ["Live smoke remains with verification."],
-            "risks": ["One residual risk."],
-            "verification": ["Run focused suite."],
-        }
-        cases = {
-            "result": {"schema": "cortex/report/result/v2", "summary": "Result v2.", "outcome": "implemented", "changes": [], **common},
-            "plan": {"schema": "cortex/report/plan/v2", "summary": "Plan v2.", "scope": [], "stages": [], **common},
-            "synthesis": {"schema": "cortex/report/synthesis/v2", "summary": "Synthesis v2.", "findings": [], "recommendations": [], **common},
-        }
-        for report_type, content in cases.items():
-            rendered = render_report(report_type=report_type, content=content, report={"report_type": report_type, "assembly_state": "finalized", "status": "completed"})
-            self.assertIn("## Contract coverage", rendered)
-            self.assertIn("## Unresolved items", rendered)
-            self.assertIn("o_0123456789ab", rendered)
-            self.assertNotIn("## Additional details", rendered)
-
 
 if __name__ == "__main__":
     unittest.main()

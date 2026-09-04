@@ -51,8 +51,9 @@ def main() -> int:
         if forbidden in combined:
             issues.append(f"model instructions contain removed protocol term {forbidden}")
     for required in (
-        "dynamic dag", "stores only `task_ref`", "assignment-read contract",
-        "never an imperative workflow command", "no workflow or governance admission",
+        "dynamic dag", "retain the server-issued task reference", "assignment-read contract",
+        "never an imperative workflow command", "immutable consumed node scope and declared publication kind",
+        "identity, revision, artifact generation, mutation boundaries",
         "the host supplies this complete skill content",
         "after compaction/reset", "user approval question",
         "additionalcontextlimit=0", "repetition is never forbidden or consumed",

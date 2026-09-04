@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cortex_runtime.model_routing import validate_model_selection
+from cortex_runtime.host_boundary import CodexHostAdapter
 
 
 NATIVE_DISPATCH_MAX_BYTES = 64 * 1024
@@ -43,9 +44,12 @@ def validate_native_dispatch_projection(
     bound_projection = isinstance(native_arguments, Mapping)
     if native_arguments is None:
         # Public open_assignment uses one literal-callable host projection.
-        # Its three fields are forwarded directly; assignment identity and the
+        # Its complete routing fields are forwarded directly; assignment identity and the
         # private digest are kept in the surrounding server receipt.
-        if set(projection) != {"fork_turns", "message", "task_name"}:
+        if set(projection) not in (
+            {"fork_turns", "message", "task_name", "reasoning_effort"},
+            {"fork_turns", "message", "task_name", "model", "reasoning_effort"},
+        ):
             raise ValueError("native dispatch arguments are missing")
         native_arguments = projection
     elif projection.get("assignment_ref") != assignment_ref:
@@ -59,10 +63,7 @@ def validate_native_dispatch_projection(
     required = ("fork_turns", "message", "task_name", "reasoning_effort")
     if any(key not in native_arguments for key in required):
         raise ValueError("native dispatch arguments are incomplete")
-    if set(native_arguments) not in (
-        set(required),
-        set(required) | {"model"},
-    ):
+    if set(native_arguments) not in (set(required), set(required) | {"model"}):
         raise ValueError("native dispatch arguments are not closed")
     if native_arguments.get("fork_turns") != "none":
         raise ValueError("native dispatch must use isolated history")
@@ -72,8 +73,7 @@ def validate_native_dispatch_projection(
     task_name = native_arguments.get("task_name")
     if not isinstance(task_name, str) or not task_name:
         raise ValueError("native dispatch task name is invalid")
-    routed_model = native_arguments.get("model", "gpt-5.6-luna")
-    validate_model_selection(routed_model, native_arguments.get("reasoning_effort"))
+    validate_model_selection(native_arguments.get("model", "gpt-5.6-luna"), native_arguments.get("reasoning_effort"))
     if native_arguments.get("model") == "gpt-5.6-luna":
         raise ValueError("native Luna dispatch must use the configured default model")
     if bound_projection:
@@ -96,20 +96,11 @@ def native_dispatch_projection(
     if not isinstance(message, str) or not message or len(message.encode("utf-8")) > NATIVE_DISPATCH_MAX_BYTES:
         raise ValueError("rendered_message exceeds the native dispatch bound")
     selection = validate_model_selection(model, reasoning_effort)
-    # Emit every short routing discriminator before the potentially long
-    # rendered message.  Codex can visually compact long tool results; placing
-    # the explicit effort after the message caused the first native call to
-    # omit that required field even though the durable selection was valid.
-    # Order is therefore part of this host-facing projection's reliability
-    # contract, while the digest remains key-canonical and order-independent.
-    native_arguments: dict[str, object] = {
-        "fork_turns": "none",
-        "task_name": task_name,
-        "reasoning_effort": selection.reasoning_effort,
-    }
-    if selection.model != "gpt-5.6-luna":
-        native_arguments["model"] = selection.model
-    native_arguments["message"] = message
+    native_arguments = CodexHostAdapter.prepare_spawn(
+        task_name=task_name, message=message,
+        model_route="default" if selection.model == "gpt-5.6-luna" else selection.model,
+        effort=selection.reasoning_effort,
+    )
     return {
         "assignment_ref": assignment_ref,
         "dispatch_digest": _native_dispatch_digest(assignment_ref, native_arguments),
@@ -130,13 +121,6 @@ def native_task_name(profile_name: object, instance: object = 1) -> str:
         raise ValueError("instance must be a positive integer")
     result = profile_name if instance == 1 else f"{profile_name}_{instance}"
     return result
-
-
-def legacy_native_task_name(delegation_id: object) -> str:
-    """Return the prior opaque task name retained for live old workers."""
-    if not isinstance(delegation_id, str):
-        raise ValueError("delegation_id must be a string")
-    return "cortex_" + hashlib.sha256(delegation_id.encode("utf-8")).hexdigest()[:32]
 
 
 def is_profile_native_task_name(task_name: object, profile_name: object) -> bool:
@@ -178,7 +162,6 @@ def dispatch_brief_projection(
     project_root: object,
     semantic_objective: object,
     profile_proof: Mapping[str, object],
-    effective_contract: Mapping[str, object] | None = None,
     dispatch_correlation_marker: object = None,
     dispatch_correlation_digest: object = None,
 ) -> dict[str, Any]:

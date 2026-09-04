@@ -17,11 +17,15 @@ def test_all_public_tools_have_compact_and_closed_runtime_schemas() -> None:
     for name, contract in PUBLIC_TOOLS.items():
         public = contract["outputSchema"]
         runtime = contract["runtimeOutputSchema"]
-        assert public is not runtime, name
-        assert public["type"] == "object" and public["additionalProperties"] is False, name
-        assert "handles" not in public.get("properties", {}), name
-        assert runtime["type"] == "object", name
-        assert "properties" in runtime and len(runtime["properties"]) >= 2, name
+        # Static no-dispatch/non-publication variants are complete closed
+        # objects, not an untyped catch-all. Sharing an immutable schema value
+        # is harmless; validate its contract rather than Python object identity.
+        for schema in (public, runtime):
+            variants = schema.get("anyOf", [schema])
+            for variant in variants:
+                assert variant["type"] == "object" and variant["additionalProperties"] is False, name
+                assert "handles" not in variant.get("properties", {}), name
+                assert len(variant["properties"]) >= 2, name
 
 
 def test_compact_catalogue_is_bounded_and_runtime_rejects_extra_fields() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from plan_fixtures import ordinary_candidates
 import unittest
 
 from cortex import PUBLIC_TOOLS
@@ -8,6 +9,8 @@ from cortex_runtime.mcp_api import (
     _validation_failure,
     _validate_schema,
 )
+from test_execution_graph_integrity import graph
+from test_graph_ledger import observation
 
 
 class CallerContractGuardTests(unittest.TestCase):
@@ -24,14 +27,23 @@ class CallerContractGuardTests(unittest.TestCase):
         for contract in PUBLIC_TOOLS.values():
             visit(contract["inputSchema"])
 
+    def test_reference_error_does_not_direct_caller_to_removed_handles_envelope(self) -> None:
+        from cortex_runtime.mcp_api import _service_failure, _tool_error_result
+        from cortex_runtime.v12_service import V12ServiceError
+        for code in ("invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found"):
+            with self.subTest(code=code):
+                result = _tool_error_result(_service_failure(V12ServiceError("private failure", code=code)), mutation="read_task")
+                rendered = repr(result)
+                self.assertNotIn("structuredContent.handles", rendered)
+                self.assertNotIn("private failure", rendered)
+                self.assertIn("exact server-issued reference", rendered)
+
     def test_publications_reject_old_handle_fields_before_runtime(self) -> None:
         schema = PUBLIC_TOOLS["publish_plan"]["inputSchema"]
         valid = {
             "task_ref": "t_0123456789ab_" + "a" * 32,
             "summary": "Plan.", "scope": "Bounded.",
-            "stages": [{"owner": "implementation", "work": ["Build."], "verification": ["Test."]}],
-            "verification_facts": [{"state": "not_run", "summary": "Execution belongs to implementation."}],
-            "outcome_coverage": [{"outcome": "Build.", "status": "planned", "verification": ["Mapped."]}],
+            "candidates": ordinary_candidates(graph()), "artifact": observation(),
             "risks": [], "unresolved": [], "status": "completed",
         }
         _validate_schema(schema, valid)
@@ -46,22 +58,17 @@ class CallerContractGuardTests(unittest.TestCase):
         self.assertIn("reasoning_effort", schema["required"])
         self.assertEqual(schema["properties"]["model"]["enum"], ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
 
-    def test_runtime_assignment_shape_matches_optional_complete_scope_contract(self) -> None:
-        for responsibility in ("delivery", "evidence", "planning"):
-            with self.subTest(responsibility=responsibility):
-                _validate_public_call_shape(
-                    "open_assignment", {"responsibility": responsibility},
-                )
-        with self.assertRaisesRegex(ValueError, "unsupported property"):
-            _validate_public_call_shape(
-                "open_assignment", {"responsibility": "planning", "outcomes": ["A"]},
-            )
-        _validate_public_call_shape(
-            "open_assignment", {
-                "responsibility": "delivery",
-                "loss_recovery": {"state": "blocked", "reason": "Lost", "evidence": ["Confirmed"]},
-            },
-        )
+    def test_runtime_assignment_shape_requires_one_typed_intent(self) -> None:
+        for intent in ({"nodes": ["baseline"]}, {"bootstrap": {"kind": "planning"}},
+                       {"bootstrap": {"kind": "discovery", "question": "Which interface exists?"}}):
+            _validate_public_call_shape("open_assignment", intent)
+        for invalid in ({}, {"nodes": ["baseline"], "bootstrap": {"kind": "planning"}}):
+            with self.subTest(intent=invalid), self.assertRaisesRegex(ValueError, "exactly one"):
+                _validate_public_call_shape("open_assignment", invalid)
+        for invalid in ({"bootstrap": {"kind": "discovery"}},
+                        {"bootstrap": {"kind": "planning", "question": "Invent scope"}}):
+            with self.subTest(intent=invalid), self.assertRaises(ValueError):
+                _validate_public_call_shape("open_assignment", invalid)
 
     def test_missing_required_publication_fields_are_reported_together(self) -> None:
         schema = PUBLIC_TOOLS["publish_result"]["inputSchema"]

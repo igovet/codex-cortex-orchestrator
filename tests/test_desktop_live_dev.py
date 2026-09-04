@@ -34,6 +34,27 @@ def test_desktop_launcher_is_executable_and_uses_the_shared_candidate() -> None:
         assert required in source
 
 
+def test_desktop_launcher_scrubs_parent_codex_integration_markers(monkeypatch, tmp_path: Path) -> None:
+    driver = module()
+    for name in driver.INHERITED_INTEGRATION_VARS:
+        monkeypatch.setenv(name, f"inherited-{name.lower()}")
+    environment = driver._launch_environment(
+        tmp_path / "owner",
+        tmp_path / "candidate" / ".codex",
+        tmp_path / "electron-profile",
+        {
+            "build_id": "sha256:build",
+            "source_digest": "source",
+            "candidate_path": "/candidate",
+            "candidate_digest": "candidate",
+        },
+    )
+    assert all(name not in environment for name in driver.INHERITED_INTEGRATION_VARS)
+    assert environment["HOME"].endswith(".cortex-dev")
+    assert environment["CODEX_HOME"].endswith(".codex")
+    assert environment["CORTEX_CANDIDATE_PATH"] == "/candidate"
+
+
 def test_desktop_model_projection_only_copies_safe_scalars(tmp_path: Path) -> None:
     driver = module()
     owner = tmp_path / "owner"

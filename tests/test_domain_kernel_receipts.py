@@ -45,7 +45,7 @@ class DomainKernelReceiptIntegrationTests(unittest.TestCase):
         self.assertTrue(replay.ok)
         self.assertTrue(replay.replayed)
         self.assertEqual(replay.value, first.value)
-        self.assertEqual(kernel.receipt_store.lookup_command_receipt("task/t1/create")["build_id"], "sha256:verified")  # type: ignore[union-attr]
+        self.assertEqual(kernel.receipt_store.lookup_command_receipt("task/t1/create", aggregate_type="task", aggregate_id="t1", command_name="open_task")["build_id"], "sha256:verified")  # type: ignore[union-attr]
         conflict = kernel.execute_command(
             "open_task", self.payload(2), aggregate_type="task", aggregate_id="t1",
             logical_slot="task/t1/create", mutate=lambda conn: {"bad": True},
@@ -57,7 +57,7 @@ class DomainKernelReceiptIntegrationTests(unittest.TestCase):
             logical_slot="task/t2/decision", mutate=lambda conn: {"bad": True},
         )
         self.assertFalse(failed.ok)
-        self.assertIsNone(kernel.receipt_store.lookup_command_receipt("task/t2/decision"))  # type: ignore[union-attr]
+        self.assertIsNone(kernel.receipt_store.lookup_command_receipt("task/t2/decision", aggregate_type="task", aggregate_id="t2", command_name="open_clarification"))  # type: ignore[union-attr]
 
     def test_concurrent_identical_calls_have_one_mutation(self) -> None:
         calls = 0
@@ -94,7 +94,7 @@ class DomainKernelReceiptIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(result.ok)
         # A caller that lost the response can reconcile from the durable receipt.
-        receipt = kernel.receipt_store.lookup_command_receipt("task/t4/create")  # type: ignore[union-attr]
+        receipt = kernel.receipt_store.lookup_command_receipt("task/t4/create", aggregate_type="task", aggregate_id="t4", command_name="open_task")  # type: ignore[union-attr]
         self.assertEqual(receipt["status"], "completed")  # type: ignore[index]
         other_root = self.root / "other-project"
         other_root.mkdir()
@@ -110,7 +110,30 @@ class DomainKernelReceiptIntegrationTests(unittest.TestCase):
         kernel = self.kernel()
         result = kernel.execute_query("read_task", {"task_ref": "task-1"}, query=lambda payload: {"state": "open"})
         self.assertTrue(result.ok)
-        self.assertIsNone(kernel.receipt_store.lookup_command_receipt("task-1/read"))  # type: ignore[union-attr]
+        self.assertIsNone(kernel.receipt_store.lookup_command_receipt("task-1/read", aggregate_type="task", aggregate_id="task-1", command_name="read_task"))  # type: ignore[union-attr]
+
+    def test_local_slots_are_isolated_by_aggregate_and_operation(self) -> None:
+        store = self.kernel().receipt_store
+        scopes = [("task", "a", "create"), ("task", "b", "create"),
+                  ("task", "a", "update"), ("graph", "a", "create")]
+        for resolved in (False, True):
+            for index, (kind, anchor, operation) in enumerate(scopes):
+                scope = dict(aggregate_type=kind, aggregate_id=anchor, command_name=operation)
+                slot = f"local-{resolved}"
+                mutate = lambda connection, index=index: {"owner": index}
+                if resolved:
+                    invoke = lambda: store.run_command_receipt_resolved(
+                        **scope, resolve=lambda connection: (slot, {"same": True}, mutate))
+                else:
+                    invoke = lambda: store.run_command_receipt(
+                        **scope, logical_slot=slot, request={"same": True}, mutate=mutate)
+                result, replayed = invoke()
+                self.assertEqual(result, {"owner": index})
+                self.assertFalse(replayed)
+                self.assertEqual(invoke(), (result, True))
+                receipt = store.lookup_command_receipt(slot, **scope)
+                self.assertEqual(receipt["aggregate_id"], anchor)
+                self.assertEqual(receipt["command_name"], operation)
 
 
 if __name__ == "__main__":

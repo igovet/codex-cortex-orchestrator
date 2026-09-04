@@ -30,6 +30,22 @@ SAFE_DESKTOP_SCALARS = (
     "personality",
     "service_tier",
 )
+# A Desktop process launched from the current Codex app inherits host-only
+# integration markers and the parent thread identity.  Passing those through
+# makes the child attach to the app's transport instead of its isolated local
+# profile (and can surface the host's 404 response endpoint).  Keep the
+# candidate/runtime variables that this helper sets explicitly, and remove
+# only these integration values at the process boundary.
+INHERITED_INTEGRATION_VARS = (
+    "CODEX_APP_TOOLS_PIPE_PATH",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    "CODEX_MCP_NODE_PATH",
+    "CODEX_CI",
+    "CODEX_SHELL",
+    "CODEX_PERMISSION_PROFILE",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+)
 
 
 class DesktopDevError(RuntimeError):
@@ -143,6 +159,33 @@ def _candidate_identity(owner_home: Path, codex_home: Path) -> dict[str, object]
     return payload
 
 
+def _launch_environment(
+    owner_home: Path,
+    codex_home: Path,
+    desktop_profile: Path,
+    identity: dict[str, object],
+) -> dict[str, str]:
+    """Build an isolated Desktop environment without inheriting host markers."""
+    environment = os.environ.copy()
+    for name in INHERITED_INTEGRATION_VARS:
+        environment.pop(name, None)
+    environment.update(
+        {
+            "HOME": str(owner_home / ".cortex-dev"),
+            "CODEX_HOME": str(codex_home),
+            "CODEX_ELECTRON_USER_DATA_PATH": str(desktop_profile),
+            "CORTEX_BUILD_ID": str(identity["build_id"]),
+            "CORTEX_SOURCE_DIGEST": str(identity["source_digest"]),
+            "CORTEX_CANDIDATE_PATH": str(identity["candidate_path"]),
+            "CORTEX_CANDIDATE_RECEIPT": str(codex_home / ".cortex-candidate-receipt.json"),
+            "CORTEX_CANDIDATE_DIGEST": str(identity["candidate_digest"]),
+            "CORTEX_HOOK_DIAGNOSTIC": "1",
+            "CORTEX_RAW_DIAGNOSTIC": "1",
+        }
+    )
+    return environment
+
+
 def _read_state() -> dict[str, object] | None:
     if not STATE_PATH.exists():
         return None
@@ -252,21 +295,9 @@ def start(args: argparse.Namespace) -> int:
         if not prompt:
             raise DesktopDevError("prompt file must not be empty")
 
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(owner_home / ".cortex-dev"),
-            "CODEX_HOME": str(codex_home),
-            "CODEX_ELECTRON_USER_DATA_PATH": str(desktop_profile),
-            "CORTEX_BUILD_ID": str(identity["build_id"]),
-            "CORTEX_SOURCE_DIGEST": str(identity["source_digest"]),
-            "CORTEX_CANDIDATE_PATH": str(identity["candidate_path"]),
-            "CORTEX_CANDIDATE_RECEIPT": str(codex_home / ".cortex-candidate-receipt.json"),
-            "CORTEX_CANDIDATE_DIGEST": str(identity["candidate_digest"]),
-            "CORTEX_HOOK_DIAGNOSTIC": "1",
-            "CORTEX_RAW_DIAGNOSTIC": "1",
-        }
-    )
+    environment = _launch_environment(owner_home, codex_home, desktop_profile, identity)
+    from cortex_host_qualification import capture_launch
+    environment["CORTEX_HOST_CAPABILITY_SNAPSHOT"] = str(capture_launch(owner_home, "desktop"))
     command = [str(_desktop_executable()), f"--user-data-dir={desktop_profile}"]
     if prompt is None:
         command.extend(["--open-project", str(workdir)])

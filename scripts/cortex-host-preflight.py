@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +22,13 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLUGIN_ROOT = ROOT / "plugins/cortex"
+sys.path.insert(0, str(DEFAULT_PLUGIN_ROOT / "scripts"))
+from cortex_runtime.host_boundary import Capability, CodexHostProbe, HostIdentity, digest
 MAX_CACHE_VERSION_HINTS = 8
 MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
 COMMAND_TIMEOUT_SECONDS = 15
 CORTEX_PLUGIN_ID = "cortex@cortex"
-EXPECTED_BASE_VERSION = "1.15.3"
+EXPECTED_BASE_VERSION = "1.15.6"
 EXPECTED_MCP = {
     "mcpServers": {
         "cortex": {
@@ -42,6 +45,7 @@ EXPECTED_MCP = {
     }
 }
 REQUIRED_HOOK_EVENTS = frozenset({
+    "UserPromptSubmit",
     "SessionStart",
     "PreToolUse",
     "PostToolUse",
@@ -868,6 +872,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plugin-root", type=Path, default=DEFAULT_PLUGIN_ROOT, help="source or installed Cortex plugin directory")
     parser.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    parser.add_argument("--host", choices=("cli", "desktop"), default="cli")
+    parser.add_argument("--capability-output", type=Path, help="create an owner-only passive capability snapshot; never a live qualification verdict")
     args = parser.parse_args()
 
     python_result, cortex_python = resolve_python()
@@ -895,6 +901,21 @@ def main() -> int:
         "checks": checks,
         "mcp": summarize_mcp(checks),
     }
+    if args.capability_output:
+        # These checks do not expose the native coordination catalogue, actual
+        # app/engine identity, lifecycle delivery, or direct-user provenance.
+        # Preserve those unknowns; do not promote package parity to live proof.
+        environment = HostIdentity(
+            args.host, "unverified", "unverified", source_digest or "unverified",
+            "unverified", digest([(item["name"], item["status"]) for item in checks]),
+            "preflight-" + uuid.uuid4().hex,
+        )
+        capabilities = CodexHostProbe.capture(environment, (), {})
+        CodexHostProbe.save(capabilities, args.capability_output)
+        payload["capabilities"] = {
+            "snapshot_digest": capabilities.snapshot_digest,
+            "qualification": "unverified",
+        }
     if args.as_json:
         print(json.dumps(payload, sort_keys=True))
     else:

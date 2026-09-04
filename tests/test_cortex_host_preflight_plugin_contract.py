@@ -89,3 +89,24 @@ def test_preflight_requires_the_exact_native_agent_matcher(tmp_path: Path) -> No
             declaration["matcher"] = "Agent"
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert "exact native Agent lifecycle matcher" in module.hook_contract_failure(root)
+
+
+def test_passive_snapshot_does_not_claim_native_capabilities(tmp_path, monkeypatch, capsys):
+    module = _module()
+    passed = {"name": "fixture", "status": "PASS", "detail": "fixture"}
+    monkeypatch.setattr(module, "resolve_python", lambda: (passed, None))
+    monkeypatch.setattr(module, "inspect_codex", lambda: passed)
+    monkeypatch.setattr(module, "inspect_plugin", lambda root: (passed, "fixture-version"))
+    monkeypatch.setattr(module, "package_digest", lambda root: "fixture-digest")
+    monkeypatch.setattr(module, "inspect_cache", lambda *args: passed)
+    monkeypatch.setattr(module, "inspect_registration", lambda *args: passed)
+    monkeypatch.setattr(module, "inspect_mcp_config", lambda *args: passed)
+    output = tmp_path / "host.json"
+    monkeypatch.setattr(module.sys, "argv", ["preflight", "--json", "--host", "desktop", "--capability-output", str(output)])
+    assert module.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["capabilities"]["qualification"] == "unverified"
+    snapshot = json.loads(output.read_text())["snapshot"]
+    assert snapshot["identity"]["host"] == "desktop"
+    assert snapshot["tools"] == []
+    assert all(value["state"] == "unverified" for _, value in snapshot["capabilities"])

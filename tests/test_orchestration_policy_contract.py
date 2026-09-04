@@ -31,32 +31,39 @@ def test_pre_planner_analysis_is_conditional_luna_evidence_work():
         assert "distinct" in text
 
 
-def test_evidence_queue_has_slot_limited_concurrency_without_a_total_cap():
-    orchestrator = _text(ORCHESTRATOR)
-    adaptive = _text(ADAPTIVE)
+def test_evidence_parallelism_preserves_finite_expansion_and_mutation_bounds():
+    for path in (ORCHESTRATOR, ADAPTIVE):
+        text = _text(path).lower()
+        assert "finite" in text and "budgets" in text
+        assert "parallel" in text and "readers" in text
+        assert "one" in text and "artifact-mutating assignment" in text
+        assert "one-worker limit" in text or "one worker" in text
+        assert "no finite total cap" not in text
+        assert "do not impose a finite total evidence-assignment cap" not in text
 
-    assert "There is no finite total cap on justified evidence assignments" in orchestrator
-    assert "currently available native-agent slots" in orchestrator
-    assert "dispatch the next queued assignment when a slot becomes free" in orchestrator
-    assert "expected incremental value no longer justifies latency and cost" in orchestrator
-    assert "Never fan out overlapping prompts merely to occupy slots" in orchestrator
 
-    assert "Do not impose a finite total evidence-assignment cap" in adaptive
-    assert "native slots currently available" in adaptive
-    assert "dispatch the next non-overlapping ready assignment when a slot frees" in adaptive
-    assert "incremental value no longer justifies latency and cost" in adaptive
+def test_dynamic_dag_dispatches_only_dependency_ready_nodes():
+    for path in (ORCHESTRATOR, ADAPTIVE):
+        text = _text(path).lower()
+        assert "readiness is a dependency" in text
+        assert "terminal, acceptable evidence" in text or "prerequisites become acceptable" in text
+        assert "implementation-dependent" in text or "implementation -> dependent audits" in text
+        assert "sealed generation" in text or "sealed artifact" in text
+    planner = _text(PLANNER)
+    assert "every stage names the predecessor evidence and artifacts it requires" in planner
+    assert "scope availability and a free worker slot are not readiness evidence" in planner.lower()
 
 
 def test_planner_remains_the_only_plan_owner_and_publishes_once():
-    orchestrator = _text(ORCHESTRATOR)
-    adaptive = _text(ADAPTIVE)
+    for path in (ORCHESTRATOR, ADAPTIVE):
+        text = _text(path)
+        assert "planner remains the sole owner" in text.lower()
+        assert "independent" in text.lower() and "validation" in text.lower()
     planner = _text(PLANNER)
-
-    assert "The planner remains the sole owner of the project solution plan" in orchestrator
-    assert "Evidence workers never publish or revise the plan" in orchestrator
-    assert "remains the sole owner of one terminal project plan" in adaptive
-    assert "one terminal plan publication" in planner
-    assert "never publish a supplementary result" in planner
+    assert "one terminal publication fixed by the consumed assignment" in planner
+    assert "A planning node publishes a plan" in planner
+    assert "validation node publishes its assigned result even when this profile is used" in planner
+    assert "Never publish a supplementary report" in planner
 
 
 def test_expected_missing_paths_are_observed_without_failed_commands():
@@ -115,22 +122,25 @@ def test_first_read_recovery_and_terminal_transition_are_bounded():
         assert "partial or blocked publication" in text
 
 
-def test_assignment_selection_uses_current_outcomes_and_one_bounded_recovery():
-    orchestrator = _text(ORCHESTRATOR)
+def test_assignment_selection_uses_current_typed_nodes_not_removed_outcome_modes():
+    orchestrator = _text(ORCHESTRATOR).lower()
+    assert "immediately before every assignment" in orchestrator
+    assert "same connection" in orchestrator
+    assert "exact observed ready nodes" in orchestrator
+    assert "backend owns exact node grouping" in orchestrator
+    assert "replayed or ambiguous dispatch never creates another worker" in orchestrator
+    for obsolete in ("terminal_rework=", "omit outcome selection", "that responsibility's returned names"):
+        assert obsolete not in orchestrator
 
-    assert "Immediately before every assignment, read only the selected responsibility's current server-owned assignment scope" in orchestrator
-    assert "the coordinator need not continue through remaining exact-name pages" in orchestrator
-    assert "that responsibility's returned names" in orchestrator
-    assert "Planning and evidence work cannot turn their responsibility into delivery ownership" in orchestrator
-    assert "omit outcome selection" in orchestrator
-    assert "partition intentionally" in orchestrator
-    assert "terminal_rework=steering_revision_required" in orchestrator
-    assert "first obtain and record explicit user steering" in orchestrator
-    assert "Do not reuse a pre-steering snapshot" in orchestrator
-    assert "at most one fresh scope read and one rebuilt assignment" in orchestrator
-    assert "Never retry the unchanged request or reconstruct a retired outcome" in orchestrator
-    assert "spawns exactly once and immediately" in orchestrator
-    assert "never creates a duplicate worker" in orchestrator
+
+def test_assignment_scope_has_one_typed_authority_not_a_prose_partition():
+    for path in (ORCHESTRATOR, ADAPTIVE):
+        text = _text(path).lower()
+        assert "exact" in text and "graph nodes" in text
+        assert "prose" in text and "complete assignment" in text
+        assert "terminal" in text
+        assert "omitted selection grants the complete current responsibility scope" not in text
+    assert "profile name never grants outcome ownership" in _text(ORCHESTRATOR).lower()
 
 
 def test_native_wait_is_advisory_and_durable_publication_recovers_empty_wait():
@@ -148,14 +158,16 @@ def test_native_wait_is_advisory_and_durable_publication_recovers_empty_wait():
         assert "worker-liveness poll" in text
         assert "suppress" in text and "durable evidence" in text
 
-    assert "read active continuations next" in orchestrator
+    assert "immediate next Cortex operation" in orchestrator
+    assert "priority over queued user steering" in orchestrator
     assert "never substitute the historical timeline" in orchestrator
-    assert "read active continuations next" in control
-    assert "never use the historical timeline as a continuation lookup" in control
-    assert "question is known in advance to select concrete behavior" in orchestrator
-    assert "open steering before showing that question" in orchestrator
-    assert "direct answer is the steering answer" in control
-    assert "do not route it through ordinary clarification" in control
+    assert "immediate next Cortex operation" in control
+    assert "before queued user steering" in control
+    assert "Never use the historical timeline as a continuation lookup" in control
+    assert "product branch" in orchestrator
+    assert "plan-review" in orchestrator
+    assert "direct user change" in control
+    assert "do not open either question type" in control
     assert "terminal worker stop without publication" in control
     assert "never repeats the original assignment opening" in control
     assert "asks the user to say “continue”" in control
@@ -172,9 +184,9 @@ def test_orchestrator_has_one_canonical_routing_state_machine_without_payload_sh
     assert "Observed coordinator event" in routing
     assert "read_continuations" in routing
     assert "Call any Cortex read merely to poll liveness" in routing
-    assert "Use `read_timeline` as a continuation lookup" in routing
-    assert "open_steering" in routing
-    assert "ask for a second confirmation" in routing
+    assert "timeline as the second recovery operation" in routing
+    assert "record that exact message as steering" in routing
+    assert "record that exact message as steering" in routing
     assert "canonical coordinator router" in control
 
     worker_start = control.index("## Worker routing state machine")
@@ -184,6 +196,7 @@ def test_orchestrator_has_one_canonical_routing_state_machine_without_payload_sh
     assert "Observed worker event" in worker_routing
     assert "read_task" in worker_routing
     assert "exactly one matching terminal publication" in worker_routing
+    assert "read-only evidence as documentation" in worker_routing
 
     for payload_token in (
         '"task_ref"',
@@ -214,3 +227,43 @@ def test_added_policy_does_not_embed_mcp_payload_contracts():
     )
     for token in forbidden_shape_tokens:
         assert token not in added_analysis_policy
+
+
+def test_no_conflicting_legacy_steering_review_or_unbounded_recovery_rules():
+    removed = (
+        "queue the exact message until the assignment publishes",
+        "let that bounded assignment reach its terminal publication before recording steering",
+        "after the revised planner publishes, the coordinator must open and record the fresh plan review",
+        "a revised plan requires a fresh review",
+        "terminal_rework=",
+        "no finite total cap",
+        "same-handle follow up",
+        "copy its server-issued approval relation and exact report/view digest",
+    )
+    for path in (ORCHESTRATOR, CONTROL, ADAPTIVE):
+        text = _text(path).lower()
+        for obsolete in removed:
+            assert obsolete not in text
+        assert "pre-plan" in text
+        assert "quiescence" in text or "quiescent" in text or "signed current observation" in text
+        assert "closure" in text and "fresh" in text
+def test_supporting_skills_preserve_typed_recovery_and_finite_evidence_policy():
+    skills = ROOT / "plugins/cortex/skills"
+    communication = (skills / "coordinator-communication/SKILL.md").read_text()
+    recovery = (skills / "context-compaction/SKILL.md").read_text()
+    validation = (skills / "output-validation/SKILL.md").read_text()
+    combined = " ".join((communication + recovery + validation).split()).lower()
+    for forbidden in (
+        "exact returned retry handle", "stable finding key",
+        "copy any complete semantic outcome used by a pending decision exactly from that fresh result",
+        "only for the plan-review packet", "never becomes a backend permission barrier",
+        "optional unchanged optional unchanged",
+    ):
+        assert forbidden not in combined
+    assert "immediate next cortex operation" in recovery.lower()
+    assert "complete unfiltered host" in recovery.lower()
+    assert "genuine pre-plan steering" in communication.lower()
+    assert "finite exhaustion" in communication.lower()
+    assert "verification lives in that coverage matrix" in validation.lower()
+    assert "failed source" in validation.lower()
+    assert "only close permits" in validation.lower()

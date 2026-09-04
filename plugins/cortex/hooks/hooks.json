@@ -1,6 +1,9 @@
 {
   "description": "Cortex activation guardrails for explicitly selected routes.",
   "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "python3 -B \"$PLUGIN_ROOT/hooks/cortex_activation.py\"", "timeout": 5}]}
+    ],
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "python3 -B \"$PLUGIN_ROOT/hooks/cortex_activation.py\"", "timeout": 5, "additionalContextLimit": 0}]},
       {"hooks": [{"type": "command", "command": "python3 -B \"$PLUGIN_ROOT/hooks/cortex_lifecycle_observer.py\"", "timeout": 5}]}

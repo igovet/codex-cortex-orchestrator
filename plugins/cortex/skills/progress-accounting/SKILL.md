@@ -42,25 +42,27 @@ Suppress unchanged waits, repeated summaries, routine pagination, chunk
 assembly, retry attempts, and internal worker-recovery chatter.
 
 Progress accounting does not authorize stopping orchestration. Once sufficient
-completed outcome evidence is available, the coordinator independently selects
-`ready`, `ready_with_risks`, or `not_ready`, automatically attempts supported
-`close_task`, and performs supported inspection of the intended
-record. `ready_with_risks` never creates a confirmation hold or any other
-user-facing question. While the requested outcome remains unfinished, the
-coordinator continues to reconcile state and advance the next safe worker or
-recovery stage. A completed worker, waiting or incomplete stage,
+completed outcome evidence is available, the coordinator presents the reconciled result,
+opens the mandatory closure review, records the user's explicit `revise` or
+`close` choice, and calls `close_task` only after `close`, followed by supported
+inspection of the intended record. Incomplete requirements or checks never permit
+task closure, even after a close answer. Report non-completion and continue safe
+in-contract repair; do not use an incomplete verdict to end the task.
+This review is the sole final user decision
+boundary and is not an execution-time blocker. While the requested outcome remains unfinished, the coordinator
+continues to reconcile state and advance the next safe worker or recovery
+stage. A completed worker, waiting or incomplete stage,
 technical/documentation/review error, Demo/production gate, or quiet interval
-is not terminal. The only early-turn pause is one genuine user question that
-materially changes requirements, scope, acceptance, or required
-external/destructive authority; after its answer, resume from the recorded
-decision. Record changed evidence and the next action without treating a
-progress update as completion.
+is not terminal. The only user pause is a high-risk/material or explicitly
+requested plan-review decision; all internal blockers are handled by
+rework/replacement or bounded discovery. Record changed evidence and the next
+action without treating a progress update as completion.
 
 For a verified transient closure storage or inspection failure, make one
 bounded safe retry with the exact returned retry handle and unchanged
 idempotency semantics. If it remains unavailable, preserve the completed
 outcome and record an honest `closure_unconfirmed` limitation. Do not
-manufacture a closure result, silently omit the automatic attempt, or describe
+manufacture a closure result, silently omit the required review, or describe
 completed work as open solely because advisory confirmation is unavailable.
 
 Workers must emit English checkpoints of at most five bullets/150 words and a
@@ -84,15 +86,15 @@ user-facing host-private paths; other records remain SQLite-only. If projection
 verification fails, omit the link, continue from canonical evidence, and
 disclose the human-view limitation only when material.
 
-A decision-opening call stores a durable prompt but does not display that prompt
-to the user. After the call succeeds, the coordinator must still render the
-complete localized decision packet in its final answer. For plan review this
-includes the current verified link when ready plus the plan's scope, ordered
-stages, intended changes, verification, stop conditions, risks, unresolved
-items, and approve/revise/cancel choices. Never compress it to a bare status or
-question. A worker-raised decision is summarized with its evidence, blocked
-action, safe choices, and consequence of each rather than forwarded as raw or
-context-free worker prose.
+A plan-review opening stores a durable prompt but does not display that prompt
+to the user. After it succeeds, the coordinator must still render the complete
+localized decision packet in its final answer. This includes the current
+verified link when ready plus the plan's scope, ordered stages, intended
+changes, verification, stop conditions, API-key/ENV prerequisites, branch
+choices, risks, unresolved items, and approve/revise/cancel choices. Never
+compress it to a bare status or question. Workers never raise user decisions;
+the coordinator resolves internal blockers autonomously and records any direct
+user-authored change as steering.
 
 Use English for coordinator-to-worker and inter-worker messages, report and
 decision-normalization content, and other durable coordination prose. Preserve

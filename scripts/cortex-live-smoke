@@ -28,11 +28,6 @@ SESSION = "cortex-v12-smoke"
 # that is known to submit Codex's collapsed paste state.
 TARGET = f"{SESSION}:0.0"
 SUBMIT_DRAIN_SECONDS = 5.0
-# Codex treats one large literal delivery as a collapsed paste acknowledgement.
-# Keep each transport delivery below that threshold while preserving one final
-# submission Enter for the complete prompt.
-PROMPT_CHUNK_CHARS = 512
-PROMPT_CHUNK_DRAIN_SECONDS = 0.1
 CAPTURE_MAX_BYTES = 20_000
 CAPTURE_OUTPUT_MAX_LINES = 1_000
 FAILURE_STAGES = frozenset({"receipt", "lease", "candidate_topology", "runtime_import", "generation", "journal_permissions", "journal_absent", "journal_schema", "journal_content", "unknown"})
@@ -334,11 +329,32 @@ def _launcher_command(launcher: Path, selected_workdir: Path, event_path: Path, 
     # The packaged MCP process derives and claims its observation generation
     # from the verified isolated candidate. No shell-provided event path is a
     # supported host-to-plugin boundary.
+    optional_mcp_overrides = (
+        " -c " + shlex.quote("mcp_servers.codebase_memory.enabled=false")
+        + " -c " + shlex.quote("mcp_servers.node_repl.enabled=false")
+        + " -c " + shlex.quote("features.apps=false")
+        + " -c " + shlex.quote("features.enable_mcp_apps=false")
+    )
     if resume_last and resume_session_id:
-        codex_args = " resume " + shlex.quote(resume_session_id)
+        # Resume accepts the same global -c options after its session id;
+        # keeping the readable `cortex-dev resume <id>` sequence also makes
+        # the exact continuation visible in the bounded pane observation.
+        codex_args = " resume " + shlex.quote(resume_session_id) + optional_mcp_overrides
     else:
-        codex_args = " resume --last" if resume_last else ""
-    return f"cd {shlex.quote(str(selected_workdir))} && CORTEX_LIVE_SMOKE_LAUNCH=1 {shlex.quote(str(launcher))}{codex_args}; status=$?; printf 'Cortex live-dev exit=%s\\n' \"$status\"; exit \"$status\""
+        codex_args = (" resume --last" if resume_last else "") + optional_mcp_overrides
+    # The desktop host keeps CI/app-server markers in the default tmux
+    # server environment.  They make an otherwise ordinary CLI launch attach
+    # to the host's app MCP (and can hang on an unavailable remote endpoint),
+    # so scrub only those inherited integration variables at the exact
+    # launcher boundary.  This does not alter the user's server environment or
+    # the isolated profile and leaves the Cortex candidate variables intact.
+    integration_vars = (
+        "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "CODEX_MCP_NODE_PATH", "CODEX_CI", "CODEX_SHELL",
+        "CODEX_PERMISSION_PROFILE", "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+    )
+    scrub = "env " + " ".join(f"-u {name}" for name in integration_vars)
+    return f"cd {shlex.quote(str(selected_workdir))} && {scrub} CORTEX_LIVE_SMOKE_LAUNCH=1 {shlex.quote(str(launcher))}{codex_args}; status=$?; printf 'Cortex live-dev exit=%s\\n' \"$status\"; exit \"$status\""
 
 
 def _capture_pipe_command(capture_path: Path) -> str:
@@ -422,7 +438,7 @@ def start(project_root: Path, workdir: Path | None = None, *, resume_last: bool 
         tmux("kill-session", "-t", f"={SESSION}")
         _discard_state()
         return fail("could not insert the fixed live-dev launcher")
-    launched = tmux("send-keys", "-t", TARGET, "C-m")
+    launched = tmux("send-keys", "-t", TARGET, "Enter")
     if launched.returncode != 0:
         _stop_pipe()
         tmux("kill-session", "-t", f"={SESSION}")
@@ -452,17 +468,12 @@ def send_prompt(prompt_file: Path) -> int:
     prompt = " ".join(prompt.split())
     if not prompt:
         return fail("prompt file must contain a non-empty task-specific prompt")
-    # Send the normalized prompt as bounded literal tmux key input.  A single
-    # large delivery is interpreted by Codex as collapsed paste; sub-threshold
-    # literal chunks avoid that acknowledgement state.  The explicit
-    # five-second drain below begins only after the complete insertion returns.
-    chunks = [prompt[index:index + PROMPT_CHUNK_CHARS] for index in range(0, len(prompt), PROMPT_CHUNK_CHARS)]
-    for index, chunk in enumerate(chunks):
-        inserted = tmux("send-keys", "-l", "-t", TARGET, "--", chunk)
-        if inserted.returncode != 0:
-            return transport_fail("target_mismatch" if not exists() else "send_keys_exit")
-        if index + 1 < len(chunks):
-            time.sleep(PROMPT_CHUNK_DRAIN_SECONDS)
+    # One literal insertion regardless of length. Do not infer host paste
+    # state, split delivery, or send compensating keys. The operator observes
+    # actual acceptance after the fixed drain and standalone Enter.
+    inserted = tmux("send-keys", "-l", "-t", TARGET, "--", prompt)
+    if inserted.returncode != 0:
+        return transport_fail("target_mismatch" if not exists() else "send_keys_exit")
     if not exists():
         return transport_fail("session_missing")
     pane = tmux("display-message", "-p", "-t", TARGET, "#{pane_dead}")

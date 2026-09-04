@@ -1,6 +1,6 @@
 ---
 name: cortex-control
-description: Internal Cortex v1.15.3 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
+description: Internal Cortex v1.15.6 task_ref-only semantic companion supplied after explicit cortex:orchestrator activation.
 ---
 
 # Cortex Control Activation Kernel
@@ -29,39 +29,45 @@ This table chooses only the next operation kind. The worker derives every comple
 | --- | --- | --- |
 | Fresh native worker start | Consume the immutable assignment with `read_task` as the first Cortex operation | Read coordinator state, scope, evidence, continuations, or timeline |
 | An assignment page explicitly says more remains | Continue the same assignment read immediately | Change the read or begin project work early |
-| The terminal assignment page is consumed | Perform only the bounded assigned work, then call exactly one matching terminal publication operation and stop | Re-read the assignment, delegate, ask the user, or call coordinator operations |
+| The terminal assignment page is consumed | Perform only the bounded assigned work, then call exactly one matching terminal publication operation and stop: plan only for planning, documentation only for an explicitly documentation-impact assignment, otherwise result | Treat read-only evidence as documentation merely because no files changed; re-read the assignment, delegate, ask the user, or call coordinator operations |
 | Work is blocked or needs a user decision | Publish an honest partial or blocked terminal report containing the decision context and stop | Ask the user directly or loop on reads |
 
-After successful native spawn and lifecycle binding, no workflow or governance admission gate may block the worker. Enforce only schema, exact task/actor identity, isolation, immutable relation freshness, atomic replay/conflict, and ledger integrity.
+After lifecycle binding, governance does not retroactively change the immutable assignment. Identity, exact node coverage, revision and artifact freshness, mutation boundaries, publication uniqueness and ledger integrity remain enforceable. A non-publication result ends that worker route without retry or further project work; the coordinator interprets current evidence and chooses bounded reconciliation.
 
 ## Anchor boundary
 
 For project work, `open_task` is the first execution operation. Before it, compose only the semantic task contract. Do not inspect the project, dispatch, open a decision, assess governance, or emit task-specific commentary. On success retain only `task_ref`. Ambiguous transport permits only an identical retry. Failure to establish the task ends the Cortex route.
 
-After task creation, make and record one explicit governance-depth decision before the first assignment. Choose the depth from the complete user contract before invoking the assessment operation. Fully specified, bounded, reversible low-risk work with no remaining product choice is minimal even when mechanically multi-step; meaningful choices or unresolved cross-surface branches are light; security, privacy, credentials, money, destructive, or production-critical work is full. Only the root coordinator owns this decision and any later reassessment. The public assignment boundary rejects a missing assessment. A complete risk-free minimal plan is informational; light/full governance, uncertainty, incomplete evidence, unresolved items, or plan-discovered risk requires exact plan approval regardless of language. A planner cannot self-attest a downgrade. Accepted semantic steering atomically revokes every nonterminal worker bound to an earlier contract revision and requires a fresh current-contract assignment.
+After task creation, make and record one explicit governance-depth decision before the first assignment. Choose the depth from the complete user contract before invoking the assessment operation. Fully specified, bounded, reversible low-risk work with no remaining product choice is minimal even when mechanically multi-step; ordinary multi-step or cross-surface work is light; security, privacy, credentials, money, destructive, or production-critical work is full. Only the root coordinator owns this decision and any later reassessment. The public assignment boundary rejects a missing assessment. A complete risk-free minimal or ordinary light plan is informational; materially high-risk/full work, a genuine product or authority choice, a credential prerequisite, or explicit user-requested review requires its decision packet. Incomplete work and uncertainty alone require bounded discovery, not automatic user approval. A planner cannot self-attest a downgrade. Accepted semantic steering atomically revokes every nonterminal worker bound to an earlier contract revision and requires a fresh current-contract assignment.
 
-Closure is a user decision boundary, not an automatic finalization step. Before
-every `close_task` attempt, the coordinator must present the reconciled,
-verified result and its impact in the latest meaningful user language, then
-use the advertised `open_clarification` operation to open one closure-review
-hold with exactly two choices: revise the current task or close the task. The
-coordinator must wait for the explicit answer and record it through the
-advertised `record_clarification` operation;
-silence, prior approval, worker completion, or a ready-looking ledger state is
-not permission to close. A request made before the result existed to close
-automatically afterward is not the required current review. Never probe the
-closure operation before the review has been opened and recorded. A revise
-answer keeps the same task reference alive
-and routes bounded rework/replacement from the current evidence. A close answer
-is the only answer that permits closure. Any new result or rework invalidates
-an earlier closure review and requires a fresh one.
+A committed semantic change revokes old-revision authority. Interrupt the affected protected native tasks, obtain current host lifecycle evidence, and reconcile the artifact before new execution. Prepare and independently validate the revised candidate. A revision alone does not require another review; follow the current material-risk, authority, credential and explicit-review policy.
+
+Closure is a user decision boundary after evidence reconciliation. The
+coordinator presents the reconciled result, opens the mandatory closure-review
+question with the localized revise/close choices, waits for the direct response,
+and records it before calling `close_task`. Only a current recorded `close`
+choice authorizes closure; `revise` keeps the same task reference alive for
+bounded rework and requires a fresh review after the new evidence. Any partial
+or blocked result is routed to autonomous rework before asking for the final
+choice, not hidden by an automatic close.
 
 Native wait output is advisory host coordination. A timeout or empty wait while the child remains active does not justify a task-state read; wait again without polling the ledger. Read current state or relevant evidence after reported completion or attention, a visible child-completion notification, user steering, or recovery/compaction. A finalized worker publication is authoritative durable completion evidence and is consumed without another wait for that child even when host completion output is contradictory. Within the active coordinator turn, route that evidence to the next current-contract assignment, verification, recovery, rework, review, or result action without asking the user to re-authorize bounded work. Lifecycle stop without publication uses explicit loss/recovery. `read_state` is never a worker-liveness poll, and host wait output never suppresses durable evidence.
 
-A host-confirmed terminal worker stop without publication, including a terminal worker connection error, is concrete loss evidence. The coordinator reads the current responsibility scope and creates one lineage-linked replacement immediately. It never repeats the original assignment opening, respawns a replayed dispatch, asks the user to say “continue”, or leaves the task idle when that recovery route is available.
+A terminal worker stop without publication is a recovery event, not permission to guess a replacement. Obtain the complete unfiltered native-agent projection and use its signed observation with the current responsibility scope. The backend checks the exact protected owner and returns the bounded reconciliation/replacement route. The coordinator never repeats the original assignment opening, spawns a replayed dispatch, or asks the user to say “continue”. Timeout and silence do not prove loss.
 
-After coordinator recovery or compaction, use one scalar state read to choose the route. If delegated work is active or unfinished, read active continuations next; never use the historical timeline as a continuation lookup. Timeline reads are reserved for an explicit chronology or audit need.
+After coordinator recovery or compaction, use one scalar state read to choose
+the route. If delegated work is active or unfinished, `read_continuations` is
+the immediate next Cortex operation, before queued user steering or any scope,
+outcome, evidence, plan, assignment, or timeline operation. Consume that
+continuation view first, then record any queued direct semantic change
+immediately so stale nonterminal ownership is revoked rather than awaited.
+Never use the historical timeline as a continuation lookup. Timeline reads are
+reserved for an explicit chronology or audit need.
 
-A question known in advance to select previously unstated product behavior opens steering before it is presented. The user's direct answer is the steering answer; do not route it through ordinary clarification. When the user already states a concrete semantic change, record that exact message directly as steering and never open a duplicate confirmation. The same applies when a factual clarification answer itself contains the change. Ordinary clarification is only for facts whose possible answers leave every current outcome detail unchanged. Do not open either question type for an already-approved bounded rerun, routine independent verification, report rework, recovery, or another action wholly inside the current acceptance, constraints, and verification.
+A real product or authority choice belongs in an independently validated plan-review packet when its alternatives can be responsibly planned. If the missing answer prevents constructing valid alternatives, open one genuine pre-plan steering decision. A direct user change is already authorized: record it once, and do not open either question type to repeat or confirm it. Internal failures, retries, prerequisites and in-contract rework do not require user decisions. Closure always requires its own fresh post-result review.
+
+If a direct semantic change arrives while a native assignment is nonterminal, record it immediately after the required fresh reads; never wait for old publication. After coordinator recovery, consume the required continuation view first and then apply queued changes in order. After commit, interrupt affected protected tasks and confirm quiescence before artifact reconciliation. A late still-bound publication is non-current evidence, not permission to overwrite the report or retry against a guessed revision.
+
+An approved current plan covers its unchanged scope, not arbitrary new authority. Failed, partial and unrun checks feed finite diagnostic, repair and independent-regression routes. Use exact ready node selections; never reopen a completed assignment or overwrite failed evidence. Honor bounded expansion and non-progress exhaustion. Continue available authorized work without another question; if no safe route remains, present unresolved evidence honestly rather than fabricate success or loop forever.
 
 All later calls follow the orchestrator skill and live schemas. Neither coordinator nor worker copies any other identifier, handle, digest, cursor, revision, slot, or idempotency value. Server-owned read continuation is requested only by its boolean flag. After `open_assignment` succeeds, native spawn follows immediately with the exact returned dispatch and no intervening model narration, read, or tool call.

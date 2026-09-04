@@ -14,7 +14,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from cortex_runtime.v12_store import V12Store, V12StoreError
+from cortex_runtime.v12_store import V12Store, V12StoreError, SCHEMA_VERSION, MIGRATION_NAME
 from cortex_runtime.v12_maintenance import health
 
 
@@ -52,6 +52,7 @@ class TaskLocatorTests(unittest.TestCase):
     def _create(self, suffix: str = "one") -> dict:
         result, replayed = self.store.create_task(
             objective=f"Task locator {suffix}.", user_request_original=f"Task locator {suffix}.", user_language="en",
+            outcome_contracts=[{'requirement': 'Route exactly one compact task reference.', 'acceptance': ['Verify the canonical task row.'], 'verification': ['Resolve the compact task reference.'], 'constraints': []}],
             requirements=["Route exactly one compact task reference."], constraints=["Locator is derived only."],
             acceptance_criteria=["Verify the canonical task row."], verification_plan=["Resolve the compact task reference."],
             context={}, idempotency_key=f"task-locator-{suffix}",
@@ -61,7 +62,7 @@ class TaskLocatorTests(unittest.TestCase):
 
     def test_normal_lookup_uses_one_indexed_shard_without_recovery_scan(self) -> None:
         task = self._create()
-        with patch.object(V12Store, "_legacy_task_ref_matches", side_effect=AssertionError("unexpected shard scan")):
+        with patch.object(V12Store, "_recover_task_locator_matches", side_effect=AssertionError("unexpected shard scan")):
             resolved, canonical = V12Store.for_task_ref(task["task_ref"])
         self.assertEqual(canonical, task["task_id"])
         self.assertEqual(resolved.project_hash, self.store.project_hash)
@@ -83,7 +84,7 @@ class TaskLocatorTests(unittest.TestCase):
                 self.assertEqual((resolved.project_hash, canonical), (self.store.project_hash, task["task_id"]))
                 # The successful recovery must repair an independently usable
                 # sidecar rather than leave scans on the normal hot path.
-                with patch.object(V12Store, "_legacy_task_ref_matches", side_effect=AssertionError("unrepaired")):
+                with patch.object(V12Store, "_recover_task_locator_matches", side_effect=AssertionError("unrepaired")):
                     self.assertEqual(V12Store.for_task_ref(task["task_ref"])[1], task["task_id"])
 
     def test_wrong_project_locator_and_cross_project_reference_fail_closed(self) -> None:
@@ -93,6 +94,7 @@ class TaskLocatorTests(unittest.TestCase):
         other_store = V12Store(other)
         other_task_result, _ = other_store.create_task(
             objective="Other task.", user_request_original="Other task.", user_language="en",
+            outcome_contracts=[{'requirement': 'Keep project identity.', 'acceptance': ['Reject wrong locator.'], 'verification': ['Verify canonical shard.'], 'constraints': []}],
             requirements=["Keep project identity."], constraints=["No cross-project routing."],
             acceptance_criteria=["Reject wrong locator."], verification_plan=["Verify canonical shard."], context={},
         )
@@ -104,7 +106,7 @@ class TaskLocatorTests(unittest.TestCase):
         self.assertEqual(V12Store.for_task_ref(task["task_ref"])[1], task["task_id"])
         self.assertNotEqual(task["task_ref"], other_task["task_ref"])
 
-    def test_v19_publication_is_transactional_and_maintenance_shape_is_present(self) -> None:
+    def test_current_publication_is_transactional_and_maintenance_shape_is_present(self) -> None:
         task = self._create()
         with sqlite3.connect(self.store.database_path) as connection:
             row = connection.execute(
@@ -113,7 +115,7 @@ class TaskLocatorTests(unittest.TestCase):
             self.assertEqual(row[0], self.store.project_hash)
             self.assertEqual(row[1], task["task_id"][-12:])
             self.assertEqual(row[2], V12Store._task_locator_fingerprint(task["task_id"]))
-            self.assertEqual(connection.execute("SELECT name FROM schema_migrations WHERE version=20").fetchone()[0], "v20-dispatch-correlation-marker")
+            self.assertEqual(connection.execute("SELECT version,name FROM schema_migrations").fetchall(), [(SCHEMA_VERSION, MIGRATION_NAME)])
         self.assertTrue(health(task_id=task["task_id"])["healthy"])
 
     def test_eighty_shards_one_hundred_sixty_first_calls_do_not_scan_or_busy(self) -> None:
@@ -132,6 +134,7 @@ class TaskLocatorTests(unittest.TestCase):
             store = V12Store(project)
             created, _ = store.create_task(
                 objective=f"Stress {index}.", user_request_original=f"Stress {index}.", user_language="en",
+                outcome_contracts=[{'requirement': 'Resolve one target shard.', 'acceptance': ['No storage busy.'], 'verification': ['Resolve concurrently.'], 'constraints': []}],
                 requirements=["Resolve one target shard."], constraints=["No all-shard scan."],
                 acceptance_criteria=["No storage busy."], verification_plan=["Resolve concurrently."], context={},
             )

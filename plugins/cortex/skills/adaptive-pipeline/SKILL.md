@@ -1,249 +1,130 @@
 ---
 name: adaptive-pipeline
-description: Internal Cortex v12 adaptation overlay. Load only for an explicitly activated Cortex task when new evidence changes delegation, verification, or governance depth.
+description: Internal Cortex adaptation overlay. Load only during an explicitly activated Cortex task when new evidence changes delegation, verification, or governance depth.
 ---
 
 # Evidence-Driven Adaptation
 
-Adapt the model-owned orchestration DAG from evidence, not from a backend state
-machine. This overlay is operational: load it after explicit Cortex activation
-whenever a worker report, user decision, failed/incomplete check, changed risk,
-contradiction, scope change, or documentation-impact finding could change later
-work. The coordinator changes pipeline nodes only; it never writes the project
-solution plan. When planning is required, a `planner` worker must publish the
-durable `plan` report that plan-dependent nodes name as their predecessor.
+The coordinator decides intent, decomposition and which ready work is useful.
+The typed ledger stores the graph and enforces prerequisites, ownership,
+artifact generation, revision, publication type and decision bindings. It does
+not choose a specialist or execute a workflow. Do not maintain an initiative
+revision, prose-only DAG or copied private identifiers as a competing authority.
 
-## Dynamic pipeline state
+## Adapt from current evidence
 
-Maintain an evidence-backed DAG and persist its current projection through the
-existing task-linked initiative revision plus delegation/report/decision links.
-For each stage retain: its unique purpose; worker owner/profile/model/effort;
-scope and mutation boundary; named predecessor evidence; acceptance
-and expected evidence; and state. Valid model-owned
-states are `proposed → waiting_predecessors → ready → dispatched →
-evidence_received → settled`, with `rework_required` returning to a new
-parent-linked `proposed` node and `cancelled` permitted only for unstarted work
-made unnecessary by evidence or a user decision. These labels are coordinator
-reasoning persisted as advisory pipeline revisions, not backend lifecycle states
-or tool admission rules.
+1. Read only the current status and finalized evidence needed for the observed
+   completion, contradiction, direct user change or recovery event.
+2. Interpret the finding against the unchanged contract. Distinguish a product
+   defect, incorrect classification, missing evidence, new authority, and an
+   actual user-authored semantic change.
+3. Select a bounded current ready route. Keep failed reports immutable. A
+   successful repair needs its declared independent regression before it
+   resolves a finding or enables dependent work.
+4. Read the selected responsibility's scope immediately before assignment on
+   the same connection. Exact graph nodes, not prose or remembered outcomes,
+   determine the complete assignment and its terminal publication.
+5. Spawn only a newly confirmed dispatch, immediately and byte-for-byte as
+   rendered. Never spawn again after a replay or an ambiguous dispatch result.
 
-Use this transition discipline:
+Readiness is a dependency and artifact property. Every named predecessor must
+have terminal, acceptable evidence for the relevant sealed generation. Scope
+availability, an idle native slot or a desire to exercise a profile does not
+prove readiness. Implementation-dependent architecture, database, security,
+accessibility, performance and code-review work waits for implementation;
+verification waits for any required fixes; final documentation evidence must
+refer to the same relevant generation.
 
-1. Read the bounded relevant report sections or decision; record which evidence
-   changes which assumption, risk, acceptance criterion, or predecessor.
-2. Decide whether current nodes still cover the outcome. Add, remove, reorder,
-   retry, or create rework only for the evidence-backed delta, then append the
-   updated pipeline revision with its stage owners, predecessor evidence,
-   acceptance, evidence, and rationale. Completed worker reports remain
-   immutable and are never relabeled as a new solution.
-3. Preserve parallelism only for non-overlapping ownership. Make a predecessor
-   edge only when a later worker needs its evidence, particularly the finalized
-   planner plan report for plan-dependent implementation or review.
-4. Dispatch the next ready worker through a new durable assignment. A retry or
-   rework uses the exact server-returned parent-assignment relation; do not reuse
-   a worker or invent evidence.
-5. Reassess C1/C2/C3, governance depth, residual risk, verification depth, and
-   the final documentation branch after every material evidence arrival.
+Parallelize independent ready readers within native capacity. The shared
+project admits only one artifact-mutating assignment at a time; this is not a
+one-worker limit. Never dispatch a premature audit merely to occupy a slot.
+Observe the graph's finite planning, additional-evidence, remediation,
+reconciliation and recovery budgets. Repeating the same failed approach with
+different prose is not progress. Exhaustion is unresolved evidence, never
+permission to widen scope or silently reset a budget.
 
-A verification or QA report is settled only when its executed required checks
-support the assigned acceptance criteria. If such a report is failed or
-partial, records any failed executed check, or leaves a required check unrun,
-mark that verification stage `rework_required` and create bounded corrective
-ownership from the exact report evidence before closure. Route source defects
-to implementation rework and candidate, dependency, CI, provenance, or test
-harness defects to an owner for that release or verification infrastructure;
-do not discard them as unrelated environment noise. Only a genuinely external
-constraint that no in-scope worker can change may remain as an explicit
-limitation. After correction, dispatch an independent verifier to rerun the
-failed and affected gates. Unrelated new scope, a passing focused subset, or a
-later worker report cannot silently supersede the unresolved QA evidence.
+## Planning and review
 
-Before every new or rework delegation, perform an admission preflight against
-the current governance depth, the chosen profile's packaged ownership class,
-and the exact available predecessor evidence. In light/full governance,
-production-owner work requires finalized approved planner evidence; build that
-planning and approval chain first. When bounded C1 production work genuinely
-needs no plan, governance stays minimal from the outset—it is never downgraded
-after a rejected assignment. Test-only QA correction remains non-owning and
-must not be mislabeled as production remediation. Multiple workers or the mere
-presence of rework does not justify light/full governance. A planning-
-predecessor rejection proves a first-attempt orchestration defect; a later
-successful retry cannot make that verification run clean.
+Pre-planner analysis is conditional. Use read-only Luna work for distinct
+questions whose evidence is actually needed to avoid speculation or duplicate
+discovery. Choose effort from the entire currently advertised range, up to max;
+the highest available effort is reserved for genuinely demanding analysis.
+Stop adding analysis when the evidence is sufficient or its budget is exhausted.
 
-After each revision, update the standard Codex To-Do projection from the latest
-DAG. To-Do contains only current pipeline stages and gate state, never worker subtasks,
-implementation checklists, or report bodies. Keep it concise and current with
-the persisted initiative revision; update it when a stage or gate changes, and
-when evidence adds, removes, reorders, retries, or reworks a node. The To-Do
-projection is for live progress only and is not a second durable task ledger.
+The planner remains the sole owner of one terminal project plan. The current
+candidate requires independent graph validation before execution or review.
+A validator checks source coverage, artifact prerequisites, contribution
+ownership, verification independence and finite repair policies. A structurally
+accepted graph is not proof of these semantic properties.
 
-The C-level is advisory: C1 normally starts minimal, C2 light, and C3 full.
-Escalate or reduce the advisory starting-depth label only with recorded
-evidence; an explicit user choice remains the governing preference subject to
-ordinary live safety gates. A reassessment cannot weaken an already-required
-plan/approval obligation: once the current task has a persisted light/full gate
-or the user explicitly requires planning and approval, a model cannot bypass it
-by selecting C1/minimal after a planner or report failure. No C-level or state
-label creates a backend wave, mandatory stage, model escalation, or new
-user-approval gate.
+Ordinary complete low-risk plans proceed informationally. Review is for
+materially high-risk work, an explicit user request, external authority,
+credentials or a genuine product choice. Complexity, a partial report, an
+internal error or the existence of a revised plan does not itself require a
+question. If all safe alternatives can be responsibly planned and validated,
+present them in one decision-ready plan packet. If a missing answer prevents
+that preparation, use a genuine pre-plan steering decision instead.
 
-The durable light/full governance gate is narrower: it validates the planner
-publication/approval decision relation before downstream assignment. Its required
-relations are monotonic for the task: preserve the exact opaque plan evidence
-reference, plan digest, and approval decision reference in each successor's
-declared predecessor evidence. A failed,
-partial, missing, or schema-rejected planner report requires correction, rework,
-or a parent-linked planner replacement—not a downgrade, native-prose
-substitute, explorer/QA/implementation bypass, or free-text instruction. After
-the replacement submits a finalized completed plan, obtain one new explicit
-localized user decision. If it is `approve`, read the plan to obtain the exact
-ready approval view, copy its server-issued approval relation and exact
-report/view digest and sequence, and record approval against those exact values
-before dispatching downstream work. A `request_revision` or `cancel` decision
-is recorded against the exact finalized plan digest and response without a
-volatile view binding. Never reuse the original task request or infer consent.
+Present the verified current plan link and a localized summary of scope,
+ordered stages, changes, checks, risks, alternatives and stopping conditions.
+Record the user's exact decision once. A choice of a validated alternative
+and its approval is one decision, not permission to ask again. Approval binds
+only the current plan and never grants native host permissions.
 
-The coordinator makes adaptation decisions only from user input, ledger state,
-and worker reports. Any new project inspection, domain analysis, implementation,
-command, or verification required to resolve uncertainty must be delegated; the
-coordinator never performs that work itself.
+## Steering and recovery
 
-The coordinator can select discovery, planner, implementation, review,
-verification, security, documentation-impact, documentation-sync,
-documentation-verification, knowledge-harvest, or closure-evidence stages only
-when governance, user constraints, or worker evidence justifies them. Their
-order and presence are dynamic; documentation is a final conditional stage,
-while knowledge harvest is selected only by an explicit harvest route.
+Record a direct user-authored semantic change immediately; never queue it behind
+an older worker's publication. After committed steering, interrupt affected
+protected native tasks, obtain current lifecycle evidence and reconcile any
+unpublished artifact changes before new execution. Preserve snapshots and
+failed reports; never attribute abandoned work to a replacement.
 
-Pre-planner analysis is also conditional. Create read-only Luna evidence
-assignments only when separable repository facts, cross-domain dependencies,
-material uncertainty, or contradictory evidence would otherwise force the
-planner to speculate or duplicate broad discovery. Select Luna effort
-explicitly from its entire currently advertised range in proportion to each
-scope, using the highest available effort only when the analysis genuinely
-warrants it. Each assignment owns a distinct question and stopping boundary.
+After coordinator resume or compaction, use `read_state` and, when unfinished
+delegated work is reported, `read_continuations` immediately before queued
+steering or other progress operations. History is not a recovery lookup.
+Then apply distinct queued user changes in order without asking for repetition.
 
-Do not impose a finite total evidence-assignment cap. Limit active assignments
-to the native slots currently available, keep additional justified work queued
-in the model-owned DAG, and dispatch the next non-overlapping ready assignment
-when a slot frees. Stop adding or dispatching evidence work when the finalized
-set answers the planning questions, no distinct domain remains, or incremental
-value no longer justifies latency and cost. The planner consumes the relevant
-finalized evidence, investigates only remaining gaps, reconciles conflicts, and
-remains the sole owner of one terminal project plan.
+Native waits are advisory. A quiet interval never proves loss and does not
+justify ledger polling, interruption, checkpoint spam or a new worker.
+For an actual stopped-without-publication event, obtain the complete unfiltered
+native-agent projection and use the signed current observation with the exact
+recovery scope. The backend establishes the protected owner's status and
+bounded reconciliation route. After reconciliation, the coordinator may select
+the admitted replacement; it never infers loss from a copied reference,
+timeout or missing telemetry.
 
-Reassessment may compare reported evidence with acceptance criteria, but it
-must not turn into direct inspection or testing of the target project. Create a
-focused evidence-gathering or verification delegation when the reports do not
-support a decision.
+A still-bound racing stale publication returns a non-publication result and
+ends the worker. It cannot satisfy the current revision or consume another
+publication slot. A lost identity cannot regain authority through a new
+connection. Never revive a finalized worker to amend its immutable report.
 
-Do not use a report gap to inspect Git, manifests, caches, worktrees, file
-existence/absence or unchanged-state, or project-local `.codex`. These are
-project-state checks and always require a focused worker delegation, even when
-the user asks the coordinator to perform one directly.
-
-When evidence expands or moves the project scope, the coordinator updates its
-bounded route and compiles a revised delegation knowledge contract for the next
-worker. A missing or unreadable index creates bounded discovery; a reported
-stale or conflicting document is handled according to task impact. Neither
-condition permits coordinator source inspection or automatically forces
-harvest.
-
-If rework or new evidence changes behavior, architecture, interfaces, commands,
-verification, conventions, feature ownership, or public usage after an earlier
-documentation assessment, reassess documentation impact from the new worker
-reports. Create or revise a documentation-sync worker delegation when needed,
-and ensure a separate worker verifies documentation when the impact is
-material. Otherwise retain the updated `documentation not required` rationale.
-For light/full governance, perform this reassessment before advisory closure:
-the closure relation requires a post-approval technical_writer report that
-names the approved plan/decision and relevant finalized result refs, followed
-by a coordinator report read. The report content remains opaque and no-impact
-does not require a documentation edit.
+## Governance, documentation and closure
 
 Governance assessment belongs only to the root coordinator: no native worker,
-profile, planner revision, replacement, or rework path may invoke it. The
-coordinator performs the initial assessment in its required lifecycle position
-and reassesses only after material evidence changes risk and it deliberately
-selects a current depth. The model chooses the role, exact model, and reasoning
-effort for every delegation; the backend records the choice but never promotes
-a model, substitutes a profile, or chooses a recovery route.
+profile, planner revision, replacement, or rework path may invoke it. Reassess
+only when material evidence changes risk. Luna remains the ordinary default,
+with native model override omitted and explicit effort no higher than max.
+Terra needs genuinely complex planning or architecture; Sol is rare and
+security-risk-specific. There is no automatic escalation ladder or Ultra route.
 
-Routing remains Luna-first: Explorer and ordinary discovery always use Luna,
-with task-specific effort selected from the full live-advertised range before a
-model change. Terra requires evidence of genuinely complex non-security work
-or planning; Sol is reserved for security work and review. Do not encode an
-automatic escalation ladder or fixed Luna effort in a pipeline revision.
+The coordinator decides from user input, current ledger projections and worker
+reports. Any required project inspection, command, change or verification
+remains worker-owned. A missing or stale documentation index warrants bounded
+discovery or documentation repair, never unauthorized coordinator inspection
+or automatic knowledge harvest.
 
-A failed worker, partial report, missing report, or `not_ready` closure is
-evidence for the model's next decision, not a lifecycle barrier. Create a
-replacement when it is useful, proceed with other safe work, ask the user when
-their decision materially changes intent, or finish with a clear limitation.
-This flexibility never overrides a required plan/approval hold: when the failed
-worker is its planner or its report is missing/rejected, safe work is limited to
-planner recovery and already-authorized planning/discovery; no downstream
-project stage may start until finalized plan and explicit decision evidence
-exist.
+Reassess documentation impact after changes to behavior, interfaces, commands,
+architecture or verification. A no-impact finding is evidence, not a requirement
+to edit files. A documentation edit must be followed by the declared artifact
+observation and affected verification so closure uses one current generation.
 
-Before replacing a reportless worker, wait no more than 60 seconds per call;
-after the first quiet interval send the exact native worker name an English
-checkpoint request, then inspect/list status after later intervals. If the
-worker remains running, keep waiting and update the user; silence never proves
-it is stuck. Interrupt and same-handle follow up only for explicit
-failed/unavailable/idle-without-work evidence, host-confirmed no-progress, or
-user cancellation. If the child is live and its mutation scope is active, avoid
-overlapping write ownership. If its state is unknown, preserve uncertainty and
-do not infer that a durable delegation proves it started or stopped. Only failed
-or ambiguous authorized recovery permits blocked evidence and a replacement.
-Every semantic replacement or rework assignment uses the exact emitted
-parent-assignment relation and carries only relevant predecessor evidence. Do
-not create a new task, skip a planner predecessor, or silently start a
-downstream stage to simulate recovery. C-level/timebox can shorten the count,
-never alter server-owned model routing.
+Continue safe in-contract work without re-authorization. If a finite route is
+exhausted or genuinely new authority is missing, preserve the unresolved facts
+and report them honestly. Do not weaken a contract, erase a failed check or
+pretend completion.
 
-A user question may concern task requirements, scope, acceptance or product
-behavior, or explicit external/destructive authorization. Never turn internal
-ledger status, mode, dependency, closure, retry, or worker conditions into a
-user decision.
-
-Pipeline progress is continuous until the requested outcome and closure
-evidence are complete. A worker completion, incomplete or waiting stage,
-technical/documentation/review error, Demo or production gate, or quiet host
-interval is evidence for the next safe coordinator action, not permission to
-end the task. Reconcile and dispatch, follow up, replace, or recover the next
-safe node automatically. The coordinator may pause before closure only after
-asking one genuine user question that materially changes requirements, scope,
-acceptance, or required external/destructive authority; after the answer,
-resume from that decision. Never leave an unfinished DAG stopped without such
-a question and an explicit recorded reason.
-
-When a genuine decision is required, ask one complete question in the language
-of the latest meaningful user message and end the turn. Silence is not an
-answer. Record the exact original response, together with the neutral question
-and language, against the immutable subject/digest
-before using it; do not generate or accept translated or duplicate language-specific fields. Follow
-up the same native child only when its live handle and ownership are known and
-ordinary host follow-up is safe. Replace the same nonterminal delivery owner
-only after confirming loss with explicit blocked/aborted reason and non-empty
-evidence; use the advertised lost-worker successor field so Cortex commits the
-immutable loss and lineage atomically. Timeout, silence, reconnect, or missing
-telemetry alone is insufficient. Cortex does not guarantee same-child
-continuation and never recovers worker authority on a fresh connection.
-
-For plan review, `approve` applies only to the exact plan report and digest and
-requires the current ready approval view plus opaque approval handle. Plan
-`request_revision` and `cancel` preserve the exact finalized plan digest and
-response without volatile view binding, so intervening non-plan timeline events
-cannot block feedback. Revision records the user's feedback verbatim, preserves
-the old plan, creates
-a new immutable plan/digest through the same live planner when possible (or a
-parent-linked replacement only when it is unavailable), then asks for a new
-decision. A requested/necessary main plan must have a finalized verified
-Markdown link and explicit localized approval. Record `approve` against its
-exact digest plus the ready-view binding and pass that decision evidence to
-every plan-dependent assignment; do not
-dispatch implementation or research beyond discovery/planning first. Cancellation
-prevents the exact approval relation and therefore keeps light/full delivery
-closed at both coordinator policy and backend admission. If persistence is
-unavailable, never infer approval; proceed only from an unambiguous safe user
-message and disclose the non-durable decision.
+Every closure attempt follows a fresh user-visible verified result and the
+mandatory revise-or-close decision. Record the explicit current answer before
+closure; silence, an earlier plan approval and a worker report are insufficient.
+Revision keeps the same task open. Closing an incomplete result must remain
+truthfully not ready. Only copy verified server-rendered report links.

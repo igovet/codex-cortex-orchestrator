@@ -136,10 +136,10 @@ or verification pages while keeping `index.md` as its canonical entry point.
 
 ## Delegation reports
 
-Each worker reads its complete delegation and any relevant input reports before
-acting. It may publish progress reports when intermediate evidence will help
-coordination, then publishes a result or synthesis report with a truthful
-`partial`, `completed`, `blocked`, or `failed` status. The active tool
+Each worker consumes its immutable assignment and relevant predecessor evidence
+before acting. It may emit native commentary during work, but publishes exactly
+one terminal report of the kind fixed by that assignment. The report states
+completed work and every incomplete or failed check truthfully. The active tool
 registry defines call fields.
 
 Report IDs are durable evidence references, not proof that work is complete.
@@ -174,6 +174,6 @@ decisions, gotchas, or feature explanations without evidence and explicit
 scope. Never expose secrets, source dumps, private operational values, or
 personal data.
 
-Missing closure, incomplete reports, open initiative state, or unresolved
+Missing closure, incomplete reports, or unresolved
 dependencies may affect the model's readiness recommendation, but never prevent
 useful delegation, evidence access, corrective work, or a truthful final answer.

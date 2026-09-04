@@ -1,4 +1,4 @@
-"""Persistence invariants for the v21 worker bootstrap capability ledger."""
+"""Persistence invariants for current typed worker bootstrap capabilities."""
 from __future__ import annotations
 
 import os
@@ -29,26 +29,25 @@ class V21WorkerCapabilityStoreTests(unittest.TestCase):
         self.store = V12Store(self.project)
         task, _ = self.store.create_task(
             objective="Test worker bootstrap persistence.", user_request_original="Test worker bootstrap persistence.",
+            outcome_contracts=[{'requirement': 'Persist capability.', 'acceptance': ['Exact replay is stable.'], 'verification': ['Read the capability.'], 'constraints': []}],
             user_language="en", requirements=["Persist capability."], constraints=["No reset."],
             acceptance_criteria=["Exact replay is stable."], verification_plan=["Read the capability."], context={},
         )
         self.task_id = task["task"]["task_id"]
-        self.item_ref = self.store.inspect_task(
-            task_id=self.task_id, after_sequence=0,
-        )["effective_contract"]["items"][0]["item_ref"]
-        delegation, _ = self.store.create_delegation(
-            task_id=self.task_id, objective="Test worker bootstrap persistence.", role="planner",
-            profile_name="planner", scope="one assignment", instructions="Perform the test.",
-            model="gpt-5.6-luna", reasoning_effort="high",
-            outcome_assignments={"owned": [self.item_ref]},
-            assignment_policy="owner",
-        )
+        from cortex_runtime.domain_api import assess_governance
+        from test_domain_public_api_contract import PROVENANCE
+        assess_governance(task_ref=task["task"]["task_ref"], mode="minimal")
+        graph_id = self.store._read(lambda c: c.execute("SELECT graph_id FROM execution_graphs WHERE task_id=?", (self.task_id,)).fetchone()[0])
+        admission = self.store.node_admission_snapshot(graph_id=graph_id)
+        self.dispatch_args = dict(task_id=self.task_id, graph_id=graph_id, graph_digest=admission["digest"],
+            admission=admission, node_keys=["baseline"], profile_name="explorer",
+            model="gpt-5.6-luna", reasoning_effort="high", bootstrap_provenance=PROVENANCE)
+        delegation, replayed = self.store.open_node_assignment(**self.dispatch_args)
+        self.assertFalse(replayed)
         self.assignment = delegation["delegation"]
         self.args = {
             "task_id": self.task_id, "assignment_id": self.assignment["delegation_id"], "contract_revision": 1,
-            "build_digest": "sha256:" + "1" * 64, "candidate_digest": "sha256:" + "2" * 64,
-            "source_digest": "sha256:" + "3" * 64, "catalogue_digest": "sha256:" + "4" * 64,
-            "dispatch_digest": self.assignment["dispatch_correlation_digest"],
+            **PROVENANCE, "dispatch_digest": self.assignment["dispatch_correlation_digest"],
         }
 
     def tearDown(self) -> None:
@@ -58,7 +57,7 @@ class V21WorkerCapabilityStoreTests(unittest.TestCase):
     def test_mint_and_consume_are_exactly_idempotent(self) -> None:
         first = self.store.mint_worker_bootstrap(**self.args)
         replay = self.store.mint_worker_bootstrap(**self.args)
-        self.assertFalse(first["replayed"])
+        self.assertTrue(first["replayed"])
         self.assertTrue(replay["replayed"])
         self.assertEqual(first["capability"], replay["capability"])
         consumed = self.store.consume_worker_bootstrap(capability=first["capability"], **self.args)
@@ -173,10 +172,10 @@ class V21WorkerCapabilityStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(V12StoreError, "stale"):
             self.store.consume_worker_bootstrap(capability=first["capability"], **changed)
 
-    def test_migration_is_forward_only_and_table_is_present(self) -> None:
+    def test_current_capability_and_receipt_tables_are_present(self) -> None:
         with self.store._connection() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 26)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 2)
             columns = {row[1] for row in connection.execute("PRAGMA table_info(worker_capabilities)")}
             receipt_columns = {
                 row[1] for row in connection.execute(
@@ -196,114 +195,22 @@ class V21WorkerCapabilityStoreTests(unittest.TestCase):
         self.assertIn("successor_assignment_id", loss_columns)
         self.assertIn("evidence_digest", loss_columns)
 
-    def test_v21_store_automatically_migrates_through_v23_with_data_preserved(self) -> None:
-        """The v22 migration must admit v21 before inserting its own record."""
-        capability = self.store.mint_worker_bootstrap(**self.args)
-        with self.store._connection() as connection:
-            connection.execute("DROP TRIGGER assignment_scope_no_update")
-            connection.execute("DROP TRIGGER assignment_scope_no_delete")
-            connection.execute("DROP INDEX assignment_scope_task_revision")
-            connection.execute("DROP TABLE assignment_scope_snapshots")
-            connection.execute("DROP TABLE effective_contract_item_details")
-            connection.execute("DROP INDEX assignment_page_task_sequence")
-            connection.execute("DROP INDEX assignment_page_assignment_position")
-            connection.execute("DROP TABLE assignment_page_receipts")
-            connection.execute("DROP TRIGGER assignment_loss_no_update")
-            connection.execute("DROP TRIGGER assignment_loss_no_delete")
-            connection.execute("DROP INDEX assignment_loss_task_sequence")
-            connection.execute("DROP TABLE assignment_losses")
-            connection.execute("DELETE FROM schema_migrations WHERE version IN (22,23,24,25,26)")
-            connection.execute("ALTER TABLE worker_capabilities DROP COLUMN lease_expires_at")
 
-        upgraded = V12Store(self.project)
-        with upgraded._connection() as connection:
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 26)
-            row = connection.execute(
-                "SELECT state,lease_expires_at FROM worker_capabilities WHERE capability_ref=?",
-                (capability["capability"],),
-            ).fetchone()
-            self.assertEqual(row["state"], "minted")
-            self.assertTrue(row["lease_expires_at"])
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM tasks WHERE task_id=?", (self.task_id,)).fetchone()[0], 1)
-
-    def test_active_dispatch_lease_rejects_parent_replacement_before_worker_consumes(self) -> None:
-        capability = self.store.mint_worker_bootstrap(**self.args)
-        self.assertEqual(capability["state"], "minted")
-        with self.assertRaisesRegex(V12StoreError, "active dispatch lease"):
-            self.store.create_delegation(
-                task_id=self.task_id, parent_delegation_id=self.assignment["delegation_id"],
-                objective="Replacement attempted before worker bootstrap.", role="worker",
-                profile_name="general", scope="Inherited scope.", instructions="Continue the work.",
-                model="gpt-5.6-luna", reasoning_effort="high", idempotency_key="blocked-parent-replacement",
-            )
-        with self.store._connection() as connection:
-            row = connection.execute(
-                "SELECT state FROM worker_capabilities WHERE capability_ref=?", (capability["capability"],)
-            ).fetchone()
-            self.assertEqual(row["state"], "minted")
-            self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM delegations WHERE task_id=?", (self.task_id,)).fetchone()[0], 1
-            )
-
-    def test_consumed_dispatch_lease_requires_explicit_loss_before_replacement(self) -> None:
-        capability = self.store.mint_worker_bootstrap(**self.args)
-        self.store.consume_worker_bootstrap(capability=capability["capability"], **self.args)
-        with self.assertRaises(V12StoreError) as unrecorded:
-            self.store.create_delegation(
-                task_id=self.task_id, parent_delegation_id=self.assignment["delegation_id"],
-                objective="Unsafe replacement after worker consumption.", role="worker",
-                profile_name="general", scope="Inherited scope.", instructions="Continue the work.",
-                model="gpt-5.6-luna", reasoning_effort="high", idempotency_key="unrecorded-parent-replacement",
-            )
-        self.assertEqual(unrecorded.exception.code, "assignment_loss_unrecorded")
-        replacement, replayed = self.store.create_delegation(
-            task_id=self.task_id, parent_delegation_id=self.assignment["delegation_id"],
-            objective="Replacement after worker consumption.", role="worker",
-            profile_name="general", scope="Inherited scope.", instructions="Continue the work.",
-            model="gpt-5.6-luna", reasoning_effort="high", idempotency_key="allowed-parent-replacement",
-            loss_recovery={
-                "state": "blocked",
-                "reason": "The native worker terminated and cannot resume its connection.",
-                "evidence": ["The host recorded a terminal worker failure for the bound native child."],
-            },
-        )
-        self.assertFalse(replayed)
-        self.assertNotEqual(replacement["delegation"]["delegation_id"], self.assignment["delegation_id"])
-        with self.store._connection() as connection:
-            loss = connection.execute(
-                "SELECT * FROM assignment_losses WHERE assignment_id=?",
-                (self.assignment["delegation_id"],),
-            ).fetchone()
-            self.assertEqual(loss["terminal_state"], "blocked")
-            self.assertEqual(loss["successor_assignment_id"], replacement["delegation"]["delegation_id"])
-            self.assertEqual(
-                connection.execute(
-                    "SELECT state FROM worker_capabilities WHERE capability_ref=?",
-                    (capability["capability"],),
-                ).fetchone()["state"],
-                "stale",
-            )
-
-    def test_expired_dispatch_lease_does_not_infer_loss(self) -> None:
-        capability = self.store.mint_worker_bootstrap(**self.args)
-        with self.store._connection() as connection:
-            connection.execute(
-                "UPDATE worker_capabilities SET lease_expires_at=? WHERE capability_ref=?",
-                ("2000-01-01T00:00:00+00:00", capability["capability"]),
-            )
-        with self.assertRaises(V12StoreError) as expired:
-            self.store.create_delegation(
-                task_id=self.task_id, parent_delegation_id=self.assignment["delegation_id"],
-                objective="Replacement after bounded lease expiry.", role="worker",
-                profile_name="general", scope="Inherited scope.", instructions="Continue the work.",
-                model="gpt-5.6-luna", reasoning_effort="high", idempotency_key="expired-parent-replacement",
-            )
-        self.assertEqual(expired.exception.code, "assignment_loss_unrecorded")
-        with self.store._connection() as connection:
-            state = connection.execute(
-                "SELECT state FROM worker_capabilities WHERE capability_ref=?", (capability["capability"],)
-            ).fetchone()["state"]
-        self.assertEqual(state, "minted")
+    def test_live_or_expired_unpublished_route_never_infers_native_loss(self):
+        for consumed in (False, True):
+            if consumed:
+                self.store.consume_worker_bootstrap_for_assignment(**self.args)
+            for deadline in ("2999-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00"):
+                self.store._write(lambda c: c.execute(
+                    "UPDATE worker_capabilities SET lease_expires_at=? WHERE assignment_id=?",
+                    (deadline, self.assignment["delegation_id"])))
+                snapshot = self.store.node_admission_snapshot(graph_id=self.dispatch_args["graph_id"])
+                for recover in (False, True):
+                    with self.subTest(consumed=consumed, deadline=deadline, recover=recover), self.assertRaises(V12StoreError):
+                        self.store.open_node_assignment(**dict(self.dispatch_args, admission=snapshot, recover=recover))
+                self.assertEqual(self.store._read(lambda c: c.execute("SELECT COUNT(*) FROM delegations").fetchone()[0]), 1)
+                self.assertEqual(self.store._read(lambda c: c.execute("SELECT state FROM worker_capabilities").fetchone()[0]),
+                                 "consumed" if consumed else "minted")
 
 
 if __name__ == "__main__":

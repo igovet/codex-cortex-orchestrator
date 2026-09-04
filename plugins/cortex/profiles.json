@@ -13,34 +13,35 @@
       {
         "model": "gpt-5.6-terra",
         "recommended_effort": "high",
-        "choose_for": "Only evidence-backed genuinely complex non-security implementation, cross-cutting analysis, demanding review, or planning that benefits from Terra."
+        "choose_for": "Only genuinely complex planning or architecture, including cross-cutting design decisions or processes that cannot be safely resolved by Luna at the selected effort."
       },
       {
         "model": "gpt-5.6-sol",
         "recommended_effort": "high",
-        "choose_for": "Security work and security-focused review only."
+        "choose_for": "Rarely: only genuinely very-high-risk security-related work where Sol's specialized security reasoning is justified; never ordinary difficult work or routine security review."
       }
     ]
   },
   "dynamic_pipeline": {
     "schema": "cortex/model-owned-pipeline/v1",
-    "ownership": "The coordinator owns only the orchestration DAG: it constructs, follows, and revises stages from worker evidence, persisting advisory pipeline revisions through the task-linked initiative and delegation/report/decision graph. It never authors a project solution plan. A planner worker owns every project-grounded plan and publishes it as an immutable plan report.",
+    "ownership": "The coordinator chooses intent, specialists and ready work from the typed execution graph and finalized evidence. The ledger enforces dependencies, artifact generations and revision bindings. A planner worker owns each project solution plan and publishes one immutable candidate graph; no prose pipeline competes with that graph.",
     "complexity_baselines": {
       "C1": "A bounded, low-risk change with one clear ownership surface and proportional verification.",
       "C2": "A multi-step or cross-surface change that benefits from discovery or a planner-owned plan, plus independent verification as evidence requires.",
       "C3": "A high-risk, cross-domain, security/privacy, migration, public-contract, concurrency, destructive, production-critical, or long-lived change requiring full governance depth and evidence-driven specialist coverage."
     },
     "governance_baselines": {"C1":"minimal","C2":"light","C3":"full"},
-    "stages": ["discovery","planning","implementation","review","verification","security","documentation-impact","documentation-sync","documentation-verification","knowledge-harvest","closure"],
+    "stages": ["baseline","discovery","planning","graph-validation","implementation","review","verification","security","documentation-impact","documentation-sync","documentation-verification","knowledge-harvest","closure"],
     "rules": [
-      "Stages are optional except for work made necessary by accepted evidence, user constraints, or selected governance depth.",
-      "Planning, when needed, is a planner delegation whose finalized plan report is the predecessor from which plan-dependent pipeline stages are derived.",
+      "Stages are conditional on the current graph, accepted evidence and user constraints; the initial artifact observation precedes artifact-dependent discovery and planning.",
+      "Select an already ready initial baseline node to establish project capability and artifact observations. Baseline is not a request to append new discovery work; discovery is available only after its prerequisites are met.",
+      "Planning produces a candidate graph. Independent graph validation must establish its contract coverage and dependency correctness before plan-dependent work becomes ready.",
       "A new report, failed check, changed risk, or user decision may add, remove, reorder, retry, or rework only unexecuted or newly required DAG nodes; completed evidence remains immutable.",
-      "Before every delegation, preflight the chosen profile's packaged ownership class against current governance and exact predecessor evidence: production-owner work honors the current plan's adaptive informational-or-required review policy, light/full work requires a fresh current plan, bounded C1 owner work without a planning need remains minimal from the outset, and test-only QA correction remains non-owning.",
+      "Before every delegation, select only current ready work with satisfied artifact and predecessor requirements. Terminal kind and mutation ownership come from the graph, never from the profile label. Review follows the current risk, authority and explicit user-decision binding; a prior approval is not a reason to ask again.",
       "A planning-predecessor rejection is a first-attempt orchestration failure; a later corrected retry cannot make that verification run clean.",
       "Implementation, review, verification, security, documentation-impact, documentation sync/verification, and knowledge harvest are worker-owned stages.",
       "The standard Codex To-Do projection contains only current pipeline stages and gate state, never worker subtasks, implementation checklists, or report bodies; refresh it whenever a stage or gate changes.",
-      "The initiative and linked reports are durable evidence; To-Do is a concise live progress projection and must remain consistent with the latest persisted pipeline revision."
+      "The typed graph and immutable reports are durable evidence; To-Do is only a concise projection and must remain consistent with current readiness."
     ]
   },
   "profiles": [

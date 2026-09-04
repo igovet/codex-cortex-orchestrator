@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
+from test_graph_ledger import observation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -247,15 +248,8 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
         "constraints": ["Use the real hook and one persistent MCP connection."],
         "verification": ["Coordinator evidence contains one completed result."],
     }
-    evidence_outcomes = [
-        {
-            "outcome": f"Supply bounded predecessor evidence {index} for {surface}.",
-            "acceptance": ["One finalized evidence report exists."],
-            "constraints": ["Keep the public task-opening request bounded."],
-            "verification": ["The report is consumed by the target assignment."],
-        }
-        for index in range(6)
-    ] if paginated else []
+    if paginated:
+        outcome["acceptance"] = [f"Criterion {index}: " + "bounded source evidence " * 75 for index in range(24)]
 
     with patch.dict(os.environ, {"PLUGIN_DATA": plugin_data}):
         with COMMANDS._source_stdio_session(home) as coordinator:
@@ -263,11 +257,23 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                 "project_root": str(project),
                 "request_original": f"Exercise ordinary {surface} worker startup.",
                 "user_language": "en",
-                "outcomes": [outcome, *evidence_outcomes],
+                "outcomes": [outcome],
                 "constraints": ["Keep CLI and Desktop results equivalent."],
             })
             assert not opened["result"].get("isError"), opened
             task_ref = opened["result"]["structuredContent"]["task_ref"]
+            if paginated:
+                # Grow the current contract through genuine independent user
+                # additions. Each request remains bounded; the resulting
+                # immutable assignment must naturally span multiple pages.
+                for index in range(3):
+                    added = {**outcome, "outcome": f"Additional parity requirement {index}."}
+                    steered = coordinator("record_steering", {
+                        "task_ref": task_ref,
+                        "response_original": f"Also implement additional parity requirement {index} with the supplied acceptance criteria.",
+                        "user_language": "en", "add": [added], "retire": [],
+                    })
+                    assert not steered["result"].get("isError"), steered
             assessed = coordinator("assess_governance", {
                 "task_ref": task_ref,
                 "mode": "minimal",
@@ -275,79 +281,14 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                 "risk_factors": [],
             })
             assert not assessed["result"].get("isError"), assessed
-            if paginated:
-                # Build large predecessor evidence through ordinary public MCP
-                # calls. Each call remains below the operation limit, while
-                # the target assignment must be consumed across real pages.
-                report_filler = "bounded-predecessor-report-" * 900
-                for index, evidence_outcome in enumerate(evidence_outcomes):
-                    evidence_assignment = coordinator("open_assignment", {
-                        "task_ref": task_ref,
-                        "role": f"predecessor evidence worker {index}",
-                        "profile_name": "explorer",
-                        "model": "gpt-5.6-luna",
-                        "reasoning_effort": "high",
-                        "responsibility": "evidence",
-                        "outcomes": [evidence_outcome["outcome"]],
-                        "goal": "Publish one bounded predecessor report.",
-                        "scope": evidence_outcome["outcome"],
-                        "instructions": "Consume the assignment, then publish one report.",
-                        "report_policy": "none",
-                    })
-                    assert not evidence_assignment["result"].get("isError"), evidence_assignment
-                    evidence_ref = re.search(
-                        r'"task_ref":"(t_[0-9a-f]{12}_[0-9a-f]{32})"',
-                        evidence_assignment["result"]["structuredContent"]
-                        ["native_dispatch"]["message"],
-                    ).group(1)
-                    evidence_identity = (
-                        f"{surface}-evidence-agent-{index}",
-                        f"{surface}-evidence-turn-{index}",
-                        f"{surface}-evidence-session-{index}",
-                    )
-                    COMMANDS._write_host_worker_receipt(
-                        plugin_data, evidence_ref, authorize=True,
-                        agent_id=evidence_identity[0],
-                        turn_id=evidence_identity[1],
-                        session_id=evidence_identity[2],
-                    )
-                    with COMMANDS._source_stdio_session(
-                        home, host_identity=evidence_identity,
-                    ) as evidence_worker:
-                        evidence_read = evidence_worker("read_task", {
-                            "task_ref": evidence_ref,
-                        })
-                        assert not evidence_read["result"].get("isError"), evidence_read
-                        evidence_published = evidence_worker("publish_result", {
-                            "task_ref": evidence_ref,
-                            "summary": f"Predecessor {index}: {report_filler}",
-                            "outcome": "The bounded predecessor evidence was captured.",
-                            "changes": [],
-                            "verification_facts": [{
-                                "state": "executed",
-                                "summary": "The source fixture produced this report.",
-                            }],
-                            "outcome_coverage": [{
-                                "outcome": evidence_outcome["outcome"],
-                                "status": "complete",
-                                "verification": ["The report was finalized."],
-                            }],
-                            "documentation_impact": "No documentation change.",
-                            "risks": [], "unresolved": [], "status": "completed",
-                        })
-                        assert not evidence_published["result"].get("isError"), evidence_published
+            scope = coordinator("read_scope", {"task_ref": task_ref, "responsibility": "evidence"})
+            assert not scope["result"].get("isError"), scope
+            ready = [node for node in scope["result"]["structuredContent"]["data"]["nodes"] if node["state"] == "ready"]
+            assert len(ready) == 1
+            selected = ready[0]
             assigned = coordinator("open_assignment", {
-                "task_ref": task_ref,
-                "role": f"{surface} parity worker",
-                "profile_name": "backend_dev",
-                "model": "gpt-5.6-luna",
-                "reasoning_effort": "high",
-                "responsibility": "delivery",
-                "goal": "Publish one exact result through the assigned connection.",
-                "scope": outcome["outcome"],
-                "instructions": "Consume the assignment first, then publish once.",
-                "outcomes": [outcome["outcome"]],
-                "report_policy": "all_finalized" if paginated else "none",
+                "task_ref": task_ref, "profile_name": "backend_dev",
+                "model": "gpt-5.6-luna", "reasoning_effort": "high", "nodes": [selected["node"]],
             })
             assert not assigned["result"].get("isError"), assigned
             assignment = assigned["result"]["structuredContent"]
@@ -453,7 +394,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         break
                     read_input = {
                         "task_ref": worker_ref,
-                                                "continue": True,
+                        "continue": True,
                     }
                 assert (page_count > 1) is paginated
 
@@ -515,7 +456,7 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                         break
                     recovery_input = {
                         "task_ref": worker_ref,
-                                                "continue": True,
+                        "continue": True,
                     }
                 assert recovery_pages == page_count
                 assert worker.notifications == []
@@ -525,15 +466,12 @@ def test_real_hook_and_persistent_stdio_worker_lifecycle_are_equivalent(
                     "summary": f"{surface.capitalize()} parity fixture completed.",
                     "outcome": "The assigned source lifecycle completed once.",
                     "changes": [],
-                    "verification_facts": [{
-                        "state": "executed",
-                        "summary": "The real hook and persistent stdio connection succeeded.",
-                    }],
-                    "outcome_coverage": [{
-                        "outcome": outcome["outcome"],
-                        "status": "complete",
-                        "verification": ["One non-replayed publication was returned."],
-                    }],
+                    "node_coverage": [{"node": selected["node"], "coverage": [{
+                        **subject, "status": "complete",
+                        "verification": [{"check_key": "reconciliation" if paginated else "baseline", "state": "executed",
+                                          "summary": "Real hook and persistent source MCP completed."}],
+                    } for subject in selected["verifies"]]}],
+                    "artifact": observation(),
                     "documentation_impact": "No product documentation change in the fixture.",
                     "risks": [],
                     "unresolved": [],
@@ -639,14 +577,11 @@ def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_en
             "rationale": "Single Desktop environment regression.", "risk_factors": [],
         })
         assert not assessed["result"].get("isError"), assessed
+        scope = coordinator("read_scope", {"task_ref": task_ref, "responsibility": "evidence"})
+        assert not scope["result"].get("isError"), scope
         assigned = coordinator("open_assignment", {
-            "task_ref": task_ref, "role": "Desktop environment parity worker",
-            "profile_name": "backend_dev", "model": "gpt-5.6-luna",
-            "reasoning_effort": "high", "responsibility": "delivery",
-            "goal": "Consume and publish once without MCP environment injection.",
-            "scope": outcome["outcome"],
-            "instructions": "Consume the exact assignment, then publish one result.",
-            "report_policy": "none",
+            "task_ref": task_ref, "profile_name": "backend_dev", "model": "gpt-5.6-luna",
+            "reasoning_effort": "high", "nodes": ["baseline"],
         })
         assert not assigned["result"].get("isError"), assigned
         native_dispatch = assigned["result"]["structuredContent"]["native_dispatch"]
@@ -734,14 +669,12 @@ def test_desktop_packaged_worker_claims_hook_authorization_without_codex_home_en
                 "task_ref": worker_ref, "summary": "Desktop env fallback verified.",
                 "outcome": "The host authorization was consumed without CODEX_HOME.",
                 "changes": [],
-                "verification_facts": [{
-                    "state": "executed",
-                    "summary": "Packaged MCP claimed the real hook authorization.",
-                }],
-                "outcome_coverage": [{
-                    "outcome": outcome["outcome"], "status": "complete",
-                    "verification": ["The exact first read and publication succeeded."],
-                }],
+                "node_coverage": [{"node": "baseline", "coverage": [{
+                    "kind": "outcome", "name": outcome["outcome"], "status": "complete",
+                    "verification": [{"check_key": "baseline", "state": "executed",
+                                      "summary": "Packaged source MCP claimed actual hook authorization."}],
+                }]}],
+                "artifact": observation(),
                 "documentation_impact": "Regression-only fixture.",
                 "risks": [], "unresolved": [], "status": "completed",
             }

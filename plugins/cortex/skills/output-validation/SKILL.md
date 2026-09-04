@@ -1,86 +1,91 @@
 ---
 name: output-validation
-description: Internal Cortex v12 validation overlay. Load for an explicitly activated Cortex task when a result or closure recommendation needs acceptance and evidence review.
+description: Internal Cortex validation overlay. Load for an explicitly activated Cortex task when a result or closure recommendation needs acceptance and evidence review.
 ---
 
 # Output Validation
 
-Validate the result, not the confidence of its author. The coordinator designs
-the evidence request and delegates project verification; a validation worker
-performs every project inspection and executed check. The coordinator never
-reads project artifacts, runs a command, or performs substantive verification
-itself.
+Validate observed evidence, not author confidence. The coordinator interprets
+canonical reports and chooses bounded verification. Workers perform all project
+inspection, artifact observation, commands and documentation edits.
 
-1. Restate acceptance criteria as observable checks and create bounded
-   validation delegations. Compose the orchestrator's authoritative delegation
-   knowledge contract into each worker's instructions.
-2. Have workers inspect the relevant change and execution path for scope and
-   unintended effects.
-3. Have workers run the smallest relevant build, typecheck, lint, test,
-   reproduction, or behavioral check; use an independent worker where risk
-   justifies it.
-4. Reconcile reported files, commands, outputs, and observed behavior by report
-   ID. If the evidence is insufficient, delegate the missing check.
-5. From worker reports, classify each criterion as passed, failed, blocked, or
-   unverified, with its evidence, risk, and useful next owner.
-6. Preserve a concise verified change-surface summary for the coordinator's
-   later documentation-impact decision, covering behavior, architecture,
-   interfaces, commands, verification, conventions, and feature ownership.
+## Authority and readiness
 
-Build the validation matrix from the original task contract, not from the
-latest implementation summary. Every independent effective-contract outcome must appear
-exactly once with its current disposition and canonical report digest. Keep
-its linked acceptance and verification facts in that single matrix row rather than
-creating a second row. Before the first publication attempt, preserve the
-complete ordered server-owned reconciliation row set and compare the finished
-row count and references against its receipt. Compare
-the matrix across discovery, every plan revision, implementation assignments,
-rework, and final verification. An omitted item, a merged finding, or an item
-present only in an earlier report is a failed handoff and requires rework.
+Derive checks from the effective task contract and current typed graph, not
+from the implementation summary. An assignment carries immutable node scope,
+contributions or verified outcomes, required checks, declared independence and
+publication purpose. Instructions explain bounded work; they never replace that
+authority. Admit dependent audits only after acceptable prerequisites and the
+required artifact generation exist. Parallelize ready readers without
+overlapping a mutator. Validate a candidate independently before its review or
+execution; a planner's confidence never substitutes for validation.
 
-Artifact verification includes existence, absence, unchanged-state, manifests,
-Git, caches, worktrees, and project-local `.codex`. A validation worker performs
-every such check; the coordinator never performs one directly.
+Use the complete server-owned publication reconciliation projection. Cover
+every assigned node and every assigned subject/check exactly once. Preserve
+required acceptance and verification distinctions even when their text matches.
+Verification lives in that coverage matrix; derived summaries are not a second
+source of truth. Publication kind follows the consumed assignment, not the
+profile name or whether files changed. One terminal publication ends the route.
 
-When validation finds a defect or material concern, use a structured advisory
-finding in report content: stable finding key, severity, affected surface,
-sanitized evidence, failure scenario/impact, recommendation, disposition, and
-any exact decision reference. Preserve conflicting findings and supersede them
-explicitly; do not turn severity, waiver, or resolution into a backend gate.
+## Observable evidence
 
-For an executed check, the worker records the command, working directory,
-integer exit code, and decisive sanitized evidence in a report. A passing check
-has exit code 0. A negative-path check uses an assertion harness that observes
-the expected failure and itself exits 0. Never omit or relabel a nonzero result.
+Run the smallest relevant build, typecheck, lint, reproduction or behavioral
+check, using an independent worker when the graph requires independence.
+Report observed command, canonical working directory, integer exit status and
+decisive sanitized evidence. A passing check exits zero. A negative-path test
+must assert the expected rejection and itself exit zero; never relabel a
+nonzero command as success. An unrun check is not passed evidence.
 
-Missing evidence is not a pass. It may justify more verification, bounded
-rework, `ready_with_risks`, or `not_ready`; it never becomes a backend
-permission barrier or prevents an honest final answer.
+Project observations include existence, absence, unchanged state, manifests,
+Git capability, caches, worktrees and project-local configuration. Probe
+optional paths and repository capabilities safely before dependent commands.
+For artifact-bound work, follow the consumed fingerprint procedure before work
+and immediately before publication, after mutating children stop. Distinguish
+pre-existing changes from this worker's changes. Never describe an observation
+as an atomic filesystem lock.
 
-Before a material classification, consume the complete canonical report body
-through the coordinator evidence-read path and finish its continuation chain.
-A native handoff summary, report reference, projection link, or manifest alone
-does not establish that findings and unresolved items were transferred.
+Classify failed or applicable unrun checks honestly under the advertised
+publication contract. The backend binds immutable finding identity to source
+evidence; workers do not invent finding identities. Preserve the causal
+evidence and failed source. Independent classification and regression nodes
+assess that source rather than amending its report. A finding does not itself
+authorize broader changes, new credentials or destructive action.
 
-Record decisive check evidence in the immutable report, including selected
-large-report sections when chunking is required. A status or final handoff may
-summarize that evidence only after the relevant report sections were read.
-When a current contained digest-verified report or plan Markdown projection is
-available, publish its clickable absolute path with a localized result summary
-and implication. Task/status/decision/delegation and other non-report records
-remain SQLite-only. A missing or stale projection produces no link and does not
-change the acceptance classification.
+## Reconciliation and corrective work
 
-Project verification precedes the conditional documentation stage. The
-coordinator uses bounded knowledge-route context and these worker reports only;
-it delegates any documentation inspection, synchronization, and material
-independent verification before the advisory closure attempt or final answer.
-Once sufficient completed outcome evidence is available, the coordinator
-chooses `ready`, `ready_with_risks`, or `not_ready` and automatically attempts
-supported closure plus its supported inspection. That evidence-based verdict is
-not a user confirmation step: `ready_with_risks` never asks for confirmation.
-An unavailable advisory record never prevents an honest final claim. For a
-verified transient closure storage or inspection failure, make one bounded safe
-retry with the exact returned retry handle and unchanged idempotency semantics;
-if it remains unavailable, preserve the outcome and disclose
-`closure_unconfirmed` rather than presenting completed work as open.
+Read the complete relevant canonical evidence through its bounded read chain
+before a material decision. A native handoff summary, report reference, link or
+manifest alone does not prove complete evidence transfer. Copy verified
+server-returned Markdown links byte-for-byte beside the localized summary.
+Never reconstruct paths or private identifiers.
+
+If evidence fails or remains incomplete, choose available bounded diagnostic,
+repair, regression or reconciliation work from current readiness. Preserve
+finite budgets and non-progress detection. Do not repeat an immutable report,
+retry a non-publication response, weaken a check, manufacture scope changes or
+ask the user to re-authorize in-contract repairs. A superseded or artifact-
+conflicting response creates no current evidence; reconcile its current route.
+Exhaustion or genuinely missing authority remains an honest unresolved result.
+Missing evidence is never a pass and may legitimately prevent dependent
+admission or successful closure.
+
+## Documentation and closure
+
+Keep a concise verified change-surface summary covering behavior, architecture,
+interfaces, commands, tests, conventions and ownership. Documentation is
+conditional on impact; delegate inspection and synchronization when needed.
+Final verification and documentation must refer to the latest required sealed
+generation. Do not let an older clean report conceal a newer change.
+
+Reconcile completion, decisive checks, user impact, documentation, residual
+risk and every unrun gate. Continue available authorized corrective work first.
+Then present the current result and verified links, open a fresh closure
+review, and record the direct revise or close choice. Only close permits an
+evidence-backed closure attempt; revise keeps the same task open. A later
+change invalidates that review. Never probe closure for readiness, infer
+approval from silence, or describe exhausted work as complete.
+
+If storage or projection fails, preserve verified evidence and distinguish
+unconfirmed closure from successful closure. Use only the supported bounded
+reconciliation indicated by current evidence; never invent retry handles,
+private identities, supplementary reports or an unsupported inspection route.

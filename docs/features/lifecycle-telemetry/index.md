@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-Cortex 1.15.3 ships two bounded native hook components: an activation guard and
+Cortex 1.15.6 ships two bounded native hook components: an activation guard and
 a sanitized lifecycle observer. The activation guard applies only after an
 explicit Cortex route selection. It validates task-anchoring order and
 correlates a native worker dispatch with a one-shot server receipt without
@@ -56,19 +56,21 @@ server-side evidence consumption and terminal publication.
 The worker lease is keyed first by the native child thread extracted from its
 transcript path, then by stable agent identity. This preserves exact publication
 authority when Desktop omits `agent_id` from a later child tool event and keeps
-parallel workers from aliasing through a shared parent turn. The turn-only alias
-is compatibility state for hosts that expose neither stronger identity and is
-never preferred when a child thread is available.
+parallel workers from aliasing through a shared parent turn. No shared-parent
+turn alias may substitute for exact child identity.
 Host hooks see directly surfaced tool calls. They do not decompose an outer
 programmatic-tool or `exec` call into separately authorized nested Cortex
 operations. The activation guard therefore rejects an outer `exec` containing
 any Cortex invocation for coordinators and workers; every Cortex operation is
-a separate direct model-visible call. Steering also consumes a
-same-connection post-opening state-read marker at the MCP boundary.
+a separate direct model-visible call. Recovery/compaction requires current state
+and any unfinished-work continuation read before task progress. Direct steering
+commits immediately and returns protected stale task names; the coordinator,
+not a hook or MCP server, interrupts matching native workers. Signed complete
+native observations establish quiescence before artifact reconciliation.
 After an explicit successful assignment result, a host dispatch denial is not
 an ambiguous MCP outcome and never authorizes reopening or replacing that
-assignment. The pending receipt is retained for diagnosis and the route stops
-until the host boundary is corrected.
+assignment. A definitive failed spawn follows bounded evidence-backed recovery;
+ambiguous native state must be reconciled before another worker is considered.
 
 The active feature registry is [features/index.md](../index.md). See the
 [orchestration ledger](../orchestration-ledger/index.md) and

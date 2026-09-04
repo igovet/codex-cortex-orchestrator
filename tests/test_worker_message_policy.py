@@ -25,7 +25,7 @@ def _delegation() -> dict[str, str]:
 
 
 def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
-    rendered = worker_message.render_worker_message(task=_task(), delegation=_delegation(), decisions=[])
+    rendered = worker_message.render_worker_message(task=_task(), delegation=_delegation())
     message = rendered["message"]
     normalized_message = " ".join(message.split())
     policy = worker_message.assignment_worker_policy("explorer")
@@ -54,7 +54,8 @@ def test_fresh_worker_receives_compact_bootstrap_then_full_assignment_policy():
     assert "absence alone is not a blocked publication cause" in normalized
     assert "Do not silently skip an available usable graph" in normalized
     assert "A plan publication does not choose or declare its review disposition" in policy["common_policy"]
-    assert "A planning worker completes all bounded discovery before publishing one terminal plan" in normalized
+    assert "An assignment containing a planning node completes all bounded discovery before publishing one terminal plan" in normalized
+    assert "Packaged profiles supply expertise, never a different authority or publication kind" in normalized
     assert "never publishes a supplementary result or documentation outcome" in normalized
     assert "separate evidence assignment followed by a fresh planning revision" in normalized
     assert "Never repeat a terminal assignment read during normal execution" in normalized
@@ -113,6 +114,23 @@ def test_worker_catalogue_without_codebase_memory_still_authorizes_one_bounded_f
     assert "stop and report an environment blocker" not in normalized
 
 
+@pytest.mark.parametrize("profile_name", worker_message.packaged_profile_names())
+def test_profiles_never_route_execution_questions_or_private_lineage_into_public_reports(profile_name):
+    policy = worker_message.assignment_worker_policy(profile_name)
+    assert policy is not None
+    instructions = " ".join(policy["profile_instructions"].split()).lower()
+
+    assert "do not ask the user" in instructions
+    assert "plan-review packet" in instructions
+    assert "predecessor ids" not in instructions
+    assert "parent_assignment_ref" not in instructions
+
+    common = " ".join(policy["common_policy"].split()).lower()
+    assert "execution-time decision" in common
+    assert "private lineage" in common
+    assert "active advertised publication" in common
+
+
 def test_common_policy_is_exposed_by_the_assignment_policy_boundary():
     policy = worker_message.assignment_worker_policy("explorer")
     assert policy is not None
@@ -122,7 +140,7 @@ def test_common_policy_is_exposed_by_the_assignment_policy_boundary():
 def test_fresh_planner_bootstraps_with_assignment_read_and_has_no_governance_authority():
     delegation = {**_delegation(), "profile_name": "planner"}
     message = worker_message.render_worker_message(
-        task=_task(), delegation=delegation, decisions=[]
+        task=_task(), delegation=delegation
     )["message"]
 
     # A native planner is still a worker: assignment evidence must be its

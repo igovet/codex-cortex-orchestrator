@@ -4,17 +4,17 @@
 
 ## Purpose and boundary
 
-Cortex 1.15.3 includes a local administrator CLI for explicit maintenance of
+Cortex 1.15.6 includes a local administrator CLI for explicit maintenance of
 one existing V12 project shard. It is implemented by
 [v12_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/v12_maintenance.py)
-and is deliberately outside the public MCP registry. It adds no fifteenth tool,
+and is deliberately outside the twenty-operation public MCP registry. It adds no tool,
 accepts no `project_root` or arbitrary filesystem target, and begins every
 operation from one exact V12 `task_id`. The task ID's embedded shard hash
 selects the only database, backup, and projection paths the command may touch.
 
 The CLI knows nothing about V11 and never writes below the target project. It
 validates owner-only modes, regular-file/no-symlink boundaries, the V12
-application ID, `PRAGMA user_version = 1`, the exact additive migration history,
+application ID, `PRAGMA user_version = 2`, the exact current-schema record,
 required tables/indexes/triggers, project metadata, task/root binding, foreign
 keys, integrity, WAL, and `synchronous=FULL` before a sensitive operation.
 Output is one bounded sanitized JSON object on stdout; detailed database rows,
@@ -101,7 +101,7 @@ steps, governance events, worker evidence, or prerequisites for a final answer.
 ## Projection regeneration and pruning
 
 Regeneration re-renders only the exact task's host-private plan and finalized
-report Markdown views. Task, decision, delegation, initiative, closure,
+report Markdown views. Task, decision, delegation, closure,
 governance, handoff, index, and timeline records remain SQLite-only. Canonical
 SQLite remains authoritative, and the normal renderer preserves direct-edit
 conflicts:

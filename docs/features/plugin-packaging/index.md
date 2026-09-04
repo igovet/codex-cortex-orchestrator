@@ -2,322 +2,175 @@
 
 <!-- GENERATED:START -->
 
-## Purpose
+## Purpose and installable boundary
 
-Cortex 1.15.3 is packaged as a repository-local Codex plugin and distributed to
-users through the GitHub Marketplace source documented in README. Manifest,
-MCP server, advisory profiles, bundled skills, runtime, tests,
-and release-facing documentation must describe the same V12 contract.
+Cortex 1.15.6 is a Codex plugin with one complete installable payload below
+plugins/cortex. Root scripts, tests, documents and AGENTS.md support development;
+they are not installed runtime authority. End-user installation follows
+[README](../../../README.md), while repository live development uses only the
+isolated candidate.
 
-## Package files
+| Source | Responsibility |
+| --- | --- |
+| [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) | Semantic version, content stamp and UI metadata |
+| [.mcp.json](../../../plugins/cortex/.mcp.json) | Direct Python MCP launch and host exposure |
+| [marketplace.json](../../../.agents/plugins/marketplace.json) | Repository marketplace entry |
+| [cortex.py](../../../plugins/cortex/scripts/cortex.py) | Public server facade |
+| [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) | Twenty authoritative tool contracts |
+| [typed_publications.py](../../../plugins/cortex/scripts/cortex_runtime/typed_publications.py) | Shared publication schemas and validation |
+| [execution_graph.py](../../../plugins/cortex/scripts/cortex_runtime/execution_graph.py) | Typed graph invariants |
+| [graph_ledger.py](../../../plugins/cortex/scripts/cortex_runtime/graph_ledger.py) | Transactional graph/assignment/artifact state |
+| [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) | Current schema v2 storage and receipts |
+| [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) | Verified private Markdown projections |
+| [v12_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/v12_maintenance.py) | Explicit non-MCP operator maintenance |
+| [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) | Exact native bootstrap and packaged profile policy |
+| [profiles.json](../../../plugins/cortex/profiles.json) | All 22 profiles and model recommendations |
+| [Orchestrator skill](../../../plugins/cortex/skills/orchestrator/SKILL.md) | Model-owned intent, ready-work selection and user communication |
+| [Control skill](../../../plugins/cortex/skills/cortex-control/SKILL.md) | Worker/coordinator protocol policy |
+| [Communication skill](../../../plugins/cortex/skills/coordinator-communication/SKILL.md) | Localized decision-ready user presentation |
 
-- [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) carries V12 version and UI metadata.
-- [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
-- [marketplace.json](../../../.agents/plugins/marketplace.json) defines the GitHub Marketplace entry.
-- [cortex.py](../../../plugins/cortex/scripts/cortex.py) exposes the twenty-tool semantic facade.
-- [public_contracts.py](../../../plugins/cortex/scripts/cortex_runtime/public_contracts.py) defines the complete registry projected by runtime audience.
-- [v12_contract.py](../../../plugins/cortex/scripts/cortex_runtime/v12_contract.py) defines bounded task/report constants and report-digest semantics.
-- [v12_store.py](../../../plugins/cortex/scripts/cortex_runtime/v12_store.py) owns schema-v1 storage.
-- [v12_projections.py](../../../plugins/cortex/scripts/cortex_runtime/v12_projections.py) owns host-private plan/report Markdown materialization.
-- [v12_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/v12_maintenance.py) provides the task-anchored host-private operator CLI outside MCP.
-- [worker_message.py](../../../plugins/cortex/scripts/cortex_runtime/worker_message.py) renders the attested native worker message.
-- [profiles.json](../../../plugins/cortex/profiles.json) defines advisory roles and model recommendations.
-- [orchestrator/SKILL.md](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines the authoritative outcome-first coordinator contract.
-- [cortex-control/SKILL.md](../../../plugins/cortex/skills/cortex-control/SKILL.md) defines the authoritative twenty-tool semantic and nonblocking contract.
-- [coordinator-communication/SKILL.md](../../../plugins/cortex/skills/coordinator-communication/SKILL.md) defines the mandatory coordinator-to-user policy.
-- [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates repository package structure.
-- [cortex_release_candidate.py](../../../scripts/cortex_release_candidate.py) builds the explicit source candidate and docs closure.
-- [verify-cortex-release.py](../../../scripts/verify-cortex-release.py) validates source or committed candidates.
-- [sync-cortex.sh](../../../scripts/sync-cortex.sh) supports repository-development/local-source synchronization and check/dry-run modes.
-- [cortex-dev](../../../scripts/cortex-dev) starts an interactive Codex session in the isolated persistent candidate runtime.
-- [cortex-dev-reset](../../../scripts/cortex-dev-reset) removes only that exact candidate after explicit confirmation.
+## Catalogue and publication contract
 
-## Current package contract
+The initial neutral catalogue contains all twenty tools in one response.
+Closed input schemas and descriptions are authoritative; skills and profiles
+must not duplicate call shapes. Required-property descriptions are generated
+from the same schema. Catalogue size and reserve are tested so no tool or field
+is silently truncated.
 
-The package exposes exactly twenty semantic tools with audience-specific
-coordinator and worker projections. Initial neutral `tools/list` advertises the canonical registry's closed input schemas and
-complete descriptions in one response below 65,536 bytes. Optional MCP
-`outputSchema` declarations are omitted from discovery. The complete family
-result schemas remain private runtime contracts and are used to
-validate every successful result before transport. Success returns canonical JSON as text plus
-`structuredContent` with `isError=false`.
-Every advertised tool description mechanically includes the exact required
-input-property list derived from its closed `inputSchema`; the schema remains
-the authoritative call contract. Caller-correctable errors are bounded
-sanitized `isError=true` results with both text and a matching sanitized
-`structuredContent.error`. Multiple missing required properties are returned
-as one bounded `details.missing_fields` list and in the recovery action, so the
-caller can correct the complete request at once. Server-state faults use
-sanitized JSON-RPC internal errors. The server is a storage/integrity sidecar and contains no V11
-control-plane route.
+Successful result schemas remain runtime validation contracts even when not
+included in discovery. Bounded structural diagnostics do not echo task/report
+values. The physical frame and compact argument limits are independent.
+Large structured responses preserve complete assignment authority without
+duplicating an oversized body into text.
 
-Every input schema also advertises the complete compact UTF-8 JSON aggregate
-bound independently of per-field limits. Root aggregate diagnostics are
-value-blind and bounded. Large successful structured results use a fixed text
-notice rather than duplicating the same body across both MCP content channels,
-keeping assignment authority and the full response below the physical frame.
+Only task opening supplies the canonical project root. Later public operations
+use exact task/worker references, not caller-created IDs, cursors or replay keys.
+Assignments select ready graph nodes or genuinely available bootstrap work;
+there is no textual-scope API alongside the graph.
 
-The standard MCP `tools/list` response returns the complete unchanged
-twenty-tool catalogue in one page. A release fails validation if the final
-JSON-RPC envelope exceeds 65,536 bytes, well below the 256 KiB physical JSONL
-frame bound. The MCP companion is required at session startup and declares
-`omit_tools_from: ["code_mode", "deferred"]`; Desktop must project the
-complete catalogue as direct model tools before the first turn or fail
-initialization explicitly. An
-unavailable or truncated declaration is a fail-closed condition, and the host
-must not infer or guess a mutation contract.
+Workers consume one immutable assignment with complete scoped product context,
+expected checks, artifact procedure and fixed terminal kind. Planning,
+documentation and ordinary result publications are distinct and share one
+cross-kind terminal slot. Observed node coverage is canonical verification;
+plans contain expected checks, not fabricated observations.
 
-Only `open_task` accepts explicit `project_root`; it stores the canonical
-project association and returns a compact `task_ref` for later task-anchored
-calls. The durable `task_id` in results and ledger evidence is non-callable.
-The task-anchored tools use `task_ref`: `read_task`, `open_assignment`,
-`assess_governance`, `close_task`, the six narrow decision operations, and the
-three worker-owned publication operations. Publications accept the worker-scoped
-`task_ref`; private assignment and continuation identity is derived from the
-connection after the worker has consumed its server-rendered assignment view;
-there are no separate delegation/report-read or initiative inspection tools, and
-no public call accepts durable `*_id` values, assignment refs, report refs,
-initiative refs, cursors, or caller idempotency keys.
-No host metadata, plugin `cwd`, or hook binds a project. `open_task` records
-the exact original request and a concrete language tag beside the English
-objective and four non-empty, meaningful result-contract lists; `context`
-remains optional arbitrary JSON. Delegation `scope` is required non-empty text
-defining the concise worker-ownership boundary, not an object, and detailed
-execution belongs in `instructions`. Exact model and effort are required
-together. `close_task` is task-scoped and accepts the exact task reference,
-advisory verdict, and bounded evidence; private/internal subject and initiative
-ledger identity is never a public argument.
+Required evidence is not defaulted away. Unknown legacy envelopes, progress
+publication and chunk-assembly continuation are unsupported. Conditional
+artifact metadata requires the actual declared assignment condition.
 
-The package keeps finalized-report evidence separate from advisory bookkeeping.
-`read_state` exposes only scalar execution status, report counts, current
-revision, coverage status/outcome, and closure status/verdict. These values
-derive deterministically from current effective-contract coverage, not report
-arrival order or historical claims, and make no native-lifecycle claim. After sufficient evidence,
-the coordinator selects `ready`, `ready_with_risks`, or `not_ready`, then
-automatically attempts the advisory write and intended bounded inspection;
-`ready_with_risks` never requires user confirmation. The closure result returns
-`closure_confirmation` with `inspection_status`, `reason`, and `attempts`.
-At most one same-idempotency retry is made for a verified transient persistence
-or inspection failure. An `unconfirmed` advisory result is disclosed without
-changing `execution_outcome` evidence.
+## Integrity core and native host
 
-The public publication operations accept one complete immutable plan, result,
-or documentation evidence payload. Private/internal report assembly state,
-chunking, and retained-content limits remain behind the facade. Plan reports
-carry informational/required review policy and immutable digest identity.
-Product-facing reports support the fixed `cortex/report/{progress,result,synthesis,plan}/v1`
-schemas plus additive `cortex/report/{result,synthesis,plan}/v2` schemas. V2
-retains structured effective-contract coverage, deviations, unresolved items,
-risks, and verification. They may carry one optional unchanged `source_text`
-value, with no language tag or translated/original duplicate. Storage-valid
-legacy and semantic-invalid reports remain immutable evidence; only a
-finalized, completed, semantic-valid canonical plan receives a ready approval
-relation.
-Planner-authored microtask fields are evidence for the model-owned DAG only;
-they do not create backend jobs, scheduling gates, or worker-subtask To-Do
-entries.
-The matching narrow decision record operation appends coordinator-attributed exact original-language
-evidence for an exact subject using one closed canonical field set: neutral
-`prompt`, exact `response_original`, and `user_language`; retired `prompt_en`
-and `response_en` are not accepted. Plan/report decisions
-require the immutable subject digest; plan approval additionally requires the
-matching ready-view handle, view digest, and source sequence copied from one
-returned relation. Missing or mixed fields fail before mutation. Neither review
-nor decision is a backend admission rule.
+The model chooses intent, decomposition, profile/model/effort, ready work and
+evidence interpretation. The core deterministically guards prerequisites,
+artifact generations, ownership, revisions, terminal kind and current user
+decisions. It does not choose the next specialist or schedule a native agent.
 
-The bundled orchestration/control skills are the authoritative runtime model
-contract. Agent TOML files are advisory role templates without model literals,
-effort pins, or public-tool capabilities. `profiles.json` recommends `high` for
-Luna, Terra, and Sol while the native transport supports all five effort values
-for each model.
+The package includes the declared activation/lifecycle hooks. Desktop MCP
+initialization may lack trusted child identity, so initial discovery is neutral.
+Exact supported host correlation and first assignment consumption establish the
+worker role; a retained initial catalogue cannot bypass per-call actor checks.
 
-The bundled skills make the coordinator orchestration-only. All project
-discovery, source/code/configuration access, domain analysis, edits, commands,
-builds, tests, and verification are worker-owned. For routing only, the
-coordinator must follow the bounded path defined in the orchestrator skill. That
-skill alone owns the exact path list and six-part template; profiles consume
-the compiled per-delegation contract and do not reroute. Coordinator reads use
-only already-known exact paths through a non-shell direct reader; root/path
-discovery, shell/search/graph access, and every project-local artifact or state
-check are worker-owned. It also defines the
-report-grounded conditional documentation stage before closure: material
-impact gets documentation-sync plus a separate verifier; no impact gets an
-explicit `documentation not required` rationale without an edit.
+Native spawn remains outside MCP. Forward the exact new dispatch once and
+immediately. Hooks do not asynchronously terminate workers, grant filesystem
+permissions or manufacture completion. Native quiescence must be observed
+before reconciliation and loss recovery.
 
-The installable package contains the bounded activation guard and sanitized
-lifecycle observer declared by its hook manifest. Installation requires review
-and trust of only those declared callbacks. Hook processes store owner-private
-digests and routing categories in `PLUGIN_DATA`; the MCP process resolves the
-same exact package data directory from explicit `PLUGIN_DATA`/`CODEX_HOME` or,
-when ordinary Desktop supplies neither, from its verified content-addressed
-installed cache topology. Because Desktop initialize does not carry child
-identity, every connection starts with a neutral complete
-catalogue and foreign pending state cannot select its role. That catalogue
-grants no authority. The process consumes only
-the exact child-bound PreToolUse authorization on the first assignment read,
-then commits worker authority without a mid-turn refresh that could replay the
-Desktop bootstrap. An explicit catalogue read returns the worker projection;
-clients that retain the neutral catalogue remain constrained by authoritative server
-role checks. Native subagent dispatch remains outside
-the MCP server, and hooks never replace server-side ledger authority.
+Luna is the configured default, and its native override is omitted. Terra is
+for genuinely complex planning/architecture; Sol is rare and high-risk-security
+specific. They use exact explicit overrides. Every effort is explicit and no
+higher than max. No server-owned escalation, ad-hoc profile fallback or
+unsupported native agent-type argument is allowed.
 
-The SQLite database remains schema v1 under the V12 project namespace, with
-additive V12 migration history. Host-private Markdown views are disposable
-structured projections for current/immutable plans and finalized reports only;
-`v12_projections.py` writes no project file. Other task records remain
-SQLite-only.
-V11 databases are deliberately excluded from migration and remain untouched.
+## Current storage and human views
 
-The task-ID-anchored `v12_maintenance` module is an operator/admin CLI, not an
-MCP tool. It supports health, project-shard backup, checkpoint, optimize,
-vacuum, strictly offline restore, derived-projection prune/regeneration, and
-explicit backup retention. It accepts no root/export path, uses sanitized JSON,
-and writes only inside the selected host-private V12 shard. Restore requires
-`RESTORE`, exact task/shard confirmation, and `MCP_STOPPED`; package text must
-never call it an online restore.
+Fresh project state is schema v2. Unsupported schema shapes are rejected
+without migration, directory adoption or legacy sentinels. Initiative tables,
+services and locators are removed. Old installations remain untouched.
 
-## Public installation versus source synchronization
+Canonical commands commit their transition, event and derived receipt
+atomically. Exact ambiguous-response reconciliation does not create another
+report or spawn. Steering immediately invalidates old authority; successor work
+waits for native quiescence and observed artifact reconciliation.
 
-End users add
-`https://github.com/igovet/codex-cortex-orchestrator` at Git ref `main` as a
-Marketplace source, then install `cortex@cortex` through Desktop or CLI.
+Only plans and finalized reports have user-facing Markdown. Links require
+contained regular-file, source and digest/readback verification. Unsafe paths
+and external edits are not overwritten. A transient projection I/O failure can
+be repaired once within the original publication from its durable report;
+persistent failure stays explicit and cannot erase canonical evidence.
 
-The source published to that Marketplace already has a content-addressed
-manifest version, `1.15.3+codex.sha256.<digest-prefix>`. The isolated development
-builder uses the identical version rule. At MCP startup the packaged runtime
-recomputes the normalized plugin-tree digest before `initialize`; therefore the
-production and development paths differ only in installation environment, not
-in provenance strength. A plain `1.15.3` manifest is source-mode only and the
-Marketplace validator rejects it. The same gate enforces the host's 128-byte
-`defaultPrompt` and three-second `SessionEnd` timeout limits.
+Maintenance remains an explicit task-anchored operator CLI outside the twenty
+tools. Backup covers the project shard; restore is strictly offline. Pruning
+cannot delete canonical task evidence or write ledger data into the project.
 
-`./scripts/cortex-dev` is the repository's interactive local source-development
-entry point. It creates/reuses the exact persistent `$HOME/.cortex-dev`
-candidate, isolates both `HOME` and `CODEX_HOME` (including plugin cache,
-configuration, and V12 state), synchronizes this checkout there, and starts
-ordinary Codex. It projects only the safe enabled production Codebase Memory
-server definition into the candidate and runs that external MCP child with its
-owning production HOME; production config and credentials remain unchanged.
-Its paired `./scripts/cortex-dev-reset --confirm` helper is
-explicit and path-guarded; it refuses stable, repository, broad, symlinked,
-and non-regular targets. `./scripts/sync-cortex.sh` remains the explicitly
-authorized local-source synchronization operation and must not replace the
-public GitHub Marketplace instructions. `--dry-run` and `--check` are
-non-installing validation modes.
+## Candidate identity and development
 
-The normal synchronization mode removes only disposable Python bytecode
-(`__pycache__`, `.pyc`, and `.pyo`) beneath `plugins/cortex` before validation,
-so a prior local interpreter run cannot make the workflow fail. It also refreshes
-the marked model-routing table in `orchestrator/SKILL.md` from `profiles.json`.
-Read-only `--dry-run` and `--check` never remove or rewrite source state and
-continue to report any residue or catalog drift.
+The installable manifest uses 1.15.6+codex.sha256.<digest-prefix>. Startup
+recomputes the normalized payload digest before initialization. An invented,
+missing or stale installed stamp is rejected. Explicit source mode is a
+different evidence class and is not an installed release.
+
+For this hardening task, preserve the semantic version and refresh only the
+content-addressed suffix through the supported isolated entry point:
+
+```bash
+./scripts/cortex-dev --prepare-only
+```
+
+The helper creates/reuses the exact HOME/.cortex-dev candidate and its isolated
+Codex configuration/cache/state. It never updates the stable plugin as a test.
+The candidate's optional Codebase Memory projection copies only its supported
+safe settings, not arbitrary credential/environment tables.
+
+Ordinary interactive CLI runs use scripts/cortex-live-smoke; actual Desktop
+uses scripts/cortex-desktop-dev with a disposable profile. The final pair must
+fully complete on one unchanged payload. Any payload edit invalidates previous
+host qualification.
+
+Read-only sync preview/check modes do not install or rewrite source state.
+Normal synchronization is a development operation invoked only through the
+isolated launcher for live work, not a replacement end-user installation flow.
 
 ## Validation requirements
 
-The release candidate must prove:
+Release/source validation must prove:
 
-- content-addressed manifest/Marketplace parity with semantic base version
-  1.15.3 and a suffix matching the complete normalized plugin payload;
-- exact twenty-tool registry/runtime parity;
-- uniform participant catalog, closed advertised input schemas, compact public
-  result projections with closed operation-specific handles, private
-  successful-result schema validation, a complete catalogue below 65,536
-  bytes, and the distinct success/correctable-error/server
-  fault transport shapes;
-- explicit root only on `open_task`, compact typed task, assignment, report,
-  decision, and initiative references on their advertised consumers, arbitrary
-  optional task context, bounded task contract/language fields, required
-  non-empty textual delegation scope with object rejection, exact model/effort,
-  and required closure subject fields;
-- schema-v1 bootstrap/additive migration, project isolation, idempotency,
-  concurrency, and ordered report reads;
-- same-connection worker publication on a persistent source stdio process,
-  copied-locator rejection on a second initialized process, monotonic
-  coordinator/worker connection roles, sanitized host audience receipts, and
-  explicit blocked/aborted successor lineage for confirmed worker loss;
-- bounded task inspection and evidence consumption through the advertised
-  continuation handles;
-- assembled report lifecycle, manifest digest and aggregate quota enforcement, plan
-  review metadata, append-only digest-bound user decisions, safe resume, and
-  task-scoped `report_chunk_appended` chronology/backfill behavior;
-- host-private projection layout, owner-only modes, atomic writes, tamper
-  conflict preservation, source-sequence/digest verification, and zero writes
-  under `project_root`;
-- private state modes, pre-open symlink/non-regular-file rejection, and
-  oversized-frame drain/recovery;
-- QA/verification adaptation that assigns failed source, candidate, dependency,
-  CI, provenance, and harness checks to bounded rework and independently reruns
-  the failed and affected gates;
-- first-attempt profile admission: the live assignment schema classifies
-  packaged owner, review, and planning profiles; owner work with a
-  required-review plan needs approved planner evidence, while test-only QA
-  correction remains non-owning;
-- append-only assessments/revisions/closures and nonblocking initiative
-  warnings/verdicts;
-- self-contained bundled skill/profile lint covering coordinator-only,
-  textual-scope, knowledge-contract, closed direct-read routing, worker-owned
-  project-state verification, and conditional-documentation invariants without
-  claiming model behavior;
-- exact model/effort support, Luna override omission, and no server fallback;
-- advisory profile parity across registry and TOML files;
-- exact inclusion of the activation guard and sanitized lifecycle observer,
-  with every callback using the same `python3 -B` runtime contract as the MCP
-  server and exact native `Agent` matchers for pre/post tool observation;
-- packaged maintenance-module parity without changing the twenty-tool registry,
-  including task/shard anchoring, confirmation strings, backup validation,
-  offline restore, projection safety, canonical-data retention, and zero
-  project/V11 writes;
-- preservation of V11 database bytes;
-- recursively valid public documentation links and documented commands;
-- absence of secret-prone, runtime-state, symlink, bytecode, or nested
-  Marketplace artifacts.
-- source inclusion and source-mode execution of `tests/test_public_mcp_first_call_conformance.py`,
-  which exercises a first valid call for every advertised public tool using
-  exact emitted handles; and
-- source inclusion and documented use of `scripts/cortex-live-smoke` as the
-  owned-PTY verifier when the required controlling-terminal preflight cannot
-  be supplied by the driver.
+- exact allowlisted payload, current content stamp and marketplace parity;
+- complete twenty-tool schemas, catalogue reserve and safe diagnostic bounds;
+- all 22 packaged profiles and default Luna/explicit effort transport;
+- worker bootstrap, exact native correlation and actor/project isolation;
+- typed readiness, acceptable dependencies and compatible parallel ownership;
+- current-only schema, atomic receipts and one terminal publication;
+- candidate validation, current plan/closure binding and real semantic steering;
+- artifact conflict, quiescence, recovery and finite remediation;
+- verified views and bounded post-commit repair without duplicate reports;
+- private modes, no symlink adoption and no raw sensitive data in diagnostics;
+- packaged non-MCP maintenance with offline restore and bounded retention;
+- self-contained skills without removed initiative/progress/textual-scope routes;
+- current public documentation, links, commands and release metadata.
+
+Source regression is not a native live pass. After local levels and the short
+CLI succeed, the full scenario must exercise all tools and profiles with real
+prerequisites, multiple messages, several steering revisions, same-task recovery
+and post-result closure. Actual Desktop must finish, not merely launch.
+
+Use the commands and binary criteria in
+[Verification](../../project/verification.md) and the authoritative
+[qualification ladder](../../project/typed-orchestration-integrity.md#10-qualification-ladder).
+Maintain the Completion checklist with exact observed results and unrun gates.
 
 ## Security-sensitive packaging rules
 
-The MCP configuration invokes the packaged server directly through `python3`
-and therefore requires Python 3.11+ in the Codex launch environment. Malformed
-calls return bounded sanitized errors. Task/report content, secrets,
-credentials, personal data, raw prompts, host identities, and private diagnostics
-must not enter package logs, fixtures, docs, issues, or release evidence.
+The package and hooks use the host-resolved Python 3.11+ runtime. They must share
+the same launch contract without source-tree bytecode drift. No package
+metadata, skill or profile may imply native permission from a plan decision,
+make the coordinator a project operator or treat Markdown as ledger authority.
 
-Package metadata must not claim waves, server-selected scheduling gates, plan
-authority, bearer capability handoff, profile enforcement, governance
-promotion, closure authority, repair/rework waves, resource locks, or
-server-owned recovery. Assignment-page receipts are ledger evidence only. The
-separate digest-only host audience receipt binds one supported native child to
-one MCP connection but is not portable worker identity, task completion,
-report evidence, or proof of physical worktree/workspace isolation.
+Keep credentials, personal data, raw worker reports, prompts and private logs
+out of package artifacts and release evidence. Worker engineering prose is
+English; exact user-source fields retain their language. Coordinator summaries
+and decision packets are localized, with fresh server-verified links.
 
-It also must not imply that the coordinator may inspect source or operate on
-the target project, directly verify worker work, infer `project_root`, accept
-an object delegation scope, use shell/search/graph for knowledge routing, check
-project-local artifacts or state, independently reconstruct documentation
-routing, or skip the report-grounded documentation-impact decision before
-closure.
-
-Package evidence must not treat a generated Markdown view as canonical, a
-delegation view as worker input, a user decision as cryptographic attestation,
-or a plan-review pause as a backend permission gate. All worker-authored
-internal/durable operational content is English. Existing task contracts retain
-verbatim user language in labeled original fields; decision records retain the
-exact `response_original` without English duplicate fields. Canonical
-product-facing report and handoff payloads
-carry any needed user-authored source material once in optional unchanged
-`source_text`, without language tags or translated/original pairs. Coordinator
-summaries and verified ready links follow the user's language.
-
-## Verification
-
-Run the commands in [verification.md](../../project/verification.md). The
-release/protocol test is the black-box V12 contract proof; package validation,
-the self-contained skill/profile lint, `git diff --check`, release-candidate
-validation, and local source `sync-cortex.sh --dry-run` provide bounded
-supporting evidence.
+See [Security policy](../../../SECURITY.md) and
+[Storage classification](../../project/storage-classification.md).
 
 <!-- GENERATED:END -->

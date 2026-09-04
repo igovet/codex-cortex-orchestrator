@@ -78,6 +78,15 @@ _SAFE_VALIDATION_REASONS = frozenset({
     "semantic_outcome_missing", "semantic_outcome_ambiguous",
     "stale_current_outcome", "ownership_conflict", "scope_overlap",
     "invalid_decomposition", "unchanged_retry", "correction_exhausted",
+    "assignment_not_ready", "bootstrap_prerequisites_unsatisfied", "bootstrap_budget_exhausted",
+    "bootstrap_non_progress", "project_mutation_barrier", "execution_evidence_pending",
+    "artifact_generation_missing", "reconciliation_required", "graph_revision_stale",
+    "completed_report_has_unfinished_evidence", "failed_report_without_failed_coverage",
+    "artifact_observation_invalid", "change_commitment_invalid", "fingerprint_invalid",
+    "fingerprint_method_invalid", "verification_check_invalid", "verification_check_coverage_incomplete",
+    "classification_without_finding", "finding_classification_missing", "coverage_subject_invalid",
+    "coverage_incomplete", "complete_with_failed_fact", "complete_with_missing_check",
+    "incomplete_without_finding", "failed_without_failed_fact",
 })
 
 
@@ -454,66 +463,15 @@ def _validate_public_call_shape(tool_name: str, arguments: Mapping[str, Any]) ->
     here before any storage lookup or mutation.
     """
 
-    def require(*names: str) -> None:
-        for name in names:
-            if name not in arguments:
-                raise _SchemaError(f"$.{name}", f"missing required property '{name}'")
-
-    def forbid(*names: str) -> None:
-        for name in names:
-            if name in arguments:
-                raise _SchemaError(f"$.{name}", f"unsupported property '{name}'")
-
     if tool_name == "open_assignment":
-        if arguments.get("responsibility") == "planning":
-            forbid("outcomes")
-    elif tool_name == "submit_report":
-        mode = arguments.get("mode")
-        plan_fields = ("review_policy", "supersedes_report_ref")
-        if mode == "begin":
-            require("report_type")
-            forbid("report_ref", "status", "content", "section", "abort_reason_en")
-            if arguments.get("report_type") != "plan":
-                forbid(*plan_fields)
-        elif mode == "append":
-            require("report_ref", "section", "content")
-            forbid("report_type", "status", "abort_reason_en", *plan_fields)
-        elif mode == "finalize":
-            require("report_ref", "status")
-            forbid("report_type", "content", "section", "abort_reason_en", *plan_fields)
-        elif mode == "abort":
-            require("report_ref", "abort_reason_en")
-            forbid("report_type", "status", "content", "section", *plan_fields)
-    elif tool_name == "submit_governance_closure":
-        # The flat public schema keeps the first-call declaration concrete;
-        # task closures nevertheless cannot carry initiative-only state.
-        # Enforce that relation at the MCP boundary before service lookup.
-        if arguments.get("subject_type") == "task":
-            forbid("initiative_status")
-    elif tool_name == "record_user_decision":
-        subject_type = arguments.get("subject_type")
-        decision_type = arguments.get("decision_type")
-        approval_fields = ("approval_handle", "approval_view_content_digest", "approval_view_source_sequence")
-        if subject_type in {"task", "delegation", "initiative"}:
-            forbid("subject_digest", *approval_fields)
-        elif subject_type == "report":
-            require("subject_digest")
-            forbid(*approval_fields)
-        elif subject_type == "plan":
-            require("subject_digest")
-            if decision_type == "approve":
-                require(*approval_fields)
-            else:
-                forbid(*approval_fields)
-        if decision_type == "steer":
-            if subject_type != "task" or arguments.get("subject_ref") != arguments.get("task_ref"):
-                raise _SchemaError("$.subject_ref", "value does not match the required constant")
-            require("steering_delta")
-            delta = arguments.get("steering_delta")
-            if not isinstance(delta, Mapping) or not any(isinstance(delta.get(name), list) and delta.get(name) for name in ("retire_item_refs", "add")):
-                raise _SchemaError("$.steering_delta", "value does not match a permitted input shape")
-        else:
-            forbid("steering_delta")
+        if ("nodes" in arguments) == ("bootstrap" in arguments):
+            raise _SchemaError("$", "select exactly one of nodes or bootstrap")
+        intent = arguments.get("bootstrap")
+        if isinstance(intent, Mapping):
+            if intent.get("kind") == "discovery" and "question" not in intent:
+                raise _SchemaError("$.bootstrap.question", "discovery requires its evidence question")
+            if intent.get("kind") == "planning" and "question" in intent:
+                raise _SchemaError("$.bootstrap.question", "planning scope is server-derived")
 
 
 def _safe_details(value: object) -> dict[str, object]:
@@ -639,8 +597,8 @@ def _failure_text(*, code: str, details: object, mutation: str, retryable: bool,
                 parts.append(f"Largest known sections: {rendered_sections} bytes.")
     parts.append(f"Mutation: {mutation}.")
     parts.append(f"Action: {action}")
-    if code in {"invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found", "initiative_not_found", "decision_not_found"}:
-        parts.append("Handle rule: do not retry a shortened, ellipsized, inferred, or reconstructed value; reuse the exact structuredContent.handles value from the last success.")
+    if code in {"invalid_identifier", "task_not_found", "delegation_not_found", "report_not_found", "decision_not_found"}:
+        parts.append("Reference rule: never shorten, infer, or reconstruct a reference. Use only the exact server-issued reference for the current actor and operation.")
     if retryable:
         parts.append("Retryable now: yes.")
     elif code in {
@@ -786,26 +744,6 @@ def _validation_failure(
             "Stop this correction path: the single permitted aggregate-size correction has "
             "already failed and no further retry is allowed on this worker connection."
         )
-    if tool_name == "create_delegation" and "delegation_id" in arguments:
-        action = (
-            "create_delegation is creation-only: never pass delegation_id to it. "
-            "For retrieval, call read_delegation({delegation_ref, after_sequence}) exactly "
-            "with the emitted delegation_ref and durable sequence. For an exact mutation retry, "
-            "reuse the original complete create_delegation payload with its returned idempotency_key."
-        )
-    elif tool_name == "record_user_decision" and arguments.get("decision_type") == "approve":
-        required = (
-            "approval_handle",
-            "approval_view_content_digest",
-            "approval_view_source_sequence",
-        )
-        missing = [name for name in required if name not in arguments]
-        if missing:
-            action = (
-                "For decision_type=approve, copy "
-                + ", ".join(missing)
-                + " byte-for-byte from one ready approval_view, then correct the request."
-            )
     return {
         "code": "validation_error",
         "message": _safe_message("validation_error"),
@@ -910,10 +848,9 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
     # Canonical IDs are durable evidence, never public next-call handles.  The
     # compact typed refs below are the only callable entity locators emitted
     # from this function.
-    task_id = next((entity_id(value.get(name), "task_id") for name in ("task", "delegation", "report", "initiative", "closure", "decision", "assessment") if entity_id(value.get(name), "task_id") is not None), None)
+    task_id = next((entity_id(value.get(name), "task_id") for name in ("task", "delegation", "report", "closure", "decision", "assessment") if entity_id(value.get(name), "task_id") is not None), None)
     delegation_id = next((entity_id(value.get(name), "delegation_id") for name in ("delegation", "report") if entity_id(value.get(name), "delegation_id") is not None), None)
     report_id = entity_id(value.get("report"), "report_id")
-    initiative_id = next((entity_id(value.get(name), "initiative_id") for name in ("initiative", "assessment") if entity_id(value.get(name), "initiative_id") is not None), None)
     decision_id = entity_id(value.get("decision"), "decision_id")
     emitted_decision_ref = value.get("decision_ref")
     if not isinstance(emitted_decision_ref, str) or record_ref_parts(emitted_decision_ref, label="decision_ref") is None:
@@ -930,8 +867,6 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
             report_id = report_id or subject_id
         elif subject_type == "delegation" and isinstance(subject_id, str):
             delegation_id = delegation_id or subject_id
-        elif subject_type == "initiative" and isinstance(subject_id, str):
-            initiative_id = initiative_id or subject_id
     # Public compact publication/family projections have intentionally
     # removed canonical IDs. Treat their bounded emitted refs as authoritative
     # handles rather than trying to reconstruct an internal record ID.
@@ -972,7 +907,7 @@ def _handles(value: Mapping[str, Any]) -> dict[str, Any]:
         compact = value["task_ref"]
     if compact is not None:
         result["task_ref"] = compact
-    for canonical, compact_name in ((delegation_id, "delegation_ref"), (report_id, "report_ref"), (decision_id, "decision_ref"), (initiative_id, "initiative_ref")):
+    for canonical, compact_name in ((delegation_id, "delegation_ref"), (report_id, "report_ref"), (decision_id, "decision_ref")):
         compact_entity = record_ref(canonical)
         if compact_entity is not None:
             result[compact_name] = compact_entity
@@ -1031,22 +966,22 @@ def _success_tool_result(value: Mapping[str, Any]) -> dict[str, Any]:
                 collect_view(report_view)
     content = []
     data = structured.get("data")
-    reconciliation = (
-        data.get("publication_reconciliation")
+    assignment = (
+        data.get("assignment")
         if isinstance(data, Mapping)
         else None
     )
-    if isinstance(reconciliation, Mapping):
+    if isinstance(assignment, Mapping):
         # The full assignment can contain a large policy, semantic contract,
         # and predecessor reports.  Hosts which primarily expose TextContent
         # may abbreviate that body before the model reaches the exact terminal
-        # publication selectors.  Put the small server-owned reconciliation
+        # publication selectors. Put the server-owned typed assignment
         # block first and keep structuredContent unchanged.  This is not a
         # second authority: it is a byte-for-byte projection of the same
         # structured result and survives the large-result fallback below.
         compact_assignment = {
             "task_ref": structured.get("task_ref"),
-            "publication_reconciliation": dict(reconciliation),
+            "assignment": dict(assignment),
             "has_more": structured.get("has_more"),
         }
         content.append({
@@ -1421,6 +1356,7 @@ def serve_stdio(
         "_role": "unknown",
         "_role_history": [],
         "_connection_nonce": os.urandom(32).hex(),
+        "_native_plugin_data": _plugin_data_root(package_root),
         "_audience": "unattributed",
         "_host_worker_claim": None,
         "_pre_candidate_audience": None,
@@ -1817,10 +1753,24 @@ def serve_stdio(
                 continue
             try:
                 handler_arguments = dict(resolved_arguments)
+                if (connection_context.get("_role") == "unknown"
+                        and audience not in {"worker_candidate", "worker"}
+                        and name not in {"open_task", "read_state"}):
+                    raise V12ServiceError(
+                        "a fresh coordinator must open a new task or read existing task state",
+                        code="recovery_state_required",
+                    )
+                required_next = connection_context.get("_required_next_operation")
+                if required_next is not None and required_next != (name, handler_arguments.get("task_ref")):
+                    raise V12ServiceError(
+                        "consume the current recovery continuation view before progressing",
+                        code="recovery_continuations_required",
+                    )
                 if name in {
                     "read_task", "read_state", "read_scope", "read_outcome",
                     "read_continuations", "read_evidence", "read_timeline",
                     "open_steering", "record_steering",
+                    "open_assignment",
                     "publish_plan", "publish_result", "publish_documentation",
                 }:
                     handler_arguments["_connection_context"] = connection_context

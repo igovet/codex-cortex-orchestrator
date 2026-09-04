@@ -1,138 +1,57 @@
-"""Focused regression coverage for neutral public execution-outcome projections."""
-from __future__ import annotations
+"""Current graph evidence, not legacy report counters, determines completion."""
+from copy import deepcopy
 
-import os
-import tempfile
-import unittest
-from pathlib import Path
-from unittest import mock
+import pytest
 
-
-SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
-if str(SCRIPTS) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(SCRIPTS))
-
-from cortex_runtime.v12_store import V12Store  # noqa: E402
+from cortex_runtime.domain_api import publish_result, read_state, close_task
+from cortex_runtime.v12_contract import task_ref as public_task_ref
+from cortex_runtime.v12_service import V12ServiceError
+from test_domain_public_api_contract import PROVENANCE
+from test_node_assignment_receipts import node_case
+from test_typed_closure import review
+from test_typed_public_api import dispatch_and_consume
+from test_typed_publication_transaction import baseline_content
 
 
-class ExecutionOutcomeProjectionTests(unittest.TestCase):
-    def test_task_and_closure_responses_expose_canonical_result_outcomes(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="cortex-v12-outcome-") as temporary:
-            root = Path(temporary)
-            home = root / "home"
-            project = root / "project"
-            home.mkdir()
-            project.mkdir()
-            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                os.environ.pop("CORTEX_HOST_STATE_DIR", None)
-                os.environ.pop("CODEX_HOME", None)
-                store = V12Store(project)
-                task = store.create_task(
-                    objective="Expose neutral report evidence.",
-                    user_request_original="Expose neutral report evidence.",
-                    user_language="en",
-                    task_contract_version="cortex/task-contract/v3-outcome-linked",
-                    requirements=["Preserve neutral report evidence."],
-                    constraints=["Keep advisory closure independent."],
-                    acceptance_criteria=["Task and closure projections expose neutral counts."],
-                    verification_plan=["Inspect both public projections."],
-                    context={},
-                    idempotency_key="outcome-task",
-                )[0]["task"]["task_id"]
-                delegation = store.create_delegation(
-                    task_id=task,
-                    objective="Submit one canonical result.",
-                    role="worker",
-                    profile_name="general",
-                    scope="Own the result evidence.",
-                    instructions="Submit the result evidence.",
-                    model="gpt-5.6-luna",
-                    reasoning_effort="high",
-                    idempotency_key="outcome-delegation",
-                )[0]["delegation"]["delegation_id"]
-                def submit(*, key: str, status: str, content: object) -> dict[str, object]:
-                    started = store.submit_report(task_id=task, delegation_id=delegation, mode="begin", report_type="result", idempotency_key=f"{key}-begin")[0]
-                    report_id = started["report"]["report_id"]
-                    store.submit_report(task_id=task, delegation_id=delegation, mode="append", report_id=report_id, section="result", content=content, idempotency_key=f"{key}-append")
-                    return store.submit_report(task_id=task, delegation_id=delegation, mode="finalize", report_id=report_id, status=status, idempotency_key=f"{key}-finalize")[0]
-                initial = store.inspect_task(task_id=task, after_sequence=0)
-                self.assertEqual(initial["execution_outcome"], {
-                    "evidence_status": "no_finalized_reports",
-                    "finalized_report_count": 0,
-                    "completed_report_count": 0,
-                    "effective_revision": 1,
-                    "coverage_status": "rework",
-                    "outcome": "incomplete",
-                })
-                submit(key="outcome-noncanonical-report", status="completed", content={"schema": "not-canonical", "outcome": "ignored"})
-                noncanonical = store.inspect_task(task_id=task, after_sequence=0)
-                self.assertEqual(noncanonical["execution_outcome"], {
-                    "evidence_status": "finalized_reports_present",
-                    "finalized_report_count": 1,
-                    "completed_report_count": 0,
-                    "effective_revision": 1,
-                    "coverage_status": "rework",
-                    "outcome": "incomplete",
-                })
-                report = submit(key="outcome-report", status="completed", content={
-                        "schema": "cortex/report/result/v1",
-                        "summary": "The worker recorded result evidence.",
-                        "outcome": "evidence_recorded",
-                        "changes": [],
-                        "verification": [],
-                        "risks": [],
-                    })
-                self.assertEqual(report["report"]["assembly_state"], "finalized")
-                inspected = store.inspect_task(task_id=task, after_sequence=0)
-                self.assertEqual(inspected["execution_outcome"], {
-                    "evidence_status": "finalized_reports_present",
-                    "finalized_report_count": 2,
-                    "completed_report_count": 1,
-                    "effective_revision": 1,
-                    "coverage_status": "rework",
-                    "outcome": "incomplete",
-                })
-                closure = store.submit_governance_closure(
-                    task_id=task,
-                    subject_type="task",
-                    subject_id=task,
-                    verdict="ready",
-                    evidence={"result": "evidence_recorded"},
-                    unresolved_risks=[],
-                    follow_ups=[],
-                    initiative_status=None,
-                    completion_notes=None,
-                    idempotency_key="outcome-closure",
-                )[0]
-                self.assertEqual(closure["execution_outcome"], inspected["execution_outcome"])
-                # A recorded advisory verdict must be accompanied by the
-                # current conformance projection; the verdict alone is not a
-                # readiness gate.
-                self.assertEqual(closure["conformance_review"], inspected["conformance_review"])
-                self.assertEqual(closure["conformance_review"]["status"], "not_ready")
-                self.assertEqual(closure["conformance_review"]["recommendation"], "rework")
-                submit(key="outcome-failed-report", status="failed", content={
-                        "schema": "cortex/report/result/v1",
-                        "summary": "A later canonical result remained incomplete.",
-                        "outcome": "worker_detail_not_exposed",
-                        "changes": [],
-                        "verification": [],
-                        "risks": ["Acceptance remains incomplete."],
-                    })
-                later_evidence = store.inspect_task(task_id=task, after_sequence=0)
-                self.assertEqual(later_evidence["execution_outcome"], {
-                    "evidence_status": "finalized_reports_present",
-                    "finalized_report_count": 3,
-                    "completed_report_count": 1,
-                    "effective_revision": 1,
-                    "coverage_status": "rework",
-                    "outcome": "incomplete",
-                })
-                self.assertEqual(
-                    set(later_evidence["execution_outcome"]),
-                    {"evidence_status", "finalized_report_count", "completed_report_count", "effective_revision", "coverage_status", "outcome"},
-                )
+def test_completed_baseline_is_not_completed_product_and_closure_retains_that_fact(node_case, monkeypatch):
+    store, args = node_case
+    task = public_task_ref(args["task_id"])
+    monkeypatch.setattr("cortex_runtime.domain_api._worker_capability_provenance", lambda: PROVENANCE)
+    before = read_state(task_ref=task)["data"]
+    assert before["coverage_status"] == "incomplete"
+    worker_ref, context = dispatch_and_consume(task, nodes=["baseline"])
+    result = publish_result(task_ref=worker_ref, _connection_context=context, **baseline_content())
+    assert result["published"] and not result["replayed"]
+    observed = read_state(task_ref=task)["data"]
+    assert observed["coverage_status"] == "incomplete"
+    assert observed["coverage_status_counts"] == {"unverified": 1}
+    assert observed["node_state_counts"]["complete"] == 1
+    review(task)
+    with pytest.raises(V12ServiceError) as rejected:
+        close_task(task_ref=task, verdict="ready")
+    assert rejected.value.code == "closure_not_ready"
+    with pytest.raises(V12ServiceError):
+        close_task(task_ref=task, verdict="not_ready", completion_notes=["Only the baseline was observed."])
+    after = read_state(task_ref=task)["data"]
+    assert after["closure_record_status"] == "not_recorded"
+    assert after["coverage_status_counts"] == observed["coverage_status_counts"]
+    assert store._read(lambda c: c.execute("SELECT COUNT(*) FROM reports").fetchone()[0]) == 1
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.mark.parametrize("defect", ["old_schema", "empty_verification", "contradictory_completion"])
+def test_invalid_report_cannot_create_a_completion_signal(node_case, monkeypatch, defect):
+    store, args = node_case
+    task = public_task_ref(args["task_id"])
+    monkeypatch.setattr("cortex_runtime.domain_api._worker_capability_provenance", lambda: PROVENANCE)
+    worker_ref, context = dispatch_and_consume(task, nodes=["baseline"])
+    content = deepcopy(baseline_content())
+    if defect == "old_schema":
+        content["schema"] = "cortex/report/result/v1"
+    elif defect == "empty_verification":
+        content["node_coverage"][0]["coverage"][0]["verification"] = []
+    else:
+        content["node_coverage"][0]["coverage"][0]["status"] = "partial"
+    with pytest.raises((V12ServiceError, TypeError)):
+        publish_result(task_ref=worker_ref, _connection_context=context, **content)
+    assert store._read(lambda c: c.execute("SELECT COUNT(*) FROM reports").fetchone()[0]) == 0
+    assert read_state(task_ref=task)["data"]["coverage_status"] == "incomplete"
