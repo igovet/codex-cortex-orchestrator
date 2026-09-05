@@ -1,3 +1,0 @@
-$cortex:orchestrator
-
-Build one accessible, self-contained index.html landing page. It must use no external assets, network requests, or dependencies; have clear semantic HTML, a responsive layout, good keyboard and focus behavior, and a small interactive theme toggle that works without a build step. Before implementation, ask me one genuine product question about the visual theme, then show me the plan and wait for my approval. After implementation, independently verify the page without network access, including keyboard operation, visible focus, responsive behavior, reduced-motion support, readable contrast, and the theme toggle. Add a concise README explaining how to open and check the page locally.

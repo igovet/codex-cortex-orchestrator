@@ -1,6 +1,0 @@
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "additionalContext": "This native dispatch is correlated to the selected server-issued assignment. End-to-end authority remains pending until worker assignment evidence is consumed successfully. Do not interrupt or replace it unless explicit terminal, ambiguous, or stale evidence is observed."
-  }
-}

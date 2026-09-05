@@ -1,378 +1,1186 @@
 #!/usr/bin/env python3
-"""Launch a real, isolated Codex Desktop against the repository candidate."""
-
-from __future__ import annotations
-
+"""Run the actual Desktop in the same isolated candidate and a disposable profile."""
 import argparse
+import hashlib
 import json
 import os
+from pathlib import Path
+import re
+import shlex
 import signal
-import stat
+import sqlite3
 import subprocess
-import sys
 import tempfile
 import time
-import tomllib
 import urllib.parse
-from pathlib import Path
+from collections import Counter
+from datetime import datetime
+import shutil
+
+ROOT=Path(__file__).resolve().parents[1]
+STATE=Path(tempfile.gettempdir())/f'cortex-markdown-desktop-{os.getuid()}'
+CONFIG_BACKUP=STATE/'config.toml.before-live-test'
 
 
-SOURCE_ROOT = Path(__file__).resolve().parent.parent
-STATE_ROOT = Path(tempfile.gettempdir()) / f"cortex-desktop-dev-{os.getuid()}"
-STATE_PATH = STATE_ROOT / "session.json"
-LOG_PATH = STATE_ROOT / "desktop.log"
-SAFE_DESKTOP_SCALARS = (
-    "model_provider",
-    "model",
-    "model_reasoning_effort",
-    "model_reasoning_summary",
-    "model_verbosity",
-    "personality",
-    "service_tier",
-)
+def private():
+    STATE.mkdir(mode=0o700,exist_ok=True)
+    if STATE.is_symlink() or STATE.stat().st_uid!=os.getuid() or STATE.stat().st_mode&0o077:
+        raise RuntimeError('Unsafe Desktop observation directory')
 
 
-class DesktopDevError(RuntimeError):
-    pass
+def identity(pid):
+    try:return Path(f'/proc/{pid}/stat').read_text().split()[21]
+    except (OSError,IndexError):return None
 
 
-def _owner_home() -> Path:
-    raw = os.environ.get("HOME", "")
-    if not raw:
-        raise DesktopDevError("HOME is required")
-    home = Path(raw).resolve(strict=True)
-    if home.is_symlink() or not home.is_dir():
-        raise DesktopDevError("HOME must be a regular directory")
-    return home
+def safe_data_directory(requested):
+    if requested is None:
+        return Path(tempfile.mkdtemp(prefix='data-',dir=STATE)),True
+    requested.mkdir(mode=0o700,parents=True,exist_ok=True)
+    path=requested.resolve(strict=True)
+    if path.is_symlink() or not path.is_dir() or path.stat().st_uid!=os.getuid() or path.stat().st_mode&0o077:
+        raise RuntimeError('data directory must be an owner-private non-symlink directory')
+    return path,False
 
 
-def _ensure_private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.is_symlink() or not path.is_dir():
-        raise DesktopDevError(f"private runtime path is invalid: {path}")
-    path.chmod(0o700)
-
-
-def _json_toml_scalar(value: object) -> str:
-    if isinstance(value, (str, bool, int, float)) and not isinstance(value, complex):
-        return json.dumps(value, ensure_ascii=False)
-    raise DesktopDevError("stable Desktop model configuration contains a non-scalar value")
-
-
-def _project_desktop_model_config(
-    owner_home: Path,
-    codex_home: Path,
-    *,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> None:
-    source = owner_home / ".codex" / "config.toml"
-    target = codex_home / "config.toml"
-    for path, label in ((source, "stable config"), (target, "isolated config")):
-        if path.is_symlink() or not path.is_file():
-            raise DesktopDevError(f"{label} must be a regular non-symlink file")
-    source_payload = tomllib.loads(source.read_text(encoding="utf-8"))
-    target_text = target.read_text(encoding="utf-8")
-    selected = {
-        key: source_payload[key]
-        for key in SAFE_DESKTOP_SCALARS
-        if key in source_payload
-    }
-    if "model" not in selected or "model_reasoning_effort" not in selected:
-        raise DesktopDevError("stable Desktop model and reasoning effort must be configured")
-    if model is not None:
-        selected["model"] = model
-    if reasoning_effort is not None:
-        selected["model_reasoning_effort"] = reasoning_effort
-
-    kept: list[str] = []
-    inside_table = False
-    for line in target_text.splitlines(keepends=True):
-        stripped = line.strip()
-        if stripped.startswith("["):
-            inside_table = True
-        key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
-        if not inside_table and key in SAFE_DESKTOP_SCALARS:
-            continue
-        kept.append(line)
-    prefix = "".join(
-        f"{key} = {_json_toml_scalar(selected[key])}\n"
-        for key in SAFE_DESKTOP_SCALARS
-        if key in selected
-    )
-    if kept and kept[0].strip():
-        prefix += "\n"
-    rendered = prefix + "".join(kept)
-    tomllib.loads(rendered)
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+def configure_workspace_network():
+    """Enable loopback verification only in the isolated dev Codex profile."""
+    config=Path.home()/'.cortex-dev/.codex/config.toml'
+    if config.is_symlink() or not config.is_file():
+        raise RuntimeError('isolated Codex config must be a regular non-symlink file')
+    if CONFIG_BACKUP.exists():
+        raise RuntimeError('stale isolated config backup exists; restore it before a new Desktop run')
+    original=config.read_bytes()
+    CONFIG_BACKUP.write_bytes(original);os.chmod(CONFIG_BACKUP,0o600)
+    source=original.decode('utf-8')
+    section=re.search(r'(?m)^\[sandbox_workspace_write\]\s*$',source)
+    if section:
+        end=re.search(r'(?m)^\[',source[section.end():])
+        boundary=section.end()+(end.start() if end else len(source)-section.end())
+        body=source[section.end():boundary]
+        if re.search(r'(?m)^network_access\s*=',body):
+            body=re.sub(r'(?m)^network_access\s*=.*$',
+                        'network_access = true',body,count=1)
+        else:
+            body='\nnetwork_access = true'+body
+        updated=source[:section.end()]+body+source[boundary:]
+    else:
+        updated=source.rstrip()+'\n\n[sandbox_workspace_write]\nnetwork_access = true\n'
+    temporary=config.with_name('.'+config.name+'.cortex-live')
     try:
-        temporary.write_text(rendered, encoding="utf-8")
-        temporary.chmod(0o600)
-        os.replace(temporary, target)
+        with temporary.open('w',encoding='utf-8',newline='') as target:
+            target.write(updated);target.flush();os.fsync(target.fileno())
+        os.chmod(temporary,0o600);os.replace(temporary,config)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        config.write_bytes(original);os.chmod(config,0o600)
+        CONFIG_BACKUP.unlink(missing_ok=True)
+        raise
+    return config
+
+
+def restore_workspace_network(config):
+    if not CONFIG_BACKUP.is_file():
+        raise RuntimeError('isolated config backup is missing')
+    original=CONFIG_BACKUP.read_bytes()
+    temporary=config.with_name('.'+config.name+'.cortex-restore')
+    try:
+        with temporary.open('wb') as target:
+            target.write(original);target.flush();os.fsync(target.fileno())
+        os.chmod(temporary,0o600);os.replace(temporary,config)
+        CONFIG_BACKUP.unlink()
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _candidate_identity(owner_home: Path, codex_home: Path) -> dict[str, object]:
-    command = [
-        "python3",
-        "-B",
-        str(SOURCE_ROOT / "scripts" / "cortex_candidate_receipt.py"),
-        "verify",
-        "--source-root",
-        str(SOURCE_ROOT),
-        "--owner-home",
-        str(owner_home),
-        "--isolated-home",
-        str(owner_home / ".cortex-dev"),
-        "--isolated-codex-home",
-        str(codex_home),
-    ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-    payload = json.loads(result.stdout)
-    required = {
-        "base_version",
-        "build_id",
-        "source_digest",
-        "candidate_digest",
-        "candidate_path",
-        "candidate_version",
-    }
-    if not required.issubset(payload):
-        raise DesktopDevError("candidate receipt is incomplete")
-    return payload
+def environment(profile,events,data):
+    env=dict(os.environ)
+    owner=Path.home()
+    for key in ['CODEX_APP_TOOLS_PIPE_PATH','CODEX_INTERNAL_ORIGINATOR_OVERRIDE','CODEX_MCP_NODE_PATH','CODEX_CI','CODEX_SHELL','CODEX_PERMISSION_PROFILE','CODEX_SESSION_ID','CODEX_THREAD_ID']:
+        env.pop(key,None)
+    env.update(HOME=str(owner/'.cortex-dev'),CODEX_HOME=str(owner/'.cortex-dev/.codex'),CODEX_ELECTRON_USER_DATA_PATH=str(profile),CORTEX_OBSERVATION_DIR=str(events),CORTEX_DATA_DIR=str(data))
+    return env
 
 
-def _read_state() -> dict[str, object] | None:
-    if not STATE_PATH.exists():
-        return None
-    info = STATE_PATH.lstat()
-    if STATE_PATH.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-        raise DesktopDevError("Desktop live-dev state is not an owner-owned regular file")
-    return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+def observed_events(directory):
+    rows=[]
+    for path in Path(directory).glob('*.jsonl'):
+        with path.open(encoding='utf-8') as source:
+            for line in source:
+                try: rows.append(json.loads(line))
+                except ValueError: continue
+    return sorted(rows,key=lambda row:row.get('time_ns',0))
 
 
-def _process_start(pid: int) -> str | None:
+COMMAND_ERROR_PATTERN=re.compile(
+    r'(?im)(?:^|\n|["\']output["\']\s*:\s*["\'])(?:fatal:|traceback \(most recent call last\):|npm error (?:code|syscall|errno|request|log files)|error when starting .*server:|curl:\s*\([0-9]+\)|(?:bash|sh): .*command not found)'
+)
+
+
+def observed_outcome(raw,tool=None,arguments=''):
+    """Classify a rollout result without returning its possibly private payload."""
+    if isinstance(raw,list):
+        rendered='\n'.join(str(item.get('text','')) if isinstance(item,dict) else str(item) for item in raw)
+    else:rendered=str(raw)
+    diagnostic=rendered.replace('\\n','\n')
+    exit_codes=[int(value) for value in re.findall(r'\\?"exit_code\\?"\s*:\s*(-?[0-9]+)',rendered)]
+    # A wrapper may emit the command receipt as a separate labelled text item.
+    for item in raw if isinstance(raw,list) else []:
+        value=item.get('text','') if isinstance(item,dict) else ''
+        match=re.fullmatch(r'\s*(?:exit_code|exit_status|__EXEC_EXIT_CODE__)=(-?\d+)\s*',value)
+        if match:exit_codes.append(int(match.group(1)))
+    session_match=re.search(r'\\?"session_id\\?"\s*:\s*[0-9]+',rendered)
+    cell_match=re.search(r'Script running with cell ID\s+[A-Za-z0-9_-]+',rendered)
+    explicit_diagnostic=(tool in {'exec_command','write_stdin'} and COMMAND_ERROR_PATTERN.search(diagnostic))
+    if 'Script failed' in rendered or 'Script error' in rendered or re.search(r'\\?"isError\\?"\s*:\s*true',rendered):
+        outcome='error'
+    elif explicit_diagnostic:
+        outcome='error'
+    elif 'Warning: truncated output' in rendered:
+        outcome='truncated'
+    elif (tool=='write_stdin' and exit_codes and set(exit_codes)<={1,130}
+          and ('\\u0003' in arguments or '\x03' in arguments)):
+        outcome='stopped'
+    elif exit_codes and any(code!=0 for code in exit_codes):
+        outcome='error'
+    elif cell_match:
+        outcome='running'
+    elif tool in {'exec_command','write_stdin'} and session_match and not exit_codes:
+        outcome='running'
+    elif tool in {'exec_command','write_stdin'} and not exit_codes:
+        outcome='unverified'
+    else:outcome='success'
+    match=re.search(r'\\?"error\\?"\s*:\s*\\?"([a-z0-9_]+)',rendered)
+    code=match.group(1) if match else None
+    if outcome=='error' and not code and any(value!=0 for value in exit_codes):
+        code='command_exit_'+str(next(value for value in exit_codes if value!=0))
+    if outcome=='error' and not code and explicit_diagnostic:
+        code='command_output_error'
+    return outcome,code,hashlib.sha256(rendered.encode()).hexdigest()[:12]
+
+
+def mcp_receipt_metadata(item):
+    """Classify the host's completed MCP receipt independently of wrappers."""
+    if not isinstance(item,dict) or item.get('type')!='McpToolCall':return None
+    server=item.get('server')
+    tool=item.get('tool')
+    if not isinstance(server,str) or not server or not isinstance(tool,str) or not tool:return None
+    result=item.get('result')
+    rendered=json.dumps(result,ensure_ascii=False,sort_keys=True,separators=(',',':')) if result is not None else ''
+    outcome,code,digest=observed_outcome(rendered,'mcp__'+server+'__'+tool)
+    status=item.get('status')
+    if status in {'failed','error','cancelled'} and outcome=='success':outcome='error'
+    if status not in {'completed','failed','error','cancelled'} and outcome=='success':outcome='pending'
+    if outcome=='error' and not code:
+        code='capability_unavailable' if 'Capability is not available:' in rendered else 'mcp_tool_failed'
+    return dict(tool='mcp__'+server+'__'+tool,host_status=status,
+                host_receipt_outcome=outcome,host_error_code=code,
+                host_result_digest=digest)
+
+
+def command_execution_outcome(status,exit_code,output=''):
+    """Use host status/exit code first; inspect output only when neither is conclusive."""
+    output_error=(exit_code is None and bool(COMMAND_ERROR_PATTERN.search(output)))
+    outcome=('success' if status=='completed' and exit_code in {0,None} and not output_error
+             else 'error' if status=='failed' or output_error or isinstance(exit_code,int) and exit_code!=0
+             else 'pending')
+    code=None
+    if outcome=='error':
+        code=('command_output_error' if output_error and exit_code in {0,None}
+              else 'command_exit_'+str(exit_code) if isinstance(exit_code,int)
+              else 'command_failed')
+    return outcome,code
+
+
+def raw_command_family(source):
+    """Return a coarse executable family used only to link an explicit correction."""
+    first=source.strip().splitlines()[0] if source.strip() else ''
+    try:tokens=shlex.split(first)
+    except ValueError:tokens=first.split()
+    if not tokens:return None
+    if tokens[0]=='npm' and len(tokens)>=3 and tokens[1]=='run':return 'npm run '+tokens[2]
+    return tokens[0]
+
+
+def nested_tool_invocations(source):
+    """Extract literal tools.NAME(...) calls and each call's own argument digest."""
+    matches=[]
+    pattern=re.compile(r'\btools\.([A-Za-z0-9_]+)\s*\(')
+    for found in pattern.finditer(source):
+        index=found.end();depth=1;quote=None;escaped=False
+        while index<len(source) and depth:
+            char=source[index]
+            if quote:
+                if escaped:escaped=False
+                elif char=='\\':escaped=True
+                elif char==quote:quote=None
+            elif char in {'"',"'",'`'}:quote=char
+            elif char=='(':depth+=1
+            elif char==')':depth-=1
+            index+=1
+        arguments=source[found.end():index-1] if depth==0 else source[found.end():]
+        matches.append((found.group(1),hashlib.sha256(arguments.encode()).hexdigest()[:12],arguments))
+    return matches
+
+
+def observed_cell_ids(raw):
+    if isinstance(raw,list):
+        rendered='\n'.join(str(item.get('text','')) if isinstance(item,dict) else str(item) for item in raw)
+    else:rendered=str(raw)
+    return sorted(set(re.findall(r'Script running with cell ID\s+([A-Za-z0-9_-]+)',rendered)))
+
+
+def requested_identifiers(arguments,key,numeric=False):
+    values=re.findall(r'(?:["\']'+re.escape(key)+r'["\']|\b'+re.escape(key)+r')\s*:\s*["\']?([A-Za-z0-9_-]+)',arguments)
+    return sorted(set(int(value) for value in values)) if numeric else sorted(set(values))
+
+
+def original_request_digest(text):
+    text=text.strip()
+    token='$cortex:orchestrator'
+    if text.startswith(token) and (len(text)==len(token) or text[len(token)].isspace()):
+        text=text[len(token):].strip()
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def desktop_editor_source(text):
+    # Desktop serializes its rich-text list and literal underscores as Markdown.
+    # Retain all other whitespace and characters; this is not general normalization.
+    return re.sub(r'(?m)([^\n])\n\n(?=1\. )',r'\1\n',text.replace('\\_','_'))
+
+
+def delivered_request_digests(state,text):
+    accepted={state.get('original_request_sha256')}
+    expected=state.get('desktop_editor_source_sha256')
+    if expected and original_request_digest(desktop_editor_source(text))==expected:
+        accepted.update((original_request_digest(text),
+                         original_request_digest(text.replace('\\_','_'))))
+    return accepted
+
+
+def assigned_worker_profile(text):
+    matches=re.findall(r'\$cortex:worker-([a-z-]+)',text)
+    profiles={p['name'] for p in json.loads((ROOT/'plugins/cortex/profiles.json').read_text())['profiles']}
+    found={name.replace('-','_') for name in matches} & profiles
+    return next(iter(found)) if len(found)==1 else None
+
+
+def worker_skill_read(tool,arguments):
+    if tool!='exec_command':return False
+    match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')',arguments)
+    if not match:return False
     try:
-        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21]
-    except (FileNotFoundError, IndexError, OSError):
-        return None
+        import ast
+        lexer=shlex.shlex(ast.literal_eval(match.group(1)),posix=True,punctuation_chars=True)
+        lexer.whitespace_split=True
+        parts=list(lexer)
+    except (ValueError,SyntaxError):return False
+    if ';' in parts:
+        index=parts.index(';');tail=parts[index:]
+        # Recognize bounded status-printing suffixes; command success is checked
+        # separately from the host receipt, never inferred from shell output.
+        if len(tail)<5 or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=\$\?',tail[1]):return False
+        var=tail[1].split('=',1)[0]
+        if tail[:1]!=[';'] or tail[2]!=';':return False
+        rest=tail[3:]
+        if rest[-3:]==[';','exit','$'+var]:rest=rest[:-3]
+        echo=rest==['echo','__EXIT_STATUS__=$'+var]
+        printf=(len(rest)==3 and rest[0]=='printf' and rest[2]=='$'+var
+                and re.fullmatch(r'(?:\\n)?[A-Z_]+=%s\\n',rest[1]) is not None)
+        if not (echo or printf):return False
+        parts=parts[:index]
+    if len(parts)==2 and parts[0]=='cat':path=Path(parts[1])
+    elif len(parts)==3 and parts[:2]==['wc','-l']:path=Path(parts[2])
+    elif len(parts)==4 and parts[:2]==['sed','-n'] and re.fullmatch(r'\d+,\d+p',parts[2]):path=Path(parts[3])
+    else:return False
+    if path.name!='SKILL.md' or not path.parent.name.startswith('worker-'):return False
+    expected=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
+    try:relative=path.relative_to(expected)
+    except ValueError:return False
+    return len(relative.parts)==4 and relative.parts[1]=='skills' and path.is_file()
 
 
-def _state_is_active(state: dict[str, object]) -> bool:
-    pid = state.get("pid")
-    start = state.get("process_start")
-    return isinstance(pid, int) and isinstance(start, str) and _process_start(pid) == start
-
-
-def _write_state(payload: dict[str, object]) -> None:
-    _ensure_private_directory(STATE_ROOT)
-    temporary = STATE_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    os.replace(temporary, STATE_PATH)
-
-
-def _desktop_executable() -> Path:
-    configured = os.environ.get("CODEX_DESKTOP_EXECUTABLE", "/usr/bin/chatgpt")
-    executable = Path(configured).resolve(strict=True)
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise DesktopDevError("Codex Desktop executable is unavailable")
-    return executable
-
-
-def _prepare(
-    owner_home: Path,
-    workdir: Path,
-    *,
-    model: str | None,
-    reasoning_effort: str | None,
-) -> tuple[Path, dict[str, object]]:
-    subprocess.run(
-        [str(SOURCE_ROOT / "scripts" / "cortex-dev"), "--prepare-only"],
-        cwd=workdir,
-        check=True,
-    )
-    codex_home = owner_home / ".cortex-dev" / ".codex"
-    _project_desktop_model_config(
-        owner_home,
-        codex_home,
-        model=model,
-        reasoning_effort=reasoning_effort,
-    )
-    return codex_home, _candidate_identity(owner_home, codex_home)
-
-
-def _descendant_commands(root_pid: int) -> list[str]:
-    rows: dict[int, tuple[int, str]] = {}
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            fields = (entry / "stat").read_text(encoding="utf-8").split()
-            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
-            rows[int(entry.name)] = (int(fields[3]), command)
-        except (FileNotFoundError, IndexError, OSError, ValueError):
-            continue
-    descendants: set[int] = {root_pid}
-    changed = True
-    while changed:
-        changed = False
-        for pid, (parent, _) in rows.items():
-            if parent in descendants and pid not in descendants:
-                descendants.add(pid)
-                changed = True
-    return [rows[pid][1] for pid in descendants if pid in rows]
-
-
-def start(args: argparse.Namespace) -> int:
-    owner_home = _owner_home()
-    workdir = Path(args.workdir).resolve(strict=True)
-    if workdir.is_symlink() or not workdir.is_dir():
-        raise DesktopDevError("workdir must be an existing regular directory")
-    previous = _read_state()
-    if previous is not None and _state_is_active(previous):
-        raise DesktopDevError("an isolated Codex Desktop live-dev process is already active")
-
-    codex_home, identity = _prepare(
-        owner_home,
-        workdir,
-        model=args.model,
-        reasoning_effort=args.reasoning_effort,
-    )
-    _ensure_private_directory(STATE_ROOT)
-    desktop_profile = Path(tempfile.mkdtemp(prefix="electron-user-data-", dir=STATE_ROOT))
-    desktop_profile.chmod(0o700)
-    prompt: str | None = None
-    if args.prompt_file is not None:
-        prompt_path = Path(args.prompt_file).resolve(strict=True)
-        if prompt_path.is_symlink() or not prompt_path.is_file():
-            raise DesktopDevError("prompt file must be a regular non-symlink file")
-        prompt = prompt_path.read_text(encoding="utf-8").strip()
-        if not prompt:
-            raise DesktopDevError("prompt file must not be empty")
-
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(owner_home / ".cortex-dev"),
-            "CODEX_HOME": str(codex_home),
-            "CODEX_ELECTRON_USER_DATA_PATH": str(desktop_profile),
-            "CORTEX_BUILD_ID": str(identity["build_id"]),
-            "CORTEX_SOURCE_DIGEST": str(identity["source_digest"]),
-            "CORTEX_CANDIDATE_PATH": str(identity["candidate_path"]),
-            "CORTEX_CANDIDATE_RECEIPT": str(codex_home / ".cortex-candidate-receipt.json"),
-            "CORTEX_CANDIDATE_DIGEST": str(identity["candidate_digest"]),
-            "CORTEX_HOOK_DIAGNOSTIC": "1",
-            "CORTEX_RAW_DIAGNOSTIC": "1",
-        }
-    )
-    command = [str(_desktop_executable()), f"--user-data-dir={desktop_profile}"]
-    if prompt is None:
-        command.extend(["--open-project", str(workdir)])
-    else:
-        query = urllib.parse.urlencode({"path": str(workdir), "prompt": prompt})
-        command.append(f"codex://threads/new?{query}")
-    with LOG_PATH.open("ab", buffering=0) as log:
-        process = subprocess.Popen(
-            command,
-            cwd=workdir,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    start_token = _process_start(process.pid)
-    if start_token is None:
-        raise DesktopDevError("Codex Desktop exited before its process identity was recorded")
-    _write_state(
-        {
-            "pid": process.pid,
-            "process_start": start_token,
-            "workdir": str(workdir),
-            "codex_home": str(codex_home),
-            "desktop_profile": str(desktop_profile),
-            "candidate_version": str(identity["candidate_version"]),
-            "model": args.model,
-            "reasoning_effort": args.reasoning_effort,
-            "prompt_supplied": prompt is not None,
-        }
-    )
-    time.sleep(3)
-    if not _state_is_active(_read_state() or {}):
-        raise DesktopDevError("Codex Desktop did not remain active")
-    print(f"Cortex Desktop live-dev pid={process.pid}")
-    print(f"Cortex Desktop candidate version={identity['candidate_version']}")
-    print(f"Cortex Desktop workdir={workdir}")
-    print("Cortex Desktop stable profile untouched=yes")
-    return 0
-
-
-def status(_: argparse.Namespace) -> int:
-    state = _read_state()
-    if state is None or not _state_is_active(state):
-        print("Cortex Desktop live-dev active=no")
-        return 1
-    pid = int(state["pid"])
-    commands = _descendant_commands(pid)
-    app_server = any(" app-server" in command and "/resources/codex" in command for command in commands)
-    print("Cortex Desktop live-dev active=yes")
-    print(f"Cortex Desktop live-dev pid={pid}")
-    print(f"Cortex Desktop app-server active={'yes' if app_server else 'no'}")
-    print(f"Cortex Desktop candidate version={state['candidate_version']}")
-    print(f"Cortex Desktop workdir={state['workdir']}")
-    return 0 if app_server else 2
-
-
-def stop(_: argparse.Namespace) -> int:
-    state = _read_state()
-    if state is None:
-        print("Cortex Desktop live-dev active=no")
-        return 0
-    if not _state_is_active(state):
-        STATE_PATH.unlink(missing_ok=True)
-        print("Cortex Desktop live-dev stale state removed=yes")
-        return 0
-    pid = int(state["pid"])
-    if os.getpgid(pid) != pid:
-        raise DesktopDevError("refusing to stop a process outside the dedicated Desktop process group")
-    os.killpg(pid, signal.SIGTERM)
-    for _ in range(100):
-        if not _state_is_active(state):
-            break
-        time.sleep(0.1)
-    if _state_is_active(state):
-        raise DesktopDevError("Codex Desktop did not exit after SIGTERM; no forced kill was sent")
-    STATE_PATH.unlink(missing_ok=True)
-    print("Cortex Desktop live-dev stopped=yes")
-    return 0
-
-
-def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description=__doc__)
-    commands = result.add_subparsers(dest="command", required=True)
-    start_parser = commands.add_parser("start", help="prepare the candidate and launch actual Codex Desktop")
-    start_parser.add_argument("--workdir", required=True)
-    start_parser.add_argument("--prompt-file")
-    start_parser.add_argument("--model", choices=("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"))
-    start_parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max"))
-    start_parser.set_defaults(handler=start)
-    status_parser = commands.add_parser("status", help="report the exact isolated Desktop process")
-    status_parser.set_defaults(handler=status)
-    stop_parser = commands.add_parser("stop", help="stop only the isolated Desktop process group")
-    stop_parser.set_defaults(handler=stop)
+def safe_call_metadata(tool,arguments):
+    """Expose only bounded routing fields needed to audit native delegation."""
+    if tool!='spawn_agent':return {}
+    try:value=json.loads(arguments)
+    except (TypeError,ValueError):return {}
+    if not isinstance(value,dict):return {}
+    allowed=('task_name','agent_type','model','reasoning_effort','fork_turns')
+    result={key:value[key] for key in allowed if isinstance(value.get(key),str)}
+    profile=assigned_worker_profile(str(value.get('message','')))
+    if profile:result['assigned_profile']=profile
     return result
 
 
-def main() -> int:
+def native_agent_result_metadata(payload):
+    """Extract only lifecycle status and short report IDs from a native handoff."""
+    if not isinstance(payload,dict) or payload.get('type')!='agent_message':return None
+    content=payload.get('content') or []
+    rendered='\n'.join(str(part.get('text','')) for part in content if isinstance(part,dict))
+    if not rendered.startswith('Message Type: FINAL_ANSWER\n'):return None
+    report_ids=sorted(set(re.findall(r'(?<![0-9a-f])r_[0-9a-f]{12}(?![0-9a-f])',rendered)))
+    failed='Agent errored:' in rendered or "agent's turn failed" in rendered
+    result=dict(agent_path=payload.get('author'),outcome='error' if failed else 'success')
+    if len(report_ids)==1:result['report_id']=report_ids[0]
+    elif report_ids:result['report_ids']=report_ids
+    if failed:
+        result['error_code']=('agent_model_capacity' if 'model is at capacity' in rendered.lower()
+                              else 'native_agent_error')
+    return result
+
+
+def command_intent_digest(arguments):
+    """Correlate a retried command with the last command in a simple shell chain."""
+    match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*(["\'])(.*?)\1',arguments,re.S)
+    if not match:return None
+    return raw_command_intent_digest(match.group(2))
+
+
+def raw_command_intent_digest(command):
+    """Identify the command capability while discarding ports and loopback spelling."""
+    command=command.strip()
+    if re.search(r'(?:^|\s)python3\s+-m\s+http\.server(?:\s|$)',command):
+        command='python3 -m http.server'
+    elif re.search(r'(?:^|\s)curl(?:\s|$)',command):
+        urls=re.findall(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?([^\s"\']*)',command)
+        if urls:command='curl '+(urls[0] or '/')
+    segments=[part.strip() for part in re.split(r'\s*(?:&&|;)\s*',command) if part.strip()]
+    if not segments:return None
+    return hashlib.sha256(segments[-1].encode()).hexdigest()[:12]
+
+
+def browser_call_metadata(arguments):
+    """Expose only the browser resource decision needed by the live policy audit."""
+    action=None
+    if 'createBrowserTab' in arguments:action='create_tab'
+    elif re.search(r'\bcua\.getTab\s*\(|\.tabs\.get\s*\(',arguments):action='attach_tab'
+    elif re.search(r'\bcua\.getState\s*\(',arguments):action='inventory'
+    if not action:return {}
+    match=re.search(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?',arguments)
+    origin=match.group(0).replace('127.0.0.1','localhost').replace('0.0.0.0','localhost') if match else None
+    result={'browser_action':action}
+    if origin:result['browser_origin']=origin
+    return result
+
+
+def local_http_origin(source):
+    """Return a normalized loopback origin without retaining a full command."""
+    match=re.search(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?',source)
+    if not match:return None
+    return match.group(0).replace('127.0.0.1','localhost').replace('0.0.0.0','localhost')
+
+
+def browser_mutation_count(arguments):
+    """Count explicit state-changing browser operations in a CUA request."""
+    patterns=(r'\.click\s*\(',r'\.fill\s*\(',r'\.setValue\s*\(',r'\.check\s*\(',
+              r'\.uncheck\s*\(',r'\.setChecked\s*\(',r'\.press\s*\(',
+              r'\.navigate\s*\(',r'\.goto\s*\(',r'\.setViewportSize\s*\(')
+    return sum(len(re.findall(pattern,arguments)) for pattern in patterns)
+
+
+def draft_call_metadata(tool,arguments):
+    """Mark edits to Cortex-owned draft documents without retaining their paths."""
+    normalized=arguments.replace('\\\\','/')
+    if tool=='apply_patch' and re.search(r'(?:^|[\s/])\.cortex/(?:draft-reports|pipeline-drafts)/',normalized):
+        return {'cortex_draft_edit':True}
+    return {}
+
+
+def observed_session_ids(raw):
+    if isinstance(raw,list):
+        rendered='\n'.join(str(item.get('text','')) if isinstance(item,dict) else str(item) for item in raw)
+    else:rendered=str(raw)
+    return sorted({int(value) for value in re.findall(r'\\?"session_id\\?"\s*:\s*([0-9]+)',rendered)})
+
+
+def call_policy_flags(tool,arguments,role,workdir):
+    flags=[];normalized=arguments.replace('\\\\','/')
+    if ('/.codex/plugins/' in normalized or '/plugins/cache/' in normalized) and not worker_skill_read(tool,arguments):
+        flags.append('forbidden_plugin_or_cache_access')
+    if tool=='apply_patch' and 'Delete File' in arguments and '/.cortex/' in normalized:
+        flags.append('forbidden_cortex_draft_deletion')
+    if (tool=='apply_patch' and '/.cortex/' in normalized
+            and re.search(r'tools\.apply_patch\s*\(\s*(?:String\.raw\s*)?`',arguments)):
+        flags.append('unsafe_cortex_draft_template_literal')
+    verification_roles={'accessibility_auditor','build_verification','code_reviewer','qa_engineer'}
+    if (tool=='exec_command' and role in verification_roles
+            and re.search(r'(?<![A-Za-z0-9_.-])(?:ps\s+-e|pgrep\b|lsof\b|netstat\b|ss\s+-)',arguments)):
+        flags.append('forbidden_global_process_probe')
+    if (tool=='exec_command' and '.git/HEAD' in arguments and re.search(r'\bopen\s*\(',arguments)
+            and not re.search(r'(?:is_file|isfile)\s*\(',arguments)):
+        flags.append('unguarded_optional_git_marker_read')
+    if (tool=='exec_command' and re.search(r'(?<![A-Za-z0-9_.-])git(?=\s|["\'])',arguments)
+            and not (Path(workdir)/'.git').exists()):
+        flags.append('git_command_without_git_workspace')
+    if (tool=='exec_command'
+            and re.search(r'(?:npm\s+run\s+(?:build|lint|typecheck)|\b(?:tsc|eslint|mypy|pyright)\b)',arguments)):
+        cap=re.search(r'(?:["\']max_output_tokens["\']|\bmax_output_tokens)\s*:\s*([0-9]+)',arguments)
+        if cap is None or int(cap.group(1))<16000:
+            flags.append('insufficient_diagnostic_output_budget')
+    if role=='coordinator':
+        native_coordination={'spawn_agent','wait_agent','send_message','followup_task',
+                             'list_agents','interrupt_agent','tool_catalogue_search'}
+        pipeline_edit=tool=='apply_patch' and '/.cortex/pipeline-drafts/' in normalized
+        standard_skill=tool.startswith('skills__') or tool in {'skills_read','skills_list'}
+        if tool not in native_coordination and not pipeline_edit and not standard_skill:
+            flags.append('coordinator_forbidden_tool')
+    return flags
+
+
+def observed_tool_calls(state):
+    """Return argument-free call metadata plus the observed wrapper outcome."""
+    database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
+    if not database.is_file():return []
+    connection=sqlite3.connect(f'file:{database}?mode=ro',uri=True)
+    connection.row_factory=sqlite3.Row
     try:
-        args = parser().parse_args()
-        return int(args.handler(args))
-    except (DesktopDevError, OSError, subprocess.CalledProcessError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        threads=connection.execute(
+            'SELECT id,rollout_path,agent_role,model,reasoning_effort,created_at '
+            'FROM threads WHERE cwd=? AND created_at>=? ORDER BY created_at,id',
+            (state['workdir'],int(state.get('thread_created_since',state.get('started_at',0)))-2),
+        ).fetchall()
+        edges={row['child_thread_id']:row['parent_thread_id'] for row in connection.execute(
+            'SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges'
+        )}
+    finally:connection.close()
+    calls=[];cortex_calls={};agent_paths={}
+    pending={}
+    pending_arguments={}
+    thread_details={row['id']:dict(row) for row in threads}
+    for row in thread_details.values():
+        if row['id'] not in edges:continue
+        row['agent_role']=row['agent_role'] or 'worker'
+        path=Path(row['rollout_path'])
+        if not path.is_file():continue
+        with path.open(encoding='utf-8') as source:
+            for line in source:
+                try:payload=json.loads(line).get('payload',{})
+                except ValueError:continue
+                if payload.get('type') in {'custom_tool_call','function_call'}:
+                    match=re.search(r'/skills/worker-([a-z-]+)/SKILL.md',str(payload.get('input') or payload.get('arguments') or ''))
+                    if match:
+                        profile=assigned_worker_profile('$cortex:worker-'+match.group(1))
+                        if profile:row['agent_role']=profile;break
+                if (payload.get('type')=='message' and payload.get('role')=='user') or payload.get('type')=='agent_message':
+                    profile=assigned_worker_profile(json.dumps(payload.get('content',[])))
+                    if profile:row['agent_role']=profile;break
+    threads=list(thread_details.values())
+    for thread in threads:
+        request_digests={state.get('original_request_sha256')}
+        path=Path(thread['rollout_path'])
+        if not path.is_file():continue
+        with path.open(encoding='utf-8') as source:
+            for line in source:
+                try:entry=json.loads(line)
+                except ValueError:continue
+                if state.get('resumed'):
+                    observed_at=datetime.fromisoformat(entry['timestamp'].replace('Z','+00:00')).timestamp()
+                    if observed_at<state['started_at']:continue
+                payload=entry.get('payload',{})
+                if not isinstance(payload,dict):continue
+                if (thread['id']==state.get('thread_id') and payload.get('type')=='message'
+                        and payload.get('role')=='user' and state.get('desktop_editor_source_sha256')):
+                    delivered='\n'.join(part.get('text','') for part in payload.get('content',[]) if isinstance(part,dict))
+                    request_digests.update(delivered_request_digests(state,delivered))
+                item=payload.get('item') if payload.get('type')=='item_completed' else None
+                if (entry.get('type')=='event_msg' and isinstance(item,dict)
+                        and item.get('type')=='UserMessage'
+                        and payload.get('thread_id')==thread['id']
+                        and not edges.get(thread['id'])):
+                    calls.append(dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
+                                      parent_thread_id=None,role='coordinator',tool='native_user_input',
+                                      outcome='success',argument_digest=None))
+                if (isinstance(item,dict) and item.get('type')=='SubAgentActivity'
+                        and item.get('kind')=='started' and item.get('agent_path')
+                        and item.get('agent_thread_id')):
+                    agent_paths[item['agent_path']]=item['agent_thread_id']
+                if payload.get('type')=='agent_message':
+                    result=native_agent_result_metadata(payload)
+                    if result is not None:
+                        author=result.get('agent_path')
+                        child=agent_paths.get(author)
+                        detail=thread_details.get(child)
+                        lifecycle=dict(timestamp=entry.get('timestamp'),
+                                       thread_id=child or thread['id'],
+                                       parent_thread_id=thread['id'] if child else edges.get(thread['id']),
+                                       role=(detail['agent_role'] if detail else None) or 'worker',
+                                       model=detail['model'] if detail else None,
+                                       reasoning_effort=detail['reasoning_effort'] if detail else None,
+                                       tool='native_agent_result',
+                                       argument_digest=hashlib.sha256(str(author).encode()).hexdigest()[:12],
+                                       outcome=result['outcome'],agent_path=author)
+                        for key in ('report_id','report_ids','error_code'):
+                            if key in result:lifecycle[key]=result[key]
+                        calls.append(lifecycle)
+                receipt=mcp_receipt_metadata(item)
+                if receipt is not None:
+                    arguments=item.get('arguments') or {}
+                    encoded=json.dumps(arguments,sort_keys=True,separators=(',',':'))
+                    row=next((candidate for candidate in reversed(calls)
+                              if candidate.get('thread_id')==thread['id']
+                              and (candidate.get('tool')==receipt['tool']
+                                   or (candidate.get('tool_namespace','')+'__'+candidate.get('tool',''))==receipt['tool'])
+                              and not candidate.get('host_receipt_observed')),None)
+                    if row is None:
+                        row=dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
+                                 parent_thread_id=edges.get(thread['id']),
+                                 role=thread['agent_role'] or 'coordinator',model=thread['model'],
+                                 reasoning_effort=thread['reasoning_effort'],tool=receipt['tool'],
+                                 argument_digest=hashlib.sha256(encoded.encode()).hexdigest()[:12])
+                        calls.append(row)
+                        if row['tool'].startswith('mcp__cortex__'):
+                            row['server_observed']=False
+                            cortex_calls.setdefault((thread['id'],row['tool'].rsplit('__',1)[-1]),[]).append(row)
+                    receipt_tool=receipt['tool']
+                    row.update({key:value for key,value in receipt.items() if key!='tool'})
+                    if row.get('tool') is None:row['tool']=receipt_tool
+                    if receipt['tool']=='mcp__cortex__create_task' and state.get('original_request_sha256'):
+                        result=item.get('result') or {}
+                        captured=(result.get('structuredContent') or {}).get('original_request_sha256')
+                        # Historical observations used model-authored request bodies.
+                        original=arguments.get('request')
+                        source_digest=captured or (original_request_digest(original) if isinstance(original,str) else None)
+                        row['original_request_preserved']=source_digest in request_digests
+                        if row['original_request_preserved'] and source_digest!=state['original_request_sha256']:
+                            row['desktop_editor_formatting_observed']=True
+                    row['host_receipt_observed']=True
+                    if row.get('outcome') in {None,'pending'}:row['outcome']=receipt['host_receipt_outcome']
+                    if receipt.get('host_error_code'):row['error_code']=receipt['host_error_code']
+                if isinstance(item,dict) and item.get('type')=='CommandExecution':
+                    command=item.get('command') or []
+                    rendered=' '.join(command) if isinstance(command,list) else str(command)
+                    intent_source=(command[-1] if isinstance(command,list) and len(command)>=3
+                                   and command[-2] in {'-c','-lc'} else rendered)
+                    exit_code=item.get('exit_code')
+                    status=item.get('status')
+                    command_output=(item.get('aggregated_output') or '')+'\n'+(item.get('stderr') or '')
+                    # CommandExecution already carries an authoritative status and
+                    # exit code. Successful output may quote source text containing
+                    # diagnostic words, so output is only a fallback when there is
+                    # no exit code.
+                    outcome,error_code=command_execution_outcome(status,exit_code,command_output)
+                    row=dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
+                             parent_thread_id=edges.get(thread['id']),role=thread['agent_role'] or 'coordinator',
+                             model=thread['model'],reasoning_effort=thread['reasoning_effort'],
+                             tool='command_execution',argument_digest=hashlib.sha256(rendered.encode()).hexdigest()[:12],
+                             intent_digest=raw_command_intent_digest(intent_source),outcome=outcome,
+                             source='host_command_execution')
+                    family=raw_command_family(intent_source)
+                    if family:row['command_family']=family
+                    origin=local_http_origin(intent_source)
+                    if origin:row['local_http_origin']=origin
+                    if isinstance(exit_code,int):row['exit_code']=exit_code
+                    if error_code:row['error_code']=error_code
+                    calls.append(row)
+                if payload.get('type') in {'function_call','custom_tool_call'}:
+                    arguments=payload.get('arguments') or payload.get('input') or ''
+                    if not isinstance(arguments,str):arguments=json.dumps(arguments,sort_keys=True,separators=(',',':'))
+                    digest=hashlib.sha256(arguments.encode()).hexdigest()[:12]
+                    common=dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
+                                parent_thread_id=edges.get(thread['id']),role=thread['agent_role'] or 'coordinator',
+                                model=thread['model'],reasoning_effort=thread['reasoning_effort'])
+                    selected=[];nested=nested_tool_invocations(arguments) if payload.get('type')=='custom_tool_call' else []
+                    if payload.get('type')=='custom_tool_call':
+                        wrapper=dict(common,tool='functions.exec',argument_digest=digest,outcome='pending')
+                        calls.append(wrapper);selected.append(wrapper)
+                    for name,nested_digest,nested_arguments in nested:
+                        if name.startswith('mcp__cortex__'):
+                            row=dict(common,tool=name,argument_digest=nested_digest,
+                                     wrapper_argument_digest=digest,outcome='pending',nested=True,
+                                     server_observed=False)
+                            calls.append(row);selected.append(row)
+                            cortex_calls.setdefault((thread['id'],name.rsplit('__',1)[-1]),[]).append(row)
+                            continue
+                        row=dict(common,tool=name,argument_digest=nested_digest,
+                                 wrapper_argument_digest=digest,outcome='pending',nested=True)
+                        row.update(draft_call_metadata(name,arguments))
+                        if name=='js':
+                            row.update(browser_call_metadata(nested_arguments))
+                            row['browser_mutations']=browser_mutation_count(nested_arguments)
+                        if name=='exec_command':
+                            intent=command_intent_digest(nested_arguments)
+                            if intent:row['intent_digest']=intent
+                        instruction_read=worker_skill_read(name,nested_arguments)
+                        flags=call_policy_flags(name,nested_arguments if instruction_read else arguments,common['role'],state['workdir'])
+                        if instruction_read:row['skill_instruction_read']=True
+                        if flags:row['policy_flags']=flags
+                        calls.append(row);selected.append(row)
+                    if not nested and payload.get('type')=='function_call':
+                        row=dict(common,tool=payload.get('name','unknown'),argument_digest=digest,outcome='pending')
+                        if payload.get('namespace'):row['tool_namespace']=payload['namespace']
+                        row.update(safe_call_metadata(row['tool'],arguments))
+                        row.update(draft_call_metadata(row['tool'],arguments))
+                        if row['tool']=='js':
+                            row.update(browser_call_metadata(arguments))
+                            row['browser_mutations']=browser_mutation_count(arguments)
+                        flags=call_policy_flags(row['tool'],arguments,common['role'],state['workdir'])
+                        if worker_skill_read(row['tool'],arguments):row['skill_instruction_read']=True
+                        if flags:row['policy_flags']=flags
+                        calls.append(row);selected.append(row)
+                        if row['tool'].startswith('mcp__cortex__'):
+                            row['server_observed']=False
+                            cortex_calls.setdefault((thread['id'],row['tool'].rsplit('__',1)[-1]),[]).append(row)
+                    if 'ALL_TOOLS' in arguments:
+                        row=dict(common,tool='tool_catalogue_search',argument_digest=digest,outcome='pending',nested=True)
+                        calls.append(row);selected.append(row)
+                    pending[payload.get('call_id')]=selected
+                    pending_arguments[payload.get('call_id')]=arguments
+                elif payload.get('type') in {'function_call_output','custom_tool_call_output'}:
+                    selected=pending.pop(payload.get('call_id'),[])
+                    arguments=pending_arguments.pop(payload.get('call_id'),'')
+                    nested_rows=[row for row in selected if row.get('nested') and row['tool']!='tool_catalogue_search']
+                    raw_output=payload.get('output','')
+                    rendered_output=('\n'.join(str(item.get('text','')) if isinstance(item,dict) else str(item)
+                                                for item in raw_output)
+                                     if isinstance(raw_output,list) else str(raw_output))
+                    wrapper_syntax_error=('Script error:' in rendered_output
+                                          and 'SyntaxError:' in rendered_output)
+                    cells=observed_cell_ids(payload.get('output',''))
+                    for row in selected:
+                        classify_tool=(nested_rows[0]['tool'] if row['tool']=='functions.exec' and len(nested_rows)==1
+                                       else row['tool'] if len(nested_rows)<=1 else 'functions.exec')
+                        outcome,code,result_digest=observed_outcome(payload.get('output',''),classify_tool,arguments)
+                        if row.get('host_receipt_outcome')=='error':
+                            outcome='error'
+                            code=row.get('host_error_code') or code
+                        if wrapper_syntax_error and row.get('nested'):
+                            row['outcome']='not_dispatched'
+                            row['completed_timestamp']=entry.get('timestamp')
+                            row['error_code']='wrapper_syntax_error'
+                            row['result_digest']=result_digest
+                            continue
+                        if cells and (row['tool']=='functions.exec' or row.get('nested')):
+                            row['cell_ids']=cells
+                        if cells and row.get('nested'):
+                            row['wrapper_outcome']=outcome
+                            outcome='covered_by_wrapper'
+                        elif (row['tool']=='functions.exec' and len(nested_rows)==1
+                              and not wrapper_syntax_error):
+                            row['wrapper_outcome']=outcome
+                            outcome='covered_by_nested'
+                        elif len(nested_rows)>1 and row.get('nested'):
+                            row['wrapper_outcome']=outcome
+                            outcome='covered_by_wrapper'
+                        row['outcome']=outcome
+                        row['completed_timestamp']=entry.get('timestamp')
+                        row['result_digest']=result_digest
+                        sessions=observed_session_ids(payload.get('output',''))
+                        if sessions:row['session_ids']=sessions
+                        if row['tool']=='write_stdin':
+                            requested=requested_identifiers(arguments,'session_id',numeric=True)
+                            if requested:row['requested_session_ids']=sorted(set(requested))
+                        if row['tool']=='wait':
+                            requested=requested_identifiers(arguments,'cell_id')
+                            if requested:row['requested_cell_ids']=sorted(set(requested))
+                        if code:row['error_code']=code
+    for event in observed_events(state['events']):
+        operation=event.get('operation','unknown')
+        thread_id=event.get('thread_id')
+        detail=thread_details.get(thread_id)
+        candidates=cortex_calls.get((thread_id,operation),[])
+        row=next((candidate for candidate in candidates if not candidate.get('server_observed')),None)
+        if row is None:
+            row=dict(timestamp_ns=event.get('time_ns',0),thread_id=thread_id,
+                     parent_thread_id=event.get('parent_thread_id'),
+                     role=(detail['agent_role'] or 'coordinator') if detail else 'runtime',
+                     model=detail['model'] if detail else None,
+                     reasoning_effort=detail['reasoning_effort'] if detail else None,
+                     tool='mcp__cortex__'+operation,argument_digest=None)
+            calls.append(row)
+        else:
+            row['host_outcome']=row.get('outcome')
+            row['timestamp_ns']=event.get('time_ns',0)
+        row['server_observed']=True
+        row['outcome']=event.get('outcome','unverified')
+        row['replayed']=bool(event.get('replayed'))
+        for key in ('document_kind','report_id','draft_id','page','template','requested_limit','summary_characters'):
+            if key in event:row[key]=event[key]
+        if event.get('error'):row['error_code']=event['error']
+    def order(row):
+        if row.get('timestamp_ns'):return row['timestamp_ns']
+        stamp=row.get('timestamp') or ''
+        try:return int(__import__('datetime').datetime.fromisoformat(stamp.replace('Z','+00:00')).timestamp()*1_000_000_000)
+        except ValueError:return 0
+    ordered=sorted(calls,key=order)
+    cell_intents={};session_intents={}
+    for row in ordered:
+        if row.get('tool')=='exec_command' and row.get('intent_digest'):
+            for cell_id in row.get('cell_ids',[]):
+                cell_intents[(row.get('thread_id'),cell_id)]=row['intent_digest']
+            for session_id in row.get('session_ids',[]):
+                session_intents[(row.get('thread_id'),session_id)]=row['intent_digest']
+        if row.get('tool')=='wait':
+            intents={cell_intents.get((row.get('thread_id'),cell_id))
+                     for cell_id in row.get('requested_cell_ids',[])}
+            intents.discard(None)
+            if len(intents)==1:
+                row['intent_digest']=intents.pop()
+                for session_id in row.get('session_ids',[]):
+                    session_intents[(row.get('thread_id'),session_id)]=row['intent_digest']
+        if row.get('tool')=='write_stdin':
+            intents={session_intents.get((row.get('thread_id'),session_id))
+                     for session_id in row.get('requested_session_ids',[])}
+            intents.discard(None)
+            if len(intents)==1:row['intent_digest']=intents.pop()
+    execution_times={}
+    for row in ordered:
+        if row.get('tool')=='command_execution':
+            execution_times.setdefault(row.get('thread_id'),[]).append(order(row))
+    for row in ordered:
+        if row.get('tool')!='exec_command' or not row.get('nested'):
+            continue
+        start=order(row)
+        end=order({'timestamp':row.get('completed_timestamp')}) if row.get('completed_timestamp') else start
+        covered=sum(start<=stamp<=end for stamp in execution_times.get(row.get('thread_id'),[]))
+        if covered:
+            row['covered_execution_count']=covered
+            row['wrapper_outcome']=row.get('outcome')
+            row['outcome']='covered_by_command_execution'
+    return ordered
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def open_command_sessions(rows):
+    opened=set();closed=set()
+    for row in rows:
+        if row.get('tool')=='exec_command' and row.get('outcome')=='running':
+            opened.update(row.get('session_ids',[]))
+        if row.get('tool')=='write_stdin' and row.get('outcome') in {'success','stopped','error'}:
+            closed.update(row.get('requested_session_ids',[]))
+    return sorted(opened-closed)
+
+
+def open_exec_cells(rows):
+    opened=set();closed=set()
+    for row in rows:
+        if row.get('tool')=='functions.exec' and row.get('outcome')=='running':
+            opened.update(row.get('cell_ids',[]))
+        if row.get('tool')=='wait' and row.get('outcome') in {'success','stopped','error'}:
+            closed.update(row.get('requested_cell_ids',[]))
+    return sorted(opened-closed)
+
+
+def classify_host_failures(rows):
+    """Keep every failure visible while recognizing explicit later corrections."""
+    terminal_sessions=set();terminal_intents=set()
+    wrapper_error_intents={}
+    for row in rows:
+        if row.get('tool')=='write_stdin' and row.get('outcome') in {'success','stopped'}:
+            terminal_sessions.update(row.get('requested_session_ids',[]))
+            if row.get('intent_digest'):
+                terminal_intents.add((row.get('parent_thread_id') or row.get('thread_id'),row['intent_digest']))
+        receipt_outcome=(row.get('wrapper_outcome')
+                         if row.get('wrapper_outcome') in {'error','truncated','unverified','pending'}
+                         else row.get('outcome'))
+        if (row.get('result_digest') and row.get('intent_digest')
+                and receipt_outcome=='error'):
+            wrapper_error_intents[(row.get('thread_id'),row['result_digest'])]=row['intent_digest']
+    later_success=set();later_family_success=set();later_tool_success=set();unresolved=[];resolved=[]
+    for row in reversed(rows):
+        effective_outcome=row.get('outcome')
+        # Covered wrapper rows remain useful for correlation, but their own transport
+        # status must never disappear.  A nested call or host command succeeding does
+        # not make a truncated/error wrapper response complete for the model.
+        wrapper_outcome=row.get('wrapper_outcome')
+        if wrapper_outcome in {'error','truncated','unverified','pending'}:
+            effective_outcome=wrapper_outcome
+        elif effective_outcome in {'covered_by_nested','covered_by_wrapper','covered_by_command_execution'}:
+            continue
+        digest=row.get('intent_digest') if row.get('tool') in {'exec_command','command_execution','write_stdin','wait'} else None
+        if (not digest and row.get('tool')=='functions.exec'
+                and effective_outcome=='error'):
+            digest=wrapper_error_intents.get((row.get('thread_id'),row.get('result_digest')))
+        family='command' if digest else row.get('tool')
+        task_thread=row.get('parent_thread_id') or row.get('thread_id')
+        key=(task_thread,family,digest or row.get('argument_digest'))
+        family_key=(row.get('thread_id'),row.get('command_family')) if row.get('command_family') else None
+        if effective_outcome in {'success','stopped'}:
+            later_success.add(key)
+            if family_key:later_family_success.add(family_key)
+            if (isinstance(row.get('tool'),str)
+                    and (row['tool'].startswith('mcp__')
+                         or str(row.get('tool_namespace','')).startswith('mcp__'))):
+                later_tool_success.add((row.get('thread_id'),row['tool']))
+        elif (row.get('tool')=='exec_command' and effective_outcome=='running'
+              and terminal_sessions.intersection(row.get('session_ids',[]))):
+            later_success.add(key)
+        elif effective_outcome in {'error','truncated','unverified','pending'}:
+            failure_row=dict(row)
+            if effective_outcome!=row.get('outcome'):
+                failure_row['effective_outcome']=effective_outcome
+            intentionally_stopped=(family=='command' and (task_thread,digest) in terminal_intents)
+            corrected_family=family_key in later_family_success if family_key else False
+            corrected_tool=(row.get('thread_id'),row.get('tool')) in later_tool_success
+            if key in later_success or intentionally_stopped or corrected_family or corrected_tool:
+                reason=('later_exact_success' if key in later_success else
+                        'later_command_family_success' if corrected_family else
+                        'later_same_tool_success' if corrected_tool else 'intentional_stop')
+                resolved.append(dict(failure_row,resolution=reason))
+            else:unresolved.append(failure_row)
+    return list(reversed(unresolved)),list(reversed(resolved))
+
+
+def tool_error_history(rows):
+    """Keep a safe, chronological record of every observed tool error."""
+    _,resolved=classify_host_failures(rows)
+    intentional_stops={
+        (row.get('timestamp'),row.get('thread_id'),row.get('tool'),row.get('argument_digest'))
+        for row in resolved if row.get('resolution')=='intentional_stop'
+    }
+    history=[]
+    for row in rows:
+        outcome=row.get('wrapper_outcome') if row.get('wrapper_outcome')=='error' else row.get('outcome')
+        if outcome!='error':continue
+        identity=(row.get('timestamp'),row.get('thread_id'),row.get('tool'),row.get('argument_digest'))
+        if identity in intentional_stops:continue
+        history.append({key:row.get(key) for key in (
+            'timestamp','timestamp_ns','thread_id','parent_thread_id','role','tool',
+            'error_code','argument_digest','result_digest','host_status',
+        ) if row.get(key) is not None})
+    return history
+
+
+COORDINATION_TOOLS={'spawn_agent','wait_agent','send_message','followup_task',
+                    'list_agents','interrupt_agent'}
+
+
+def is_orchestration_call(row):
+    """Separate Cortex coordination from the delegated project's own tooling."""
+    tool=str(row.get('tool',''))
+    if row.get('role')=='coordinator':return True
+    return (tool.startswith('mcp__cortex__') or tool in {'tool_catalogue_search','native_agent_result'}
+            or tool in COORDINATION_TOOLS or bool(row.get('cortex_draft_edit'))
+            or bool(row.get('skill_instruction_read')))
+
+
+def orchestration_error_history(rows):
+    """Return real tool errors that belong to orchestration itself."""
+    orchestration_ids={
+        (row.get('timestamp'),row.get('thread_id'),row.get('tool'),row.get('argument_digest'))
+        for row in rows if is_orchestration_call(row)
+    }
+    return [row for row in tool_error_history(rows)
+            if (row.get('timestamp'),row.get('thread_id'),row.get('tool'),row.get('argument_digest'))
+            in orchestration_ids]
+
+
+def orchestration_policy_violations(violations):
+    """Keep policy findings about delegation, reports, pipeline and Cortex state."""
+    prefixes=('coordinator_','worker_report_','worker_pipeline_','worker_final_',
+              'duplicate_unchanged_',
+              'cortex_','mcp_','draft_','summary_','complex_planning_')
+    exact={'forbidden_plugin_or_cache_access','forbidden_cortex_draft_deletion',
+           'unsafe_cortex_draft_template_literal','worker_project_tool_before_cortex_bootstrap',
+           'worker_tool_after_successful_write_report','worker_draft_created_with_open_command_session',
+           'worker_report_published_with_open_command_session'}
+    return [row for row in violations
+            if row.get('violation') in exact or str(row.get('violation','')).startswith(prefixes)]
+
+
+def call_policy_violations(rows):
+    profile_templates={
+        'accessibility_auditor':'verification','accessibility_fixer':'implementation',
+        'architect':'planning','backend_dev':'implementation',
+        'build_verification':'verification','code_reviewer':'verification',
+        'data_engineer':'implementation','database_architect':'planning',
+        'debugger':'investigation','devops_engineer':'implementation',
+        'explorer':'investigation','frontend_dev':'implementation',
+        'fullstack_dev':'implementation','general':'general','mobile_dev':'implementation',
+        'performance_engineer':'verification','planner':'planning',
+        'qa_engineer':'verification','refactorer':'implementation',
+        'security_auditor':'verification','technical_writer':'documentation',
+        'ux_designer':'planning',
+    }
+    mutating_profiles={'accessibility_fixer','backend_dev','data_engineer','devops_engineer',
+                       'frontend_dev','fullstack_dev','mobile_dev','refactorer'}
+    violations=[];clarification_parents=set();published=set();published_reports=set();bootstrap={};generation=0;last_catalogue={};last_document={};active_sessions={};active_cells={};browser_state={};coordinator_waited=set();active_mutation_owners=set()
+    for row in rows:
+        flags=list(row.get('policy_flags',[]))
+        thread=row.get('thread_id')
+        role=row.get('role')
+        tool=row.get('tool')
+        if tool=='native_user_input' and role=='coordinator':
+            coordinator_waited.discard(thread)
+            generation+=1
+        if tool=='native_agent_result' and not row.get('report_id') and row.get('parent_thread_id'):
+            clarification_parents.add(row['parent_thread_id'])
+        if row.get('original_request_preserved') is False:
+            flags.append('coordinator_original_request_changed')
+        state=bootstrap.setdefault(thread,dict(catalogue=False,reports=False,pipeline=False))
+        if role=='coordinator' and row.get('outcome')=='success':
+            if tool=='mcp__cortex__create_task':state['needs_initial_pipeline']=True
+            elif tool=='mcp__cortex__write_report':state['needs_initial_pipeline']=False
+        if role=='coordinator' and tool=='spawn_agent' and state.get('needs_initial_pipeline'):
+            flags.append('coordinator_delegation_before_pipeline_publication')
+        sessions=active_sessions.setdefault(thread,set())
+        cells=active_cells.setdefault(thread,set())
+        browser=browser_state.setdefault(thread,dict(create_attempts=0,origin=None,ready_origins=set()))
+        if cells and tool!='wait' and not row.get('nested'):
+            flags.append('tool_called_before_exec_cell_terminal')
+        if tool=='functions.exec' and row.get('outcome')=='running':
+            cells.update(row.get('cell_ids',[]))
+        if tool=='wait' and row.get('outcome') in {'success','stopped','error'}:
+            cells.difference_update(row.get('requested_cell_ids',[]))
+        if tool=='exec_command' and row.get('outcome')=='running':
+            sessions.update(row.get('session_ids',[]))
+        if tool=='write_stdin' and row.get('outcome') in {'success','stopped','error'}:
+            sessions.difference_update(row.get('requested_session_ids',[]))
+        if (role not in {'coordinator','runtime'} and tool=='command_execution'
+                and row.get('outcome')=='success' and row.get('command_family')=='curl'
+                and row.get('local_http_origin')):
+            browser['ready_origins'].add(row['local_http_origin'])
+        if role not in {'coordinator','runtime'} and tool=='js':
+            action=row.get('browser_action')
+            if not browser['ready_origins']:flags.append('browser_before_local_url_ready')
+            if row.get('browser_mutations',0)>1:flags.append('batched_browser_mutations')
+            if action=='attach_tab':flags.append('forbidden_browser_tab_attachment')
+            if action=='create_tab':
+                browser['create_attempts']+=1
+                if browser['create_attempts']>1:flags.append('repeated_browser_tab_creation')
+                origin=row.get('browser_origin')
+                if browser['origin'] and origin and browser['origin']!=origin:
+                    flags.append('browser_origin_switch')
+                if origin and browser['origin'] is None:browser['origin']=origin
+                if origin and origin not in browser['ready_origins']:
+                    flags.append('browser_origin_not_http_verified')
+        if role=='coordinator':
+            if tool=='spawn_agent':
+                coordinator_waited.discard(thread)
+                profile=row.get('assigned_profile') or row.get('agent_type')
+                owner=(thread,profile)
+                if row.get('outcome')=='success' and profile in mutating_profiles:
+                    if owner in active_mutation_owners:
+                        flags.append('coordinator_duplicate_active_mutation_owner')
+                    active_mutation_owners.add(owner)
+                if (row.get('outcome')=='success'
+                        and profile in {'planner','architect','database_architect'}
+                        and row.get('model')!='gpt-5.6-terra'):
+                    flags.append('complex_planning_without_terra')
+            elif tool=='wait_agent':coordinator_waited.add(thread)
+            elif tool=='list_agents' and thread in coordinator_waited:
+                flags.append('coordinator_status_probe_after_wait')
+            elif tool in {'send_message','followup_task'} and thread in coordinator_waited:
+                if thread in clarification_parents:clarification_parents.remove(thread)
+                else:flags.append('coordinator_unsolicited_message_after_wait')
+        if tool=='mcp__cortex__create_draft' and row.get('outcome')=='success':
+            expected_template='pipeline' if role=='coordinator' else profile_templates.get(role)
+            if expected_template and row.get('template')!=expected_template:
+                flags.append('draft_template_profile_mismatch')
+        if (tool=='mcp__cortex__write_report' and row.get('outcome')=='success'
+                and row.get('summary_characters',0)>140):
+            flags.append('summary_exceeds_operating_target')
+        if tool=='tool_catalogue_search' and row.get('outcome')=='success':state['catalogue']=True
+        if tool=='mcp__cortex__list_reports' and row.get('outcome')=='success':
+            state['reports']=True
+            if role not in {'coordinator','runtime'}:
+                flags.append('worker_report_catalogue_in_fresh_thread')
+                if last_catalogue.get(thread)==generation:
+                    flags.append('duplicate_unchanged_report_catalogue')
+            last_catalogue[thread]=generation
+        if tool=='mcp__cortex__read_report' and row.get('outcome')=='success':
+            if row.get('document_kind')=='pipeline':
+                state['pipeline']=True
+                if role not in {'coordinator','runtime'}:
+                    flags.append('worker_pipeline_read_in_fresh_thread')
+            key=(thread,row.get('report_id') or 'pipeline',row.get('page'))
+            if row.get('page')=='start' and last_document.get(key)==generation:
+                flags.append('duplicate_unchanged_document_start')
+            last_document[key]=generation
+        project_tools={'exec_command','write_stdin','apply_patch','view_image','js'}
+        if (role not in {'coordinator','runtime'} and tool in project_tools
+                and not row.get('skill_instruction_read') and not state['catalogue']):
+            flags.append('worker_project_tool_before_cortex_bootstrap')
+        if (row.get('role')=='coordinator' and row.get('tool')=='mcp__cortex__read_report'
+                and row.get('document_kind') not in {None,'pipeline'}):
+            flags.append('coordinator_report_body_read')
+        if (row.get('role')!='runtime' and row.get('tool')=='mcp__cortex__read_report'
+                and row.get('requested_limit',0)>4000):
+            flags.append('oversized_report_page')
+        if (thread in published and row.get('role') not in {'coordinator','runtime'}
+                and row.get('tool') not in {'functions.exec','native_agent_result'}):
+            flags.append('worker_tool_after_successful_write_report')
+        if (role not in {'coordinator','runtime'} and sessions
+                and tool=='mcp__cortex__create_draft'):
+            flags.append('worker_draft_created_with_open_command_session')
+        if (role not in {'coordinator','runtime'} and sessions
+                and tool=='mcp__cortex__write_report'):
+            flags.append('worker_report_published_with_open_command_session')
+        if tool.startswith('mcp__cortex__') and not row.get('server_observed',True):
+            flags.append('cortex_call_missing_server_event')
+        if ((tool.startswith('mcp__') or str(row.get('tool_namespace','')).startswith('mcp__'))
+                and row.get('outcome')=='error'):
+            flags.append('mcp_tool_error_observed')
+        if ((tool.startswith('mcp__') or str(row.get('tool_namespace','')).startswith('mcp__'))
+                and role not in {'runtime',None}
+                and row.get('argument_digest') is not None
+                and not row.get('host_receipt_observed')):
+            flags.append('mcp_call_missing_host_receipt')
+        if tool=='native_agent_result' and row.get('outcome')=='success':
+            report_ids=([row['report_id']] if row.get('report_id') else row.get('report_ids',[]))
+            if len(report_ids)!=1:
+                flags.append('worker_final_without_single_report_id')
+            elif report_ids[0] not in published_reports:
+                flags.append('worker_final_with_unobserved_report')
+        if row.get('tool')=='mcp__cortex__write_report' and row.get('outcome')=='success':
+            published.add(thread)
+            if row.get('report_id'):published_reports.add(row['report_id'])
+            generation+=1
+            parent=row.get('parent_thread_id')
+            if parent and role in mutating_profiles:
+                active_mutation_owners.discard((parent,role))
+        for flag in sorted(set(flags)):
+            violations.append(dict(timestamp=row.get('timestamp'),timestamp_ns=row.get('timestamp_ns'),
+                                   thread_id=thread,role=row.get('role'),tool=row.get('tool'),violation=flag))
+    return violations
+
+
+def write_state(path,state):
+    temporary=path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(state));os.chmod(temporary,0o600);os.replace(temporary,path)
+
+
+def desktop_window(pid):
+    xdotool=shutil.which('xdotool')
+    if not xdotool:raise RuntimeError('xdotool is required to submit the prepared Desktop prompt')
+    found=subprocess.run([xdotool,'search','--onlyvisible','--name','^ChatGPT$'],capture_output=True,text=True)
+    matches=[]
+    for window in found.stdout.split():
+        owner=subprocess.run([xdotool,'getwindowpid',window],capture_output=True,text=True)
+        if owner.returncode==0 and owner.stdout.strip()==str(pid):matches.append(window)
+    if len(matches)!=1:
+        raise RuntimeError(f'exactly one visible ChatGPT window owned by isolated pid {pid} is required; found {len(matches)}')
+    return xdotool,matches[0]
+
+
+def wait_desktop_window(pid):
+    for _ in range(240):
+        try:return desktop_window(pid)
+        except RuntimeError:time.sleep(.25)
+    raise RuntimeError('isolated Desktop window did not become uniquely available within 60 seconds')
+
+
+def desktop_thread_ids(workdir,started_at):
+    database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
+    if not database.is_file():return set()
+    connection=sqlite3.connect(f'file:{database}?mode=ro',uri=True)
+    try:
+        return {row[0] for row in connection.execute(
+            'SELECT id FROM threads WHERE cwd=? AND created_at>=?',
+            (workdir,int(started_at)-2),
+        )}
+    finally:connection.close()
+
+
+def window_geometry(xdotool,window):
+    result=subprocess.run([xdotool,'getwindowgeometry','--shell',window],capture_output=True,text=True,check=True)
+    values=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+    return tuple(int(values[key]) for key in ('X','Y','WIDTH','HEIGHT'))
+
+
+def main():
+    p=argparse.ArgumentParser();sub=p.add_subparsers(dest='action',required=True)
+    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,required=True);s.add_argument('--prompt-file',type=Path);s.add_argument('--data-dir',type=Path)
+    sub.add_parser('status');sub.add_parser('send');e=sub.add_parser('events');e.add_argument('--limit',type=int);c=sub.add_parser('calls');c.add_argument('--limit',type=int);sub.add_parser('audit');sub.add_parser('stop')
+    args=p.parse_args();private();state_file=STATE/'session.json'
+    if args.action=='start':
+        if state_file.exists():
+            old=json.loads(state_file.read_text())
+            if identity(old['pid'])==old['start']:raise RuntimeError('Desktop test process is already active')
+        workdir=args.workdir.resolve(strict=True)
+        subprocess.run([str(ROOT/'scripts/cortex-dev'),'--prepare-only'],cwd=workdir,check=True)
+        binary=Path(os.environ.get('CORTEX_DESKTOP_BINARY','/usr/bin/chatgpt')).resolve(strict=True)
+        if not binary.is_file() or not os.access(binary,os.X_OK):raise RuntimeError('Actual Desktop executable unavailable')
+        profile=Path(tempfile.mkdtemp(prefix='profile-',dir=STATE));events=Path(tempfile.mkdtemp(prefix='events-',dir=STATE));data,data_owned=safe_data_directory(args.data_dir)
+        prompt=None
+        if args.prompt_file is not None:
+            prompt_path=args.prompt_file.resolve(strict=True)
+            if prompt_path.is_symlink() or not prompt_path.is_file():
+                raise RuntimeError('prompt file must be a regular non-symlink file')
+            prompt=prompt_path.read_text(encoding='utf-8').strip()
+            if not prompt:raise RuntimeError('prompt file must not be empty')
+        log=STATE/'desktop.log'
+        fd=os.open(log,os.O_CREAT|os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+        isolated_config=configure_workspace_network()
+        try:
+            command=[str(binary),'--user-data-dir='+str(profile)]
+            if prompt is None:command.extend(['--open-project',str(workdir)])
+            else:command.append('codex://threads/new?'+urllib.parse.urlencode({'path':str(workdir),'prompt':prompt}))
+            try:
+                child=subprocess.Popen(command,env=environment(profile,events,data),stdout=fd,stderr=fd,start_new_session=True)
+            except Exception:
+                restore_workspace_network(isolated_config)
+                raise
+        finally:os.close(fd)
+        state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),profile=str(profile),events=str(events),data=str(data),data_owned=data_owned,workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
+        if prompt is not None:
+            state['original_request_sha256']=original_request_digest(prompt)
+            state['desktop_editor_source_sha256']=original_request_digest(desktop_editor_source(prompt))
+        write_state(state_file,state)
+        print('Actual Desktop launched with disposable profile; pid='+str(child.pid))
+    else:
+        state=json.loads(state_file.read_text())
+        alive=identity(state['pid'])==state['start']
+        if args.action=='status':print(json.dumps(dict(alive=alive,pid=state['pid'],profile=state['profile'])))
+        elif args.action=='send':
+            if not alive:raise RuntimeError('isolated Desktop process is not active')
+            if not state.get('prompt_supplied'):raise RuntimeError('start with --prompt-file before send')
+            if state.get('prompt_sent'):raise RuntimeError('prepared Desktop prompt was already sent')
+            xdotool,window=wait_desktop_window(state['pid'])
+            before=desktop_thread_ids(state['workdir'],state['started_at'])
+            subprocess.run([xdotool,'windowactivate','--sync',window],check=True)
+            if subprocess.run([xdotool,'getwindowpid',window],capture_output=True,text=True,check=True).stdout.strip()!=str(state['pid']):
+                raise RuntimeError('isolated Desktop window ownership changed before submission')
+            x,y,width,height=window_geometry(xdotool,window)
+            subprocess.run([xdotool,'mousemove',str(x+width//2),str(y+height-120),'click','1'],check=True)
+            subprocess.run([xdotool,'key','--window',window,'ctrl+Return'],check=True)
+            created=set()
+            for _ in range(60):
+                created=desktop_thread_ids(state['workdir'],state['started_at'])-before
+                if created:break
+                time.sleep(.25)
+            if len(created)!=1:
+                raise RuntimeError(f'Desktop submission produced {len(created)} new task receipts; prompt remains retryable')
+            state['prompt_sent']=True;state['desktop_window']=window;state['thread_id']=created.pop();write_state(state_file,state)
+            print('Submitted the prepared prompt to the exact isolated Desktop window and observed one new task receipt; pid='+str(state['pid']))
+        elif args.action=='events':
+            if args.limit is not None and (args.limit<1 or args.limit>5000):raise RuntimeError('events limit must be from 1 through 5000')
+            rows=observed_events(state['events']);rows=rows[-args.limit:] if args.limit is not None else rows
+            for row in rows:print(json.dumps(row))
+        elif args.action=='calls':
+            if args.limit is not None and (args.limit<1 or args.limit>10000):raise RuntimeError('calls limit must be from 1 through 10000')
+            rows=observed_tool_calls(state);rows=rows[-args.limit:] if args.limit is not None else rows
+            for row in rows:print(json.dumps(row))
+        elif args.action=='audit':
+            rows=observed_events(state['events'])
+            failures=[row for row in rows if row.get('operation')!='initialize' and row.get('outcome')!='success']
+            host_rows=observed_tool_calls(state)
+            host_failures,resolved_host_failures=classify_host_failures(host_rows)
+            error_history=tool_error_history(host_rows)
+            orchestration_errors=orchestration_error_history(host_rows)
+            open_sessions=open_command_sessions(host_rows)
+            open_cells=open_exec_cells(host_rows)
+            policy_violations=call_policy_violations(host_rows)
+            orchestration_policies=orchestration_policy_violations(policy_violations)
+            orchestration_host_failures=[row for row in host_failures if is_orchestration_call(row)]
+            threads={(row.get('thread_id'),row.get('parent_thread_id')) for row in rows if row.get('thread_id')}
+            print(json.dumps(dict(mcp_events=len(rows),host_calls=len(host_rows),threads=len(threads),operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=policy_violations,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells)))
+            if failures or orchestration_errors or orchestration_host_failures or orchestration_policies or open_sessions or open_cells:raise RuntimeError('Desktop orchestration audit found unsuccessful, forbidden, or non-terminal orchestration outcomes')
+        else:
+            if alive:
+                os.killpg(state['pid'],signal.SIGTERM)
+                for _ in range(30):
+                    if identity(state['pid'])!=state['start']:break
+                    time.sleep(.1)
+                else:raise RuntimeError('Desktop test process has not stopped; disposable profile retained')
+            restore_workspace_network(Path(state['isolated_config']))
+            for key in ['profile','events']+(['data'] if state.get('data_owned') else []):
+                path=Path(state[key])
+                if path.parent!=STATE or path.is_symlink():raise RuntimeError('Unsafe Desktop cleanup path')
+                shutil.rmtree(path)
+            (STATE/'desktop.log').unlink(missing_ok=True);state_file.unlink()
+            print('Stopped only the isolated Desktop process and removed its disposable artifacts.')
+
+if __name__=='__main__':
+    try:main()
+    except Exception:
+        raise SystemExit('Desktop test operation failed; private logs were not displayed.') from None

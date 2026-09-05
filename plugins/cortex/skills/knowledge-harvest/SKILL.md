@@ -1,32 +1,31 @@
 ---
 name: knowledge-harvest
-description: Internal Cortex v12 knowledge-route overlay. Load only after the user explicitly activates cortex:orchestrator with harvest or harvest-refresh; never infer this route from repository state.
+description: Source-backed project knowledge maintenance. Load only after the user explicitly activates cortex:orchestrator with harvest or harvest-refresh; never infer this route from repository state.
 ---
 
 # Knowledge Harvest
+
+Apply this skill only to an explicitly selected harvest or harvest-refresh
+route. Ordinary product work does not implicitly authorize a census or broad
+documentation rewrite.
 
 Build a durable functional map of the repository, not a task journal or recent
 commit summary. Documentation should let a new engineer discover each in-scope
 capability, its owning code, runtime behavior, and verification or operating
 path.
 
-Before planning or delegating a harvest, read
-[feature-census.md](references/feature-census.md) completely. Its inventory,
-coverage, page-content, and validation rules are the evidence contract.
+Harvest workers load this skill through Codex and read
+[feature-census.md](references/feature-census.md) completely before their assigned
+census/planning work. Its inventory, coverage, page-content and validation rules
+are the evidence contract. The coordinator delegates this reading and receives
+concise report previews; it does not open this reference or project indexes.
 
-The coordinator uses this contract to create delegations, but never performs
-the census, source or documentation inspection, technical synthesis, writing,
-or verification itself. Every repository read, project analysis, documentation
-change, command, and completeness check is worker-owned and returned by report
-ID.
+Every repository read, project analysis, documentation change, command and
+completeness check is worker-owned. The coordinator only reads report previews
+and the current pipeline beginning, then chooses the next bounded assignments.
+Graph/search, index routing and repository enumeration below are worker instructions.
 
-The orchestrator's closed knowledge-route exception still permits only
-non-shell direct reads of already-known exact allowed paths. Graph/search and
-repository-native enumeration described below are worker instructions, never
-coordinator tools. Unknown roots or paths and every project-local artifact or
-state check require a worker delegation.
-
-Use the orchestrator's authoritative delegation knowledge contract for every
+Use the orchestrator's index-driven documentation routing instructions for every
 harvest worker. A missing or unreadable project knowledge index justifies a
 bounded census delegation and never coordinator source inspection. A worker's
 evidence that supplied documentation is stale, conflicting, or incomplete
@@ -43,6 +42,15 @@ harvest scope.
   trusting prior coverage claims, audit every project and feature document, and
   run an independent post-write completeness review. Finish only when a second
   planning comparison proposes no factual changes or new feature page.
+
+## Shared skills and reporting
+
+Load skill `cortex:cortex-control` through Codex for every worker and apply skill
+`cortex:tool-discipline` to calls. Writers use the
+[documentation report example](../cortex-control/references/documentation-example.md),
+planners the [plan example](../cortex-control/references/plan-example.md), and other
+workers select only their applicable [example](../cortex-control/references/index.md).
+After context loss, load skill `cortex:context-compaction` and follow its rereading procedure.
 
 ## Evidence topology
 
@@ -94,10 +102,10 @@ documentation delegations serve as the dedicated documentation-sync worker or
 workers for `docs/project/`, `docs/features/`, and any affected public
 documentation. After the final writing or corrective delegation, a separate
 worker verifies documentation through the completeness-review and verification
-evidence above. The coordinator decides readiness only from those finalized
-evidence references;
-apart from its bounded index-driven routing reads, it never inspects or edits
-the documentation itself.
+evidence above. The coordinator decides readiness from the meaningful previews of those worker
+checks and the current pipeline. It never reads report bodies, documentation
+indexes or project files. Missing evidence requires another worker check, not
+coordinator inspection.
 
 Do not use a task-level `documentation not required` outcome for a completed
 harvest, because documentation is the requested artifact. Public documents
@@ -136,11 +144,12 @@ or verification pages while keeping `index.md` as its canonical entry point.
 
 ## Delegation reports
 
-Each worker reads its complete delegation and any relevant input reports before
-acting. It may publish progress reports when intermediate evidence will help
-coordination, then publishes a result or synthesis report with a truthful
-`partial`, `completed`, `blocked`, or `failed` status. The active tool
-registry defines call fields.
+Each worker receives its concrete assignment and mandatory requirements
+directly. It lists the report catalogue, selects only relevant materials, and
+reads only needed pages before acting. It publishes a free-form Markdown report
+through the same writer as every other profile. The report states completed
+work and every incomplete or failed check truthfully. The live advertised
+contract alone defines tool arguments. No specific report headings are required.
 
 Report IDs are durable evidence references, not proof that work is complete.
 A successor reads only the reports it needs. A partial or failed report can
@@ -148,22 +157,23 @@ support replacement, narrower research,
 parallel progress elsewhere, or an honest residual-risk statement.
 
 A material user decision is reported clearly to the coordinator, who presents
-it through the normal user interaction boundary. Internal ledger, dependency,
-worker, or closure conditions are not user questions.
+it through the normal user interaction boundary. Internal storage and worker coordination conditions alone are not user questions.
+For a genuine question, load skill `cortex:coordinator-communication` through
+Codex and follow it: detailed chat context and
+answer alternatives and their consequences as ordinary chat text.
 
 ## Evidence and preservation
 
 Source, tests, executable configuration, schemas and migrations, and deployment
-definitions outrank generated documentation. Codebase Memory is the required,
-enabled worker MCP and mandatory first route for structural project-code
-discovery: bind it to the exact canonical project root and use its graph
-evidence before any local search. Missing or unusable access is an environment
-blocker. Check index coverage for every cited path and bounded scope; confirm
-consequential claims in current source. Only an actual graph call proving that
-the indexed graph excludes the relevant surface or is insufficient permits one
-bounded repository-native enumeration or file/text-search fallback. A fallback
-must name that graph evidence and remain limited to the requested scope; never
-silently fall back or chain multiple fallback searches.
+definitions outrank generated documentation. Codebase Memory is the preferred
+worker route for structural project-code discovery when available: bind it to
+the exact canonical project root and use its graph evidence before local search.
+If it is unavailable, denied, timed out, erroneous, unusable, or insufficient,
+record that concrete limitation and use exactly one bounded repository-native
+enumeration or file/text-search fallback. Check index coverage for every cited
+graph path and bounded scope; confirm consequential claims in current source.
+A fallback must remain limited to the requested scope; never silently fall back
+or chain multiple fallback searches.
 
 Run the repository's deterministic knowledge-census validator when available.
 Its result is advisory evidence for the model and verification worker, never a
@@ -175,6 +185,5 @@ decisions, gotchas, or feature explanations without evidence and explicit
 scope. Never expose secrets, source dumps, private operational values, or
 personal data.
 
-Missing closure, incomplete reports, open initiative state, or unresolved
-dependencies may affect the model's readiness recommendation, but never prevent
+Incomplete reports or unresolved dependencies may affect the model's readiness recommendation, but never prevent
 useful delegation, evidence access, corrective work, or a truthful final answer.

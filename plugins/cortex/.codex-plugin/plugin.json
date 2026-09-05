@@ -1,28 +1,26 @@
 {
   "name": "cortex",
-  "version": "1.15.0+codex.sha256.6e125dab770798c9",
-  "description": "Durable local coordination ledger for model-owned multi-agent governance.",
+  "version": "1.15.6+codex.sha256.cc786ae2fbd04cf1",
+  "description": "Durable tasks, advisory governance and immutable Markdown reports for model-owned coordination.",
   "author": {
     "name": "igovet"
   },
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate durable multi-agent work",
-    "longDescription": "Cortex 1.15.0 provides 22 advisory agent profiles and a local durable coordination ledger. It exposes exactly 20 flat task_ref-only semantic operations, including audience-specific bounded reads for coordinator status, scope, evidence, continuations, timeline, and worker assignment consumption. The LLM owns the dynamic DAG, worker selection, parallelism, models, reasoning effort, rework, verification, documentation, and final answer. The lifecycle hook binds real native workers to private assignments without rewriting spawn input; SQLite enforces identity, isolation, atomic replay, lineage, evidence consumption, and coverage without acting as a workflow engine.",
+    "longDescription": "Cortex 1.15.6 provides seven storage tools and 22 specialist profiles. The server creates typed, thread-bound Markdown drafts; the coordinator manages one pipeline with newest editions first and native subagents. Reports are real project files and SQLite indexes brief metadata. The model interprets evidence and handles steering.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [
-      "Local MCP coordination ledger",
-      "Project-scoped tasks and delegations",
-      "Immutable delegation reports",
-      "Advisory governance history",
-      "Project initiatives and closures",
-      "Advisory agent profiles"
+      "Task storage",
+      "Advisory governance",
+      "Immutable Markdown reports",
+      "Bounded report reads",
+      "22 specialist profiles"
     ],
     "logo": "./assets/logo.png",
-    "defaultPrompt": "Coordinate this task with Cortex 1.15.0 using task_ref-only durable worker evidence and an LLM-owned dynamic DAG."
+    "defaultPrompt": "Coordinate this task with a durable Markdown pipeline and appropriate specialist subagents."
   }
 }

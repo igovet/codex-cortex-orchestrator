@@ -1,690 +1,439 @@
-# Release readiness
-
-Status: content-addressed production and development release contract for Cortex 1.15.0.
-
-## Current release identity
-
-- semantic release label: 1.15.0
-- installable identity: `1.15.0+codex.sha256.<digest-prefix>` with runtime
-  verification against the complete normalized plugin payload
-- source-to-installed synchronization reuses that same canonical plugin
-  manifest and digest contract on Linux and macOS; it does not maintain a
-  second platform-specific temporary-tree hash
-- coordination contract: V12 durable, nonblocking ledger
-- SQLite schema: v1 in the new V12 namespace
-- public facade: exactly twenty action-specific MCP tools
-- public audience: immutable coordinator and four-tool worker projections
-- runtime model contract: bundled `orchestrator` and `cortex-control` skills
-- profiles: advisory role templates
-- governance: model-owned and advisory
-- coordinator: orchestration/delegation plus the bounded orchestrator-owned
-  knowledge route; no source/project action or substantive task work
-- lifecycle hooks: bundled and bounded; `SessionEnd` is limited to three seconds
-- operator maintenance: task-anchored host-private CLI outside MCP; restore is
-  offline only
-
-The acceptance criterion is simple and strict: governance may deepen reasoning,
-verification, and the final explanation, but no governance record or missing
-record may prohibit the model from taking the next safe meaningful step.
-
-## Public contract
-
-The complete registry must contain exactly these names, in canonical order:
-
-1. `open_task`
-2. `read_task`
-3. `read_state`
-4. `read_scope`
-5. `read_outcome`
-6. `read_continuations`
-7. `read_evidence`
-8. `read_timeline`
-9. `open_clarification`
-10. `record_clarification`
-11. `open_plan_review`
-12. `record_plan_review`
-13. `open_steering`
-14. `record_steering`
-15. `open_assignment`
-16. `publish_plan`
-17. `publish_result`
-18. `publish_documentation`
-19. `assess_governance`
-20. `close_task`
-
-`tools/list` projects this registry by immutable connection audience.
-Coordinators receive only coordinator operations; signed
-worker-candidates and committed workers receive only `read_task` and the three
-publication operations. Authorization remains independently server-side:
-connection roles are monotonic, and worker assignment reads and publications
-require the exact signed host-bound child attestation plus server-side
-assignment authority. Each input schema is closed and is also the runtime
-validator's source. Optional MCP `outputSchema` declarations are omitted from
-discovery; every complete successful-result schema remains private and is the
-runtime validator's authoritative contract. Unrelated
-canonical handles are filtered before a
-success is transported as JSON text plus `structuredContent` with
-`isError=false`. Each advertised tool description mechanically lists the exact
-required input properties derived from its closed `inputSchema`; that schema
-remains the authoritative call contract. Caller-correctable errors are bounded
-sanitized `isError=true` results with text and a matching `structuredContent.error`.
-When multiple required properties are absent, safe error details and the
-recovery action include the complete bounded `missing_fields` list so the
-caller can correct the request in one call. Server-state failures are
-sanitized JSON-RPC internal errors.
-
-Each input schema advertises the 65,536-byte compact UTF-8 aggregate argument
-bound independently of per-field limits. Root aggregate diagnostics disclose
-only bounded numeric sizes and safe advertised-section contributions.
-Successful structured results are duplicated as deterministic JSON text when
-the complete encoded tool result leaves the fixed JSON-RPC envelope reserve.
-This keeps one-shot worker assignment consumption self-contained even when a
-host exposes only `TextContent` to the model. Only a genuinely oversized
-non-duplicable result uses the fixed `structuredContent` notice. Assignment
-results additionally place their exact compact publication reconciliation in
-the first text block; that block survives the notice fallback and is checked
-against the unchanged structured result. Worker authority is paginated so a
-valid bootstrap page remains directly visible. After host context compaction or
-reset, the already-bound worker may restart the same assignment from its first
-page on the same authenticated connection; exact page receipts reconcile
-without duplication, publication remains blocked until the restarted read is
-terminal, and a fresh or copied connection remains rejected. Ordered
-publication diagnostics retain the actual mismatched outcome index.
-
-Live workload activation uses the real `$cortex:orchestrator` token or host
-skill picker. The host normally supplies the complete activated context; after
-compaction/reset the agent may reload the exact installed skill through the
-host loader or sandboxed read-only access. Initial load and recovery reload
-must never request user approval or elevated execution, and must not substitute
-an MCP resource or project copy. Decorative bracket text is not activation.
-
-The complete catalogue must fit in one `tools/list` JSON-RPC response below
-65,536 bytes. This bounded discovery contract is substantially below the 256
-KiB physical JSONL frame bound and does not use continuation pages, so every
-participant receives all twenty operation definitions together. The bundled
-MCP is required and excluded from programmatic code mode and deferred discovery,
-leaving direct model calls as its only valid host surface. Desktop must expose
-that intact catalogue before its first model turn. Missing or truncated
-declarations fail session initialization; no mutation contract may be guessed
-from names, descriptions, or partial output.
-
-Only `open_task` accepts the exact resolved `project_root` and stores the
-canonical project association; it is the sole public project-root boundary. It
-returns the compact `task_ref` used by every task-anchored operation. The durable
-`task_id` in results is non-callable evidence. `open_assignment` returns only a
-compact host-neutral native dispatch; the worker's first `read_task` call consumes the
-server-rendered assignment view and receives the full common policy, profile
-guidance, and task evidence; subsequent worker publications carry that
-worker-scoped `task_ref` on the same host-bound connection. A fresh or restarted
-connection cannot recover consumed worker authority from that locator, a
-report, bare assignment reference, or durable continuation. Coordinator and
-worker roles are monotonic per connection, and minted, consumed elsewhere,
-foreign, malformed, stale, partial/different-bound, or drifted relations fail
-without mutation. Confirmed loss requires explicit blocked/aborted evidence and
-an atomically linked successor. Public decision, governance, and
-closure calls are also task-ref-only. Private assignment, publication,
-initiative, and decision identity never becomes a caller locator. The native
-worker brief carries the saved root only for working-directory context. No root
-is inferred from MCP metadata, thread identity, the plugin process `cwd`, or a
-lifecycle hook.
-
-`open_task` is an exact, versioned task/result contract. It keeps the exact
-arbitrary-Unicode `user_request_original` and `user_language` beside the
-English-normalized internal `objective`, English bounded independent outcome
-requirements, `constraints`, and linked `acceptance_criteria`; the independent
-verification plan starts empty and is not derived from acceptance, plus
-`task_contract_version` and optional bounded JSON `context`. The English
-normalization does not replace the original request, and the result contract is
-not a backend execution or permission gate. `context` never supplies or
-overrides the root. `open_assignment.scope` is required non-empty text
-(maximum 65,536 characters) describing the concise worker-ownership boundary;
-detailed execution belongs in `instructions`, and object-shaped scope is
-invalid. `open_assignment` also separates exact packaged `profile_name` from
-the human-readable `role`, requires loaded renderer proof, and returns one
-compact closed native dispatch plus replay state. The projection preserves exact
-effort, omits the model only for default Luna, and is forwarded unchanged to one matching active host
-spawn. The mandatory first `read_task` assignment supplies the complete
-policy/profile/task context on healthy and recovery paths.
-The three narrow decision record operations use their matching closed advertised
-contract and task-scoped server binding; callers provide only the task reference,
-neutral prompt/response fields, and (for steering) outcome changes. Private
-subject references, decision digests, and relation sequences are resolved by the
-server and are never public inputs. Plan review additionally checks the current
-private ready view before mutation. `close_task` requires only the task reference
-and advisory verdict fields; its coverage and evidence context are derived from
-the ledger, while durable IDs remain evidence only.
-
-The root coordinator may use the ledger, user interaction, native worker
-coordination, and worker reports to orchestrate and synthesize. It must never
-inspect or search source/code/configuration, create or edit target-project
-files, perform substantive domain analysis, or run project commands, builds,
-tests, browser checks, or direct verification. Every such action is
-worker-owned. Before project delegation, its only project-read exception must
-follow the bounded route through the host-injected `AGENTS.md` context, the project and feature
-indexes, and task-relevant
-linked pages. The orchestrator alone defines the exact route and six-part
-per-delegation contract; profiles consume the supplied result without rerouting.
-
-Each allowed read names an already-known exact path and uses a non-shell direct
-reader. Shell/commands, `rg`, `find`, globs, graph/source/repository search,
-directory listing, and candidate probes are never routing mechanisms. Unknown
-roots or paths and unavailable direct reads require a worker. Project-root
-discovery and project-local state or artifact checks are also worker-owned,
-including Git, manifests, caches, worktrees, existence/absence or
-unchanged-state, and project-local `.codex`. Read-only, pre-plan,
-report-recovery, or explicit-user-request framing does not create coordinator
-authority.
-
-Core coordination tools must not read governance mode, initiative status,
-dependency warnings, report completion, closure verdict, or closure presence to
-authorize an operation. The following states are explicit nonblocking release
-cases:
-
-- no governance closure exists;
-- the latest closure is `not_ready`;
-- an initiative remains open;
-- a linked task is unfinished;
-- a same-project dependency is unresolved or cyclic;
-- a worker ends without a report or native stop observation.
-
-In each case, the coordinator remains free to create a useful delegation, read
-known reports, synthesize reported evidence, request a real user decision, or
-provide a final answer. A user-requested plan review and any genuine external,
-destructive, scope, acceptance, or product decision remain coordinator-owned
-ordinary-chat holds, not backend gates. It does not fill an evidence gap by
-directly inspecting or testing the project. Replacing the same nonterminal
-delivery ownership is narrower: it requires explicit blocked/aborted reason and
-non-empty evidence, committed atomically with the linked successor.
-
-## Storage contract
-
-V12 creates one database per resolved project root:
-
-```text
-~/.codex/cortex/v12/projects/p-<sha256-of-resolved-project-root>/cortex.db
-```
-
-The database must identify the V12 family, report `PRAGMA user_version = 1`,
-contain the complete ordered additive migration history through
-`v12-effective-outcome-coverage`, and retain matching project-hash metadata. The schema contains
-tasks, private assignments, immutable internal publications and chunks,
-append-only governance assessments, user decisions that preserve exact original
-text and neutral prompt, private initiative bookkeeping, append-only revisions,
-current internal links, immutable closures, an ordered timeline, server-owned
-replay records, bounded projection jobs/files, and minimal metadata.
-
-Release evidence must prove:
-
-- first-use bootstrap is atomic;
-- the one additive pre-release V12 migration preserves existing task rows and
-  converts each legacy internal publication body into one finalized canonical chunk without
-  changing `PRAGMA user_version = 1`;
-- concurrent reports, assessments, and initiative revisions are not lost;
-- timeline sequences remain unique and ordered;
-- each accepted private/internal chunk append emits a task-scoped `report_chunk_appended` event;
-  a one-time normal-open repair appends only missing derived chronology with a
-  `backfill` marker, preserves existing timeline/report evidence, refreshes
-  affected private views best effort, and refuses to guess ambiguous report-only
-  initiative lineage;
-- identical server-owned replay returns the original public receipt;
-- conflicting replay returns a non-mutating server error; replay identity is
-  server-owned and no caller key is accepted;
-- private/internal ledger publication types include `progress`, `result`,
-  `synthesis`, and `plan`; the private/internal storage layer may support
-  assembled `begin`, sequential `append`, `finalize`, and `abort` writes, with
-  immutable sequential chunks, terminal finalization/abort, and explicit
-  supersession. These are not public MCP operations: workers use the atomic
-  `publish_plan`, `publish_result`, or `publish_documentation` calls;
-- each private/internal chunk is bounded to 32 KiB; private/internal assembly is
-  bounded to 256 chunks and 8 MiB; its final digest binds the complete immutable
-  manifest;
-- v1 internal publications remain readable, while additive v2 result, synthesis,
-  and plan publications retain structured contract coverage, unresolved items,
-  risks, and verification;
-- the current V3 specialist planner envelope is pre-terminally admitted against
-  the full current effective contract, independent of delivery assignments:
-  stable planner tokens map every current item once and ordered stages carry an
-  owner, earlier dependencies, work, and verification; a correctable mapping
-  failure remains in the same immutable assembly for corrective append rather
-  than creating a terminal semantic-invalid plan or another planner delegation;
-- `read_state` exposes only bounded scalar status; coordinator detail is split
-  across `read_scope`, `read_outcome`, `read_continuations`, `read_evidence`,
-  and newest-first `read_timeline`; worker-only `read_task` consumes the
-  assignment and is its only authoritative route to predecessor bodies;
-- pageable reads use one top-level `has_more` marker and accept only an
-  immediate same-operation `continue=true`; private position never appears on
-  the wire;
-- the compact assignment reconciliation header retains exact public outcome
-  names before the larger policy body, continuation occurs only immediately
-  after `has_more=true`, and restarted identical terminal reads reuse existing
-  consumption receipts without new timeline events;
-- planner and worker handoffs containing several finalized reports are measured
-  against the 224 KiB report-response envelope, not the 65,536-byte bound for
-  one stored JSON value; valid evidence is complete or server-paginated and is
-  never rejected as `content_invalid` merely because the aggregate crosses the
-  smaller storage boundary;
-- `publish_result` aggregate-size tests cover below/exact/above boundaries,
-  Unicode byte accounting, safe actual/maximum diagnostics, section redaction,
-  one materially corrected complete retry, and rejection of unchanged,
-  incomplete, still-oversize, or second corrections before mutation;
-- effective-contract item references remain stable across requirements,
-  constraints, acceptance criteria, and verification expectations; current
-  ownership is non-overlapping, finalized report coverage detects missing,
-  partial, unverified, stale, and contradictory evidence, complete unpaired
-  steering additions create independent outcomes, and one retire plus one add
-  atomically replaces only the selected outcome;
-- coordinator state publishes canonical `assignment_scope` selectors:
-  delivery names only currently unowned assignable outcomes, evidence names
-  all current outcomes, and omitted assignment outcomes bind the complete
-  responsibility list server-side. Exact names remain optional only for an
-  intentional subset partition; planning is server-derived, and terminal
-  rework remains unavailable until an explicit steering revision creates new
-  delivery scope;
-- failed or partial QA, failed executed checks, and required unrun checks create
-  bounded corrective ownership for source or release/verification infrastructure
-  and require an independent rerun of failed and affected gates before closure;
-- the live assignment profile schema separates owner, review, and planning
-  classes; first-attempt routing keeps bounded no-plan C1 owner work minimal,
-  requires approved planner evidence for light/full owner work, and treats any
-  planning-predecessor rejection as a failed orchestration run even after retry;
-- broad server-side report selection preserves multi-author evidence without
-  inventing one predecessor, and no public assignment failure names private
-  report, decision, or parent-reference input fields;
-- advisory conformance review relates the active effective-contract revision,
-  user decisions, finalized report manifests, completed coordinator-read
-  digests, and aggregate coverage without becoming a lifecycle gate;
-- task/report/initiative links do not cross project ledgers;
-- errors never expose raw task or report content;
-- state/project directories are `0700`, database/WAL/SHM files are `0600`, and
-  symlink or non-regular database paths are rejected before SQLite opens;
-- an oversized stdio frame is drained with a sanitized error and does not
-  prevent a following `ping` or `tools/list` request;
-- SQLite integrity checks pass after concurrent operations.
-
-## User decisions, plan review, and human views
-
-The matching narrow decision record operation records an ordinary-chat decision only when the
-coordinator asserts that the user made one. The public request is task-ref-only;
-the server resolves the private subject, revision, digest, and ready-view
-binding. The record keeps the exact arbitrary-Unicode response, user language,
-attribution, and optional supersession. Plan review additionally checks the
-current private ready plan before mutation. These records bind evidence and
-scope but are not authentication, bearer approval tokens, or backend lifecycle
-gates.
-
-Each narrow decision record operation has one closed canonical contract. Retired
-`prompt_en` and `response_en` aliases, partial inputs, and mixed shapes are
-rejected by the public schema before mutation.
-
-The public `publish_plan` operation provides immutable plan evidence without
-adding a fifteenth tool. It does not accept a model-selected review-policy
-field: the server derives persisted `informational` for minimal governance and
-`required` for light/full governance. A required plan creates the
-coordinator-owned ordinary-chat review hold: present the finalized plan
-revision, digest, localized summary, and approve/revise/cancel choices; then
-record an unambiguous response against that exact revision. A revised plan is a
-new report and requires fresh review. This approval is a narrow light/full
-delivery-integrity relation, not authorization for external action.
-
-The database is canonical. Per-task Markdown files are derived host-private
-views beside the V12 shard, never written to the target project or a
-project-local `.codex` directory. A link may be published only after the active
-tool returns it `ready` as a contained absolute regular file that is current
-for its source sequence and digest-verified. Pair each verified clickable link
-with a localized summary and its implication or next step. If creation,
-freshness, or digest verification fails, omit the link, continue from canonical evidence,
-and disclose the material human-view limitation without blocking safe work or
-an honest final answer.
-
-## Governance and initiative contract
-
-Mode assessments use `minimal`, `light`, or `full` and source `model` or
-`user_override`. An explicit override must be stored unchanged. Later mode
-changes append a new assessment; the backend does not classify or overwrite a
-prior row. The latest user override remains effective across later model
-assessments, which may preserve an evidence-backed warning without replacing
-the user's choice.
-
-Private/internal initiative status is limited to `proposed`, `active`, `paused`,
-`completed`, `closed`, and `cancelled`. Every transition among those values is
-accepted. Missing or cyclic same-project dependencies persist with warnings.
-Neither warning rejects a later private/internal revision. Initiative
-bookkeeping is not part of the public twenty-operation facade.
-
-`assess_governance` is task-ref-only and records an advisory mode assessment.
-Private/internal initiative links and revisions may be scoped to a task for
-ledger projections, but they are not public inspection inputs or paginated MCP
-views.
-
-`close_task` uses `ready`, `ready_with_risks`, or `not_ready`. The verdict is an
-advisory model recommendation. A `not_ready` task may receive worker-owned
-rework and publications. Private/internal initiative closure bookkeeping may
-retain unresolved dependency risk, but it is not a public operation. Missing
-task closure must not block the final user answer.
-
-## Model-routing contract
-
-The coordinator independently selects the exact model/effort pair for each
-delegation. Profiles and governance modes may inform judgment but do not
-authorize, derive, or rewrite the pair.
-
-Canonical recommendations are:
-
-| Model | Recommended effort | Intended use |
-| --- | --- | --- |
-| `gpt-5.6-luna` | `high` | Default bounded work |
-| `gpt-5.6-terra` | `high` | Genuinely complex non-security work |
-| `gpt-5.6-sol` | `high` | Security work and security-focused review |
-
-Every model supports `low`, `medium`, `high`, `xhigh`, and `max`. The native
-projection preserves isolated history and exact effort. Luna omits the model
-override so the configured default is used; Terra and Sol carry their exact
-overrides. The server must have no automatic model replacement or
-Luna → Terra → Sol recovery ladder. Each successful durable delegation returns
-one compact closed native dispatch that Codex forwards unchanged to exactly one
-matching active host spawn. No ad-hoc prompt,
-shared worker, missing spawn, or duplicate spawn is acceptable.
-
-## Operator maintenance contract
-
-The packaged `cortex_runtime.v12_maintenance` module remains outside
-`tools/list`; it cannot change the twenty-tool semantic catalog. Every command in this
-separately invoked non-MCP operator module starts from one exact V12 durable
-`task_id`, derives its shard and host-private targets from that ID, accepts no
-root/arbitrary path/V11 target, validates the owner-only
-filesystem and complete V12 database identity, and emits bounded sanitized
-JSON.
-
-Release evidence must cover read-only `health`; sealed whole-project-shard
-online backup; confirmed checkpoint/optimize/vacuum; exact-task projection
-regeneration; dry-run-by-default safe projection prune and explicit backup
-retention; invalid task/shard, symlink, permission, schema, manifest, digest,
-and confirmation rejection; and zero `project_root`/V11 writes. Projection
-prune may remove only exact registered non-ready derived Markdown and must
-preserve ready, conflict, unmanaged, or digest-mismatched plan/report files plus
-every canonical row. Retention may remove only 1–20 explicitly named complete sealed
-backup bundles and must preserve the canonical database.
-
-Restore is never online. Tests and documentation must require the exact backup
-ID, task ID, `p-<hash>` shard, `RESTORE`, and `MCP_STOPPED`; that last value is
-only an operator acknowledgement after all normal MCP access has actually been
-stopped, not a cross-process lock. Restore must create a fresh recovery backup,
-validate the selected backup and final live database, and return sanitized
-failure/recovery outcomes.
-
-## Package boundary
-
-The installable package must include the manifest, MCP configuration,
-twenty-tool semantic facade and runtime, schema-v1 store, host-private operator
-maintenance module, advisory profiles, bundled skills, direct MCP configuration,
-assets, the bounded activation guard, and the sanitized lifecycle observer.
-
-The package and repository metadata must consistently identify Cortex 1.15.0,
-schema v1, the nonblocking ledger, model-owned governance, advisory profiles,
-and the complete twenty-tool semantic registry plus its two audience
-projections. Stale claims about waves, gates, capabilities,
-plan authority, host epochs, server-owned receipt-driven scheduling, required wait/read order,
-lifecycle HMAC, repair escrow, closure breakers, resource locks, required
-governance workers, or server-owned recovery are release defects. Worker
-assignment-page receipts remain ledger evidence. The separate owner-private
-host audience receipt may attest one supported native child to one worker MCP
-connection, but it is not portable identity, report evidence, completion proof,
-or proof of physical worktree/workspace isolation.
-
-V11 state is a historical compatibility boundary only. V12 must not open,
-migrate, delete, or modify V11 databases. V11 tools and unfinished V11 tasks
-are incompatible with V12 and cannot serve as fallback authority.
-
-## Release/protocol gate
-
-Run the isolated release/protocol test:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
-```
-
-The test must build the explicit source candidate, compile bundled Python,
-start the actual V12 MCP facade in isolated temporary projects and `HOME`, and
-exercise the catalog, storage, nonblocking states, concurrent mutations,
-idempotency, isolation, host-private projections, maintenance CLI, V11
-preservation, hook absence, and model transport.
-
-## Supporting source diagnostics
-
-Run the smallest checks that prove the affected surface, then broaden for the
-release candidate:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-prompt-lint.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate-cortex-marketplace.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode source
-git diff --check
-./scripts/sync-cortex.sh --dry-run
-```
-
-Before publication, verify the committed candidate too:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode head
-```
-
-The self-contained skill/profile lint is structural source evidence only. It
-must cover the bundled coordination, governance, routing, knowledge-contract,
-coordinator-only, textual-scope, and conditional-documentation invariants. It
-must semantically reject coordinator shell/search/graph routing and
-project-local artifact/state authority. It must also mutation-test empty
-task/result contracts, incomplete six-part delegation blocks, constructed
-IDs/digests, coordinator `publish_result`, MCP reads of `skill://` resources,
-premature/task-subject no-doc closure, report-only final initiatives, ad-hoc or
-cardinality-mismatched native dispatch, localized worker transcripts,
-self-asserted no-impact closure, and free-form role text treated as loaded
-profile proof, but it makes no model call. Real ordinary interactive Luna/high
-tmux tasks provide the model-behavior evidence.
-
-After worker-owned project verification, the coordinator must assess
-documentation impact from reports. A material behavior, architecture,
-interface, command, verification, convention, or feature-ownership change
-requires a delegated documentation-sync update to the harvest documentation
-under `docs/project/` and `docs/features/`, then delegated documentation
-verification. A no-impact task requires a finalized worker-owned report with an
-explicit English documentation-impact section and material/no-impact rationale,
-confirms finalized evidence through bounded `read_evidence`,
-and closes the task from ledger-derived coverage. Private report identity is
-evidence only. A self-asserted
-`documentation_not_required` value is invalid. This
-conditional stage precedes advisory closure and the final answer. Missing
-documentation evidence leads to model-owned rework, replacement, or explicit
-risk disclosure rather than a backend lifecycle gate.
-
-Every source check is evidence only when actually run. A source candidate does
-not prove an installed plugin, active Codex configuration, native subagent
-behavior, or an interactive user flow.
-
-## Installed and interactive verification
-
-End users install or update through the README's GitHub Marketplace flow. For
-an explicitly authorized interactive local-source synchronization from this
-checkout, repository developers use the isolated candidate helper:
-
-```bash
-./scripts/cortex-dev
-```
-
-It keeps the stable HOME/CODEX_HOME and V12 state outside the candidate by
-using the exact persistent `$HOME/.cortex-dev` directory. Reset is explicit and
-path-guarded:
-
-```bash
-./scripts/cortex-dev-reset --confirm
-```
-
-Direct `./scripts/sync-cortex.sh` remains the explicitly authorized
-source-checkout operation; run `--check` in the environment whose candidate or
-installation is being checked.
-
-The real Desktop companion is `./scripts/cortex-desktop-dev`. It prepares that
-same isolated candidate, launches the actual Desktop binary with a disposable
-Electron profile, and never changes the stable profile or installed plugin.
-Release parity requires the same stamped payload to finish one real CLI and one
-real Desktop scenario consecutively, in either order. Any installable-payload
-edit invalidates both live results and restarts the pair.
-
-## Interactive CLI tmux live-dev gate
-
-The release gate uses a real, user-visible ordinary Codex session. `./scripts/cortex-dev` refreshes the isolated candidate but does not create tmux; `./scripts/cortex-live-smoke start` creates the exact default-server session with an ordinary `bash` pane, attaches an owner-only output-only `pipe-pane` observer to that exact pane, and only then inserts the fixed launcher command literally and submits it with one standalone Enter. The launcher prints `Cortex live-dev exit=<status>` and exits with that same status.
-
-```bash
-./scripts/cortex-live-smoke start
-./scripts/cortex-live-smoke status
-./scripts/cortex-live-smoke capture
-./scripts/cortex-live-smoke events
-TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
-# Only after visibly observing a fresh-project trust screen:
-./scripts/cortex-live-smoke enter
-./scripts/cortex-live-smoke send --prompt-file TASK_PROMPT.txt
-./scripts/cortex-live-smoke capture
-./scripts/cortex-live-smoke stop
-```
-
-After `start`, `capture` reads the bounded output-only PTY stream when detached `capture-pane` is stale. `events` reads the exact session's bounded owner-only sanitized MCP observation stream. It exposes safe metadata only and never parses readiness, errors, replay, or acceptance; the LLM verifier owns those decisions. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If the visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; it sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the composer before `send`. Each workload begins with the exact `$cortex:orchestrator` token; no other Cortex-specific text is permitted in the prompt. The remainder must look like a normal user request for a concrete development, change, diagnosis, or verification task. The external operator owns live-dev restrictions, internal lifecycle coverage, tool/replay checks, worker-event inspection, and completion criteria. The transport inserts the complete normalized prompt literally once, waits five seconds after insertion returns, and sends exactly one standalone named `Enter`; its receipt reports delivery only, never TUI acceptance. The coordinator/LLM decides readiness, rollout, acceptance, and errors from the terminal and bounded events. Observe actual task-relevant Cortex MCP calls. `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or missing expected completion is a failed gate. A repeated successful mutation without an explicitly ambiguous prior transport result is also a failed gate; backend idempotency does not excuse an unexplained replay. Use the default tmux server, isolated HOME/CODEX_HOME, ordinary Codex, bounded captures, and exact-session cleanup only; never use `codex exec`, another socket, or stable plugin updates.
-
-The current prompt transport contract is literal insertion with one `send-keys -l`, a real five-second wait after insertion returns, and exactly one standalone named `Enter`; no pre-submit `C-m` or `C-j` is permitted. The transport reports delivery only; the LLM verifier owns TUI acceptance.
-
-For every native worker spawned by live orchestration, the LLM verifier must inspect a bounded sanitized structured event stream as well as the coordinator pane because worker MCP calls/errors may be hidden. The helper may expose events but must not decide pass/fail. Acceptance requires a clean first worker-owned publication success, zero prior hidden validation/tool errors or mutation replays; a public receipt alone is insufficient without the corresponding task-scoped evidence read.
-
-The E2E acceptance case is multi-turn and runs in a separate test project. The LLM observes the pane, answers exactly one product clarification with the predefined safe answer, later approves the visibly rendered plan, and follows planner → implementation → independent verification → documentation-impact assessment → closure. It inspects every native worker event stream and fails on any hidden tool error or unexplained replay. The tmux transport never answers or approves autonomously.
-
-The full live-catalogue gate uses
-`tests/fixtures/live_cortex_all_tools_scenario.json` with Luna High. CLI and real
-Desktop must run consecutively against the same unchanged stamped candidate;
-the external LLM verifier requires one clean task-relevant success for every
-public operation, the specified same-thread CLI resume, and no hidden tool
-error or unexplained mutation replay.
-
-Exercise several explicit `$cortex:orchestrator` tasks:
-
-1. A bounded minimal task with concise acceptance and closure.
-2. A light task revised to full after security evidence.
-3. A risky task with an explicit user `minimal` override and a model warning.
-4. A task that records `not_ready`, then creates model-owned rework.
-5. A private/internal initiative ledger linking multiple tasks/publications and
-   retaining a disclosed unresolved dependency.
-6. A task where closure is deliberately absent or unavailable, followed by a
-   complete user-facing answer.
-7. A bounded knowledge-routing task where the coordinator reads only applicable
-   `AGENTS.md`, the two knowledge indexes, and task-relevant linked pages;
-   compiles all six contract parts; and dispatches a worker that does not reroute.
-8. A Russian-user plan-review task where every worker commentary, message, final
-   response, tool-authored durable string, and operational artifact remains
-   English, the coordinator presents Russian
-   summaries with verified immutable-revision and current-plan links, and an
-   approve/revise/clarify decision binds the exact report digest.
-9. A task that exercises chunked report resume and a non-ready/tampered human
-   view; the coordinator publishes no stale path, summarizes canonical evidence
-   inline, and still completes safely.
-10. A required-plan task with an explicit ban on coordinator project operations;
-    workers own all project grounding before the plan-review hold.
-11. A reportless/rework task whose user asks about project-local `.codex`; the
-    coordinator delegates the project-state check instead of searching it.
-12. A task with exactly two independent outcomes and one linked acceptance
-    criterion per outcome, where the effective contract and worker
-    reconciliation contain exactly two outcome items and every delegation has
-    the exact six non-empty knowledge sections before native spawn.
-13. A no-doc task where the owning worker submits a finalized publication with an
-    explicit English documentation-impact section and material/no-impact
-    rationale, private/internal initiative bookkeeping links the task and its
-    publications, and task-scoped closure evidence is derived from the ledger
-    (durable IDs and private publication identity remain non-callable evidence)
-    before any durable-ready claim.
-14. An explicit activation with no `read_mcp_resource`, `resources/read`, or
-    `skill://` MCP attempt, plus exact byte-for-byte reuse of every returned
-    public `task_ref` and server-rendered dispatch/evidence value in the
-    appropriate context; private IDs and digests are never reconstructed.
-15. Four durable delegations produce four matching host spawns forwarded exactly
-    once from their returned compact closed native dispatches, with isolated
-    history, exact effort, default-Luna model omission or exact Terra/Sol
-    override, full policy/profile from the mandatory first
-    assignment read, and worker-owned reports. Physical worktree/workspace isolation is
-    not asserted here: the native dispatch has no host workspace selector and
-    that capability remains unconfirmed outside the ledger.
-16. Ordinary delegations select exact packaged `profile_name` values and
-    produce loaded proof/digests; the separate human-readable `role` is not
-    profile proof, and a degraded non-durable fallback requires an explicit
-    bounded role contract and unavailable-profile disclosure.
-
-Confirm the installed coordinator `tools/list` excludes publications and the
-worker projection contains exactly `read_task` plus three publications,
-Luna is dispatched without a native model override, Terra/Sol are exact
-overrides, only the callbacks declared by the installed package are trusted,
-no fresh-connection worker-authority or server-selected recovery route appears,
-and the final answer remains available in every advisory state.
-
-Closure review is distinct from ordinary clarification. After the current
-result is presented, the user receives exactly two localized choices: revise
-the same task or close it. Revision preserves the same `task_ref`; any later
-assignment, report, or decision stales a previously consumed close choice. The
-public `close_task` path atomically requires the current consumed close choice,
-while internal advisory storage may remain policy-neutral. This public rule
-does not make closure a scheduler or block safe work.
-
-Audit the coordinator's actual tool chronology: aside from Cortex ledger calls,
-native agent coordination, user interaction, and the bounded orchestrator-owned
-knowledge route, it must contain no target-project shell or command use,
-`rg`/`find`/glob/graph/source/repository search, root discovery,
-source/edit/browser/build/test action, or project-state/artifact verification.
-Allowed knowledge reads are non-shell direct reads of already-known exact paths.
-Each project action must be attributable to a worker assignment and publication.
-Exercise both documentation branches: one
-material task with a documentation-sync worker plus an independent
-documentation verifier, and one no-impact task with an explicit
-English documentation-impact rationale in a finalized worker-owned publication,
-no documentation churn, and task-scoped closure evidence derived from the
-ledger. Private publication identity and durable IDs remain non-callable
-evidence. Reject coordinator self-assertion.
-Verify that Cortex writes no file or directory below `project_root`; every
-published task/plan/report/decision/timeline link must point to a current,
-digest-verified regular file inside the host-private V12 task subtree and must
-be paired with a localized summary.
-
-Interactive smoke is separate installed-host evidence. Record the exact session
-environment, tasks exercised, relevant sanitized outcomes, and every scenario
-not run. Do not retain raw reports, prompts, tokens, credentials, thread IDs, or
-private diagnostic logs.
-
-## Documentation and evidence handoff
-
-Before release, re-read [README.md](../README.md),
-[SECURITY.md](../SECURITY.md), all affected project/feature documentation, the
-manifest, profiles, authoritative skills, schemas, and executable package
-configuration. Verify links, Mermaid syntax, version strings, tool names,
-storage paths, model/effort rules, commands, and the V11 compatibility boundary.
-Also verify explicit root only on `open_task`, exact Cortex-issued `task_ref` on
-every task-anchored public operation including worker publications, and the
-absence of public delegation/report/subject/initiative identifiers. Verify the
-exact task/result language fields, canonical private report schemas and one optional
-unchanged `source_text` value (without language or translated/original
-duplicates), evidence-only planner microtasks, textual delegation scope, exact
-`profile_name`/human `role`, loaded proof, one-to-one native dispatch,
-model/effort, English-only worker-authored content, private chunked report modes,
-bounded audience-specific read continuation, plan-review and user-decision binding
-semantics, worker-owned documentation-impact evidence, verified host-private human-view links with
-localized summaries and nonblocking fallback, the bounded knowledge-routing
-exception, the coordinator-only boundary, and the conditional documentation
-stage.
-Also verify that maintenance remains outside MCP, uses task/shard-derived
-private paths and exact confirmations, preserves canonical data during cleanup,
-and describes restore as strictly offline. See
-[operator maintenance](features/operator-maintenance/index.md).
-
-The final release report must distinguish:
-
-- source checks and exact commands run;
-- package-candidate checks;
-- installed synchronization/check evidence;
-- ordinary interactive tmux `codex` smoke evidence;
-- unrun release gates or environment limitations;
-- material residual risks.
-
-Do not call the release ready while an authoritative source or public document
-still describes V11 control-plane behavior as active V12 behavior.
-Current live transport submission is one literal normalized insertion, a five-second wait, and exactly one standalone named `Enter` key to the same exact pane. Receipts report delivery only; the coordinator/LLM confirms TUI acceptance from the pane and bounded events.
+# Native steering qualification — 2026-09-05
+
+Qualified payload: `1.15.6+codex.sha256.cc786ae2fbd04cf1`, full SHA-256
+`cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698`.
+The ordinary installed plugin and user configuration were not updated. Only the
+isolated dev candidate was prepared through the repository launchers.
+
+The same unchanged payload passed consecutive real interactive CLI continuation
+and actual Desktop runs. CLI resumed the existing CSV task after two live steering
+messages, then added an inclusive decimal threshold combined with currency filtering,
+whole-input validation, atomic output and preservation constraints. Four new native
+workers exercised implementation, independent rejection, bounded correction and
+fresh verification. Desktop ran the original ten-requirement CSV brief from an
+untouched fixture, using implementation and independent verification workers.
+These were ordinary product prompts, without orchestration-test instructions.
+
+| Qualified phase | New workers | MCP events including initialization | Call records | Final Cortex audit |
+| --- | ---: | ---: | ---: | --- |
+| Real CLI after restart and further steering | 4 | 32 | 238 | passed |
+| Actual Desktop, same payload | 2 | 18 | 108 | passed |
+
+Every coordinator and worker reached native task completion. The full call records
+were reviewed; Cortex contract errors, report-write failures, unexplained replays,
+truncated orchestration output and role/order violations were absent. Project-code
+and test-command failures were assessed separately and handled by the live task;
+this does not claim that every project-development invocation succeeded.
+CLI exited with the explicit zero marker. The exact CLI session and disposable
+Desktop process were stopped through their helpers. Desktop's prepared composer
+was visually confirmed before one submission with a new task receipt. Passive
+initialization matched the candidate path and seven-tool catalogue on both hosts.
+
+The CLI archive contains the original source plus three separate steering messages,
+including the post-restart request. Every stored source matched the actual native
+UserMessage text and its digest. Desktop's original source also matched its native
+receipt; native editor formatting was checked against the prepared prompt.
+Desktop steering and Desktop resume were not separately exercised in this pass.
+
+Storage checks passed SQLite integrity, foreign keys, report file hashes, sizes and
+permissions, and absence of unpublished drafts. CLI retained one task, 14 documents,
+one pipeline and 24 editions across both phases. Desktop retained one task, five
+documents, one pipeline and six editions. The original CSV and protected user note
+remained byte-identical in both fixtures. Raw evidence and screenshots remain private
+outside the repository.
+
+Source checks on this payload: **110 tests passed**, package/marketplace validation,
+source-only sync check and Markdown links passed. Tests include queued corrections,
+exact Unicode/whitespace, restart, duplicate native receipts, delivery replay with
+new input, partial host records, source replacement/conflicting identities, disk-failure
+rollback, literal credential redaction, size rejection without truncation and retention.
+
+An earlier run on `f942d09fa00a961c` was rejected for one worker's unnecessary
+one-character reread of an immutable report before publication. Its complete tails
+and audit were retained and the run was followed through completion. The final
+contract and all 22 shared profiles explicitly exclude such probes. A separate
+observer defect incorrectly classified real user steering delivery after a wait;
+typed native user-input events now provide the narrowly scoped audit evidence.
+
+Steering capture commits on the next successful coordinator task operation after
+creation, except replaying create_task. It is not a background hook. The archive
+preserves source text independently of the pipeline; semantic interpretation and
+acceptance still belong to the coordinator. Missing or oversized source fails closed
+rather than silently truncating requirements. Only explicit literal credential
+redactions change captured steering text. Attachments are outside this text reader.
+
+# Complex CLI/Desktop qualification — 2026-09-05
+
+Qualified payload: `1.15.6+codex.sha256.e5e7f2252bcdf325`, full SHA-256
+`e5e7f2252bcdf325037dc861f65e9f42f038adb0607924a6094cda44f475cd2a`.
+Semantic version remains 1.15.6; the ordinary installed plugin was not updated.
+
+The unchanged isolated candidate passed consecutive real CLI, resumed CLI and
+Desktop runs. The initial ordinary Russian product prompt had ten requirements:
+offline CSV reconciliation, exact decimal arithmetic, Unicode/multiline fields,
+strict duplicates and validation, atomic output, error preservation, dry-run,
+protected existing edits, a specific test command, documentation and independent
+verification. The resumed task added currency filtering while retaining all prior
+validation and preservation requirements. No orchestration-test instructions were
+inserted into the product workload.
+
+| Real-host phase | Native workers | MCP events, including initialization | Host-call records | Cortex audit |
+| --- | ---: | ---: | ---: | --- |
+| CLI initial task | 2 | 16 | 115 | passed |
+| Same CLI thread after restart and new requirement | 2 | 16 | 104 | passed |
+| Actual Desktop initial task with corrective work and re-verification | 4 | 28 | 174 | passed |
+
+All coordinators and workers produced native task-complete receipts. Both CLI
+phases ended with the explicit exit-zero marker. Desktop's prepared composer was
+visually confirmed and submitted once to its exact isolated window; completion
+was verified from native task and MCP receipts, not inferred from the UI. Every
+host-call record was reviewed. Cortex calls, draft patches, publication, selective
+report reads, role boundaries and session closure passed without Cortex errors,
+truncation, unexplained write replays or post-publication worker calls. Project
+implementation and command diagnostics were assessed separately from Cortex,
+as required; this is not a claim that every project-development tool call succeeded.
+
+CLI retained one task, seven documents, one canonical pipeline and ten editions
+after continuation. Desktop retained one task, seven documents, one pipeline and
+eight editions. Both passed SQLite integrity and foreign-key checks, stored-file
+size/hash/permission checks, and absence of unpublished drafts or pending deletes.
+Input CSV and the pre-existing user note remained byte-identical to the initial
+fixture. Exact test sessions and the disposable Desktop process were stopped.
+Private full calls, events and screenshots remain outside the repository.
+
+The original request now comes from the host's typed user-message receipt, scoped
+to the current thread and canonical project. It is no longer retyped by the model.
+The observer verifies its stored digest against independently delivered input;
+Desktop-only rich-text serialization is accepted only with observed provenance.
+The source reader uses the tested host state/session format and fails closed if
+that source cannot be established. Literal credential redaction and source
+isolation are unit-tested; no real credentials were used in live workloads.
+
+All 101 source tests passed. Package validation, source-only synchronization,
+generated profiles, relative documentation links and diff checks passed.
+All 22 specialist profiles and seven MCP operations remain packaged. Hooks,
+custom global agent registration and stable-user installation changes were not
+used. The earlier sections below are historical evidence, not the current result.
+
+# Rejected intermediate complex candidates — 2026-09-05
+
+The previous marketplace checks below cover their named simple scenarios only.
+The new offline reconciliation scenario has ten simultaneous requirements,
+independent verification, immutable input and existing output preservation,
+Unicode CSV, exact decimal validation, and a protected pre-existing user edit.
+
+The first complex CLI run completed with 20 MCP events and no MCP errors, but
+failed qualification: task creation included a host environment envelope and
+several instruction-read wrappers omitted structured command receipts. The
+second candidate improved instruction receipts but still added a synthetic
+skill envelope to the saved task. These runs are rejected, not success evidence.
+The observer checks task-text fidelity without exposing content, and the
+coordinator now distinguishes user prose from injected instruction envelopes.
+The third candidate preserved the exact request and published the implementation
+report, but still omitted the first skill-read command receipt. The assignment
+now specifies whole-file instruction loading and structured result forwarding;
+the report protocol appears before ancillary execution guidance in every profile.
+The fourth run exposed delegation after editing an unpublished pipeline draft.
+The working sequence had placed discovery before pipeline publication; that
+ordering is corrected, and the observer now rejects premature delegation.
+Candidate `35d68aa0c27151a5` passed complex CLI and restart/continuation checks,
+but Desktop exposed a shortened report reference and premature worker final.
+A later CLI run still omitted an input-preservation sentence from copied user text.
+The current implementation removes model transcription from task creation: it
+captures typed native user input within the current host thread/project boundary.
+It also validates reference shape before MCP dispatch and keeps missing-reference
+questions inside an unfinished assignment. Source tests cover these changes.
+No ordinary installed plugin was changed during this work. These intermediate candidates do not establish final qualification.
+
+# Marketplace-only orchestration — 2026-09-05
+
+The follow-up ordinary Desktop session still stopped before its first native worker
+on package `9e278fd21933f3c0`. All initial Cortex writes succeeded. Documenting a
+manual native-profile registration step did not fix marketplace-only installation.
+
+The current package is `1.15.6+codex.sha256.ee8d25d519f1b22f`, full payload SHA-256
+`ee8d25d519f1b22fdab9aa6b172e5f1916b9b96f7499706ab21fae27ae55839a`.
+All 22 complete specialist profiles are now ordinary packaged worker skills,
+generated from the same shared reporting protocol and specialization sources.
+The coordinator assigns an exact skill token to an ordinary native subagent.
+No custom profile selector, personal agent registration, or lifecycle hook is
+required. Optional TOML exports remain separate. Dev preparation performs only
+marketplace installation and never populates the personal agents directory.
+
+Consecutive real CLI and Desktop runs on this unchanged payload started with zero
+personal agent TOMLs. The ordinary workload added an English offline-use sentence
+to a fixture README. CLI ran two workers, including independent verification that
+read its predecessor's report through Cortex. It produced 16 MCP events and 100
+host-call records, then completed with an explicit exit-zero marker. Desktop's
+composer was visually confirmed, one native task receipt followed submission,
+and its native task-complete event was observed. Desktop produced 13 MCP events
+and 55 host-call records with one worker. Both complete audits found no Cortex
+errors, hidden command failures, truncation, policy violations, open command
+sessions, or open execution cells. Both exact test sessions were stopped.
+
+The CLI store contains one task, five report documents, one canonical pipeline,
+and six editions. Desktop contains one task, four report documents, one pipeline,
+and five editions. Both passed SQLite integrity/foreign-key checks, Markdown
+size/hash/permission checks, and absence of unpublished drafts or pending deletes.
+The observer distinguishes exact skill instruction reads from project work and
+recognizes explicit standalone command-exit receipts. It does not decrypt native
+assignments or call skill loading native TOML attachment. Project development
+quality remains separate from Cortex acceptance.
+
+The full source suite passed 92 tests; all 18 focused package/observer tests also
+passed after the final classification adjustment. Package validation, source-only
+sync, links and diff checks passed. All 22 worker skills and the coordinator pass
+skill validation. The preliminary
+CLI run on `4889663ba29bbfa8` established worker execution but is not the final
+qualification: its instruction-read wrappers omitted exit receipts. Final runs
+above exposed command receipts. Private full calls, events and screenshots remain
+outside the repository; only bounded aggregate evidence is documented here.
+
+The older sections below describe earlier candidates and do not establish current
+marketplace readiness.
+
+# Ordinary-install regression — 2026-09-05
+
+An ordinary Desktop task on `e3cbb23ec9b5e373` saved its initial pipeline but
+stopped before delegation because native specialist selection was unavailable.
+The ordinary Codex home had zero native profile files; the dev home had 22.
+The earlier real-host checks established operation in the prepared dev environment,
+not completeness of marketplace-only installation. That distinction was missing
+from the earlier readiness conclusion.
+
+Candidate `1.15.6+codex.sha256.9e278fd21933f3c0` adds the explicit packaged
+`cortex_setup.py` registration/check operation. The dev preparer now calls this
+same installer instead of maintaining a separate copy path. The recommended
+installation prompt includes registration and native-spawn verification; missing
+profiles no longer lead to a misleading suggestion to switch to `normal`.
+
+All 87 source tests pass, including empty native registry detection, explicit
+registration, exact-byte verification, conflict refusal before any profile writes,
+managed refresh, unrelated-file preservation and symlink rejection. Stable setup
+was checked read-only: 22 missing, no conflicts. Registration is a distinct user
+operation and is not performed by MCP initialization or a workflow hook.
+CLI and actual Desktop passed consecutive Cortex audits on this unchanged
+candidate using the common installer. CLI: 15 MCP events including initialization,
+80 host-call records, two native specialists, no Cortex errors or coordination
+violations, and exit zero. Desktop: 13 MCP events including initialization,
+46 host-call records, one native specialist, and no Cortex errors or coordination
+violations; its task completed and the disposable process was stopped. Both hosts
+attached the selected profiles and published worker reports successfully. These
+runs verify the setup route; they do not claim that marketplace installation by
+itself installs native profiles or that the ordinary user registry was modified.
+
+# Current Cortex reliability verification — 2026-09-05
+
+The current candidate retains semantic version **1.15.6**:
+`1.15.6+codex.sha256.e3cbb23ec9b5e373`, payload SHA-256
+`e3cbb23ec9b5e3732d65dea1435269cccbf6e438b9fcd725ae194657694e5afc`.
+It exposes seven tools and 22 generated native specialist profiles.
+Catalogue SHA-256:
+`878180556042e55d775eae07ff0023773cd7d418fc20ae9dc07bda9c3e8229c3`.
+
+Package validation and source-only sync check passed. The complete source suite
+passed **83 tests**. New regression evidence covers process death after pipeline
+rename but before SQLite commit, directory-sync failure after rename, preservation
+of the prior pipeline edition, exact retry without duplicate editions, unfinished
+markers in all eight draft templates, and uncertain CLI submission without automatic
+reinsertion. Resume observation tests cover existing native threads and exclusion
+of old call history. The live observer also recognizes relative draft patch paths.
+
+Coordinator and generated worker instructions now agree on one in-place patch
+with independent marker replacements. Concrete evidence dependencies determine
+additional discovery/planning, replacing the arbitrary acceptance-category threshold.
+
+Live qualification measures Cortex: task inheritance, tool sequencing, draft
+ownership, publication, selective reads, pipeline identity, and native handoff.
+Project-development failures are separate diagnostics, not Cortex acceptance failures.
+The preliminary CLI run on `bad409fb439ce553` passed its Cortex audit and exited zero;
+it exercised four native specialists and six first-attempt publications.
+The final CLI run passed its Cortex audit: 13 non-initialization MCP operations,
+67 observed host-call records, four first-attempt publications, two native workers,
+zero Cortex errors, replays, or report/coordination policy violations. CLI exited zero.
+A real resume on the same workdir and store then passed: seven task operations,
+41 host-call records, two first-attempt publications, the same coordinator and pipeline,
+no new task creation, and exit zero. The resumed user prompt was delivered once.
+Actual Desktop then completed on that unchanged payload and passed its Cortex audit:
+14 non-initialization MCP operations, 72 host-call records, two native workers,
+five first-attempt publications, and zero Cortex errors, replays, policy violations,
+or open command/exec sessions. The prepared composer was visually confirmed before
+one submission; the host recorded one new task receipt and its completed final answer.
+The disposable Desktop process was stopped through its helper. CLI and Desktop
+therefore have consecutive successful real-host Cortex checks on this payload.
+
+A read-only storage audit after both hosts stopped verified all **11 current report
+files** across the final CLI/resume and Desktop stores: committed size and SHA-256,
+owner-private permissions, SQLite integrity and foreign keys, one pipeline per task,
+no pending source deletions and no unpublished drafts. CLI/resume retained one task
+and three pipeline editions; Desktop retained one task and three pipeline editions.
+Stable user plugin/configuration were not installed or updated.
+
+These focused runs establish the exercised Cortex lifecycle, not universal future
+LLM correctness. All 22 profiles, harvest/refresh, and native-worker compaction were
+not individually exercised in this qualification. Crash and large-document behavior
+are source/stdio evidence rather than deliberately destructive live-host scenarios.
+
+The sections below are historical observations on other payloads. Their counts,
+formats and statements about a then-current candidate do not describe this candidate.
+
+# Historical release observations
+
+## Candidate and source checks
+
+The replacement retains semantic version **1.15.6** as requested. Current payload:
+`1.15.6+codex.sha256.602d23d69b29fd83`, SHA-256
+`602d23d69b29fd8316784d13559fa90bc1e8f4fa9378ea3ebd392fc76a97b540`.
+Five-tool catalogue SHA-256:
+`6bb5966e9158b0302dae6e1ded15a753c8f04e62553034a90b0a83408b38d1e5`.
+
+On Linux, 2026-09-04, `python3 -B -m pytest -q` passed **54 tests** on this
+payload. These include read-only package/sync and Markdown link validation.
+All eight skills passed the skill format validator on this payload. README preserves its original
+second-level section order and contains the updated Mermaid architecture diagram.
+The PR workflow runs only for requests targeting `dev` or `main`.
+
+Coverage includes five input/output schemas, structured/text result parity,
+original requests, advisory governance without execution gates, real Markdown,
+metadata-only SQLite, one newest-first pipeline, immutable ordinary reports,
+Unicode cursors, catalogue snapshots, task isolation, concurrent writes, exact
+retries, crash recovery, safe errors and retention. Multipart tests publish more
+than 16 MB without truncation, including restart, rejected gaps, metadata changes,
+disk failure and cleanup. Short report allocation handles collisions without
+replacement. Every native profile contains its specialist role instructions and names required
+skills. Codex loads those skills normally; their contents are not copied into
+profiles. Assignments contain no manual plugin-installation paths. Report examples
+are ordinary declared skill references, selected only when relevant.
+
+Native-context tests cover missing/malformed metadata, unknown/conflicting parents,
+child and nested inheritance, automatic pipeline selection, restart, concurrent
+creation, one task per coordinator thread, cross-task report denial, absence of
+public task/thread selectors and cleanup of bindings/creation receipts. These
+prove storage behavior, not infallible future model decisions.
+
+## Observe first, then implement
+
+Before enabling automatic task selection, passive ingress logging on candidate
+`da94c9d187bf4cd8` verified real metadata in ordinary CLI 0.153.0 and actual Desktop.
+Each completed a read-only FAQ/source comparison with one native explorer and
+nine successful task operations. Coordinator calls supplied their own thread and
+no parent. Worker calls supplied a distinct thread and the exact coordinator as
+parent. Each worker's first report write succeeded; neither run had MCP errors or
+mutation replays. Both explorers received full profiles in native developer
+instructions and made no plugin-file reads. The CLI exited with status zero;
+Desktop was stopped after its visible final result.
+
+Only after those observations was thread-bound execution enabled. No webhook,
+Codex database lookup, model-authored task selector or latest-task fallback was
+introduced. The [MCP review](project/mcp-contract-review.md) links the exact official
+Codex source and explains the private metadata allowlist.
+
+## Multistage real-host observations
+
+Real execution uses only the isolated `.cortex-dev` candidate: ordinary Codex in
+the exact `cortex-v12-smoke` tmux session, or actual Desktop with a disposable
+Electron profile. The transport exposes events and delivers literal input; the
+LLM verifier makes acceptance decisions. No stable plugin/configuration changes
+are authorized by these checks.
+
+A substantial Northline Studio landing-page trial on `1584605ac6b21c31` uses an
+ordinary product prompt referring to a product brief. Parallel native explorer
+and UX discovery both inherited the task automatically and published on their
+first attempts. The frontend worker selected the current pipeline and only the
+two relevant discovery reports. All three full native profiles were attached;
+no plugin-file reads were observed. The coordinator used previews and native
+waits, without project-file reads. Midwork EUR pricing and editable form
+confirmation requirements updated the same pipeline and reached the active worker.
+
+That trial is **not a clean acceptance run**: the frontend made two invalid native
+patches, each deleting and adding the same path in one call. The documentation worker also made two oversized page requests, rejected with
+the precise allowed range and correction. No mutation replay was observed.
+The current payload strengthens native patch discipline and recommends default
+read pages with cursors. Normal loading of the documentation-sync skill was
+observed and is permitted; it is not installation exploration. Independent QA
+verified wide-screen interactions, and headless Chrome produced actual 390×844
+and 1440×900 screenshots. Phone interaction automation remained unavailable.
+The older trial cannot qualify the newer payload. Final CLI/Desktop qualification
+remain pending. The multistage task subsequently reached its visible final result,
+including localization polish and synchronized documentation; ordinary CLI exited
+with status zero. Its six workers all succeeded on their first report publication.
+Across 61 task operations there were 59 successes, two argument rejections and
+zero mutation replays. This remains a non-clean exploratory result.
+
+Earlier exploratory trials also remain non-qualifying: one acknowledged mutation
+replay; coordinator over-reading and direct project commands; missing assignment
+references before automatic binding; preview-length rejections before the half-limit
+writing target; and worker self-reading of profiles before native attachment.
+One earlier post-compaction recap skipped mandatory catalogue/pipeline refresh;
+the final-candidate CLI check below subsequently verified the required rereads.
+Question UI trials never established success, and the user explicitly withdrew
+that requirement. Questions use ordinary detailed chat text.
+
+## Earlier routing and recovery checks
+
+On `748fef4b4158b9f5`, a fresh ordinary CLI task uses native role profiles and
+normal skill loading. The explorer loaded its declared shared skills, report
+catalogue and only the investigation example. The technical writer inherited the
+same task, selected relevant evidence, edited only the FAQ and published its
+report. No profile or implementation-file investigation was observed.
+
+This run is not a clean global conformance result: the coordinator used Romanian
+for a Russian request and made one JavaScript syntax error before MCP dispatch.
+The corrected call reached MCP once; this is not a storage replay. Independent
+review completed with no FAQ mismatch. All 22 MCP operations succeeded without
+replay. After real `/compact`, the coordinator fetched fresh catalogue previews
+and the current pipeline before its Russian recap, keeping the same task. The
+ordinary CLI exited with status zero.
+
+Actual Desktop then completed a read-only FAQ/source check on that exact unchanged
+payload: ten MCP operations succeeded, with zero MCP errors or replays. The native
+explorer received its complete role instructions, loaded declared skills and one
+relevant report example, inherited the coordinator task and published on its first
+attempt. The coordinator read only its skill, previews and the current pipeline.
+The visible final answer was in Russian; the disposable Desktop was stopped.
+The worker also published a pipeline edition, which the coordinator reread.
+These observations establish the changed routing, profile and skill behavior in
+both hosts; the noted CLI language/wrapper faults prevent claiming a clean global
+conformance pair.
+
+## Current candidate qualification
+
+The user requested completion after the earlier partial result. Language selection
+now uses the user's own prose across commentary and recovery. Pipeline/governance
+ownership is explicit. Host code-wrapper guidance is both in the normal skill and
+in the live Markdown-field description, and an added stdio test preserves literal
+code, quotes, backslashes and Unicode across restart.
+
+Exploratory candidate `4239176937201189` still produced two pre-dispatch JavaScript
+syntax errors in an explorer; it was interrupted. Candidate `1c7f44eb99b4bdfe`
+then passed both first discovery publications but the frontend submitted multiple
+native patch operations for one existing page; it was interrupted. The selected
+frontend native profile now directly requires one update per existing path. Neither
+interrupted run is qualified. A fresh complete product scenario and real Desktop
+check on `602d23d69b29fd83` are in progress.
+
+## Storage inspection
+
+A read-only audit of eight stopped isolated stores checked **84 indexed reports**:
+all current digests and owner-private permissions matched, SQLite integrity was
+okay, and there were no foreign-key violations, unindexed files, duplicate
+pipelines or pending publication/deletion intents. Historical formats 1–3 were
+inspected read-only; current storage is format 4. No compatibility reader or
+migration is shipped. The completed multistage format-4 store passed the same audit;
+both final-candidate stores passed after their hosts stopped. All six final
+native thread bindings had consistent parent/task relationships. Stable Codex configuration and installed plugin manifest hashes
+matched the pre-task baseline at the latest comparison.
+
+## Remaining limits
+
+A clean full multistage run on the final payload remains unverified. A full
+harvest/harvest-refresh census,
+taskless clear through a native worker, native worker compaction, all 22 specialist
+workflows and explicit Terra/Sol routing have not been exercised end to end.
+Large multipart behavior is source/stdio evidence, not a model-authored enormous
+report in both hosts. The macOS/Python-version CI matrix has not run locally.
+Mermaid was reviewed as source, not rendered through a dedicated engine.
+Same-user hostile filesystem races and hardware power loss are outside these
+checks. Reads verify full-file integrity in bounded memory, so their time cost
+grows with document size. See [storage](project/storage.md) and
+[security](../SECURITY.md).

@@ -2,11 +2,16 @@
   "mcpServers": {
     "cortex": {
       "command": "python3",
-      "args": ["-B", "./scripts/cortex.py"],
+      "args": [
+        "-B",
+        "./scripts/cortex.py"
+      ],
       "cwd": ".",
       "required": true,
-      "omit_tools_from": ["code_mode", "deferred"],
-      "env_vars": ["CORTEX_SESSION_NONCE", "CORTEX_RAW_DIAGNOSTIC"]
+      "env_vars": [
+        "CORTEX_DATA_DIR",
+        "CORTEX_OBSERVATION_DIR"
+      ]
     }
   }
 }

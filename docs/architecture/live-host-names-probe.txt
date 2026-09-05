@@ -1,6 +1,0 @@
-The real isolated live-dev session is already running. Do not start nested
-tmux/cortex-dev, inspect the repository, run shell/validation work, or mutate
-Cortex state. Perform exactly one read-only metadata inspection of `ALL_TOOLS`;
-invoke no nested tool. Return only the count and sorted exact names of entries
-whose metadata identifies them as Cortex tools. Include no descriptions. Do not
-guess names or infer anything from prompts, skills, or memory.

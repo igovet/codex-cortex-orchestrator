@@ -34,15 +34,13 @@ category, recording counts and representative authoritative paths:
   paths, or hidden feature ownership.
 
 Use repository-native file enumeration as a completeness backstop. Codebase
-Memory is the required, enabled worker MCP and mandatory first route for
-project-code discovery: bind it to the exact canonical project root and use
-graph search, path tracing, then exact snippets before any local search. Missing
-or unusable access is an environment blocker. Check graph coverage for every
-cited path and bounded scope, then confirm consequential claims in current
-source. Only an actual graph call proving that the indexed graph excludes the
-relevant surface or is insufficient may authorize one bounded file/text-search
-fallback. Record the concrete graph limitation and fallback rationale; do not
-silently fall back or chain additional local searches.
+Memory is the preferred worker route for project-code discovery when available:
+bind it to the exact canonical project root and use graph search, path tracing,
+then exact snippets before local search. If it is unavailable, denied, timed
+out, erroneous, unusable, or insufficient, record that concrete limitation and
+use exactly one bounded file/text-search fallback. Check graph coverage for
+every cited graph path and bounded scope, then confirm consequential claims in
+current source. Do not silently fall back or chain additional local searches.
 Graph evidence helps explain relationships but never replaces source-tree
 enumeration. Generated, vendored, build, cache, and dependency directories may
 be excluded once with a recorded reason. Tests are evidence and coverage

@@ -1,29 +1,24 @@
-# Features
+# Feature index
 
-<!-- GENERATED:START -->
+| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| Markdown storage and retention | Local Python runtime | Six MCP operations; explicit cleanup command | plugins/cortex/scripts/cortex_runtime/ | [Reports](markdown-reports/index.md) | tests/test_markdown_store.py; tests/test_source_reports.py; tests/test_retention.py; tests/test_stdio.py; tests/test_thread_context.py | documented |
+| Coordination and project knowledge | Model and bundled skills | Explicit orchestration, help, harvest, refresh, clear, normal | plugins/cortex/skills/; plugins/cortex/agents/ | [Knowledge routing](knowledge-routing/index.md) | Package checks and real-host scenarios | documented |
 
-This registry covers the active, source-backed Cortex V12 feature areas.
-Across every feature, the root coordinator is orchestration-only; workers own
-all project actions, substantive analysis, changes, and verification. Its only
-project-read exception is the bounded orchestrator-owned knowledge route used
-to compile per-delegation requirements; profiles consume that supplied contract
-and do not independently reroute. Coordinator routing reads are non-shell direct
-reads of already-known exact allowed paths. Unknown roots or paths and every
-project-local artifact/state check remain worker-owned.
+## Inventory totals
 
-- [Orchestration ledger](orchestration-ledger/index.md)
-- [Advisory governance and project initiatives](advisory-governance/index.md)
-- [Human-readable task views](human-readable-task-views/index.md)
-- [Operator maintenance](operator-maintenance/index.md)
-- [Plugin packaging and validation](plugin-packaging/index.md)
-- [Coordinator communication](coordinator-communication/index.md)
-- [Knowledge-route contract](knowledge-route-contract/index.md)
+Two feature groups: seven storage operations, one host-side retention command,
+22 specialist profiles, and knowledge/routing skills. Two documented groups.
 
-Lifecycle hooks provide host-owned activation, compaction recovery, native
-dispatch correlation, and child-thread attestation. They do not replace the
-server boundary: MCP initialize independently matches the exact host-supplied
-child thread, reserves one signed candidate, and advertises only that
-connection's closed worker schema. Start/stop observations alone are not
-assignment or publication authority.
+## Unmapped surfaces
 
-<!-- GENERATED:END -->
+No additional installable runtime surface found in the current package manifest.
+
+## Exclusions
+
+Repository packaging, CI and live transport are development support, described
+in the project verification guide rather than product features.
+
+## Known unknowns
+
+Real-host qualification is recorded separately in release-readiness.md.

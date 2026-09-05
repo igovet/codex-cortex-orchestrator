@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Backward-compatible repository-root entry point for the isolated dev launcher.
-# Keep the implementation in scripts/cortex-dev so there is one live-dev path.
+# Convenience entry point for the one isolated development launcher.
 set -euo pipefail
-
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 exec "${script_dir}/scripts/cortex-dev" "$@"
