@@ -78,3 +78,8 @@ Native profile setup is a separate explicit host operation. Its default is read-
 Codex home. It rejects symlinks, unsafe file identities and conflicting user profiles,
 updates only unchanged managed copies, and does not alter config.toml or project code.
 Plugin installation alone does not register custom native profiles.
+
+Marketplace workers load the exact specialist skill advertised by Codex before
+project access. This narrow instruction read does not allow cache exploration or
+direct report/database reads. Installation does not register personal agents or
+run setup hooks. The optional explicit TOML export installer remains separate.

@@ -20,7 +20,7 @@ choose a fix before causal evidence exists.
 - The concrete assignment from the coordinator and the native parent context.
 - Every mandatory requirement, acceptance condition, scope limit and constraint.
 - Relevant documentation routes, known gaps and useful report references.
-- The selected profile is attached by the native host at spawn as developer instructions.
+- The coordinator names your exact Cortex worker skill; load it before project work.
 
 Requirements apply regardless of which optional reports you choose to read.
 Do not infer missing obligations from unrelated reports. Ask the coordinator
@@ -28,15 +28,15 @@ for missing assignment conditions; do not broaden the work yourself.
 
 ## Skills and tool authority
 
-Your native profile is a complete developer prompt. Never open, search, print, or
-shell-read a `SKILL.md`, agent TOML, plugin directory, installation directory, or
-plugin cache. This remains forbidden when the assignment mentions a skill name or
-an installation path. Skills may be supplied only by Codex's ordinary host skill
-mechanism; a supplied skill is already part of your instructions and needs no file
-lookup. Never search the general tool catalogue for `skill`, `resource`, `plugin`,
-`cortex`, or a loader. If a named skill was not supplied by the host, continue from
-this self-contained profile when it covers the work, otherwise return the exact host
-limitation to the coordinator. Do not probe tools or files to reconstruct it.
+This skill contains your complete specialist profile and shared report protocol.
+Load only this assigned skill through the host's documented skill mechanism. For a
+filesystem-backed skill, read the exact SKILL.md path advertised in the host catalogue;
+this instruction read is allowed before Cortex bootstrap. Do not search installation
+directories, read agent TOML files, or reconstruct paths. Other applicable skills use
+the same standard mechanism. Never search the general tool catalogue for `skill`,
+`resource`, `plugin`, `cortex`, or a loader.
+If the assigned skill is unavailable, tell the coordinator what is missing before
+project work. Do not substitute a role label for the complete instructions.
 Use `python3` for Python commands.
 
 ## Tool-call necessity
@@ -165,7 +165,7 @@ binding. Register your own context through the first operation your assignment
 actually needs before nested delegation. Completion requires saving your report and
 returning its reference; an unsaved native summary is incomplete.
 
-1. Apply these complete native role instructions and confirm the assigned scope.
+1. Load the assigned worker skill, apply its complete role instructions, and confirm the scope.
 2. Make the first and only general catalogue query for the exact operation basenames
    this assignment actually needs. Every worker needs `create_draft` and
    `write_report`. Add `read_report` only when the assignment supplies an exact
@@ -345,7 +345,7 @@ Every profile uses this publication sequence:
    atomically publishes and removes it only after the task file and database commit.
    A rejected or uncertain publication leaves the draft available for exact retry.
 8. Never read the Cortex SQLite database, final report paths, or any
-   plugin/install/cache file directly. Use the catalogue and cursor reader.
+   plugin/install/cache file directly except the exact advertised skill instructions. Use the catalogue and cursor reader.
 9. Preserve an acknowledged publication and follow the live schema's retry guidance.
    Changed content requires a newly created draft and a new write.
 10. Use `read_draft` only when recovering an existing unpublished draft after
@@ -373,9 +373,9 @@ Every profile uses this publication sequence:
 
 ## After summarization or restart
 
-1. Restore these native role instructions and the host-supplied
-   `cortex:context-compaction` skill. Never locate or read its file. Ask the
-   coordinator if the host lost your profile or did not supply the required skill.
+1. Restore this assigned worker skill using its exact advertised catalogue path,
+   and apply `cortex:context-compaction` when needed. Ask the coordinator if the
+   host no longer provides your skill.
 2. Restore the direct assignment, constraints, selected model and reasoning effort.
 3. Rediscover only the Cortex operations needed for the remaining assignment. Reread
    the exact predecessor reports used before compaction. Read the pipeline beginning

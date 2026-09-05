@@ -60,10 +60,9 @@ Then complete the setup end to end:
    Cortex-required setting documented in the README: multi_agent_v2 = true and
    agents.default_subagent_model = "gpt-5.6-luna".
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
-5. Register the 22 native specialist profiles with the installed package's
-   scripts/cortex_setup.py --install, then run that script without --install
-   to verify exact installed bytes. Do not overwrite conflicting user profiles.
-   Restart Codex and confirm the native spawn tool advertises Cortex profiles.
+5. Confirm the plugin catalogue includes the 22 `cortex:worker-*` specialist
+   skills. Native subagents load those skills; global agent registration is not
+   required. Start a fresh task after updating the plugin.
 6. Confirm that the installed package exposes exactly the seven documented
    storage tools and ships no orchestration hooks. Run the relevant
    verification checks and start a new Codex task.
@@ -237,31 +236,20 @@ user's configured approval policy.
 > replace Codex/user authorization for destructive, external, privileged, or
 > materially scope-expanding actions.
 
-### Register native specialist profiles
+### Marketplace specialist delivery
 
-Codex discovers native profiles in `~/.codex/agents/` or the project's
-`.codex/agents/`. Merely storing TOML files inside a plugin cache does not register
-them. Run the setup program from the exact installed Cortex package (replace the
-example absolute package path with the installed location):
+All 22 specialist profiles are distributed as `cortex:worker-*` skills in the
+plugin. The coordinator assigns one exact skill token to each native subagent;
+the worker loads its complete instructions through the host skill mechanism before
+project work. Marketplace installation needs no copying into `~/.codex/agents`,
+setup command, configuration hook, or custom profile selector. After an update,
+start a fresh task so the host provides the current skill catalogue.
 
-```bash
-python3 -B /absolute/path/to/installed/cortex/scripts/cortex_setup.py --install
-python3 -B /absolute/path/to/installed/cortex/scripts/cortex_setup.py
-```
+Generated TOML exports remain available for explicit personal custom-agent use,
+but Cortex orchestration always uses the packaged worker skills. The optional
+`scripts/cortex_setup.py --install` manages only those personal exports and refuses
+conflicting user files. It is not part of marketplace or dev preparation.
 
-The default operation is read-only verification. Explicit installation registers
-all 22 profiles under `$CODEX_HOME/agents` (default `~/.codex/agents`) and records
-managed digests. It refuses conflicting user files before writing any profile.
-Run setup again after plugin updates, then restart Codex and resume the task.
-A plugin-only installation is incomplete even when all seven MCP tools work.
-The selected TOML is a native configuration layer with `developer_instructions`;
-it is never a file-reading assignment for the worker. See the
-[official custom-agent documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents).
-
-The isolated `scripts/cortex-dev` preparation runs this same setup program only in
-`.cortex-dev/.codex/agents/`. Development checks never update stable profiles.
-If the host does not advertise native profile selection, orchestration reports
-that limitation rather than pretending to attach a profile through message text.
 
 ### Required post-install verification
 
@@ -512,7 +500,7 @@ flowchart TD
     Coordinator --> Governance[Choose advisory governance]
     Coordinator --> Pipeline[Adapt work, dependencies, owners and checks]
     Pipeline --> Native[Native host: launch, message and wait]
-    Native --> Worker[Host attaches native profile and assigned context]
+    Native --> Worker[Worker loads assigned specialist skill]
     Worker --> Read[Read only named predecessor pages when needed]
     Read --> Work[Inspect, implement or verify assigned work]
     Work --> Draft[Create typed draft through Cortex]
@@ -605,7 +593,7 @@ the exact initial pipeline Markdown returned when it creates its draft. A later
 It never runs shell, Git, package, build, test, browser or project-file operations.
 Its sole project-file exception is filling the exact pipeline draft returned by
 `create_draft`; every other read, edit and check belongs to a native worker.
-Codex attaches native TOML profiles at spawn. Workers read relevant indexes and reports, and own
+Native subagents load their assigned packaged worker skill before project work. Workers read relevant indexes and reports, and own
 project inspection, implementation, verification and documentation. The coordinator
 does not open project/plugin files, report bodies, diffs, logs or report examples.
 
@@ -625,8 +613,7 @@ order its evidence requires and avoid overlapping edits.
 
 ### Native workers and results
 
-Native profiles contain complete specialist role instructions and are attached at
-spawn. Applicable skills are supplied only through Codex's ordinary host skill
+Packaged worker skills contain complete specialist role instructions and are loaded before project work. Applicable skills are supplied only through Codex's ordinary host skill
 mechanism when relevant. Worker assignments never name internal skills, loaders,
 plugin files or installation paths, and workers never locate those files themselves.
 
@@ -663,7 +650,7 @@ The server protects document storage rather than sealing project source files.
 
 After summarization, compaction or restart, the coordinator restores host-supplied
 rules, fresh catalogue previews and the current pipeline beginning. Workers reload
-their host-attached profiles and reread previously selected reports and relevant
+their assigned worker skills and reread previously selected reports and relevant
 index-driven documentation. They reread the pipeline only when it was a necessary
 evidence source and list reports only when required saved references were lost.
 Both restore their assignments and constraints.
@@ -741,14 +728,13 @@ Cortex includes 22 advisory specialist profiles:
 | Documentation | `technical_writer` |
 
 The host-supplied orchestrator skill contains a routing table for all profiles.
-The coordinator selects a registered native profile at spawn and supplies the
-complete English assignment and constraints with `fork_turns: "none"`. Codex attaches the TOML `developer_instructions` as
-child-session instructions before project work. Neither role reads profile TOML
-or explores the plugin. A profile name in the task message is not native attachment.
+The coordinator names the exact packaged worker skill and supplies the
+complete English assignment and constraints with `fork_turns: "none"`. The worker loads that complete skill before project work. Neither role reads profile TOML
+or explores the plugin. Workers read only the exact skill paths advertised by the host.
 
 Profiles have structured role, input, workflow, quality, reporting and recovery
 sections. One shared source protocol plus 22 specialization fragments generates
-22 self-contained Agent v2 TOML developer prompts. A byte-for-byte test prevents
+22 self-contained worker skills and matching optional Agent v2 TOML exports. A byte-for-byte test prevents
 profile drift. Each profile also fixes its default draft class:
 
 | Draft template | Profiles |
@@ -765,7 +751,7 @@ live audit reports a mismatch. Optional [report examples](plugins/cortex/skills/
 for planning, investigation, implementation, verification, documentation and final
 synthesis. Examples guide content without imposing exact report headings.
 
-Codex supplies the selected orchestrator skill and native specialist profile.
+Codex supplies the selected orchestrator skill and the worker skill catalogue.
 The host supplies required skills through Codex's normal procedure only when relevant.
 Workers never inspect plugin files to find their instructions or report examples.
 [Tool discipline](plugins/cortex/skills/tool-discipline/SKILL.md) requires checking

@@ -7,8 +7,7 @@ remain available through the same cursor reader.
 
 The native host supplies thread and parent metadata. The server binds a coordinator
 thread once and lets registered children inherit that task without model-authored
-task identifiers. Every one of the 22 specialists receives a complete Agent v2
-profile plus its concrete assignment and mandatory requirements.
+task identifiers. Every one of the 22 specialists loads its complete packaged worker skill alongside its concrete assignment and mandatory requirements.
 
 The coordinator supplies exact short references for predecessor reports whose bodies
 a worker needs. Workers read only those report pages; they do not list the catalogue

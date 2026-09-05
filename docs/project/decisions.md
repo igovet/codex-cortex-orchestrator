@@ -20,3 +20,8 @@
   stage machine or a second hook-owned workflow.
 - Qualify Cortex calls and report lifecycle independently from project development
   diagnostics; retain both without conflating their acceptance boundaries.
+
+- Distribute the 22 complete worker profiles as native plugin skills. Ordinary
+  native subagents load the exact assigned skill; marketplace operation does not
+  depend on global TOML registration or a custom spawn selector. Keep optional
+  TOML exports generated from the same source, outside installation prerequisites.

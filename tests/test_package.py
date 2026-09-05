@@ -28,7 +28,7 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
         assert 'first and only general catalogue query for the exact operation basenames' in instructions
         assert 'Never discover an unused operation.' in instructions
         assert 'Never search the general tool catalogue for `skill`' in instructions
-        assert 'Never open, search, print, or\nshell-read a `SKILL.md`' in instructions
+        assert 'read the exact SKILL.md path advertised in the host catalogue' in instructions
         assert 'A successful `write_report` is the final tool call' in instructions
         assert 'Never use a Git-specific command until retained project evidence' in instructions
         assert 'The initial discovery call must not contain a `git` executable' in instructions
@@ -133,7 +133,7 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert 'Never search the general tool catalogue' in orchestrator
     assert 'A truncated catalogue result does not establish any schema.' in orchestrator
     assert 'final `__`-delimited\n  segment of its full name' in orchestrator
-    assert 'Every Cortex\n   project worker uses `fork_turns: "none"`' in orchestrator
+    assert "live native spawn contract's no-history" in orchestrator
     assert 'Use at least medium effort for every spawned Cortex project worker.' in orchestrator
     assert '### Evidence-dependent ordering' in orchestrator
     assert 'Do not\nrun a mutation owner alongside an active investigation' in orchestrator
@@ -608,3 +608,65 @@ def test_resumed_cli_observes_existing_thread_without_replaying_old_calls(monkey
     assert len(rows)==1
     assert rows[0]['thread_id']=='root' and rows[0]['outcome']=='success'
     assert rows[0]['timestamp']==datetime.fromtimestamp(211,timezone.utc).isoformat()
+
+
+def test_marketplace_skills_deliver_every_complete_profile_without_registry():
+    from generate_agent_profiles import expected_skills
+    skills=expected_skills()
+    assert len(skills)==22
+    for path,body in skills.items():
+        assert path.read_bytes()==body
+        name=path.parent.name.removeprefix('worker-')
+        profile=tomllib.loads((PLUGIN/'agents'/f'{name}.toml').read_text())
+        assert body.decode().split('---\n',2)[2].lstrip()==profile['developer_instructions']
+    prepare=(ROOT/'scripts/prepare_codex.py').read_text()
+    assert 'cortex_setup.py' not in prepare
+
+
+def test_marketplace_audit_extracts_only_known_role_from_assignment():
+    import runpy
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    extract=helper['assigned_worker_profile']
+    assert extract('$cortex:worker-backend-dev Implement a bounded change.')=='backend_dev'
+    assert extract('$cortex:worker-unknown secret') is None
+    assert extract('$cortex:worker-backend-dev $cortex:worker-debugger') is None
+    metadata=helper['safe_call_metadata']('spawn_agent',json.dumps({'message':'$cortex:worker-technical-writer Private content'}))
+    assert metadata=={'assigned_profile':'technical_writer'}
+
+
+def test_skill_instruction_exception_does_not_allow_cache_exploration(tmp_path,monkeypatch):
+    import runpy
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    path=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-technical-writer/SKILL.md'
+    path.parent.mkdir(parents=True);path.write_text('instructions')
+    check=helper['worker_skill_read']
+    assert check('exec_command',json.dumps({'cmd':f'cat {path}'}))
+    assert check('exec_command','{cmd:'+json.dumps(f"sed -n '1,240p' {path}")+'}')
+    assert not check('exec_command',json.dumps({'cmd':f'cat {path}; touch /tmp/unrelated'}))
+    assert not check('exec_command',json.dumps({'cmd':f'cat {path.parent.parent.parent}/profiles.json'}))
+    assert not check('apply_patch',json.dumps({'cmd':f'cat {path}'}))
+
+
+def test_labelled_command_status_is_a_receipt_but_stdout_alone_is_not():
+    import runpy
+    check=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')['observed_outcome']
+    assert check([{'text':'file content'},{'text':'exit_status=0'}],'exec_command')[0]=='success'
+    assert check([{'text':'file content'},{'text':'exit_status=2'}],'exec_command')[:2]==('error','command_exit_2')
+    assert check([{'text':'file content with exit_status=0'}],'exec_command')[0]=='unverified'
+
+
+def test_skill_read_allows_only_an_exit_preserving_suffix(tmp_path,monkeypatch):
+    import runpy
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    path=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
+    path.parent.mkdir(parents=True);path.write_text('instructions')
+    suffix='; rc=$?; printf \'\\n__EXIT_STATUS__=%s\\n\' "$rc"; exit "$rc"'
+    check=helper['worker_skill_read']
+    assert check('exec_command',json.dumps({'cmd':f"sed -n '1,240p' {path}"+suffix}))
+    assert check('exec_command',json.dumps({'cmd':f'wc -l {path}'+suffix}))
+    assert not check('exec_command',json.dumps({'cmd':f'cat {path}'+suffix+'; touch /tmp/unrelated'}))
+    assert helper['observed_outcome']([{'text':'__EXEC_EXIT_CODE__=3'}],'exec_command')[:2]==('error','command_exit_3')
+    assert helper['is_orchestration_call']({'role':'general','tool':'exec_command','skill_instruction_read':True})
+    assert not helper['is_orchestration_call']({'role':'general','tool':'exec_command'})

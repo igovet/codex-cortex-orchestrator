@@ -19,7 +19,7 @@ A summary is an orientation aid, not a replacement for rereading saved materials
   the previous change completed; do not replace it with ordinary direct execution.
 - The same native thread and parent lineage; relevant report references.
 - Direct assignments, exact requirements, constraints and acceptance checks.
-- Selected native profile identities, models and reasoning effort.
+- Selected worker skill identities, models and reasoning effort.
 - Native worker handles, current intent, known findings and remaining work.
 
 Do not retain secrets or raw logs. Both roles load required named skills through
@@ -41,8 +41,8 @@ If a detail is missing, delegate its recovery to a worker and request a concise 
 
 ## Worker recovery
 
-1. Restore the native specialist profile and reload the required named skills
-   through Codex. Report missing native profile delivery to the coordinator;
+1. Restore the assigned specialist worker skill and reload the required named skills
+   through Codex. Report missing worker skill availability to the coordinator;
    do not reconstruct it through installation inspection.
 2. Restore the directly assigned work, mandatory conditions, model and effort.
 3. Obtain a fresh catalogue and reread the current pipeline beginning.

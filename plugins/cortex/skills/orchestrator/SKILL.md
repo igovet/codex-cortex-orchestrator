@@ -111,9 +111,8 @@ the complete current instructions and treat the optional loader as unavailable.
 Instruction loading
 is separate from reading project evidence and does not widen this boundary.
 Use the host catalogue and declared skill references, without guessed paths,
-custom loaders or installation exploration. Select a registered native profile
-at spawn; the host supplies its role instructions. Do not ask workers to find or
-reconstruct profiles themselves.
+custom loaders or installation exploration. Assign the exact bundled worker skill
+from the routing table; the worker loads it through the standard skill mechanism.
 
 | Actor | Owns | Content it reads |
 | --- | --- | --- |
@@ -185,7 +184,7 @@ limits; a bare "done" is insufficient for a completion decision.
 4. Save a concise, complete current pipeline with work, ordering, dependencies,
    executors and intended checks. Choose only useful stages and specialists.
 5. Select profiles from the table and delegate bounded work through native host tools;
-   the host attaches complete profiles and workers read relevant task evidence.
+   workers load their assigned complete skill and read relevant task evidence.
 6. Wait through native coordination and review report previews. Delegate full evidence
    assessment or independent checks when needed.
 7. Adapt the same pipeline when requirements, evidence or risks change.
@@ -295,8 +294,9 @@ check; otherwise present the task as incomplete.
 ## Profile selection and delivery
 
 The table below routes work to all 22 bundled specializations. The table is sufficient for coordinator routing.
-Use the registered profile names in the native spawn contract; the table is
-sufficient for routing without looking up installation resources.
+Each profile has a bundled skill named `cortex:worker-` followed by the profile
+name with underscores replaced by hyphens (for example `cortex:worker-backend-dev`).
+Use that exact skill name in the assignment. No user agent registry is required.
 
 | Profile | Assign when | Avoid when |
 | --- | --- | --- |
@@ -325,41 +325,30 @@ sufficient for routing without looking up installation resources.
 
 Before each delegation:
 
-1. Choose the model and effort before constructing the spawn request. Every Cortex
-   project worker uses `fork_turns: "none"` and one complete English assignment.
-   Never use full, all, default, or bounded parent-history inheritance: it leaks the
-   coordinator conversation and host-supplied orchestrator skill into the worker,
-   duplicates requirements, exposes plugin paths, and competes with its TOML profile.
-   Native MCP parent metadata still binds the child to the task. This no-history rule
-   also permits an explicit Terra or Sol override without a fork conflict.
-2. Select an exact registered native profile from the table using the live spawn
-   contract. Require the host to attach that profile at creation, before child work.
-3. Before spawning, successfully create the task and save its initial pipeline.
-   The host connects each native child to this task automatically. Include the
-   concrete assignment, every mandatory requirement, acceptance check, ownership,
-   dependency and stopping boundary directly in the assignment. Do not pass or ask
-   for task identifiers. The self-contained assignment replaces history inheritance;
-   do not quote skill bodies, plugin paths, private chat history, or unrelated reports.
-   A worker must access its inherited task before creating nested workers, so the
-   parent chain is registered. Missing host context requires a host repair, not
-   guessing a task or choosing the newest unrelated task.
-   Never put a Cortex skill name, skill-loading instruction, plugin path, installation
-   path or cache path in a worker assignment. Native profile attachment supplies the
-   complete worker protocol. Route documentation, harvest and maintenance work by
-   profile plus a self-contained assignment instead of asking the worker to locate
-   internal instructions.
-4. Never replace native profile selection with a role name in message text, a profile
-   path, a request to discover its instructions, or a separate profile skill. Require
-   the worker to use live MCP discovery and task operations for its first task access;
-   it must never shell-read `.codex/cortex/` or installation/plugin files.
-   The native profile contains the complete shared worker protocol.
-5. If native profile selection is not advertised or the profile is unavailable, report
-   the exact host limitation and the missing native-profile installation prerequisite.
-   Plugin installation alone does not register profiles. Direct the user to the
-   installed package's explicit native-profile setup and a fresh Codex session;
-   retain the existing task for continuation. Do not suggest `normal` as a repair,
-   claim execution has begun, fake attachment, invent a spawn field, ask a worker
-   to inspect the plugin or silently fall back to an unconfigured generic agent.
+1. Choose the model and effort and use the live native spawn contract's no-history
+   option. Supply one complete English assignment so coordinator-only instructions
+   do not leak into the worker. Native MCP parent metadata still binds it to the task.
+2. Select the specialist from the table. Begin its assignment with the actual token
+   `$cortex:worker-<hyphenated-profile-name>` and require loading that exact skill
+   before project work. Include in the assignment: "Read the entire advertised
+   worker skill; expose the full command result including exit status for this
+   instruction read as for every later command." Use ordinary native subagents; a custom
+   profile selector and global TOML registration are not prerequisites. Never invent
+   a spawn argument or claim host-attached developer instructions.
+3. Before spawning, create the task and save its initial pipeline. Include every
+   mandatory requirement, acceptance check, ownership, dependency and stopping
+   boundary directly in the assignment, plus the exact worker skill token. Do not
+   include plugin paths, private chat history, unrelated reports, or task identifiers.
+   The worker loads only the skill path advertised by its own host catalogue; this
+   is standard instruction loading, not permission to inspect plugin internals.
+4. Require the worker's first task access through live MCP discovery and the needed
+   task operations after loading its skill. It must never shell-read task artifacts
+   or the database. Each skill contains the complete shared reporting protocol.
+   Before nested delegation the worker must register its inherited task context
+   through a needed Cortex operation. Never guess another task on binding failure.
+5. If native subagents themselves or the named worker skill are unavailable, retain
+   the current task and report that concrete limitation. Absence of custom native
+   profile selection alone is not a blocker. Do not ask for user profile setup.
 6. Provide the exact short identifiers of every predecessor report the worker needs.
    A worker must not call `list_reports` to rediscover references the coordinator
    already has, and must not read the task pipeline for routine orientation. Put the
@@ -383,10 +372,9 @@ Before each delegation:
    aligned with one finished assignment and prevents tools from running after its
    publication receipt.
 
-Native host attachment, rather than a worker's self-read, delivers the profile.
-Host delivery verification belongs to external development tests, not extra product
-stages where workers inspect the plugin or their own transcripts. No server
-assignment binding or specialized publication is involved.
+The packaged worker skill delivers the complete profile. Installation through the
+marketplace is sufficient to distribute every specialist's instructions. Tests
+verify actual skill loading and report publication without personal agent files.
 
 ## Model and effort selection
 
@@ -488,8 +476,7 @@ concise preview from workers.
    which outrank generated docs. The coordinator does not repeat their inspection.
 5. After changes, obtain a documentation-impact preview. If updates are needed, assign
    a `technical_writer` with the verified facts, affected documentation surfaces and
-   required checks. Its native profile is self-contained; do not mention an internal
-   skill, plugin, profile path or loading procedure in the assignment.
+   required checks. Include its exact worker skill token; do not include installation paths.
    Required documentation updates and their checks must finish before task completion.
    A no-update conclusion must come from an evidence-backed specialist preview;
    missing inspection is not proof that documentation is unaffected.
@@ -549,7 +536,7 @@ requirements, constraints, assignments, models/effort and native handles from th
 current state; reconcile worker status before overlapping work. Do not recreate the
 task, fetch original-request/report bodies or inspect project documentation.
 
-Workers restore their native profile, load skill `cortex:context-compaction`
+Workers restore their assigned worker skill, load skill `cortex:context-compaction`
 through Codex, then reread the current pipeline, selected reports
 and applicable index-driven documentation. A summary alone is not enough for either
 role. If the current pipeline omits a necessary detail, ask a worker to recover it

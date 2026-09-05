@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,18 +63,35 @@ def expected_profiles(plugin: Path = PLUGIN) -> dict[Path, bytes]:
     return rendered
 
 
+def expected_skills(plugin: Path = PLUGIN) -> dict[Path, bytes]:
+    rendered = {}
+    for path, body in expected_profiles(plugin).items():
+        profile = tomllib.loads(body.decode())
+        name = 'worker-' + path.stem
+        description = 'Cortex delegated specialist only: ' + profile['description']
+        text = ('---\nname: ' + name + '\ndescription: ' + json.dumps(description) + '\n---\n\n'
+                + profile['developer_instructions'])
+        rendered[plugin / 'skills' / name / 'SKILL.md'] = text.encode()
+    return rendered
+
+
 def check(plugin: Path = PLUGIN) -> None:
     expected = expected_profiles(plugin)
     actual = set((plugin / "agents").glob("*.toml"))
     if actual != set(expected):
         raise ValueError("generated Agent v2 profile set differs from source catalogue")
+    skills = expected_skills(plugin)
+    if set((plugin / "skills").glob("worker-*/SKILL.md")) != set(skills):
+        raise ValueError("generated worker skill set differs from source catalogue")
+    expected.update(skills)
     for path, body in expected.items():
         if path.read_bytes() != body:
             raise ValueError(f"generated Agent v2 profile is stale: {path.name}")
 
 
 def write(plugin: Path = PLUGIN) -> None:
-    for path, body in expected_profiles(plugin).items():
+    for path, body in (expected_profiles(plugin) | expected_skills(plugin)).items():
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
 
 

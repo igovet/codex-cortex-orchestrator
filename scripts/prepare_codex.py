@@ -34,6 +34,5 @@ cache=dev/'.codex/plugins/cache/cortex/cortex'/receipt['version']
 validate(cache)
 if payload_digest(cache)!=receipt['digest']:
     raise SystemExit('Installed candidate differs from source.')
-# Exercise the same explicit profile setup shipped to ordinary plugin users.
-subprocess.run(['python3','-B',str(cache/'scripts/cortex_setup.py'),'--install'],check=True)
+# Marketplace installation is the complete preparation; no personal agents are registered.
 print('Cortex isolated candidate installed and verified: '+receipt['version'])

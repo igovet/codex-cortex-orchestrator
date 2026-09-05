@@ -87,7 +87,7 @@ the coordinator and native workers. With no `--limit`, it emits the full run:
 wrappers, each statically visible nested host call, and each actual Cortex MCP event.
 It also records every host `CommandExecution` item separately, so one wrapper that
 starts several commands cannot hide an individual nonzero exit or truncated result.
-It retains only timestamp, thread lineage, attached role/model/effort, safe spawn
+It retains only timestamp, thread lineage, observed role/model/effort, safe spawn
 selectors, tool name, argument/result digests, bounded routing selectors and safe
 error codes. Review
 every call for a concrete need and correct role ownership. The final `audit` rejects
@@ -131,5 +131,15 @@ MCP deliveries; the previous run's audit remains separate.
 Native-profile installation regression checks must begin with an empty agents
 registry. Verify that the package alone reports 22 missing profiles, explicit setup
 registers exact bytes, conflicting user files prevent all writes, and subsequent
-managed updates preserve unrelated profiles. Isolated live preparation must call
-this same packaged setup, not maintain its own privileged copying path.
+managed updates preserve unrelated profiles. This optional personal export check is separate from marketplace preparation;
+live preparation must not install these exports.
+
+Marketplace parity requires a personal agents directory with no Cortex TOMLs;
+`prepare_codex.py` must only install the plugin through the marketplace. Verify
+that each native worker loads its exact packaged skill and publishes its own report.
+An MCP-only pass or a dev-only native registry does not prove ordinary installation.
+
+For marketplace skills, the observer identifies the worker role from the exact
+skill instruction read; it does not call that native TOML attachment. Encrypted
+assignment content remains opaque. A standalone wrapper text item `exit_status=N`
+is an explicit command receipt; stdout containing that string is not sufficient.

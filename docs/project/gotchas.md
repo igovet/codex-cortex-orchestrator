@@ -19,14 +19,8 @@ summaries. Missing indexes justify bounded worker discovery, not automatic harve
 Retention cleanup must receive active task exclusions from the coordinator;
 storage cannot infer native agent liveness.
 
-Native profiles must be registered in a Codex agents directory before starting
-a task. Plugin-cache TOML files alone are not native profile registration. The
-isolated candidate setup registers all 22 without modifying stable agents. The
-coordinator selects the profile through the advertised spawn contract; workers
-never initialize themselves by reading TOML or plugin source.
-
-Ordinary plugin installation must run the packaged `scripts/cortex_setup.py --install`
-and then its read-only check. Dev preparation now uses this identical program.
-A host with zero registered profiles can use all Cortex MCP tools yet stop before
-its first worker. Check the native spawn catalogue after restarting Codex; testing
-only MCP availability does not establish a working installation.
+A plugin cache containing agent TOML files does not populate Codex's personal
+agent registry. Cortex therefore distributes all 22 specialist profiles as worker
+skills and assigns their exact tokens to ordinary native subagents. Dev preparation
+must not register personal profiles, or it can hide marketplace installation bugs.
+Verify runs with an empty personal agents directory and inspect actual skill loading.

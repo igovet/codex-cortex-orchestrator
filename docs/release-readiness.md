@@ -1,3 +1,50 @@
+# Marketplace-only orchestration — 2026-09-05
+
+The follow-up ordinary Desktop session still stopped before its first native worker
+on package `9e278fd21933f3c0`. All initial Cortex writes succeeded. Documenting a
+manual native-profile registration step did not fix marketplace-only installation.
+
+The current package is `1.15.6+codex.sha256.ee8d25d519f1b22f`, full payload SHA-256
+`ee8d25d519f1b22fdab9aa6b172e5f1916b9b96f7499706ab21fae27ae55839a`.
+All 22 complete specialist profiles are now ordinary packaged worker skills,
+generated from the same shared reporting protocol and specialization sources.
+The coordinator assigns an exact skill token to an ordinary native subagent.
+No custom profile selector, personal agent registration, or lifecycle hook is
+required. Optional TOML exports remain separate. Dev preparation performs only
+marketplace installation and never populates the personal agents directory.
+
+Consecutive real CLI and Desktop runs on this unchanged payload started with zero
+personal agent TOMLs. The ordinary workload added an English offline-use sentence
+to a fixture README. CLI ran two workers, including independent verification that
+read its predecessor's report through Cortex. It produced 16 MCP events and 100
+host-call records, then completed with an explicit exit-zero marker. Desktop's
+composer was visually confirmed, one native task receipt followed submission,
+and its native task-complete event was observed. Desktop produced 13 MCP events
+and 55 host-call records with one worker. Both complete audits found no Cortex
+errors, hidden command failures, truncation, policy violations, open command
+sessions, or open execution cells. Both exact test sessions were stopped.
+
+The CLI store contains one task, five report documents, one canonical pipeline,
+and six editions. Desktop contains one task, four report documents, one pipeline,
+and five editions. Both passed SQLite integrity/foreign-key checks, Markdown
+size/hash/permission checks, and absence of unpublished drafts or pending deletes.
+The observer distinguishes exact skill instruction reads from project work and
+recognizes explicit standalone command-exit receipts. It does not decrypt native
+assignments or call skill loading native TOML attachment. Project development
+quality remains separate from Cortex acceptance.
+
+The full source suite passed 92 tests; all 18 focused package/observer tests also
+passed after the final classification adjustment. Package validation, source-only
+sync, links and diff checks passed. All 22 worker skills and the coordinator pass
+skill validation. The preliminary
+CLI run on `4889663ba29bbfa8` established worker execution but is not the final
+qualification: its instruction-read wrappers omitted exit receipts. Final runs
+above exposed command receipts. Private full calls, events and screenshots remain
+outside the repository; only bounded aggregate evidence is documented here.
+
+The older sections below describe earlier candidates and do not establish current
+marketplace readiness.
+
 # Ordinary-install regression — 2026-09-05
 
 An ordinary Desktop task on `e3cbb23ec9b5e373` saved its initial pipeline but

@@ -1,7 +1,7 @@
 # Knowledge routing and commands
 
 The coordinator reads only catalogue previews and the current pipeline beginning.
-The native host attaches complete selected TOML profiles at spawn. Workers read relevant indexes
+Each native worker loads its complete assigned packaged worker skill. Workers read relevant indexes
 and linked pages, select needed report bodies and inspect source. They return
 concise routing, result and verification findings for coordinator decisions.
 Current source, tests and executable configuration outrank generated docs.
@@ -20,19 +20,17 @@ bounded retention deletion to the installed maintenance command without opening
 a new task. Normal leaves coordination without deleting documents.
 
 After summarization the coordinator restores host-supplied rules, previews and the
-current pipeline. Workers restore attached developer instructions and reread needed
+current pipeline. Workers restore their assigned specialist skills and reread needed
 reports and indexed documentation. The native thread binding and current pipeline stay stable.
 
 ## Profile routing and skill loading
 
-The orchestrator skill contains a routing table for all 22 specialists. The
-coordinator selects the registered native profile at spawn; Codex applies its TOML
-as a child configuration layer containing developer instructions. Every project
-worker uses `fork_turns: "none"` and a self-contained English assignment, so the
-coordinator chat, orchestrator skill message and plugin path are never inherited.
-Native MCP parent metadata still resolves the same task. Neither role
-opens profile files or investigates plugin internals. A role label in the assignment
-cannot replace host attachment. Missing native profile support is reported honestly.
+The orchestrator skill contains a routing table for all 22 specialists. Each has
+an exact `cortex:worker-*` skill token. The coordinator supplies that token and a
+self-contained assignment through ordinary native subagent tools. The worker reads
+its advertised skill instructions before MCP bootstrap and project work. This does
+not require custom native profile selection or personal agent TOML registration.
+The coordinator never reads the worker's full instructions or project evidence.
 
 Each structured profile names responsibility, inputs, workflow, checks and recovery.
 The complete shared protocol and tool discipline are generated directly into every
@@ -61,7 +59,7 @@ one specialist assignment. Separate discovery and planning serve concrete unreso
 decisions; neither file counts nor acceptance-category counts impose fixed stages.
 Dependencies still prevent implementation from racing governing investigations.
 
-Ordinary setup explicitly registers the packaged native profiles through
-`scripts/cortex_setup.py --install`; plugin-cache presence is insufficient.
-When profile selection is absent, the coordinator identifies incomplete setup
-instead of presenting `normal` as a repair or claiming worker execution began.
+Ordinary marketplace installation and isolated dev preparation use the same
+packaged skills without writing a personal agent registry. Missing custom profile
+selection does not prevent delegation; unavailable native subagents or a missing
+assigned skill remain real host limitations.
