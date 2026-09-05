@@ -1,71 +1,180 @@
 {
-  "schema": "cortex/advisory-profiles/v1",
-  "model_routing": {
-    "schema": "cortex/advisory-model-selection/v1",
-    "native_default_model": "gpt-5.6-luna",
-    "ownership": "The coordinator chooses one exact model and reasoning effort for each delegation. This advice never authorizes, rejects, or rewrites a delegation.",
-    "recommendations": [
-      {
-        "model": "gpt-5.6-luna",
-        "recommended_effort": "high",
-        "choose_for": "Default bounded work, including Explorer/discovery, ordinary implementation, QA, and deterministic rechecks; raise Luna effort before changing models."
-      },
-      {
-        "model": "gpt-5.6-terra",
-        "recommended_effort": "high",
-        "choose_for": "Only genuinely complex planning or architecture, including cross-cutting design decisions or processes that cannot be safely resolved by Luna at the selected effort."
-      },
-      {
-        "model": "gpt-5.6-sol",
-        "recommended_effort": "high",
-        "choose_for": "Rarely: only genuinely very-high-risk security-related work where Sol's specialized security reasoning is justified; never ordinary difficult work or routine security review."
-      }
-    ]
-  },
-  "dynamic_pipeline": {
-    "schema": "cortex/model-owned-pipeline/v1",
-    "ownership": "The coordinator chooses intent, specialists and ready work from the typed execution graph and finalized evidence. The ledger enforces dependencies, artifact generations and revision bindings. A planner worker owns each project solution plan and publishes one immutable candidate graph; no prose pipeline competes with that graph.",
-    "complexity_baselines": {
-      "C1": "A bounded, low-risk change with one clear ownership surface and proportional verification.",
-      "C2": "A multi-step or cross-surface change that benefits from discovery or a planner-owned plan, plus independent verification as evidence requires.",
-      "C3": "A high-risk, cross-domain, security/privacy, migration, public-contract, concurrency, destructive, production-critical, or long-lived change requiring full governance depth and evidence-driven specialist coverage."
-    },
-    "governance_baselines": {"C1":"minimal","C2":"light","C3":"full"},
-    "stages": ["baseline","discovery","planning","graph-validation","implementation","review","verification","security","documentation-impact","documentation-sync","documentation-verification","knowledge-harvest","closure"],
-    "rules": [
-      "Stages are conditional on the current graph, accepted evidence and user constraints; the initial artifact observation precedes artifact-dependent discovery and planning.",
-      "Select an already ready initial baseline node to establish project capability and artifact observations. Baseline is not a request to append new discovery work; discovery is available only after its prerequisites are met.",
-      "Planning produces a candidate graph. Independent graph validation must establish its contract coverage and dependency correctness before plan-dependent work becomes ready.",
-      "A new report, failed check, changed risk, or user decision may add, remove, reorder, retry, or rework only unexecuted or newly required DAG nodes; completed evidence remains immutable.",
-      "Before every delegation, select only current ready work with satisfied artifact and predecessor requirements. Terminal kind and mutation ownership come from the graph, never from the profile label. Review follows the current risk, authority and explicit user-decision binding; a prior approval is not a reason to ask again.",
-      "A planning-predecessor rejection is a first-attempt orchestration failure; a later corrected retry cannot make that verification run clean.",
-      "Implementation, review, verification, security, documentation-impact, documentation sync/verification, and knowledge harvest are worker-owned stages.",
-      "The standard Codex To-Do projection contains only current pipeline stages and gate state, never worker subtasks, implementation checklists, or report bodies; refresh it whenever a stage or gate changes.",
-      "The typed graph and immutable reports are durable evidence; To-Do is only a concise projection and must remain consistent with current readiness."
-    ]
-  },
   "profiles": [
-    {"name":"accessibility_auditor","filename":"accessibility-auditor.toml","description":"Accessibility auditor for WCAG conformance, keyboard navigation, and assistive-technology risks.","select_when":"Accessibility conformance or assistive-technology behavior needs independent inspection or verification.","avoid_when":"Known accessibility defects need source remediation."},
-    {"name":"accessibility_fixer","filename":"accessibility-fixer.toml","description":"Accessibility remediation specialist for semantic UI, keyboard, focus, contrast, responsive, and assistive-technology fixes.","select_when":"Accepted accessibility findings require bounded production UI and test changes.","avoid_when":"The task is an independent accessibility audit with no source changes."},
-    {"name":"architect","filename":"architect.toml","description":"System architect for component boundaries, data flow, API contracts, and architecture decisions.","select_when":"System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided.","avoid_when":"The design is already settled and remaining work is bounded implementation."},
-    {"name":"backend_dev","filename":"backend-dev.toml","description":"Backend implementation specialist for APIs, business logic, persistence, and server-side tests.","select_when":"A bounded server, API, service, business-logic, or persistence change must be implemented.","avoid_when":"The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery."},
-    {"name":"build_verification","filename":"build-verification.toml","description":"Build and test verifier for exact command outcomes and release-readiness proof.","select_when":"Independent build, test, packaging, installation, or release-readiness evidence is required.","avoid_when":"A failing check must be diagnosed or repaired."},
-    {"name":"code_reviewer","filename":"code-reviewer.toml","description":"Code reviewer for correctness, regressions, security, performance, and missing tests.","select_when":"A completed or proposed change needs independent defect-focused review.","avoid_when":"The primary need is implementation, planning, or broad repository discovery."},
-    {"name":"data_engineer","filename":"data-engineer.toml","description":"Data engineering specialist for ETL, migrations, validation, rollbacks, and data integrity.","select_when":"Data movement, transformation, backfill, migration execution, or integrity validation must be implemented.","avoid_when":"Only database schema design is needed, with no data-operation implementation."},
-    {"name":"database_architect","filename":"database-architect.toml","description":"Database architect for schemas, indexes, migrations, query plans, and compatibility risks.","select_when":"Schema, index, query-plan, migration, locking, or rollback design needs specialist review.","avoid_when":"The approved design only needs migration or data-pipeline implementation."},
-    {"name":"debugger","filename":"debugger.toml","description":"Debugging specialist for reproducing failures, proving root cause, implementing focused fixes, and verifying regressions.","select_when":"A failure must be reproduced and its root cause proven before a focused repair.","avoid_when":"The desired behavior and implementation path are already known."},
-    {"name":"devops_engineer","filename":"devops-engineer.toml","description":"Infrastructure specialist for CI/CD, containers, deployment safety, and operational diagnostics.","select_when":"Infrastructure, delivery, deployment, runtime configuration, or operational automation must change.","avoid_when":"The task is application implementation without delivery or runtime ownership."},
-    {"name":"explorer","filename":"explorer.toml","description":"Codebase investigator for execution paths, ownership, dependencies, and relevant files.","select_when":"Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.","avoid_when":"The task requires design decisions or source changes."},
-    {"name":"frontend_dev","filename":"frontend-dev.toml","description":"Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.","select_when":"A browser UI, component, client state, styling, or frontend test change must be implemented.","avoid_when":"The task spans material server ownership or is only interaction design."},
-    {"name":"fullstack_dev","filename":"fullstack-dev.toml","description":"Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.","select_when":"One coherent change spans both browser-facing and server-facing contracts.","avoid_when":"The work can be cleanly owned by one narrower frontend or backend specialist."},
-    {"name":"general","filename":"general.toml","description":"General-purpose agent for bounded research, analysis, or implementation when no specialty fits.","select_when":"The work is bounded but no specialist profile has a justified fit.","avoid_when":"A narrower specialist clearly owns the task."},
-    {"name":"mobile_dev","filename":"mobile-dev.toml","description":"Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.","select_when":"An iOS, Android, React Native, Flutter, or native mobile change must be implemented.","avoid_when":"The task is browser web UI or a platform-neutral backend."},
-    {"name":"performance_engineer","filename":"performance-engineer.toml","description":"Performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.","select_when":"Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis.","avoid_when":"The bottleneck is already proven and only an approved implementation remains."},
-    {"name":"planner","filename":"planner.toml","description":"Planning specialist that turns delegated project evidence into the only durable project solution plan report, including decomposition, dependencies, risks, and acceptance coverage.","select_when":"A decision-complete work breakdown, dependency order, ownership map, or acceptance matrix is useful; plan-dependent work must consume its finalized plan report.","avoid_when":"The task is a simple bounded execution step or requires editing project files immediately."},
-    {"name":"qa_engineer","filename":"qa-engineer.toml","description":"QA specialist for acceptance coverage, automated tests, reproduction scenarios, and quality-risk evidence.","select_when":"Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created.","avoid_when":"Only a non-mutating final command run or source-code review is needed."},
-    {"name":"refactorer","filename":"refactorer.toml","description":"Refactoring specialist for safe structural improvements that preserve public behavior and contracts.","select_when":"The explicit goal is behavior-preserving structural improvement with regression proof.","avoid_when":"New behavior, unresolved defects, or architecture decisions dominate the task."},
-    {"name":"security_auditor","filename":"security-auditor.toml","description":"Security auditor for authentication, authorization, secrets, cryptography, dependencies, and data-protection risks.","select_when":"Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review.","avoid_when":"The task is to implement a known security fix rather than audit it."},
-    {"name":"technical_writer","filename":"technical-writer.toml","description":"Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.","select_when":"Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs.","avoid_when":"Facts are unverified or production code changes are still required."},
-    {"name":"ux_designer","filename":"ux-designer.toml","description":"UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.","select_when":"User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed.","avoid_when":"The design is settled and production frontend code must be written."}
+    {
+      "name": "accessibility_auditor",
+      "filename": "accessibility-auditor.toml",
+      "description": "Accessibility auditor for WCAG conformance, keyboard navigation, and assistive-technology risks.",
+      "select_when": "Accessibility conformance or assistive-technology behavior needs independent inspection or verification.",
+      "avoid_when": "Known accessibility defects need source remediation.",
+      "report_template": "verification"
+    },
+    {
+      "name": "accessibility_fixer",
+      "filename": "accessibility-fixer.toml",
+      "description": "Accessibility remediation specialist for semantic UI, keyboard, focus, contrast, responsive, and assistive-technology fixes.",
+      "select_when": "Accepted accessibility findings require bounded production UI and test changes.",
+      "avoid_when": "The task is an independent accessibility audit with no source changes.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "architect",
+      "filename": "architect.toml",
+      "description": "System architect for component boundaries, data flow, API contracts, and architecture decisions.",
+      "select_when": "System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided.",
+      "avoid_when": "The design is already settled and remaining work is bounded implementation.",
+      "report_template": "planning"
+    },
+    {
+      "name": "backend_dev",
+      "filename": "backend-dev.toml",
+      "description": "Backend implementation specialist for APIs, business logic, persistence, and server-side tests.",
+      "select_when": "A bounded server, API, service, business-logic, or persistence change must be implemented.",
+      "avoid_when": "The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "build_verification",
+      "filename": "build-verification.toml",
+      "description": "Build and test verifier for exact command outcomes and release-readiness proof.",
+      "select_when": "Independent build, test, packaging, installation, or release-readiness evidence is required.",
+      "avoid_when": "A failing check must be diagnosed or repaired.",
+      "report_template": "verification"
+    },
+    {
+      "name": "code_reviewer",
+      "filename": "code-reviewer.toml",
+      "description": "Code reviewer for correctness, regressions, security, performance, and missing tests.",
+      "select_when": "A completed or proposed change needs independent defect-focused review.",
+      "avoid_when": "The primary need is implementation, planning, or broad repository discovery.",
+      "report_template": "verification"
+    },
+    {
+      "name": "data_engineer",
+      "filename": "data-engineer.toml",
+      "description": "Data engineering specialist for ETL, migrations, validation, rollbacks, and data integrity.",
+      "select_when": "Data movement, transformation, backfill, migration execution, or integrity validation must be implemented.",
+      "avoid_when": "Only database schema design is needed, with no data-operation implementation.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "database_architect",
+      "filename": "database-architect.toml",
+      "description": "Database architect for schemas, indexes, migrations, query plans, and compatibility risks.",
+      "select_when": "Schema, index, query-plan, migration, locking, or rollback design needs specialist review.",
+      "avoid_when": "The approved design only needs migration or data-pipeline implementation.",
+      "report_template": "planning"
+    },
+    {
+      "name": "debugger",
+      "filename": "debugger.toml",
+      "description": "Debugging specialist for reproducing failures, proving root cause, implementing focused fixes, and verifying regressions.",
+      "select_when": "A failure must be reproduced and its root cause proven before a focused repair.",
+      "avoid_when": "The desired behavior and implementation path are already known.",
+      "report_template": "investigation"
+    },
+    {
+      "name": "devops_engineer",
+      "filename": "devops-engineer.toml",
+      "description": "Infrastructure specialist for CI/CD, containers, deployment safety, and operational diagnostics.",
+      "select_when": "Infrastructure, delivery, deployment, runtime configuration, or operational automation must change.",
+      "avoid_when": "The task is application implementation without delivery or runtime ownership.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "explorer",
+      "filename": "explorer.toml",
+      "description": "Codebase investigator for execution paths, ownership, dependencies, and relevant files.",
+      "select_when": "Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.",
+      "avoid_when": "The task requires design decisions or source changes.",
+      "report_template": "investigation"
+    },
+    {
+      "name": "frontend_dev",
+      "filename": "frontend-dev.toml",
+      "description": "Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.",
+      "select_when": "A browser UI, component, client state, styling, or frontend test change must be implemented.",
+      "avoid_when": "The task spans material server ownership or is only interaction design.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "fullstack_dev",
+      "filename": "fullstack-dev.toml",
+      "description": "Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.",
+      "select_when": "One coherent change spans both browser-facing and server-facing contracts.",
+      "avoid_when": "The work can be cleanly owned by one narrower frontend or backend specialist.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "general",
+      "filename": "general.toml",
+      "description": "General-purpose agent for bounded research, analysis, or implementation when no specialty fits.",
+      "select_when": "The work is bounded but no specialist profile has a justified fit.",
+      "avoid_when": "A narrower specialist clearly owns the task.",
+      "report_template": "general"
+    },
+    {
+      "name": "mobile_dev",
+      "filename": "mobile-dev.toml",
+      "description": "Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.",
+      "select_when": "An iOS, Android, React Native, Flutter, or native mobile change must be implemented.",
+      "avoid_when": "The task is browser web UI or a platform-neutral backend.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "performance_engineer",
+      "filename": "performance-engineer.toml",
+      "description": "Performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.",
+      "select_when": "Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis.",
+      "avoid_when": "The bottleneck is already proven and only an approved implementation remains.",
+      "report_template": "verification"
+    },
+    {
+      "name": "planner",
+      "filename": "planner.toml",
+      "description": "Planning specialist for work breakdown, dependencies, risks and verification.",
+      "select_when": "A work breakdown or dependency analysis will help the coordinator.",
+      "avoid_when": "The task is a simple bounded execution step or requires editing project files immediately.",
+      "report_template": "planning"
+    },
+    {
+      "name": "qa_engineer",
+      "filename": "qa-engineer.toml",
+      "description": "QA specialist for acceptance coverage, automated tests, reproduction scenarios, and quality-risk evidence.",
+      "select_when": "Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created.",
+      "avoid_when": "Only a non-mutating final command run or source-code review is needed.",
+      "report_template": "verification"
+    },
+    {
+      "name": "refactorer",
+      "filename": "refactorer.toml",
+      "description": "Refactoring specialist for safe structural improvements that preserve public behavior and contracts.",
+      "select_when": "The explicit goal is behavior-preserving structural improvement with regression proof.",
+      "avoid_when": "New behavior, unresolved defects, or architecture decisions dominate the task.",
+      "report_template": "implementation"
+    },
+    {
+      "name": "security_auditor",
+      "filename": "security-auditor.toml",
+      "description": "Security auditor for authentication, authorization, secrets, cryptography, dependencies, and data-protection risks.",
+      "select_when": "Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review.",
+      "avoid_when": "The task is to implement a known security fix rather than audit it.",
+      "report_template": "verification"
+    },
+    {
+      "name": "technical_writer",
+      "filename": "technical-writer.toml",
+      "description": "Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.",
+      "select_when": "Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs.",
+      "avoid_when": "Facts are unverified or production code changes are still required.",
+      "report_template": "documentation"
+    },
+    {
+      "name": "ux_designer",
+      "filename": "ux-designer.toml",
+      "description": "UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.",
+      "select_when": "User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed.",
+      "avoid_when": "The design is settled and production frontend code must be written.",
+      "report_template": "planning"
+    }
   ]
 }

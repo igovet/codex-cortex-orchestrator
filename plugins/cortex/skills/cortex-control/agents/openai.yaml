@@ -1,4 +1,0 @@
-interface:
-  display_name: "Cortex Control"
-  short_description: "Use the nonblocking Cortex v12 coordination ledger."
-  default_prompt: "Use $cortex:orchestrator to coordinate this task with an exact task contract, durable decisions and reports, verified human views, and advisory governance."

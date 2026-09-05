@@ -1,3 +1,0 @@
-$cortex:orchestrator
-
-Create a polished, self-contained product landing page as one index.html file and add a short README explaining how to open and verify it offline. The page must have a responsive header and hero, exactly three feature cards, an accessible theme toggle, a compact FAQ, a footer, visible keyboard focus, readable contrast, reduced-motion support, and no external assets or network dependency. Ask me one product question about the accent color, then present the plan and wait for explicit approval before implementation. After implementation, independently verify the interactions, accessibility-relevant structure, keyboard behavior, responsive layout, and offline operation.

@@ -8,15 +8,15 @@
       <p><strong>Reliable multi-agent coordination for complex software engineering work in Codex.</strong></p>
       <p>
         Cortex turns a large task into durable, evidence-backed coordination.
-        It preserves tasks, typed execution graphs, reports, governance assessments,
-        and closure records in a local ledger while leaving every
-        orchestration and safe next-step decision to the model.
+        It preserves tasks, advisory governance, one Markdown pipeline per task,
+        and reports in local storage. The coordinator owns delegation,
+        evidence assessment, user steering, and completion.
       </p>
       <p>
         <img src="https://img.shields.io/badge/Cortex-1.15.6-7c3aed" alt="Cortex 1.15.6" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
-        <img src="https://img.shields.io/badge/Ledger-SQLite%20schema%20v2-0f766e" alt="SQLite ledger schema v2" />
+        <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
       </p>
     </td>
   </tr>
@@ -60,10 +60,9 @@ Then complete the setup end to end:
    Cortex-required setting documented in the README: multi_agent_v2 = true and
    agents.default_subagent_model = "gpt-5.6-luna".
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
-5. Confirm that the installed package enables only the documented Cortex
-   activation guard and sanitized lifecycle observer, then run the README's
-   relevant verification checks. Start a new Codex task if the README requires
-   it.
+5. Confirm that the installed package exposes exactly the seven documented
+   storage tools and ships no orchestration hooks. Run the relevant
+   verification checks and start a new Codex task.
 
 Use only the instructions and commands documented in that README. If an
 elevated system permission, an interactive desktop confirmation, or a material
@@ -81,7 +80,7 @@ choice is required, explain exactly what is needed and ask me before proceeding.
   - [Choose a project root](#choose-a-project-root)
   - [macOS-specific notes](#macos-specific-installation-notes)
   - [Required Codex configuration](#required-codex-configuration)
-  - [Post-install hook status](#required-post-install-hook-trust)
+  - [Post-install verification](#required-post-install-verification)
   - [Codex Desktop](#2-install-on-codex-desktop)
   - [Codex CLI](#3-install-on-codex-cli)
   - [Orchestration commands](#4-orchestration-commands)
@@ -119,21 +118,15 @@ codex --version
 
 ### Choose a project root
 
-> [!WARNING]
-> **Use a specific repository or worktree as `project_root`; never use an OS
-> root or a broad system/home directory.** Each resolved root maps to one
-> project ledger. A broad root creates the wrong project boundary and risks
-> mixing unrelated task context in one private namespace.
+Use a specific existing repository or worktree, for example `/workspace/my-service`.
+The host supplies its absolute canonical directory. Each task stores that exact
+project boundary; do not use a broad system or home directory as the project.
 
-Choose the exact project, for example `/workspace/my-service`. Cortex resolves
-the root before deriving its project hash and requires it to exist as a
-directory.
-
-The installed MCP configuration invokes `python3` directly. Confirm that
-`python3` resolves to Python 3.11+ in the environment that launches Codex. The
-repository-only `CORTEX_PYTHON` override applies to local source synchronization
-commands documented under [Developing Cortex](#developing-cortex); it does not
-rewrite the installed MCP command.
+Task documents are real files under `.codex/cortex/<task>/` in that project.
+The active Codex home's `cortex/cortex.sqlite3` contains the private SQLite
+metadata index. Task/report association is checked on every read. Keep both locations
+together for offline backups. The installed MCP configuration invokes `python3`
+directly, so its launch environment must resolve Python 3.11 or newer.
 
 ### macOS-specific installation notes
 
@@ -180,15 +173,10 @@ inherit the shell `PATH`; configure the application launch environment or start
 Codex from a shell where `python3 --version` is correct. Fully quit and reopen
 Codex afterward, then start a new task.
 
-The packaged MCP server and every activation/lifecycle callback deliberately
-share the same host-resolved `python3 -B` launch contract. Cortex does not
-hard-code `/usr/bin/python3`: Codex CLI and Desktop must both resolve
-`python3` to Python 3.11 or newer in their own launch environments, while
-`-B` prevents runtime bytecode from changing the content-addressed package.
-When behavior differs between the two hosts, compare the Desktop launch
-environment with the interactive shell first, then run the host preflight
-against the same installed package; do not compensate with a host-specific
-hook command.
+The packaged MCP server uses the host-resolved `python3 -B` command. Cortex does
+not hard-code `/usr/bin/python3`; `-B` prevents runtime bytecode from changing the
+content-addressed package. If CLI and Desktop behave differently, compare their
+Python versions and launch environments. No hook setup is required.
 
 ### Required Codex configuration
 
@@ -232,7 +220,7 @@ You may also approve all tools exposed by the local Cortex MCP server:
 default_tools_approval_mode = "approve"
 ```
 
-The MCP setting affects Cortex ledger tools only. It does not authorize shell
+The MCP setting affects Cortex storage tools only. It does not authorize shell
 commands, patches, external messages, destructive actions, scope expansion, or
 tools from other plugins. Keep those decisions routed through Codex or the
 user's configured approval policy.
@@ -245,47 +233,33 @@ user's configured approval policy.
 > replace Codex/user authorization for destructive, external, privileged, or
 > materially scope-expanding actions.
 
-### Required post-install hook trust
+### Register native specialist profiles
 
-> [!IMPORTANT]
-> **Cortex 1.15.6 ships an activation guard and a sanitized lifecycle
-> observer.** Review and trust only the callbacks declared by the installed
-> Cortex package. They apply only to an explicitly selected Cortex route.
+Codex discovers native profiles in `~/.codex/agents/` or the project's
+`.codex/agents/`. Merely storing TOML files inside a plugin cache does not register
+them. Copy the 22 files from the installed Cortex package's `agents/` directory
+into the chosen native agents directory during setup, without overwriting unrelated
+profiles. Refresh these copies when updating Cortex, then start a new task.
+The selected TOML is a native configuration layer with `developer_instructions`;
+it is never a file-reading assignment for the worker. See the
+[official custom-agent documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents).
 
-The activation guard enforces host-side ordering around task anchoring and
-native worker dispatch. It never rewrites a native spawn call: the unchanged
-host call carries the exact server-rendered bootstrap. Current Desktop MCP
-initialize carries no connection-specific thread/session identity, so Cortex
-does not guess an initial audience from shared pending state. Every new
-connection begins with a neutral complete catalogue and an uncommitted role;
-that pre-identity catalogue grants no authority. `SubagentStart`
-creates the real child-bound digest-only one-shot receipt, and the worker MCP
-process atomically claims the later exact-call authorization from the same
-owner-only plugin data directory on its first assignment read. Successful
-terminal consumption commits worker role without a mid-turn catalogue
-notification, avoiding replay of the already-successful Desktop bootstrap. An
-explicit later `tools/list` returns only worker read/publication tools. A
-Desktop client that retains the initial catalogue can still publish, while committed
-server role checks reject every coordinator-only call. The hook never
-repeats or stores bootstrap plaintext. Receipt routing is isolated by coordinator session
-through an atomic active index; completed and foreign history is never scanned
-or selected. The lifecycle observer records bounded structural markers needed
-to verify real coordinator and worker sessions. Neither hook grants ledger
-authority, invents completion, or replaces successful server-side assignment-
-evidence consumption and worker-owned terminal publication.
+The isolated `scripts/cortex-dev` preparation performs this registration only in
+`.cortex-dev/.codex/agents/`. Development checks never update stable profiles.
+If the host does not advertise native profile selection, orchestration reports
+that limitation rather than pretending to attach a profile through message text.
 
-Ordinary Desktop may launch plugin MCP processes with `HOME` but without an
-explicit `CODEX_HOME` or hook-only `PLUGIN_DATA`. In that environment the
-content-addressed MCP package derives the same `.codex/plugins/data/cortex-cortex`
-directory from its verified installed cache topology. `env_vars` forwarding is
-therefore optional for this identity path rather than a prerequisite that the
-GUI host must manufacture.
+### Required post-install verification
 
-Effective coverage is outcome-oriented: one `o_` item represents one
-independent user obligation. Acceptance and verification criteria, constraints,
-steer additions, and exact user-source fragments stay linked to that outcome
-instead of inflating the report matrix. A steer revises its named outcome and
-does not create a parallel coverage item.
+Start a new task after installation and confirm that Cortex advertises exactly
+`create_task`, `set_governance`, `create_draft`, `read_draft`, `write_report`, `list_reports`,
+and `read_report`. All seven operations are available to the coordinator and native workers. The
+package ships no orchestration hooks, actor-binding callbacks or workflow gates.
+
+Confirm the required native-agent configuration and Python runtime. A small
+explicitly selected task should create one pipeline, delegate bounded work,
+read selected reports and save its result. Actual CLI and Desktop observations
+are distinct from source validation; see [release evidence](docs/release-readiness.md).
 
 ### 2. Install on Codex Desktop
 
@@ -316,8 +290,7 @@ user workflow is documented in the
 7. Return to the Plugins directory, open **Personal**, and find **Cortex**. Do
    not search for it in the public directory.
 8. Open the Cortex details page and select **+ / Install**.
-9. Review the requested permissions, bundled MCP server, activation guard, and
-   sanitized lifecycle observer.
+9. Review the requested permissions and bundled seven-operation MCP server.
 10. Verify the [required configuration](#required-codex-configuration).
 11. Start a **new Codex task**. Existing tasks do not load newly installed
     skills, MCP tools, profiles, or a different multi-agent adapter.
@@ -331,8 +304,7 @@ user workflow is documented in the
 3. Return to **Plugins → Installed → Cortex**.
 4. Install the available newer Cortex version. If the UI offers only uninstall
    and install actions, uninstall Cortex and install it again from **Personal**.
-5. Confirm that the enabled hooks match the documented activation guard and
-   sanitized lifecycle observer.
+5. Confirm the seven storage operations and absence of orchestration hooks.
 6. Recheck `multi_agent_v2` and the Luna default.
 7. Start a **new Codex task**. An existing task may retain the previous plugin
    cache and catalog.
@@ -363,8 +335,7 @@ Then:
 1. Switch to the newly added **cortex** Marketplace tab.
 2. Open **Cortex** and install it.
 3. If needed, press `Space` to enable the installed plugin.
-4. Confirm that the enabled hooks match the documented activation guard and
-   sanitized lifecycle observer.
+4. Confirm the seven storage operations and absence of orchestration hooks.
 5. Verify the [required configuration](#required-codex-configuration).
 6. Exit the current CLI session and start `codex` again.
 7. In the new session, invoke `$cortex:orchestrator` or open `/skills`.
@@ -398,9 +369,10 @@ CLI, use `$cortex:orchestrator` or `/skills`.
 | Command | Purpose | Example |
 | --- | --- | --- |
 | `$cortex:orchestrator <task>` | Start ordinary Cortex 1.15.6 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
-| `$cortex:orchestrator help` | Show read-only help without changing the project or ledger | `$cortex:orchestrator help` |
+| `$cortex:orchestrator help` | Show read-only help without changing the project or task storage | `$cortex:orchestrator help` |
 | `$cortex:orchestrator harvest` | Update missing or stale source-backed project knowledge | `$cortex:orchestrator harvest` |
 | `$cortex:orchestrator harvest-refresh` | Re-audit and rebuild project knowledge documentation | `$cortex:orchestrator harvest-refresh` |
+| `$cortex:orchestrator clear 7 days` | Delete this project's tasks and artifacts older than seven days, protecting active tasks | `$cortex:orchestrator clear 7 days` |
 | `$cortex:orchestrator normal` | Leave the active Cortex route | `$cortex:orchestrator normal` |
 
 Example tasks:
@@ -443,34 +415,25 @@ docs/features/index.md
 docs/features/<feature>/index.md
 ```
 
-`harvest-refresh` performs a full source-backed re-audit. Both routes remain
-model-owned orchestration: the coordinator delegates every source/code/config
-read, analysis, documentation edit, and verification to workers, while its
-bounded index route only selects the knowledge contract for those delegations.
-Their reports inform later delegations. The declared graph determines readiness:
-dependent work waits for acceptable prerequisite evidence, while independent
-ready work may run in parallel. The same artifact, revision and review bindings
-apply to harvest as to other tasks; it is not an alternate execution protocol.
+`harvest-refresh` rebuilds inventory from current source, audits every in-scope
+page, independently checks completeness and performs a second no-change planning
+comparison. Harvest preserves manual material outside generated blocks. The
+coordinator reads only report previews and the current pipeline; workers own
+index-driven routing, source discovery, documentation edits and checks.
+Workers receive mandatory requirements directly and select only useful reports.
+Missing indexes do not force harvest during an ordinary task.
 
 #### Documentation impact is assessed after verified tasks
 
-After worker-reported project verification, the coordinator makes a
-report-grounded documentation-impact decision. Material behavior, architecture,
-interface, command, verification, convention, or feature-ownership changes
-require a documentation-sync worker and a separate documentation-verifier
-worker. No impact requires a finalized worker-owned report with an explicit
-English documentation-impact section and material/no-impact rationale; when
-existing finalized reports do not contain that section, a bounded
-documentation-impact worker submits it. Closure derives coverage from the
-current graph and its finalized evidence; a coordinator-authored no-impact
-assertion cannot substitute for a worker report.
-The coordinator never submits a report on a worker's behalf. Documentation is
-durable navigation, not runtime authority. Source, executable configuration,
-schemas, and tests remain authoritative when prose drifts.
+The coordinator obtains a concise documentation-impact finding from a specialist.
+When updates are required, a worker loads the bundled documentation-sync skill,
+updates affected knowledge and verifies it before the task is completed.
+Independent checking is proportional to the material impact. A supported no-impact
+conclusion may use existing evidence; no extra worker or fixed report section is
+required merely to state it. Source, tests and executable configuration outrank prose.
 
-> [!CAUTION]
-> Never place secrets, personal data, raw worker reports, private diagnostic
-> logs, or credentials in generated documentation.
+Never put secrets, personal data, private reports or diagnostic logs into public
+documentation.
 
 ---
 
@@ -490,8 +453,8 @@ schemas, and tests remain authoritative when prose drifts.
 > denied, timed out, erroneous, unusable, or insufficient, the worker records
 > that bounded limitation and uses exactly one safe assignment-scoped
 > ordinary-repository fallback. There is no silent or chained fallback. The
-> coordinator is deliberately denied operational access; the
-> shared host catalog may still make the server name visible to it.
+> coordinator delegates both structural discovery and documentation-index routing
+> to workers, keeping the main context focused on pipeline state and report previews.
 
 Quick install on macOS/Linux:
 
@@ -515,230 +478,242 @@ After installation:
 3. Confirm that the indexed root matches the exact absolute `project_root`.
 
 Codebase Memory is an evidence source and preferred worker capability, not a
-Cortex ledger capability. Its absence allows one bounded safe fallback; only
+Cortex storage capability. Its absence allows one bounded safe fallback; only
 inability to establish the assigned surface after that fallback is a worker
-blocker. The ledger can preserve limitation evidence and support an honest
-closure or final answer.
+blocker. Reports can preserve that limitation and support an honest final answer.
 
 ---
 
 ## How orchestration works
 
-Cortex combines a model-owned plan with a typed, transactional integrity core.
-The coordinator decides what work is useful and which ready specialists to
-dispatch. The core stores the graph and verifies authority, dependencies,
-ownership, artifact generations and user decisions. It does not choose a
-profile, schedule a worker, interpret a product branch, or manufacture evidence.
+Cortex stores documents and metadata. The model decides the work, dependencies,
+specialists, verification depth and completion. No server graph executor or
+semantic report parser is involved. The coordinator stays active until a genuine
+user question or completed result; while workers run it uses native wait rather
+than ending the turn with a progress-only message.
 
-The implementation and qualification contract is
-[Typed orchestration integrity](docs/project/typed-orchestration-integrity.md).
-Its Completion checklist distinguishes source regression evidence from actual
-CLI/Desktop qualification. An unfinished live gate is not a release pass.
+```mermaid
+flowchart TD
+    User[User request or clarification] --> Coordinator[Coordinator: requirements and decisions]
+    Coordinator --> Governance[Choose advisory governance]
+    Coordinator --> Pipeline[Adapt work, dependencies, owners and checks]
+    Pipeline --> Native[Native host: launch, message and wait]
+    Native --> Worker[Host attaches native profile and assigned context]
+    Worker --> Read[Read only named predecessor pages when needed]
+    Read --> Work[Inspect, implement or verify assigned work]
+    Work --> Draft[Create typed draft through Cortex]
+    Draft --> Fill[Update returned Markdown in place; keep draft ID marker]
+    Recovery[Context recovery] --> DraftRead[Read existing draft through cursor]
+    DraftRead --> Fill
+    Fill --> Result[Publish draft ID and compact metadata]
+    Result -->|Catalogue preview| Assess[Coordinator reviews concise previews]
+    Assess -->|More work or new requirements| Pipeline
+    Assess -->|Genuine missing user decision| Question[Detailed question and options in chat]
+    Question --> User
+    Assess -->|Task complete| Final[Explain verified result from previews]
 
-The obligation-preserving redesign is still in progress. Registered root-input
-capture and incremental extraction storage are source-tested components, not a
-completed replacement public interface. Passive capture preserves exact selected
-input privately but does not authenticate its human origin. Drafts and Markdown
-do not establish completion; the checklist retains the remaining integration
-and real-host qualification gates.
+    subgraph Storage[Cortex: seven storage operations]
+        API[Create task, set governance, create/read draft, write, list and read reports]
+        Files[Project .codex/cortex/task: one pipeline.md and immutable reports]
+        Index[SQLite: thread bindings, links, brief metadata and receipts]
+        Context[Native MCP thread and parent context] --> API
+        API --> Files
+        API --> Index
+    end
+
+    Native -.-> Context
+    Governance --> API
+    Pipeline -->|Prepend complete latest edition; keep history below| API
+    Select --> API
+    Read --> API
+    Result --> API
+    Recovery[Worker recovery: restore profile, load skills, reread relevant context] --> Select
+    Coordinator -.-> CoordinatorRecovery[Restore previews and current pipeline only]
+    CoordinatorRecovery --> Assess
+    Worker -.-> Recovery
+```
+
+The coordinator speaks to the user in their language. All worker communication
+and authored reports, pipeline editions and governance reasoning are in English;
+original requests and necessary exact quotations retain their source language.
+
+The coordinator owns the adaptive loop and keeps waiting while delegated work is
+unfinished. Storage protects files and metadata without deciding whether the
+work is complete. For project discovery, workers prefer Codebase Memory and use
+one bounded fallback when needed; documentation routing starts at index files.
+Before project mutation, the coordinator resolves read-only predecessors whose
+answers can change implementation and never overlaps an implementation worker with
+an active explorer, designer, architect or planner governing that same result.
+Greenfield or unfamiliar work spanning at least three acceptance domains uses full
+governance, parallel independent investigations, then a plan grounded in their
+saved reports before implementation; bounded familiar work remains adaptive.
+Workers that need the same externally shared browser, emulator, port or interactive
+application run sequentially unless the host supplies isolated instances. Other
+independent discovery and verification can still run in parallel.
+
+| Operation | Purpose |
+| --- | --- |
+| `create_task` | Save the original request and bind its task to the current native thread |
+| `set_governance` | Save advisory depth and rationale without execution gates |
+| `create_draft` | Create a typed project draft and return its complete initial Markdown, path and short ID |
+| `read_draft` | Recover or later inspect an existing same-thread draft through bounded pages |
+| `write_report` | Publish a server-created draft by short ID as a report or pipeline edition |
+| `list_reports` | Return brief metadata, newest activity first, with cursor continuation |
+| `read_report` | Read the current pipeline or a selected report, with cursor continuation |
+
+Task and thread identifiers are absent from MCP tool arguments and results.
+The host supplies thread context in transport metadata. A coordinator thread owns
+one task; children inherit it through registered parents. Reading without selecting
+a report returns the current pipeline. Missing or conflicting host context returns
+an actionable error; the server never selects the latest unrelated task.
+
+The live advertised schemas and descriptions are the sole MCP argument authority.
+Skills and assignments describe intent and constraints, not duplicated tool payloads.
+The server advertises MCP 2025-11-25, explicit input/output schemas and safe English
+error corrections. Results include structured data and its identical JSON text.
+Markdown bodies and paths never enter the writer call. The server creates a typed
+draft with a short ID in its filename and body and returns its complete initial Markdown.
+The actor updates that same project file in place without an immediate duplicate read,
+and never deletes or recreates it. `read_draft` remains available for recovery or a
+genuinely needed later read. The writer accepts the ID, then streams, validates
+and atomically publishes every byte into the private task directory, then deletes
+the draft only after the file and metadata commit. Report size is limited only by
+the filesystem and available space.
 
 ### Activation and project access
 
-Only explicit selection of `cortex:orchestrator` activates this workflow.
-Ordinary complexity does not. The `normal` route leaves orchestration; help and
-knowledge-harvest routes have their separately documented boundaries.
+Only explicit selection of `cortex:orchestrator` activates coordination. Help is
+read-only; normal returns to ordinary work. The coordinator saves the original
+request, selects advisory governance and writes an initial pipeline. Its only
+durable-content reads are catalogue previews, the current pipeline beginning and
+the exact initial pipeline Markdown returned when it creates its draft. A later
+`read_draft` is allowed only for recovery or a genuinely changed draft.
+It never runs shell, Git, package, build, test, browser or project-file operations.
+Its sole project-file exception is filling the exact pipeline draft returned by
+`create_draft`; every other read, edit and check belongs to a native worker.
+Codex attaches native TOML profiles at spawn. Workers read relevant indexes and reports, and own
+project inspection, implementation, verification and documentation. The coordinator
+does not open project/plugin files, report bodies, diffs, logs or report examples.
 
-A fresh coordinator opens the complete semantic task before project execution,
-then records its governance assessment before any assignment. It preserves each
-outcome's acceptance conditions, constraints and expected checks without
-merging independently actionable requirements. The coordinator delegates project
-inspection, implementation and verification. Its direct knowledge-routing
-exception is limited to the known project/feature indexes and relevant linked
-pages; it is not general source-search authority.
+### Markdown pipeline and readiness
 
-Worker discovery prefers Codebase Memory when usable for the exact project
-root. Unavailable or insufficient graph evidence allows one bounded safe
-fallback, not repeated broad discovery. The worker records the limitation
-without treating absence of an optional knowledge service as a product blocker.
+Each task has exactly one `pipeline.md`. A new edition is prepended to that same
+file, with older editions below a separator. Its report identifier remains stable.
+Write a complete, concise current pipeline so its beginning normally suffices.
+Describe the necessary work, ordering, dependencies, executors and intended checks.
 
-### Typed execution graph and readiness
+The coordinator owns pipeline editions and governance decisions. Workers publish
+ordinary reports with findings and proposed next steps. The coordinator updates
+the pipeline when requirements or evidence change, adds or reorders work, and
+adjusts affected native agents. Dependencies are model decisions. There
+are no mandatory planning, audit or approval stages; select useful work in the
+order its evidence requires and avoid overlapping edits.
 
-Planning is proportional to the work. A genuinely bounded minimal task can use
-a backend-generated complete-contract graph. Nontrivial work uses a planner-owned
-candidate DAG, followed by independent semantic graph validation. Structural
-validation alone cannot establish that the proposed dependencies make sense.
+### Native workers and results
 
-The graph declares semantic node keys, dependencies, required and produced
-capabilities, unique contribution owners, verification subjects, execution modes
-and bounded completion/remediation policies. Several contributions may jointly
-complete one outcome, and several independent audits may verify it. A producer
-cannot self-certify independent verification of its contribution.
+Native profiles contain complete specialist role instructions and are attached at
+spawn. Applicable skills are supplied only through Codex's ordinary host skill
+mechanism when relevant. Worker assignments never name internal skills, loaders,
+plugin files or installation paths, and workers never locate those files themselves.
 
-A candidate cannot execute until it passes structural and independent semantic
-validation. Where review is required, activation still leaves execution waiting
-for the exact current approval. A rejected candidate remains historical and
-permits bounded, progressive replanning, not repeated publication of the same
-plan with different prose.
+The coordinator selects its conversation language from the user’s own request
+and checks every progress message, question and final answer. Project language,
+locale and tool responses do not override it; worker messages and reports remain
+English. Tool discipline covers executable wrapper syntax as well as MCP arguments.
 
-The usual implementation order is:
+All 22 profiles share one reporting protocol. The coordinator uses native host
+tools to launch, message, wait for and stop agents. It directly supplies the concrete assignment and every mandatory requirement and
+constraint. Codex supplies native thread context separately from model arguments;
+the server links children to their registered parent task automatically.
+Every project worker is spawned with `fork_turns: "none"`; its complete English
+assignment replaces inherited chat history. This keeps the coordinator skill,
+plugin path and unrelated user conversation out of the worker context while native
+parent metadata still selects the correct task.
+A worker receives exact predecessor report references from the coordinator, reads
+only the pages needed for its assignment, performs its work and saves a Markdown
+report. It does not list the catalogue or read the pipeline for routine startup.
 
-1. Initial artifact baseline, then bounded research and planning with independent candidate validation.
-2. Implementation and baseline checks that produce the artifacts to inspect.
-3. Dependent audits, parallel when they are ready and compatible.
-4. In-contract fixes and independent regression for confirmed defects.
-5. Documentation edits, when needed, before final verification.
-6. Final verification and read-only documentation-impact assessment on the
-   latest sealed generation.
-7. Result presentation and mandatory revise-or-close review.
-
-An architecture or database implementation audit cannot be assigned before its
-implementation prerequisites are acceptable. It must not start merely to
-return `partial` for an artifact that was not ready.
-
-Scope reads expose current ready/waiting nodes and bounded reasons. Assignment
-admission rechecks the same prerequisites atomically, claims one owner and
-renders immutable scope from the graph. The coordinator selects current node
-keys; it does not recreate scope, acceptance or predecessor evidence in a
-second free-form assignment.
-
-Native capacity is separate from semantic readiness. A ready node can wait for
-a host slot without changing the graph or asking the user to continue.
-Independent read-only work may run in parallel. The shared-checkout barrier
-admits only one artifact mutator at a time and excludes overlapping
-artifact-dependent readers; it is not a general one-worker restriction.
-
-### Native workers and terminal results
-
-Each successful, non-replayed assignment returns one exact native dispatch.
-The coordinator forwards it immediately and unchanged to the supported
-zero-history native spawn operation. Profile policy stays in the immutable
-assignment; it is not an invented native agent-type argument.
-
-The worker receives one typed assignment with its node-local checks and artifact
-procedure, plus complete scoped outcome context. Contextual product verification
-requirements do not become extra work or substitute publication keys. Old
-assigned/planning-item views and serialized duplicate node instructions are not
-part of worker evidence.
-
-Private hook observations correlate the exact dispatch with the actual native
-child. A worker first consumes its server-issued assignment, then performs only
-that scope and publishes once through the predeclared terminal kind:
-
-- planning nodes publish plans;
-- documentation nodes publish documentation assessments;
-- other nodes publish results, even when read-only or owned by a writer profile.
-
-Publication kind follows node purpose, not profile or whether files changed.
-A coordinator or sibling cannot consume another worker's authority. A retained
-initial MCP catalogue does not bypass server-side actor checks, and execution
-does not depend on a mid-turn catalogue refresh.
-
-Result/documentation coverage is the single caller-authored source of observed
-verification. Mandatory checks must be executed successfully for completion.
-Failed, incomplete and unrun evidence remains explicit. Plans contain expected
-checks, never fabricated observed facts. Artifact commitments are integrity
-metadata, not a duplicate verification narrative.
+The draft creator offers general, planning, investigation, implementation,
+verification, documentation, synthesis and pipeline heading sets. They guide the
+agent while its specialist profile remains authoritative; no semantic parser treats
+headings as completion state. Agents update the existing file body in place and never
+delete, replace or recreate it. Cortex verifies both its marker and server-created
+file identity. The short draft ID marker remains in the final Markdown.
+A saved identifier proves persistence, not correctness or completion.
 
 ### Artifact consistency and recovery
 
-Workers compute the declared Git-state or bounded path-manifest fingerprint.
-The core stores observations; it does not inspect the project filesystem.
-Read-only evidence must begin and end at its assigned sealed generation.
-A mutator begins there and seals a successor generation with its changed-path
-commitment. Earlier artifact-dependent evidence remains historical.
+The coordinator manages overlapping edits and judges whether earlier evidence
+still applies. It uses actual native-agent status; silence alone is not failure.
+The server protects document storage rather than sealing project source files.
 
-A snapshot conflict is a static non-publication result. It creates no report,
-consumes no terminal slot and raises a reconciliation barrier. Reconciliation
-waits for verified native quiescence, observes the actual project state and
-seals a new baseline. It does not claim to undo a stopped worker's writes.
-Workers must not leave detached mutating processes after final observation.
+After summarization, compaction or restart, the coordinator restores host-supplied
+rules, fresh catalogue previews and the current pipeline beginning. Workers reload
+their host-attached profiles and reread previously selected reports and relevant
+index-driven documentation. They reread the pipeline only when it was a necessary
+evidence source and list reports only when required saved references were lost.
+Both restore their assignments and constraints.
+Resume the same native thread and automatically resolved pipeline. A summary is an orientation aid,
+not a substitute for rereading. Do not automatically read all historical reports.
 
-A direct user change is committed immediately, even while an earlier plan
-question or worker is pending. The atomic revision invalidates old authority
-and returns the affected protected native task names. The coordinator
-interrupts matching stale agents through supported host calls. New-revision
-planning and execution wait for native reconciliation and the observed
-baseline. A racing old publication returns `superseded` without creating
-evidence or granting permission to retry.
+### Decisions, fixes and completion
 
-Recovery of an existing task begins with current state. If unfinished delegated
-work exists, the terminal continuation read precedes further task progress.
-Timeline is reserved for an actual chronology/audit need, not recovery.
-Loss requires complete supported native evidence and absence of a finalized
-publication; timeout, silence and an isolated stop hook are not sufficient.
-Replacement follows existing lineage and finite recovery budgets.
+New user instructions are applied to the existing task and recorded in the next
+pipeline edition. They do not require a second confirmation. Genuine questions
+from any specialist go through the coordinator, who shows the context, question,
+answer alternatives and their consequences as ordinary chat text. The user can
+choose an option or answer in their own words. No question UI tool is required.
 
-### Decisions, fixes and closure
+Governance, planning and finishing do not themselves require approval. Actual
+host/user permissions still govern external or destructive actions. The coordinator
+uses meaningful previews, delegates evidence assessment and detailed final-report
+publication, continues authorized corrections and explains results, risks and unrun checks. Completion is its judgment,
+not a server state transition.
 
-Minimal/light complete plans can proceed informationally. Complexity alone
-does not require approval. Material high risk, explicit review requests and
-genuine product/authority choices require a decision-ready plan packet.
-Approving a plan grants no native filesystem, deployment or credential
-permission beyond authority already available.
+### Storage, receipts and Markdown files
 
-When alternatives can all be specified safely, one plan publication contains
-complete candidate alternatives. Each is independently validated against its
-proposed contract. One review answer selects and approves exactly one branch;
-its semantic delta, new revision and selected graph commit atomically.
-Unselected alternatives never become executable. When responsible alternatives
-cannot yet be constructed, a genuine pre-plan steering question is appropriate.
-No-op steering is not a valid semantic revision.
+```text
+<project>/.cortex/
+  draft-reports/
+    <draft-id>.md
+  pipeline-drafts/
+    <draft-id>.md
 
-Approval fulfills its decision boundary; direct user steering does not
-automatically create another approval question. New material risk or authority,
-or an explicit renewed-review request, requires a fresh boundary. Plan-review
-authority binds the candidate, its validation, artifact state and governance
-assessment. A changed boundary invalidates an unanswered old packet without
-blocking authorized replanning.
+<project>/.codex/cortex/
+  <task>/
+    pipeline.md
+    <report>.md
 
-An in-contract defect activates only the plan's validated remediation policy.
-The graph records the repair, independent regression, original finding and
-finite strategy/evidence budgets. Successful regression resolves capabilities
-in current projection without rewriting the failed report. Non-progress and
-budget exhaustion remain honest incomplete evidence, never endless retries or
-automatic scope expansion. Scope/authority/risk-changing findings cannot
-silently activate an ordinary repair.
+$CODEX_HOME/cortex/
+  cortex.sqlite3
+```
 
-Before closure, the coordinator presents the verified result, documentation
-impact, remaining risks and unrun checks, with server-verified report links.
-It then asks whether to revise or close. Only the direct current close choice
-permits a closure attempt; an earlier plan approval or request to finish
-automatically does not. Backend graph, generation and review-freshness checks
-still apply. Incomplete work cannot be closed, including after a user agrees
-to close; a risk-bearing verdict cannot waive mandatory checks.
+Agents edit only the `.cortex` drafts. Codex protects the project `.codex`
+directory from ordinary file writes, so only the MCP server publishes into
+`.codex/cortex/<task>`.
 
-### Storage, receipts and verified views
+The active Codex home's `cortex/cortex.sqlite3` is an owner-private SQLite index.
+It stores task/project links, brief report metadata, digests and delivery receipts,
+not report bodies. Task and report references use a short type prefix plus 12
+hexadecimal characters, with collision-checked allocation. Ordinary reports are immutable. Governance and the original
+request are also readable reports. Files and directories use private permissions.
 
-The current project-sharded SQLite ledger creates its current schema directly;
-unsupported layouts are rejected, not migrated or used as compatibility
-fallbacks. Historical installations remain untouched. Current task identity is
-server-issued, and worker references are audience-bound capabilities.
+Writes serialize through SQLite transactions and fsynced files. Publication uses
+a fixed-block stream copy, destination fsync and atomic rename before the metadata
+commit; the source draft is removed only afterward. Repeated delivery returns the same
+identifiers without duplicate reports or pipeline editions. Changed content under
+the same delivery key conflicts. Unknown storage layouts are rejected, not migrated.
 
-Each command commits its transition, event and server-derived receipt in one
-transaction. An identical retry after an ambiguous response reconciles the
-existing commit; changed input conflicts. A successful non-replayed dispatch
-does not permit another native spawn. Publication consumes one cross-kind
-terminal slot.
-
-Human-readable Markdown is a derived view, not authority. A link is returned
-only after rendering, readback and digest verification. View failure after
-report commit preserves the report. One transient I/O failure receives a bounded
-same-request repair from the durable report; persistent failure remains explicit.
-Exact receipt reconciliation may repair the view without publishing again.
-Unsafe paths, permission denial and external-edit conflicts are not bypassed.
-Review cannot substitute an invented path
-for a missing verified link.
-
-Closure certifies the latest observed generation, not continuous filesystem
-immutability. No current host API supplies an atomic filesystem seal across
-the final worker observation and user closure. Qualification therefore controls
-external writers across that interval and reports the boundary honestly.
-
-The twenty live advertised schemas and descriptions are the sole MCP argument
-authority. Skills, worker messages and ordinary live workloads describe meaning
-and policy, not duplicated argument shapes.
+The newest-first catalogue uses a stable metadata snapshot across cursor pages.
+Document and draft reads use Unicode pages of at most 4,000 characters, beginning
+at the newest content and continuing only with the returned compact cursor when needed.
+Ordinary cursors survive restart; an
+updated pipeline expires its earlier read cursor, so start at its current beginning.
+See [storage](docs/project/storage.md) and [security](SECURITY.md) for reliability,
+backup and filesystem limits. Do not commit private task artifacts inadvertently.
 
 ---
+
 ## Profiles and model routing
 
 Cortex includes 22 advisory specialist profiles:
@@ -751,289 +726,189 @@ Cortex includes 22 advisory specialist profiles:
 | Quality control | `qa_engineer`, `code_reviewer`, `security_auditor`, `build_verification` |
 | Documentation | `technical_writer` |
 
-Profiles describe useful roles, operating workflows, quality bars, and
-escalation conditions. They never select a model, authorize a public tool, or
-enforce a capability.
+The host-supplied orchestrator skill contains a routing table for all profiles.
+The coordinator selects a registered native profile at spawn and supplies the
+complete English assignment and constraints with `fork_turns: "none"`. Codex attaches the TOML `developer_instructions` as
+child-session instructions before project work. Neither role reads profile TOML
+or explores the plugin. A profile name in the task message is not native attachment.
+
+Profiles have structured role, input, workflow, quality, reporting and recovery
+sections. One shared source protocol plus 22 specialization fragments generates
+22 self-contained Agent v2 TOML developer prompts. A byte-for-byte test prevents
+profile drift. Each profile also fixes its default draft class:
+
+| Draft template | Profiles |
+| --- | --- |
+| `planning` | `planner`, `architect`, `database_architect`, `ux_designer` |
+| `investigation` | `explorer`, `debugger` |
+| `implementation` | `frontend_dev`, `backend_dev`, `fullstack_dev`, `mobile_dev`, `data_engineer`, `devops_engineer`, `refactorer`, `accessibility_fixer` |
+| `verification` | `qa_engineer`, `code_reviewer`, `security_auditor`, `build_verification`, `accessibility_auditor`, `performance_engineer` |
+| `documentation` | `technical_writer` |
+| `general` | `general` |
+
+Using another report class requires a fresh worker with the matching profile; the
+live audit reports a mismatch. Optional [report examples](plugins/cortex/skills/cortex-control/references/index.md)
+for planning, investigation, implementation, verification, documentation and final
+synthesis. Examples guide content without imposing exact report headings.
+
+Codex supplies the selected orchestrator skill and native specialist profile.
+The host supplies required skills through Codex's normal procedure only when relevant.
+Workers never inspect plugin files to find their instructions or report examples.
+[Tool discipline](plugins/cortex/skills/tool-discipline/SKILL.md) requires checking
+live tool declarations, complete arguments and actual results; it forbids guessed
+calls and unexplained mutation replays. Profiles do not authorize tools or select models.
 
 ### Adaptive model policy
 
-The coordinator chooses one exact model and reasoning effort independently for
-every delegation. Governance mode does not choose a single pair for the task.
-`profiles.json` is the canonical recommendation source:
+The coordinator chooses the model and supported reasoning effort per assignment;
+Luna remains the default, while Terra also covers genuinely cross-cutting
+implementation with several interdependent behavioral and verification contracts;
+governance does not determine a single pair for the entire task. The bundled
+orchestrator skill owns this policy.
 
-| Exact model | Recommended effort | Choose for |
+| Exact model | Effort | Choose for |
 | --- | --- | --- |
-| `gpt-5.6-luna` | through `max` | Default for most bounded work, including Explorer/discovery, ordinary implementation, QA, and deterministic rechecks; increase Luna effort before changing models |
-| `gpt-5.6-terra` | through `max` | Only genuinely complex planning or architecture, including cross-cutting design decisions or processes that cannot be safely resolved by Luna at the selected effort |
-| `gpt-5.6-sol` | rare, through `max` | Only genuinely very-high-risk security-related work |
+| `gpt-5.6-luna` | Up to `max` | Default for most bounded work, ordinary discovery, implementation and checks |
+| `gpt-5.6-terra` | Up to `max` | Genuinely complex planning, architecture, or cross-cutting implementation |
+| `gpt-5.6-sol` | Rare, up to `max` | Materially risky security-sensitive work |
 
-Cortex permits `low`, `medium`, `high`, `xhigh`, and `max`; `ultra`
-is never valid. These values are a native transport support boundary, not a
-backend policy matrix; the coordinator chooses the exact effort needed for
-each assignment.
-
-Every native subagent dispatch preserves isolated history and the exact
-coordinator-selected effort; the matching durable delegation retains the exact
-model choice. Codex forwards the returned closed projection once to the active
-host spawn operation; one durable delegation maps to exactly one host spawn:
-
-- Luna omits the model override so the configured default Luna is selected, and carries the exact effort.
-- Terra carries the exact selected Terra model and effort.
-- Sol carries the exact selected Sol model and effort.
-
-The backend validates but never derives or rewrites a coordinator-selected
-pair. There is no server-owned Luna → Terra → Sol escalation. A replacement
-delegation always receives a fresh coordinator choice.
-Explorer and ordinary discovery always use Luna. Terra is selected only when
-genuinely complex planning or architecture is evidenced; Sol remains rare and
-reserved for genuinely very-high-risk security-related work.
+Choose effort proportionally from the host's advertised range; do not make max
+an automatic default. Ultra is not used. Luna uses the configured native default
+without an explicit model override. Terra and Sol use explicit native overrides.
+Respect explicit user selections and report unavailable choices rather than
+silently substituting them. The server neither selects nor enforces models.
 
 ---
 
 ## Developing Cortex
 
-> [!CAUTION]
-> End users install and update Cortex through the GitHub Marketplace flow above.
-> `./scripts/sync-cortex.sh` is the supported repository-development and local
-> source synchronization path for this checkout; it is not a replacement for
-> the public installation instructions.
+End users install through the Marketplace flow above. Repository development
+prepares only the isolated candidate; it never updates the stable user plugin.
 
 ### Runtime boundary
 
-The complete installable product lives under `plugins/cortex/`: the manifest,
-profiles, authoritative skills, MCP configuration, and runtime. Root-level
-`scripts/`, `tests/`, `docs/`, and `AGENTS.md` support repository development
-and are not installed runtime authority.
-
-Important entry points:
+The complete installable product lives under `plugins/cortex/`. Root-level
+`scripts/`, `tests/`, `docs/` and `AGENTS.md` are development support.
 
 | Path | Purpose |
 | --- | --- |
-| `plugins/cortex/scripts/cortex.py` | Cortex 1.15.6 MCP server facade |
-| `plugins/cortex/.mcp.json` | Direct Python MCP server startup configuration |
-| `plugins/cortex/scripts/cortex_runtime/v12_contract.py` | Bounded task/report constants and canonical report digests |
-| `plugins/cortex/scripts/cortex_runtime/v12_store.py` | Project-isolated current-schema storage |
-| `plugins/cortex/scripts/cortex_runtime/v12_projections.py` | Host-private derived Markdown materialization |
-| `plugins/cortex/scripts/cortex_runtime/v12_maintenance.py` | Task-anchored host-private operator CLI outside MCP |
-| `plugins/cortex/scripts/cortex_runtime/worker_message.py` | Attested direct native worker-message rendering |
-| `plugins/cortex/scripts/cortex_runtime/public_contracts.py` | Exact uniform twenty-tool semantic catalog |
-| `plugins/cortex/profiles.json` | Advisory profiles and model recommendations |
-| `plugins/cortex/skills/orchestrator/SKILL.md` | Single authoritative outcome-first orchestration skill |
-| `plugins/cortex/skills/cortex-control/SKILL.md` | Authoritative twenty-tool semantic, nonblocking, and task-anchor semantics |
-| `.agents/plugins/marketplace.json` | Repository-local Marketplace |
-| `scripts/sync-cortex.sh` | Synchronize and verify this local source checkout during development |
-| `scripts/cortex-dev` | Start an interactive Codex session in the persistent isolated `$HOME/.cortex-dev` candidate runtime |
-| `scripts/cortex-desktop-dev` | Prepare that candidate and launch the real Codex Desktop with a disposable Electron profile |
-| `cortex-dev` | Repository-root convenience entry point delegating to `scripts/cortex-dev` |
-| `scripts/cortex-dev-reset` | Remove that candidate runtime only after explicit `--confirm` |
-
-The installable release includes the activation guard and sanitized lifecycle
-observer declared in `plugins/cortex/hooks/hooks.json`. They are host-side
-ordering/observation callbacks only; all task, assignment, evidence,
-publication, decision, governance, and closure authority remains in the
-uniform MCP server.
+| `plugins/cortex/scripts/cortex.py` | Seven-operation MCP entry point |
+| `plugins/cortex/.mcp.json` | Direct Python server startup |
+| `plugins/cortex/scripts/cortex_runtime/contracts.py` | Advertised schemas and limits |
+| `plugins/cortex/scripts/cortex_runtime/store.py` | SQLite metadata and real Markdown storage |
+| `plugins/cortex/scripts/cortex_runtime/server.py` | Bounded stdio transport and private errors |
+| `plugins/cortex/scripts/cortex_clear.py` | Explicit host-side retention command |
+| `plugins/cortex/profiles.json` | 22 advisory specialist descriptions |
+| `plugins/cortex/skills/orchestrator/SKILL.md` | Coordination and model selection |
+| `plugins/cortex/skills/cortex-control/SKILL.md` | Shared worker reporting protocol |
+| `.agents/plugins/marketplace.json` | Repository Marketplace |
+| `scripts/cortex_package.py` | Complete payload hashing and candidate validation |
+| `scripts/sync-cortex.sh` | Read-only source validation or isolated candidate preparation |
+| `scripts/cortex-dev` | Prepare candidate and launch ordinary interactive Codex |
+| `scripts/cortex-desktop-dev` | Actual Desktop with a disposable profile |
+| `cortex-dev` | Repository-root forwarding launcher |
 
 ### Isolated candidate runtime
 
-Use the repository helper for interactive development. It resolves this
-checkout from the helper's own location, creates or reuses the dedicated
-`$HOME/.cortex-dev` directory with owner-only permissions, exports
-`HOME=$HOME/.cortex-dev` and `CODEX_HOME=$HOME/.cortex-dev/.codex` inside that candidate
-runtime, synchronizes the checkout there, and then starts ordinary interactive
-Codex. The candidate HOME, `CODEX_HOME`, plugin cache, configuration, and Cortex 1.15.6
-state are isolated from the stable runtime. One explicit exception supplies the
-required worker MCP: `cortex-dev` projects the enabled production
-`mcp_servers.codebase_memory` command/approval settings into the candidate and
-runs only that external MCP child with its owning production HOME. It never
-modifies the production config or copies arbitrary environment/credential
-tables. The normal checkout synchronization
-can still update source metadata or generated content and remove disposable
-plugin bytecode; the helper isolates those effects to the candidate workflow but
-does not make the source checkout immutable.
+`./scripts/cortex-dev` creates or reuses the exact `$HOME/.cortex-dev` candidate,
+sets its own `HOME` and `CODEX_HOME`, prepares the content-stamped package through
+the supported sync path and launches ordinary Codex in the caller's project.
+It does not create tmux or modify the stable installed plugin.
 
 ```bash
+./scripts/cortex-dev --prepare-only
 ./scripts/cortex-dev
+# Equivalent interactive entry point:
+./cortex-dev
 ```
 
-The equivalent repository-root convenience command is `./cortex-dev`; it
-delegates to the same launcher and accepts the same ordinary Codex arguments.
+The interactive CLI driver exposes the same complete observation gates:
+`./scripts/cortex-live-smoke calls` and `./scripts/cortex-live-smoke audit`.
+Run both before accepting or stopping a live session.
 
-For a real Desktop check, use the dedicated launcher. It prepares the same
-candidate, then opens the actual Desktop binary with isolated `HOME`,
-`CODEX_HOME`, and Electron user data. The stable Codex profile and installed
-Cortex plugin remain untouched:
+Actual Desktop uses the same prepared candidate and a disposable Electron profile:
 
 ```bash
-./scripts/cortex-desktop-dev start --workdir /absolute/test/project \
-  --prompt-file TASK_PROMPT.txt --model gpt-5.6-luna --reasoning-effort high
+./scripts/cortex-desktop-dev start --workdir /absolute/existing/test-project \
+  --prompt-file /absolute/TASK_PROMPT.txt --data-dir /absolute/fresh-private-data
 ./scripts/cortex-desktop-dev status
+./scripts/cortex-desktop-dev send
+./scripts/cortex-desktop-dev events
+./scripts/cortex-desktop-dev calls
+./scripts/cortex-desktop-dev audit
 ./scripts/cortex-desktop-dev stop
 ```
 
-CLI/Desktop parity requires consecutive successful real-host scenarios on the
-same stamped payload, in either order. Any installable-payload edit invalidates
-both results and restarts the pair.
-
-The helper accepts ordinary Codex arguments after the script name. Its `--help`
-mode only prints usage. The candidate reset helper requires an explicit
-confirmation token and refuses the active HOME, repository, broad paths,
-symlinked targets, and non-regular entries:
-
-```bash
-./scripts/cortex-dev-reset --confirm
-```
-
-Run reset only when the shell's active HOME is the original home that owns the
-dedicated `.cortex-dev` directory. The helper is deliberately limited to that
-exact candidate path; it cannot reset the stable runtime or arbitrary data.
+`CORTEX_DESKTOP_BINARY` can select the actual Desktop executable. `send` verifies
+the isolated window PID, focuses its prepared composer, submits with `Ctrl+Enter`,
+and records success only after exactly one new task receipt appears. It refuses a
+second acknowledged submission while leaving a prompt retryable when no receipt
+appears. `calls` emits the full run by default and correlates every coordinator and
+worker wrapper, nested host invocation and actual Cortex MCP event while retaining
+only argument/result digests and safe routing metadata. `audit` reads the same
+complete history and fails on MCP or host errors, truncation, missing command
+outcomes, forbidden role or file access, calls made by a worker after successful
+publication, oversized document pages, or a command session without a terminal result.
+Every observed error is retained chronologically in `tool_error_history` and fails
+the run even when a later retry succeeds. `resolved_host_failures` explains a later
+correction but never makes that run acceptable. Pre-dispatch wrapper syntax errors
+are separated from nested calls that never executed.
+This exposes redundant or misplaced operations without commands or report bodies.
+Inspect the visible result too. CLI and
+Desktop qualification requires consecutive successful scenarios on one unchanged
+payload. Any installable edit invalidates earlier live results.
 
 ### Recommended development loop
 
-The preflight optionally exports a private passive capability snapshot with
-`--host cli` (or `desktop`) and `--capability-output /absolute/new-file.json`.
-Use an owner-controlled qualification directory; an existing file is never
-overwritten. Package/configuration checks do not prove native coordination,
-hook delivery, input provenance or recovery. Those capabilities remain
-`unverified` until actual host observations are available. The new injected
-host-adapter boundary is source-tested, not yet CLI/Desktop live-qualified;
-see the [integrity completion checklist](docs/project/typed-orchestration-integrity.md#11-completion-checklist).
-Both isolated launchers save a separate passive snapshot before starting their
-host, under an owner-private `.host-qualification-*` directory in the isolated
-Codex home. Preparation without launching a host does not produce a live result.
-
 ```bash
-# 1. Inspect the checkout and host without changing Codex configuration
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-host-preflight.py
-
-# 2. Run source contract checks
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-prompt-lint.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
-
-# 3. Preview the source update without writing
-./scripts/sync-cortex.sh --dry-run
-
-# 4. Start the isolated candidate runtime; candidate state is isolated, while
-#    normal synchronization may update source metadata/generated content and
-#    remove disposable plugin bytecode
-./scripts/cortex-dev
-
-# 5. Open a new ordinary interactive Codex task and test the changed behavior
-
-# 6. Confirm the candidate environment's synchronized copy matches the checkout
-CORTEX_DEV_HOME="${HOME}/.cortex-dev" HOME="$CORTEX_DEV_HOME" CODEX_HOME="$CORTEX_DEV_HOME/.codex" ./scripts/sync-cortex.sh --check
+python3 -B scripts/cortex_package.py stamp
+python3 -B scripts/validate-cortex-marketplace.py
+./scripts/sync-cortex.sh --check
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
+git diff --check
+./scripts/cortex-live-smoke start --workdir /absolute/existing/test-project
 ```
 
-`sync-cortex.sh` validates package metadata, synchronizes `cortex@cortex`,
-enables `multi_agent_v2`, and enforces the required Luna default while
-preserving unrelated configuration. In normal synchronization mode it also
-removes only disposable Python bytecode beneath `plugins/cortex` and refreshes
-the marked orchestrator routing table from `profiles.json`; read-only modes do
-not rewrite source state. It does not import, migrate, or modify user V11
-ledgers or unrelated plugin data. Run normal synchronization through
-`scripts/cortex-dev` during active development so those changes land only in
-the candidate runtime. Normal synchronization may update source metadata,
-generated content, and disposable plugin bytecode in the checkout, so direct
-normal synchronization is an explicitly authorized source-checkout operation,
-not the public Marketplace install flow.
-
-To select another Python interpreter:
-
-```bash
-CORTEX_PYTHON=/absolute/path/to/python3.11 ./scripts/sync-cortex.sh --dry-run
-CORTEX_PYTHON=/absolute/path/to/python3.11 ./scripts/sync-cortex.sh
-```
+Stamp before release-sensitive checks after every installable edit. Run package,
+tests and sync checks sequentially in one checkout. Normal sync is allowed only
+through `cortex-dev` in the exact isolated environment; `--check` and `--dry-run`
+are read-only source checks. Observe the interactive composer and candidate receipt
+before submitting an ordinary product workload.
 
 ### Operator maintenance
 
-Cortex 1.15.6 also packages a local administrator CLI for explicit health, project-shard
-backup, checkpoint, optimize, vacuum, offline restore, derived-projection
-prune/regeneration, and sealed-backup retention. It is **not** an MCP tool and
-does not change the complete twenty-tool semantic registry or either
-audience projection. Every operation starts from an
-existing Cortex 1.15.6 `task_id`, derives the host-private shard from that ID, accepts no
-`project_root` or arbitrary destination, emits bounded sanitized JSON, touches
-no V11 state, and writes nothing to the target project.
+`$cortex:orchestrator clear 7 days` deletes only this project's tasks and all their
+artifacts whose latest recorded activity is older than seven days. Active task
+identifiers are protected using the coordinator's native-host knowledge. This
+explicit instruction authorizes the bounded deletion without another confirmation.
 
-From this checkout, run the module from the packaged scripts directory:
-
-```bash
-cd plugins/cortex/scripts
-export CORTEX_TASK_ID='paste-exact-task-id-here'
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m cortex_runtime.v12_maintenance health \
-  --task-id "$CORTEX_TASK_ID"
-```
-
-Mutating commands require their exact uppercase confirmation token. Backups
-cover the entire selected project shard, not only the anchor task. Restore is
-strictly offline: stop every normal Cortex MCP process using the shard first,
-then supply `RESTORE`, the exact task and `p-<hash>` shard, and
-`MCP_STOPPED`. That final value is an operator assertion; the CLI cannot stop or
-lock out a live MCP server. Projection pruning and backup retention default to
-dry-run and never remove canonical ledger rows.
-
-The complete commands, safety boundaries, and verification contract are in
-[operator maintenance](docs/features/operator-maintenance/index.md).
+The coordinator delegates the installed `scripts/cortex_clear.py` host command,
+obtaining its usage from `--help`. It is not an MCP operation and does not
+create a cleanup task. Committed deletion intents recover interrupted cleanup.
+The operation does not remove project source or other projects' tasks. Back up
+SQLite and task directories together while storage access is stopped.
 
 ### Versioning
 
-The current Cortex public contract release is **1.15.6**. Version and build identity are
-defined by `plugins/cortex/.codex-plugin/plugin.json`. The installable manifest always
-uses `1.15.6+codex.sha256.<digest-prefix>` in both the GitHub Marketplace package and
-the isolated development candidate; the MCP server continues to advertise semantic
-version `1.15.6`.
-
-When changing the plugin, update the version according to SemVer:
-
-- patch for a fix without new functionality;
-- minor for a backward-compatible feature;
-- major for a large or breaking change.
-
-Build metadata after `+` is content-addressed as
-`codex.sha256.<digest-prefix>`; it identifies the exact isolated candidate and
-the exact production package and cannot be reused for different bytes. Runtime
-startup recomputes the packaged digest before MCP initialization and rejects a
-missing, stale, or invented suffix outside explicit source mode. An explicitly
-source-mode checkout may use plain `1.15.6` or retain its last stamped suffix
-while edited and reports `parityVerified=false`; neither is an installable
-release until release validation stamps the exact current digest. The
-product/server compatibility boundary remains `1.15.6`. V11 tools and unfinished
-V11 tasks are not compatible with Cortex 1.15.6.
+This replacement preserves semantic version **1.15.6** as requested. The manifest
+and MCP server advertise `1.15.6+codex.sha256.<digest-prefix>`, computed from the
+complete installable payload. Regenerate the suffix whenever that payload changes.
+Different bytes must not reuse a stamp. The package validator and candidate
+preparation verify it; the server is not a workflow compatibility layer.
 
 ### Development agreements
 
-- Keep one authoritative bundled orchestrator skill and the complete static
-  twenty-operation registry. Retained catalogues never replace per-call actor
-  checks.
-- Keep project execution worker-owned and knowledge routing bounded to the
-  installed skill's exact known-path policy.
-- Derive immutable scope and predecessor evidence from current typed nodes;
-  never preserve prose-assignment or old-publication compatibility routes.
-- Use the exact packaged profile as assignment policy, never an unsupported
-  native agent type. Forward one unchanged server-rendered dispatch.
-- Preserve original user evidence in its designated fields; keep worker
-  engineering narrative English and localize coordinator presentation.
-- Store one canonical observed-coverage narrative. Expected plan checks and
-  artifact integrity metadata are not duplicate observations.
-- Enforce transactional ownership, dependency, artifact, revision, recovery,
-  review and closure gates without turning the backend into a scheduler.
-- Keep remediation bounded, independently verified and inside the validated
-  contract. Ordinary in-contract fixes do not ask the user to continue.
-- Bind documentation impact and final verification to the latest sealed
-  generation; documentation mutations precede final verification.
-- Treat human views as private verified projections, never authority or
-  reconstructed paths.
-- Keep operator maintenance outside MCP and restore offline, with exact
-  confirmations and independently established quiescence.
-- Use apply_patch for source edits. Refresh only the isolated candidate through
-  the supported development launcher; never synchronize the stable installation
-  as a development test.
-- Preserve the semantic version during this hardening work and refresh the
-  content-addressed cache suffix after every payload change.
-- Keep the implementation document's Completion checklist current. Source
-  tests do not satisfy native live gates; final CLI/Desktop qualification must
-  use the same unchanged payload and mandatory final closure review.
-- Never commit runtime ledgers, raw reports, private diagnostic logs, secrets
-  or personal data.
+- Keep one authoritative bundled orchestrator and exactly seven public operations.
+- Keep all 22 profiles with a shared free-form Markdown reporting workflow.
+- Keep model selection, delegation, steering and completion in the coordinator.
+- Store one latest-first pipeline file; ordinary reports remain immutable.
+- Keep tool argument contracts in advertised schemas, not model instructions.
+- Preserve help, harvest, refresh, clear, index routing and context rereading.
+- Verify storage integrity without interpreting Markdown completion claims.
+- Never retain compatibility routes, orchestration hooks or lifecycle barriers.
+- Update affected documentation and record actual evidence and unrun checks.
+- Refresh only the isolated candidate; never alter stable installation for tests.
+- Never commit private task reports, credentials or diagnostic logs.
 
 ---
 
@@ -1050,163 +925,81 @@ entirely optional.
 
 ## Verification and diagnostics
 
-Run the release/protocol gate before publishing a change:
+Run the focused source checks before publishing:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
-```
-
-The gate builds the allowlisted source candidate, compiles the bundled Python,
-starts an isolated MCP server, asserts the complete twenty-tool semantic
-registry and both audience projections,
-and exercises current-only storage, atomic receipts, typed DAGs, concurrent
-claims, bounded publication evidence, candidate-family selection, review
-freshness, artifact-bound verification, finite remediation and recovery,
-host-private projections, cross-project isolation, activation/lifecycle hooks
-and exact model/effort transport. These are source checks, not actual native
-CLI/Desktop qualification.
-
-Run the bounded supporting diagnostics:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-prompt-lint.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate-cortex-marketplace.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode source
+python3 -B scripts/validate-cortex-marketplace.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q
+./scripts/sync-cortex.sh --check
 git diff --check
-./scripts/sync-cortex.sh --dry-run
 ```
 
-The self-contained skill/profile lint checks the bundled runtime contract and
-advisory profile invariants without making a model call. It is structural source
-evidence, not behavioral evaluation. Actual coordinator behavior is verified in
-fresh ordinary interactive Luna/high `codex` tasks inside tmux.
+The suite verifies exactly seven tools and 22 profiles, atomic durable writes,
+real Markdown files, a single newest-first pipeline, immutability, task isolation,
+delivery deduplication, bounded cursor reads, restart, private errors and retention.
+It does not evaluate the meaning of a model report. Source tests do not substitute
+for actual CLI/Desktop sessions. CI runs only for pull requests targeting `dev`
+or `main`, with Linux/macOS and Python 3.11/3.12 jobs.
+
+Optional live observations contain bounded process, operation, outcome and package
+identity metadata, never arguments or report bodies. Inspect only the exact test
+session and remove its temporary streams afterward. The operator, not transport
+code, decides whether results are sufficient. Actual outcomes and unrun checks
+are recorded in [release evidence](docs/release-readiness.md).
 
 ## Interactive tmux live-dev workflow
 
-Before submitting any workload, the LLM/operator must observe the passive
-host-owned activation receipt for the exact isolated candidate. The receipt
-proves agreement between candidate identity, registered Cortex server, and
-advertised catalogue identity; it is observation-only, and the transport never
-parses or judges it. A missing receipt makes the environment unverified and the
-workload must not be sent. Once `cortex:orchestrator` is selected, the first
-project execution action must be the catalogued `open_task` operation. Prose
-activation acknowledgement, shell/repository inspection, project-state checks,
-or worker dispatch before task opening is a route violation.
-
-Use the real operator-controlled ordinary Codex session. `./scripts/cortex-dev` refreshes the isolated candidate but does not create tmux; `./scripts/cortex-live-smoke start` creates the exact session on the default server with an ordinary `bash` pane, attaches an owner-only output-only `pipe-pane` stream to that exact pane, and only then inserts the fixed launcher command literally and submits it with one standalone Enter. The launcher prints `Cortex live-dev exit=<status>` and exits with that same status.
+Use the ordinary interactive CLI on the default tmux server. The helper creates
+the exact `cortex-markdown-smoke` session, attaches an owner-only output observer and
+enters the fixed isolated launcher. That session name is a development locator.
+The launcher prints `Cortex live-dev exit=<status>` and exits with that status.
 
 ```bash
-./scripts/cortex-live-smoke start
+./scripts/cortex-live-smoke start --workdir /absolute/existing/test-project
 ./scripts/cortex-live-smoke status
 ./scripts/cortex-live-smoke capture
 ./scripts/cortex-live-smoke events
-TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
-# Only if the visibly observed fresh-project trust screen asks for acknowledgement:
+TERM=xterm-256color tmux -f /dev/null attach -t cortex-markdown-smoke
+# Only after observing a fresh-project trust prompt:
 ./scripts/cortex-live-smoke enter
+# Only after observing the composer and matching candidate receipt:
 ./scripts/cortex-live-smoke send --prompt-file TASK_PROMPT.txt
 ./scripts/cortex-live-smoke capture
+./scripts/cortex-live-smoke events
 ./scripts/cortex-live-smoke stop
 ```
 
-After `start`, `capture` provides the bounded output-only PTY stream when detached `capture-pane` is stale. `events` provides the exact session's bounded owner-only sanitized MCP observation stream; it carries only safe operation/outcome metadata and is never an automated readiness or acceptance parser. Visibly confirm the Codex state in `attach` or `capture` before any input; `pane_current_command=codex` alone is insufficient because early text or submission can be lost during TUI initialization. If a visibly observed fresh-project trust screen asks for acknowledgement, the operator/LLM may use `enter` exactly once; that transport action sends one standalone Enter to the exact pane, does not auto-trust a directory, and does not edit Codex trust configuration. Then visibly confirm the interactive composer before `send`. Every workload begins with the real `$cortex:orchestrator` token. That token is the prompt's only Cortex-specific content; the remainder is an ordinary user request for a concrete product change, development task, diagnosis, or verification. Environment constraints, internal stages, tool policy, replay handling, worker/coordinator instructions, and pass/fail sentinels belong to the external operator and verifier, never to the workload prompt. The controller normalizes the prompt to one line, inserts it literally with one `send-keys -l` delivery, waits five real seconds after insertion returns, and sends exactly one standalone named `Enter` to the same pane. Its receipt reports delivery only; it never claims TUI acceptance. The coordinator/LLM confirms acceptance and progress from the pane and bounded events. Observe actual task-relevant Cortex MCP calls and results: `Cortex tool error`, `validation_error`, `schema_unsupported`, traceback, or missing expected completion is failure. A repeated successful mutation without an explicitly ambiguous prior transport result is also failure. Capture the exit marker before stopping; cleanup stops the pipe and removes only `cortex-v12-smoke` plus its owner-only temporary capture. Never use `codex exec`, an alternate socket, or stable HOME/CODEX_HOME.
+A pane process name alone does not prove readiness. Observe the actual composer
+and passive initialize receipt showing the expected candidate, registered server
+and seven-tool catalogue before work. Initial workloads begin with the actual
+`$cortex:orchestrator` token; everything after it is ordinary product work rather
+than instructions about test transport or internal orchestration.
 
-Prompt delivery contract: after the composer is visibly confirmed, normalize the prompt to one line, send the complete prompt literally with one `send-keys -l` delivery, wait a real five seconds after that insertion returns, then send exactly one standalone named `Enter` to the same pane. Do not send a pre-submit `C-m` or `C-j`; the transport receipt reports delivery only and the coordinator/LLM confirms TUI acceptance.
+Exercise task and pipeline creation, native-worker selective report reads and
+publication, ordinary user steering, added work, final reporting and recovery.
+Inspect every worker's metadata stream as well as the visible coordinator result.
+Tool errors and unexplained acknowledged write replays are not clean passes.
+Questions and answers are ordinary detailed chat text with alternatives.
 
-For every native worker spawned by live orchestration, the LLM verifier must inspect a bounded sanitized structured event stream as well as the coordinator pane because worker MCP calls/errors may be hidden. The helper may expose events but must not decide pass/fail. Acceptance requires a clean first worker-owned publication success, zero prior hidden validation/tool errors or mutation replays; a final publication reference alone is insufficient.
-
-The E2E acceptance case is multi-turn and runs in a separate test project. The LLM observes the pane, approves the visibly rendered high-risk/material plan (including any predefined branch or API-key/ENV answer), and follows planner → implementation → independent verification → documentation-impact assessment → closure. While a worker is active, the operator also inserts a bounded burst of ordinary in-scope messages and verifies that they are processed in order without dropped or duplicated decisions. It inspects every native worker event stream and fails on any hidden tool error or unexplained replay. The tmux transport never answers or approves autonomously.
-
-The complete live catalogue scenario is defined by
-`tests/fixtures/live_cortex_all_tools_scenario.json` and its ordinary workload
-prompt. Run it with Luna High against the same unchanged stamped candidate in
-CLI and real Desktop consecutively. The external LLM verifier, not the
-transport, confirms at least one clean task-relevant success for every one of
-the twenty public operations, performs the specified same-thread CLI resume,
-and rejects any hidden tool error or unexplained mutation replay. Conditional
-operations are reached through real prerequisites: point replacement, active
-host recovery, an explicitly requested chronology, actual behavior steering,
-and the final closure review. `tests/test_full_orchestration_matrix.py` is only
-a source/API state-transition matrix; it neither substitutes for nor claims
-MCP, hook, native-worker, resume, or two-host evidence.
-
-Keep live checks narrowly targeted to the modified function, tool, or contract;
-do not substitute an exec-mode wrapper or detached session. The launcher prints
-the isolated `HOME` and `CODEX_HOME` target before it synchronizes, so record
-that target, the refreshed cache version, the exact session command, scope,
-outcome, and any unrun checks. If ordinary Codex cannot start or a terminal
-permission prompt/denial prevents the targeted input or result, report the
-smoke as failed or unverified from the bounded capture; never infer success.
-Always clean up the named session. Never install, reinstall, update, or
-synchronize the user's real installed plugin for a repository live-dev smoke.
-
-After installation or update, run exactly one fresh interactive Cortex session
-first. Require worker-verified acceptance and an advisory `ready` closure with
-no coordinator boundary violation. Only after that single-session pass may any
-concurrent multi-session smoke begin.
-
-Qualification is layered, as specified in
-[Typed orchestration integrity](docs/project/typed-orchestration-integrity.md#10-qualification-ladder):
-local operation/negative-contract tests, profile publication contracts, DAG and
-artifact races, steering/recovery, a short real CLI E2E, full CLI, then full real
-Desktop on one unchanged payload. The complete test must naturally exercise
-every conditional tool and all 22 profiles with meaningful, ready scope.
-
-Include genuine plan choices, several semantic steering revisions at different
-stages, multiple in-flight messages, same-task resume and a requested chronology.
-Inspect each worker's first publication, prerequisite order and artifact binding.
-A corrected call, premature audit or unexplained replay is not a clean run.
-Source tests and a merely launched Desktop session never substitute for complete
-native qualification.
-
-Documentation mutations precede final verification. A no-impact branch requires
-a finalized worker assessment, not a fabricated edit. Finish by presenting the
-verified result and links, opening a fresh closure review, receiving the direct
-close choice, and checking clean process completion. No initiative or alternate
-legacy governance route exists. The ledger writes no coordinator data into the
-product project; worker-owned product files are expected. Only verified plan and
-report views are user-facing Markdown, while decisions and timeline remain
-SQLite evidence.
-
-Run the read-only preflight on a local or SSH host with:
+To check recovery, exit and stop only that smoke session, then use the same project:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-host-preflight.py
+./scripts/cortex-live-smoke start --workdir /absolute/existing/test-project --resume-last
 ```
 
-Before release, verify the exact allowlisted working-tree candidate, then verify
-that the same required installable files are committed unchanged:
+Confirm the resumed transcript and existing thread binding before continuing.
+The coordinator and workers reread current task context without creating a duplicate.
+Capture the explicit exit marker before cleanup; use `stop --interrupt` after a
+failed run when needed. Never kill the tmux server, use an alternate socket,
+`codex exec` or the stable plugin environment. Desktop uses the launcher described
+above and the same unchanged candidate. Record limitations rather than counting
+an app launch as a complete live test.
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode source
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode head
-```
-
-Source mode and installed-plugin checks are different evidence classes. Do not
-claim installation, interactive model behavior, or published package state from
-a source-only result. Record every unrun gate or environment limitation.
-
-Unexpected MCP errors may be written to a private same-user diagnostic log.
-Treat that log as sensitive: inspect only a bounded tail, extract sanitized
-correlation metadata, and never paste raw records into chat, issues, prompts,
-commits, or external systems.
-
-The remaining publication requirements are documented in
-[docs/release-readiness.md](docs/release-readiness.md).
-
-For a separate test project, pass its canonical directory to `start` with
-`--workdir PATH`; the launcher and candidate refresh remain rooted at this
-repository's absolute `scripts/cortex-dev`.
-The launcher temporarily enters the repository only for refresh/sync and
-restores the selected workdir before starting ordinary Codex, so task project
-root follows `--workdir`.
-
-The live-smoke script is a dumb tmux transport only. It does not parse
-readiness, trust, rollout state, sentinels, acceptance, approvals, MCP errors,
-or retries; the coordinator/LLM decides those from the real attached or bounded
-owner-only captured terminal. The output-only pipe never feeds input. Prompt
-delivery is one literal normalized insertion followed by one standalone
-`Enter` key; the distinct `enter` command is only an explicit key transport
-after the operator has visibly observed the trust screen.
 ### Current live transport submission
 
 The helper performs one literal normalized insertion, waits five seconds, and sends exactly one standalone named `Enter` key to the same exact pane. Receipts report transport delivery only; the coordinator/LLM confirms TUI acceptance from the pane and bounded events.
+
+Report publication rejects unfilled template markers and preserves drafts on failure.
+Pipeline recovery retains the committed edition through interrupted publication
+and directory-sync failures. Draft editing uses one in-place patch with independent
+marker replacements, consistently across coordinator and specialist instructions.

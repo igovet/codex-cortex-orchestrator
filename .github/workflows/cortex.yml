@@ -1,53 +1,25 @@
-name: Cortex marketplace release gate
-
+name: Cortex package checks
 on:
   pull_request:
     branches:
       - dev
       - main
-
-concurrency:
-  group: cortex-marketplace-release-gate-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+permissions:
+  contents: read
 jobs:
-  marketplace-release-gate:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+  checks:
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.12"]
-    permissions:
-      contents: read
-    env:
-      PYTHONDONTWRITEBYTECODE: "1"
-      PYTHONUNBUFFERED: "1"
-      PYTHONHASHSEED: "0"
-      PYTHONPATH: plugins/cortex/scripts
+        python: ['3.11', '3.12']
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install macOS transport dependency
-        if: runner.os == 'macOS'
-        run: brew install tmux
-      - name: Install release-gate test dependencies
-        run: python -m pip install --disable-pip-version-check --no-input "pytest>=8,<9" "PyYAML>=6,<7"
-      - name: Run the Cortex marketplace release gates
-        run: |
-          python -B scripts/cortex-prompt-lint.py
-          python -B scripts/render_cortex_tool_catalog.py --check
-          bash -n scripts/sync-cortex.sh
-          python -B scripts/validate-cortex-marketplace.py
-          python -B scripts/verify-cortex-release.py --mode source
-          python -B -m pytest -q \
-            tests/test_cortex_host_preflight_plugin_contract.py \
-            tests/test_cli_desktop_source_parity.py \
-            tests/test_activation_hook.py \
-            tests/test_command_receipts.py \
-            -k 'plugin_contract or lifecycle_are_equivalent or catalogue_pending or late_desktop or parallel_candidate or copied_locator or coordinator_role'
-          python -B -m pytest -q
-          git diff --check
+          python-version: ${{ matrix.python }}
+      - run: python3 -m pip install pytest jsonschema
+      - run: python3 -B scripts/validate-cortex-marketplace.py
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q
+      - run: ./scripts/sync-cortex.sh --check
+      - run: git diff --check

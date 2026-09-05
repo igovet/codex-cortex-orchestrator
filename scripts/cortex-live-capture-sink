@@ -1,54 +1,16 @@
 #!/usr/bin/env python3
-"""Private bounded append sink for cortex-live-smoke's output-only tmux pipe."""
-from __future__ import annotations
-
+"""Bounded output-only tmux pipe consumer."""
 import argparse
 import os
-import stat
 import sys
-from pathlib import Path
-
-
-def parser() -> argparse.ArgumentParser:
-    value = argparse.ArgumentParser(description=__doc__)
-    value.add_argument("--path", type=Path, required=True)
-    value.add_argument("--max-bytes", type=int, required=True)
-    return value
-
-
-def safe_file(path: Path) -> bool:
-    try:
-        details = path.lstat()
-    except FileNotFoundError:
-        return False
-    return stat.S_ISREG(details.st_mode) and not stat.S_ISLNK(details.st_mode) and details.st_uid == os.getuid() and stat.S_IMODE(details.st_mode) == 0o600
-
-
-def append_bounded(path: Path, limit: int) -> int:
-    if limit < 1 or not safe_file(path):
-        return 2
-    for incoming in iter(lambda: sys.stdin.buffer.read(4096), b""):
-        try:
-            with path.open("r+b", buffering=0) as output:
-                output.seek(0, os.SEEK_END)
-                size = output.tell()
-                output.write(incoming)
-                size += len(incoming)
-                if size > limit:
-                    output.seek(size - limit)
-                    tail = output.read(limit)
-                    output.seek(0)
-                    output.write(tail)
-                    output.truncate(limit)
-        except OSError:
-            return 2
-    return 0
-
-
-def main() -> int:
-    args = parser().parse_args()
-    return append_bounded(args.path, args.max_bytes)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+p=argparse.ArgumentParser();p.add_argument('--path',required=True);p.add_argument('--max-bytes',type=int,default=20000);args=p.parse_args()
+fd=os.open(args.path,os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW,0o600)
+body=b''
+try:
+    while True:
+        chunk=os.read(sys.stdin.fileno(),4096)
+        if not chunk: break
+        body=(body+chunk)[-args.max_bytes:]
+        os.lseek(fd,0,0);os.write(fd,body);os.ftruncate(fd,len(body))
+finally:
+    os.close(fd)

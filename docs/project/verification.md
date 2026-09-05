@@ -1,292 +1,129 @@
-# Verification index
+# Verification
 
-<!-- GENERATED:START -->
-
-Cortex verification distinguishes source tests, real source MCP transport,
-native CLI and actual Desktop. A command is evidence only when it was run.
-Current completion and unrun gates live in the
-[Completion checklist](typed-orchestration-integrity.md#11-completion-checklist).
-
-## Freeze and refresh
-
-Keep the semantic version at 1.15.6 for this hardening task. Any installable
-payload edit invalidates the previous cache stamp and subsequent release-sensitive
-results. Refresh through the supported isolated entry point before validators:
+Source checks require Python 3.11+ with `pytest` and `jsonschema` installed.
+They run sequentially on a current content-stamped payload:
 
 ```bash
-./scripts/cortex-dev --prepare-only
-```
-
-Use its exact printed content-addressed version for the source manifest. Never
-invent a suffix or invoke cachebuster/install helpers against the stable profile.
-The isolated candidate is under HOME/.cortex-dev, not the user's stable plugin.
-
-Run release-sensitive checks sequentially in this checkout. Sync tests can
-create bounded source fixtures that concurrent validators would mistake for
-payload drift.
-
-## Source and package commands
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/cortex-prompt-lint.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate-cortex-marketplace.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode source
+python3 -B scripts/cortex_package.py stamp
+python3 -B scripts/validate-cortex-marketplace.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q
+./scripts/sync-cortex.sh --check
 git diff --check
-./scripts/sync-cortex.sh --dry-run
 ```
 
-Syntax validation uses in-memory parsing/compilation; do not create package
-bytecode as a substitute. Source checks validate the complete allowlisted
-payload, manifest, runtime import closure, static catalogue, hooks and profiles.
-They do not prove that a native model performed a correct first call.
+The focused suite covers seven advertised operations, original request recovery,
+advisory governance, real Markdown files, a single newest-first pipeline,
+immutability, duplicate delivery, changed-delivery conflicts, task isolation,
+concurrency, file publication recovery, Unicode cursor reads, stable newest-first
+catalogue snapshots, process restart, safe actionable errors, input/output schema conformance,
+whole-file publication beyond 16 MB, file-backed pipeline publication beyond the MCP
+request limit, typed server-created drafts, per-thread draft ownership, source cleanup,
+disk failure, short reference collision recovery,
+complete native profile payloads, host-metadata task binding, nested parent
+inheritance, automatic pipeline selection and package identity.
 
-Before an actual release, the separately relevant committed-payload gate is:
+For real execution, use a separate existing test project and start
+`./scripts/cortex-live-smoke start --workdir PATH`. The helper creates only the
+exact `cortex-markdown-smoke` session on the default tmux server and attaches an
+owner-private output-only observer before entering `scripts/cortex-dev`.
+That entry point refreshes and installs only `$HOME/.cortex-dev/.codex`.
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify-cortex-release.py --mode head
-```
+Inspect `capture` and `status`. A visible trust screen permits one explicit
+`enter`; then visibly confirm the composer. Inspect `events` for the passive
+server initialization receipt and compare package path, version and catalogue
+digest with the candidate. A receipt is observation, never task authority.
 
-A dirty source checkout can pass source validation without satisfying that
-committed-release gate. Do not commit, install or publish merely to change a
-verification label.
+Send a prompt file beginning with the actual `$cortex:orchestrator` skill token
+and an ordinary product request. Use a substantial landing-page brief for multistage
+acceptance, without teaching the model orchestration steps in the prompt. `send --prompt-file FILE` inserts the
+complete literal text, waits five seconds and sends one named Enter. It does
+not infer acceptance. Observe task creation, pipeline writing, native delegation,
+selective report reading and worker publication. Send a concrete product change;
+verify the same task and pipeline identity, newest edition first, added work and
+final result. Inspect metadata-only `events` for all worker calls and errors.
+Use `calls` for the complete coordinator/worker host history and run `audit`
+before accepting or stopping the CLI session. The CLI commands share the Desktop
+observer, policy checks and command-session accounting.
+Before adopting a new host-context mechanism, observe the actual incoming
+coordinator and child metadata on both CLI and Desktop first. Verify exact parent
+linkage; never infer support from upstream code alone.
 
-## Qualification ladder
+After exiting ordinary Codex, capture `Cortex live-dev exit=0`, then `stop` the
+exact session. Resume with the same workdir and `--resume-last`; confirm the
+existing task, selective report recovery and no replacement task creation.
+Finish by stopping the exact session; after failure use `stop --interrupt`.
+Never kill the tmux server or use `codex exec` as native evidence.
 
-Follow the complete [levels A–G](typed-orchestration-integrity.md#10-qualification-ladder)
-in order. A defect returns to its smallest affected local test, not immediately
-to the full live matrix.
+Actual Desktop uses
+`scripts/cortex-desktop-dev start --workdir PATH --prompt-file TASK_PROMPT.txt --data-dir FRESH_PRIVATE_DIR`
+with `CORTEX_DESKTOP_BINARY` pointing to the real executable. The helper prepares
+the same candidate, uses a disposable Electron profile, and opens exactly one new
+Desktop task with the literal prompt from the regular UTF-8 file. The explicit
+owner-private data directory keeps a run inspectable and prevents an obsolete
+isolated schema from contaminating fresh qualification; without it the helper
+creates and later removes a fresh private directory automatically. Omit
+`--prompt-file` only for manual UI entry. Source checks are not Desktop evidence;
+disclose missing credentials, display access or unrun host checks. See the
+recorded [release evidence](../release-readiness.md).
 
-| Level | Evidence required |
-| --- | --- |
-| A | All twenty operations with legal prerequisites and deliberate negative cases; no no-op steering |
-| B | Every packaged profile consumes its assignment and uses its fixed terminal kind correctly |
-| C | Typed DAG, acceptable predecessor evidence, artifact generations, races and finite remediation |
-| D | Multiple in-flight messages, real steering at different stages, quiescence and same-task recovery |
-| E | Short real CLI product task through verified result, user closure review and clean completion |
-| F | One complete all-tools/all-profiles CLI scenario on the frozen payload |
-| G | Complete actual Desktop repetition on the same unchanged payload after CLI |
+After the dev window is visible and the prepared composer is confirmed, run
+`scripts/cortex-desktop-dev send`. It resolves exactly one visible ChatGPT window
+whose X11 PID equals the isolated process recorded by `start`, rechecks ownership,
+submits once, and refuses duplicate submission. It never targets another
+Desktop instance by title alone.
 
-The source/API full matrix is not native evidence. All 22 profiles must receive
-meaningful scope that is ready when assigned. Conditional tools require real
-point replacement, a genuine branch, recovery or requested chronology; calling
-them merely for coverage violates the protocol.
+The Desktop `send` command focuses the prepared composer, uses `Ctrl+Enter`, and
+acknowledges delivery only after exactly one new task appears in isolated host state.
+Use `scripts/cortex-desktop-dev events` while the task runs and
+`scripts/cortex-desktop-dev audit` before accepting it. The audit consumes the
+complete private metadata journal from every coordinator and worker MCP process
+and fails if any non-initialization operation has an outcome other than `success`.
+Read events identify pipeline versus ordinary report, the short selected report ID,
+and start versus continuation without logging cursors, Markdown, request text or
+other arguments. This makes selective worker reads directly auditable.
 
-## API and first-call acceptance
+Use `scripts/cortex-desktop-dev calls` to inspect every host-tool invocation from
+the coordinator and native workers. With no `--limit`, it emits the full run:
+wrappers, each statically visible nested host call, and each actual Cortex MCP event.
+It also records every host `CommandExecution` item separately, so one wrapper that
+starts several commands cannot hide an individual nonzero exit or truncated result.
+It retains only timestamp, thread lineage, attached role/model/effort, safe spawn
+selectors, tool name, argument/result digests, bounded routing selectors and safe
+error codes. Review
+every call for a concrete need and correct role ownership. The final `audit` rejects
+unsuccessful MCP events, Cortex call errors or truncation, missing Cortex outcomes,
+forbidden coordinator, plugin, or draft access, worker calls after a successful
+`write_report`, oversized document pages and command sessions without a terminal
+result. It also rejects a second mutation worker with the same active profile before
+the first owner publishes its terminal report. Every tool error remains in the
+chronological `tool_error_history`; its Cortex subset fails the run, so a corrected
+`create_draft` parameter failure cannot disappear behind its successful retry. Unsafe
+JavaScript template literals around Cortex draft patches are also rejected. The audit
+also rejects routine report-catalogue and pipeline reads by fresh workers, making
+selective report routing directly visible. An exact successful command retry records
+the earlier host-check failure under `resolved_host_failures`; it is never erased.
+If a run must be rejected, collect the complete current `calls` and `events`
+and execute `audit` before stopping that isolated run. One early fault must not hide
+other calls that were already dispatched.
 
-Verify the authoritative static registry contains exactly twenty operations.
-The advertised closed input schemas and runtime validation share one source.
-Tool descriptions derive required-property lists from those schemas. Keep the
-complete catalogue within its discovery bound and reserve; never truncate tools
-or weaken required fields to fit.
+Browser-dependent workers run sequentially when the host exposes one shared browser
+surface. Each worker uses only tabs and command sessions created in its own native
+thread; the live audit rejects process hunting and unresolved cross-thread resource
+failures instead of accepting a later summary as proof.
 
-Check malformed types, missing/extra properties, Unicode and aggregate size
-limits, invalid selectors and conditional metadata. Rejection must be atomic
-and diagnostics value-blind. Missing risk/unresolved evidence must not silently
-become empty arrays. Corrective calls do not qualify as clean native first calls.
 
-Publications enforce the node's declared kind, complete exact node/check
-coverage and one cross-kind terminal slot. Plans contain expected checks;
-result/documentation coverage contains observed facts. No legacy envelope,
-progress publication, chunk-assembly continuation or alternate scope is accepted.
+Both ordinary CLI and actual Desktop scenarios are required on the same unchanged
+payload. Exercise a genuine question with detailed context, answer alternatives
+and consequences as ordinary chat text, then incorporate the user's answer. The PR workflow runs only for pull requests targeting
+dev or main; automated source tests do not substitute for either real host.
 
-Worker evidence must expose one immutable assignment authority. Contextual
-outcome verification prose cannot substitute for node-local selectors or add
-downstream work to a baseline assignment.
+Live qualification assesses Cortex coordination, not the LLM's development ability.
+Project command and browser failures remain visible in separate diagnostic fields;
+they do not independently fail Cortex acceptance. Draft-edit failures, invalid MCP
+calls, report ownership violations, duplicate publications, and unresolved sessions
+at report publication do fail it. Do not describe project diagnostics as Cortex faults.
 
-Useful focused suites include:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q tests/test_public_mcp_first_call_conformance.py tests/test_public_schema_separation.py tests/test_bootstrap_readiness.py tests/test_retired_worker_routes.py
-```
-
-## Identity, hooks and native correlation
-
-Test both initial neutral discovery and committed worker audience. A retained
-initial catalogue must not bypass actor checks. A foreign pending assignment
-cannot select a new connection's audience. No mid-turn refresh is required for
-worker publication.
-
-For every new non-replayed assignment, observe one immediate exact native spawn,
-the actual child correlation and its first assignment read. A copied worker
-reference, coordinator pivot, sibling read or mismatched dispatch must fail
-without publication.
-
-A timeout or isolated lifecycle event is not completion or loss. Verify complete
-native evidence plus absent report before loss recovery. Resume must retain the
-existing task and read current state, then any required active continuations;
-timeline cannot substitute for recovery.
-
-## DAG, artifact and revision acceptance
-
-Initial baseline must complete before artifact-dependent discovery/planning.
-Candidate structural validation precedes independent semantic validation;
-delivery stays blocked for an incomplete or invalid candidate.
-
-Race claims for the same node and for conflicting mutation ownership. Compatible
-read-only audits can run in parallel on a sealed generation. Implementation-
-dependent audits must never start against unfinished implementation.
-
-Verify matching read-only observations, mutator successor generations,
-external-change snapshot conflicts, reconciliation barriers and historical
-old-generation evidence. Unavailable manifests cannot become a matching
-fingerprint. Run the observation procedure under the real workspace sandbox.
-
-Steering must atomically record a genuine semantic delta and return every
-affected protected native task. Observe interruption and quiescence before a
-successor baseline. A racing superseded publication creates no report or slot.
-Preserve stopped-worker writes as evidence rather than silently discarding them.
-
-Exercise validated in-contract remediation, independent regression, progressive
-replanning/strategy selection and finite budget exhaustion. Scope, authority
-and material risk findings cannot masquerade as ordinary repair.
-
-## Decisions and documentation
-
-Low-risk complete plans continue without questions unless review was requested.
-Material risk, external authority or a genuine product choice requires the
-current complete plan packet. One validated-alternative choice selects its
-delta and graph atomically; unselected branches remain unauthorized.
-
-Approval fulfills its decision boundary. Authorized replanning must not ask
-again merely because a plan changed. A renewed user request or materially new
-risk/authority establishes a fresh boundary.
-
-Documentation edits precede final verification. Final checks and read-only
-documentation-impact evidence bind the same latest generation. A no-impact
-rationale must be worker-owned and must not cause a pointless edit.
-
-Always present the verified result and links before the fresh closure review.
-Only the direct current close choice permits closure. A revise answer keeps
-the task open. Backend evidence and generation gates remain mandatory.
-
-## Human views and storage
-
-Verify current-only schema v2, exact governance/timeline shape, project isolation,
-private ownership/modes and no migration of older databases/directories.
-The removed initiative and alternate publication/service routes must be absent.
-
-Plans and finalized reports are derived readable Markdown, not raw JSON.
-Only a contained regular file with current source and digest/readback parity
-may produce a link. Unknown report formats fail; they do not use a generic
-legacy fallback. External edits must be preserved as conflicts.
-
-Force a post-commit view failure for each terminal kind. One transient I/O
-failure may repair the original request without another report; persistent
-failure stays explicit. Unsafe paths, permission denial and external edits are
-not bypassed. Test before-write and after-write cases, exact report/slot counts
-and bounded attempts. Repeat the required projection-repair boundary in real
-CLI qualification; local fault injection alone is not that live gate.
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugins/cortex/scripts python3 -B -m pytest -q tests/test_publication_projection_repair.py tests/test_current_storage_schema.py tests/test_artifact_worker_sandbox.py
-```
-
-## Actual CLI live-dev
-
-Use only the supported ordinary interactive session in a separate canonical
-test project:
-
-```bash
-./scripts/cortex-live-smoke start --workdir /absolute/test/project
-./scripts/cortex-live-smoke status
-./scripts/cortex-live-smoke capture
-./scripts/cortex-live-smoke events
-TERM=xterm-256color tmux -f /dev/null attach -t cortex-v12-smoke
-```
-
-The launcher refreshes the isolated candidate through scripts/cortex-dev.
-Before workload input, observe the actual trust/composer state and passive
-host-owned receipt proving candidate, registered server and catalogue identity.
-If the fresh-project trust screen visibly requests acknowledgement, use the
-separate enter action exactly once, then observe the composer:
-
-```bash
-./scripts/cortex-live-smoke enter
-./scripts/cortex-live-smoke send --prompt-file TASK_PROMPT.txt
-```
-
-Do not use enter as a blind retry. The prompt must begin with the real
-$cortex:orchestrator token; it is the prompt's only Cortex-specific content.
-Everything after it is an ordinary product request, without protocol coaching,
-internal tool rules or success sentinels.
-
-The transport normalizes one line, sends the complete prompt literally once,
-waits five real seconds and sends one named Enter. It never splits long
-messages, sends compensating keys, decides readiness or approves a question.
-The delivery receipt is not TUI acceptance. Inspect the attached terminal when
-bounded capture is stale.
-
-The external LLM operator observes the model's decision packet and sends the
-appropriate ordinary reply for the predefined scenario. During active work,
-send the specified multiple messages and genuine changes, then verify order
-and resulting revisions. The operator, not a transport parser, judges success.
-
-For same-process-thread recovery, stop only the exact session and restart with
-the same project:
-
-```bash
-./scripts/cortex-live-smoke start --workdir /absolute/test/project --resume-last
-```
-
-Confirm the old transcript/task before continuation. A new task opening fails
-resume qualification.
-
-Inspect every worker's bounded sanitized events, including the first terminal
-call. Any first-call tool/validation error, premature assignment, unexplained
-replay or missing expected completion fails. A corrected publication is not a
-pass. Superseded/snapshot-conflict states count only as their declared clean
-non-publication outcomes, never as successful reports.
-
-Capture explicit clean process completion before cleanup:
-
-```bash
-./scripts/cortex-live-smoke capture
-./scripts/cortex-live-smoke stop
-```
-
-After failure, use the exact-session interrupt cleanup. Never kill the tmux
-server, use an alternate socket, run codex exec or modify stable HOME/CODEX_HOME.
-
-## Full CLI and real Desktop
-
-Only after local levels and the short CLI pass, run the complete ordinary
-scenario from tests/fixtures/live_cortex_all_tools_scenario.json. Verify all
-twenty tools, all 22 meaningful profiles, ready-node parallelism, message load,
-several semantic steering revisions, recovery and mandatory closure.
-
-Then repeat fully in the real disposable Desktop host, on the same payload:
-
-```bash
-./scripts/cortex-desktop-dev start --workdir /absolute/test/project --prompt-file TASK_PROMPT.txt --model gpt-5.6-luna --reasoning-effort high
-./scripts/cortex-desktop-dev status
-./scripts/cortex-desktop-dev stop
-```
-
-Use the supported Desktop observation and delivery surfaces for the complete
-multi-turn scenario. Merely launching Desktop or observing a partial flow is
-not parity. Any payload edit invalidates both earlier host results.
-
-## Maintenance and privacy
-
-Maintenance is a separately invoked non-MCP administrator CLI. Test read-only
-health, whole-shard backup, exact confirmations, offline restore, projection
-pruning and backup retention without canonical data loss or arbitrary paths.
-See [operator maintenance](../features/operator-maintenance/index.md).
-
-Never expose raw private logs, worker reports, credentials or task exports.
-Record only sanitized operation/outcome, exact candidate/host, decisive check,
-failure or unrun gate and cleanup outcome.
-
-## Documentation review
-
-Re-read README, SECURITY and affected Markdown against source, tests, schemas,
-skills and executable configuration. Check links/anchors, diagrams, commands,
-schema/release identity, model omission/effort rules and actual tool count.
-Documentation cannot reintroduce removed initiative routes, legacy migrations,
-textual assignments or intermediate publications.
-
-Update the Completion checklist after each verified change. Do not mark a
-parent invariant complete based only on one source test or a partial live run.
-
-<!-- GENERATED:END -->
+Resume observation retains the original thread-creation boundary while selecting
+only rollout calls made after the resumed session started. Prompt receipts include
+the existing coordinator thread. Old calls are neither lost nor mistaken for new
+MCP deliveries; the previous run's audit remains separate.
