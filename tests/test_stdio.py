@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import sqlite3
+import copy
 import pytest
 
 META={'threadId':'00000000-0000-4000-8000-000000000001','x-codex-turn-metadata':{}}
@@ -11,9 +13,21 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def exchange(tmp_path,messages):
+    messages=copy.deepcopy(messages)
+    home=tmp_path/'host';(home/'sessions').mkdir(parents=True,exist_ok=True)
+    db=sqlite3.connect(home/'state_5.sqlite');db.execute('CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,cwd TEXT,rollout_path TEXT)')
+    for m in messages:
+        if m.get('method')=='tools/call' and m['params'].get('name')=='create_task' and 'request' in m['params'].get('arguments',{}):
+            args=m['params']['arguments'];source=args.pop('request');thread=m['params'].get('_meta',META)['threadId'];path=home/'sessions'/(thread+'.jsonl')
+            path.write_text('\n'.join(json.dumps(x) for x in [
+                dict(type='event_msg',payload=dict(type='task_started',turn_id='turn')),
+                dict(type='event_msg',payload=dict(type='item_completed',thread_id=thread,turn_id='turn',item=dict(type='UserMessage',id='original-message',content=[dict(type='text',text=source)]))),
+            ])+'\n')
+            db.execute('INSERT OR REPLACE INTO threads VALUES (?,?,?)',(thread,args['project_root'],str(path)))
+    db.commit();db.close()
     for m in messages:
         if m.get('method')=='tools/call':m['params'].setdefault('_meta',META)
-    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=os.environ|{'CORTEX_DATA_DIR':str(tmp_path/'store')},timeout=30)
+    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=os.environ|{'CORTEX_DATA_DIR':str(tmp_path/'store'),'CODEX_HOME':str(home)},timeout=30)
     assert result.returncode==0 and result.stderr==''
     return [json.loads(line) for line in result.stdout.splitlines()]
 
@@ -155,7 +169,10 @@ def test_wire_schemas_match_every_success(tmp_path):
         assert json.loads(result['content'][0]['text'])==data
         Draft202012Validator(by_name[name]['outputSchema']).validate(data)
         return data
-    call('create_task',project_root=str(tmp_path),request='Точный запрос',request_key='new')
+    from types import SimpleNamespace
+    server.steering_source=lambda *_:SimpleNamespace(cursor={},messages=[])
+    server.request_source=lambda *_:'Точный запрос'
+    call('create_task',project_root=str(tmp_path),request_key='new')
     call('set_governance',mode='full',rationale='Risk review.',request_key='gov')
     base=dict(title='Report',summary='Evidence',author='worker')
     draft=call('create_draft',template='general',request_key='report-draft')

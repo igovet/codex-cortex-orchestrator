@@ -16,7 +16,8 @@ def call_store(store,operation,args):
     else:
         thread=_handles.get((str(store.path),task))
         if thread is None:raise StoreError('not_found')
-    result=store.call(operation,args,thread)
+    source=args.pop('request',None) if operation=='create_task' else None
+    result=store.call(operation,args,thread,original_request=source)
     if operation=='create_task':
         with store.connection() as db:
             task=db.execute('SELECT task_id FROM thread_bindings WHERE thread_id=?',(thread,)).fetchone()[0]

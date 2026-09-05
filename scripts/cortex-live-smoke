@@ -58,7 +58,7 @@ def user_prompt_receipts(data,prompt):
             (data['workdir'],int(data.get('thread_created_since',data['started_at']))-2),
         )]
     finally:connection.close()
-    expected=' '.join(prompt.split());count=0
+    expected=prompt.rstrip('\r\n');count=0
     for value in paths:
         path=Path(value)
         if not path.is_file():continue
@@ -67,7 +67,7 @@ def user_prompt_receipts(data,prompt):
             except ValueError:continue
             if payload.get('type')!='message' or payload.get('role')!='user':continue
             text=' '.join(part.get('text','') for part in payload.get('content',[]) if isinstance(part,dict))
-            if ' '.join(text.split())==expected:count+=1
+            if text.rstrip('\r\n')==expected:count+=1
     return count
 
 
@@ -89,6 +89,7 @@ def start(args):
                    if args.resume_last else started_at)
     save(dict(workdir=str(workdir),started_at=started_at,thread_created_since=created_since,
               resumed=args.resume_last,events=str(events),
+              original_request_sha256=previous.get('original_request_sha256') if args.resume_last else None,
               data=str(data_dir) if data_dir else None))
     tmux('new-session','-d','-s',SESSION,'-c',str(workdir),'bash')
     tmux('set-option','-t',SESSION,'remain-on-exit','on')
@@ -123,10 +124,20 @@ def main():
     if args.command=='start':return start(args)
     data=state()
     if args.command=='send':
-        prompt=' '.join(args.prompt_file.read_text().split())
-        if not prompt or len(prompt.encode())>32000:raise RuntimeError('Invalid prompt size')
+        prompt=args.prompt_file.read_text().rstrip('\r\n')
+        if not prompt.strip() or len(prompt.encode())>32000:raise RuntimeError('Invalid prompt size')
+        if not data.get('resumed') and not data.get('original_request_sha256'):
+            observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+            data['original_request_sha256']=observer['original_request_digest'](prompt)
+            save(data)
         before=user_prompt_receipts(data,prompt)
-        tmux('send-keys','-l','-t',TARGET,'--',prompt);time.sleep(5);tmux('send-keys','-t',TARGET,'Enter')
+        buffer=SESSION+'-prompt'
+        tmux('set-buffer','-b',buffer,'--',prompt)
+        try:tmux('paste-buffer','-p','-d','-b',buffer,'-t',TARGET)
+        except BaseException:
+            tmux('delete-buffer','-b',buffer,check=False)
+            raise
+        time.sleep(5);tmux('send-keys','-t',TARGET,'Enter')
         for _ in range(40):
             if user_prompt_receipts(data,prompt)>before:break
             time.sleep(.25)

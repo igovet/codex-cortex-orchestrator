@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS reports (
  id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
  kind TEXT NOT NULL, filename TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS source_cursors (
+ thread_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), cursor TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS source_messages (
+ thread_id TEXT NOT NULL, message_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
+ report_id TEXT NOT NULL REFERENCES reports(id), digest TEXT NOT NULL,
+ PRIMARY KEY(thread_id,message_id)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS one_pipeline ON reports(task_id) WHERE kind='pipeline';
 CREATE TABLE IF NOT EXISTS editions (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -245,11 +253,12 @@ class Store:
         try: yield db
         finally: db.close()
 
-    def call(self,operation,args,thread_id,parent_thread_id=None):
+    def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None):
         validate(operation,args)
-        return self._transaction(operation,args,(thread_id,parent_thread_id))
+        if operation=="create_task" and parent_thread_id is not None:raise StoreError("child_creation")
+        return self._transaction(operation,args,(thread_id,parent_thread_id),original_request,steering_source)
 
-    def _transaction(self,operation,args,context):
+    def _transaction(self,operation,args,context,original_request=None,steering_source=None):
         rollbacks=[]; staged=[]
         try:
             with self.connection() as db:
@@ -266,6 +275,9 @@ class Store:
                             if receipt is None: raise StoreError("task_already_bound")
                     else:
                         bound["task_id"]=self._resolve_thread(db,thread,parent)
+                        if parent is None and steering_source is not None:
+                            self._capture_steering(db,bound["task_id"],thread,steering_source,
+                                                   args.get("redact_values",[]),rollbacks,staged)
                     if operation=="read_report" and "report_id" not in bound:
                         if "cursor" in bound:
                             decoded=self._decode(bound["cursor"])
@@ -276,7 +288,7 @@ class Store:
                             row=db.execute("SELECT id FROM reports WHERE task_id=? AND kind='pipeline'",(bound["task_id"],)).fetchone()
                             if row is None: raise StoreError("pipeline_missing")
                             bound["report_id"]=row["id"]
-                    result=self._call(db,operation,bound,context[0],rollbacks,staged)
+                    result=self._call(db,operation,bound,context[0],rollbacks,staged,original_request)
                     if operation=="create_task":
                         task=result.pop("task_id")
                         db.execute("INSERT OR IGNORE INTO thread_bindings VALUES (?,NULL,?)",(thread,task))
@@ -291,6 +303,40 @@ class Store:
         except StoreError: raise
         except (sqlite3.Error,OSError,ValueError,UnicodeError):
             raise StoreError("storage_error") from None
+
+    @staticmethod
+    def _source_receipt(db,task,thread,source,report):
+        if not hasattr(source,"cursor"):return
+        for message in source.messages:
+            db.execute("INSERT INTO source_messages VALUES (?,?,?,?,?)",
+                       (thread,message["id"],task,report,digest(message["text"].encode())))
+        db.execute("INSERT OR REPLACE INTO source_cursors VALUES (?,?,?)",(thread,task,encode(source.cursor)))
+
+    def _capture_steering(self,db,task,thread,reader,redactions,rollbacks,staged):
+        row=db.execute("SELECT cursor FROM source_cursors WHERE thread_id=?",(thread,)).fetchone()
+        project=db.execute("SELECT project_root FROM tasks WHERE id=?",(task,)).fetchone()[0]
+        source=reader(project,json.loads(row[0]) if row else None)
+        pending=[];seen={}
+        for message in source.messages:
+            fingerprint=digest(message["text"].encode())
+            prior=db.execute("SELECT digest FROM source_messages WHERE thread_id=? AND message_id=?",
+                             (thread,message["id"])).fetchone()
+            accepted=prior[0] if prior else seen.get(message["id"])
+            if accepted is not None:
+                if accepted!=fingerprint:raise StoreError("host_request_unavailable")
+                continue
+            seen[message["id"]]=fingerprint;pending.append(message)
+        for value in redactions:
+            if pending and not any(value in message["text"] for message in pending):
+                raise StoreError("invalid_redaction")
+        for message in pending:
+            text=message["text"]
+            for value in sorted(redactions,key=len,reverse=True):text=text.replace(value,"[REDACTED]")
+            report,_,_=self._publish_text(db,task,"User steering","Exact native user message; chronological source of requirements.",
+                                          "user request",text,"report",rollbacks,staged)
+            db.execute("INSERT INTO source_messages VALUES (?,?,?,?,?)",
+                       (thread,message["id"],task,report,seen[message["id"]]))
+        db.execute("INSERT OR REPLACE INTO source_cursors VALUES (?,?,?)",(thread,task,encode(source.cursor)))
 
     @staticmethod
     def _resolve_thread(db,thread,parent):
@@ -412,7 +458,7 @@ class Store:
             if backup is not None: backup.unlink(missing_ok=True)
             sync_directory(target.parent)
 
-    def _call(self,db,operation,args,creation_thread,rollbacks,staged):
+    def _call(self,db,operation,args,creation_thread,rollbacks,staged,original_request=None):
         task=args.get("task_id")
         if task and db.execute("SELECT 1 FROM tasks WHERE id=?",(task,)).fetchone() is None: raise StoreError("task_not_bound")
         if operation=="list_reports": return self._list(db,args)
@@ -433,13 +479,22 @@ class Store:
             return dict(json.loads(previous["response"]),replayed=True)
         content_hash=""
         if operation=="create_task":
+            source=original_request() if callable(original_request) else original_request
+            provenance=source
+            if not isinstance(source,str) or not source or len(source)>250_000:
+                raise StoreError("host_request_unavailable")
+            for value in args.get("redact_values",[]):
+                if value not in source:raise StoreError("invalid_redaction")
+            for value in sorted(args.get("redact_values",[]),key=len,reverse=True):
+                source=source.replace(value,"[REDACTED]")
             project=Path(args["project_root"])
             if not project.is_absolute() or not project.is_dir() or str(project.resolve())!=args["project_root"]:
                 raise StoreError("invalid_project","project_root",args["project_root"],"absolute existing canonical directory")
             project_draft_directory(project,"report"); project_draft_directory(project,"pipeline")
             task=unique_identifier(db,"t_"); db.execute("INSERT INTO tasks VALUES (?,?,?)",(task,str(project),self._now()))
-            rid,content_hash,size=self._publish_text(db,task,"Original user request","Original task context.","user request",args["request"],"report",rollbacks,staged)
-            result=dict(task_id=task,original_report_id=rid)
+            rid,content_hash,size=self._publish_text(db,task,"Original user request","Original task context.","user request",source,"report",rollbacks,staged)
+            self._source_receipt(db,task,creation_thread,provenance,rid)
+            result=dict(task_id=task,original_report_id=rid,original_request_sha256=content_hash)
         elif operation=="set_governance":
             gid=identifier("g_")
             rid,content_hash,size=self._publish_text(db,task,"Governance: "+args["mode"],"Advisory choice and rationale.","coordinator",args["mode"]+"\n\n"+args["rationale"],"report",rollbacks,staged)

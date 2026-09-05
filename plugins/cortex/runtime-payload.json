@@ -5,6 +5,7 @@
     "scripts/cortex_runtime/__init__.py",
     "scripts/cortex_runtime/cleanup.py",
     "scripts/cortex_runtime/contracts.py",
+    "scripts/cortex_runtime/host_source.py",
     "scripts/cortex_runtime/server.py",
     "scripts/cortex_runtime/store.py",
     "scripts/cortex_setup.py"

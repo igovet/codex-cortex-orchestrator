@@ -115,3 +115,35 @@ The live transport never resubmits an uncertain prompt automatically, and resume
 observation includes the existing task while excluding earlier calls. Project tool
 diagnostics remain separate from Cortex report and coordination failures. Current
 counts and limits are in [release evidence](../release-readiness.md).
+
+Passive observation found an accepted task request translated and shortened by
+the coordinator, losing an execution restriction. The first correction strengthened
+the copied-request description, but did not make transcription reliable. This
+intermediate approach was replaced by the native source capture described below.
+The installed plugin and observed task are left untouched during observation.
+
+A later worker mistyped a report identifier, received `invalid_arguments`, then
+probed an already-read report before obtaining the correct reference. Identifier
+error guidance and the read property now require an unchanged authoritative
+reference and explicitly rule out character repair or probing another document.
+The observed worker recovered through coordinator correction; no report was mutated.
+
+Live stress testing later showed that copy instructions alone still allowed a
+whole input-preservation sentence to disappear. Task creation now captures typed
+native user input server-side and removes the model-authored request field from
+its public schema. The server reads only the current thread/project source,
+rejects unavailable input and applies explicitly requested literal credential
+redactions. The output includes the saved source digest for content-free auditing.
+Tests cover source isolation, missing input, symlinks, turn boundaries, exact
+Unicode/whitespace preservation, literal redaction, rejected copied-request fields,
+and idempotent replay after host source removal.
+
+All seven tools accept optional literal credential redactions for newly captured
+user text. Coordinator reads may atomically archive pending source messages, so
+readOnlyHint is false. Operation receipts stay unchanged on replay; source reports
+appear through the existing bounded catalogue and document reader. No eighth tool,
+workflow hook or model-authored steering argument is introduced.
+
+Report page reads answer a concrete missing fact. Tiny connectivity/reference
+probes before publication are explicitly prohibited in the live property contract
+and shared worker guidance; the audit retains duplicate immutable-start findings.

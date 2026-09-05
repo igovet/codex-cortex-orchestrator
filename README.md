@@ -555,7 +555,7 @@ independent discovery and verification can still run in parallel.
 
 | Operation | Purpose |
 | --- | --- |
-| `create_task` | Save the original request and bind its task to the current native thread |
+| `create_task` | Capture the native user source and bind its task to the current native thread |
 | `set_governance` | Save advisory depth and rationale without execution gates |
 | `create_draft` | Create a typed project draft and return its complete initial Markdown, path and short ID |
 | `read_draft` | Recover or later inspect an existing same-thread draft through bounded pages |
@@ -795,6 +795,7 @@ The complete installable product lives under `plugins/cortex/`. Root-level
 | `plugins/cortex/scripts/cortex.py` | Seven-operation MCP entry point |
 | `plugins/cortex/.mcp.json` | Direct Python server startup |
 | `plugins/cortex/scripts/cortex_runtime/contracts.py` | Advertised schemas and limits |
+| `plugins/cortex/scripts/cortex_runtime/host_source.py` | Read the current host thread’s typed user input within its project boundary |
 | `plugins/cortex/scripts/cortex_runtime/store.py` | SQLite metadata and real Markdown storage |
 | `plugins/cortex/scripts/cortex_runtime/server.py` | Bounded stdio transport and private errors |
 | `plugins/cortex/scripts/cortex_clear.py` | Explicit host-side retention command |
@@ -997,9 +998,63 @@ an app launch as a complete live test.
 
 ### Current live transport submission
 
-The helper performs one literal normalized insertion, waits five seconds, and sends exactly one standalone named `Enter` key to the same exact pane. Receipts report transport delivery only; the coordinator/LLM confirms TUI acceptance from the pane and bounded events.
+The helper performs one bracketed paste preserving internal spacing and line breaks, waits five seconds, and sends exactly one standalone named `Enter` key to the same exact pane. Receipts report transport delivery only; the coordinator/LLM confirms TUI acceptance from the pane and bounded events.
 
 Report publication rejects unfilled template markers and preserves drafts on failure.
 Pipeline recovery retains the committed edition through interrupted publication
 and directory-sync failures. Draft editing uses one in-place patch with independent
 marker replacements, consistently across coordinator and specialist instructions.
+
+The immutable original-request document preserves the user’s language and complete
+requirements, including exact commands and restrictions. Credential redaction does
+not permit translation or summarization. Authored reports remain English.
+
+Report references are opaque: copy them unchanged from receipts or assignments.
+An invalid reference requires correction from its source, not a guessed edit or
+a probe of an unrelated report.
+
+The isolated live observer compares a private SHA-256 of the submitted task text
+with the request retained by task creation. It ignores only the leading route
+token and outer whitespace; added host envelopes, translations and internal
+formatting changes fail qualification. Diagnostics expose only the comparison,
+not the request. CLI submission preserves multiline text with a single bracketed
+paste, and resume preserves the original comparison reference. Worker instructions
+require complete skill reads and structured command receipts, including for
+instruction loading; printed shell markers alone are not success evidence.
+
+Live qualification also rejects delegation on a newly created task before the
+coordinator has received a successful pipeline publication receipt. A created
+or edited draft is not a published pipeline; discovery may revise the initial
+pipeline after delegation, but cannot precede its publication.
+
+Desktop rich-text formatting is accepted only when independently present in the
+recorded user message and traceable to the prepared prompt: a blank line before
+an ordered list and literal underscore escaping. Other spacing and source changes
+remain failures. This exception does not apply to CLI or unobserved model changes.
+
+Original task text is captured by Cortex from typed `UserMessage` receipts in the
+current native turn. The model does not transcribe it into tool arguments. The
+reader queries only the current thread in the active Codex home, verifies its
+canonical project, and reads at most the last 8 MiB of that thread's owned session
+file. Missing or mismatched source fails closed; there is no model-summary fallback.
+Literal credential redactions remain available through the advertised schema.
+Accepted task creation returns the stored source digest, and a delivery retry
+reuses the immutable receipt without rereading newer host input.
+
+
+Native steering is archived on the next successful coordinator Cortex operation,
+including catalogue reads. Each typed native user message becomes a separate
+immutable report in its original order; the pipeline remains a model-authored
+working summary. Capture is not an idle background service and cannot prove that
+the model correctly applied every requirement. Text is preserved without trimming,
+translation or summarization, except explicitly requested literal credential
+redactions. Attachments are not copied by this text-source reader.
+
+The private host-file cursor and native message identities commit atomically with
+report metadata and the requested operation. Retries, restart and repeated native
+receipts do not duplicate messages. Failed operations retain the previous cursor;
+changed files, conflicting message identities or unavailable source fail closed.
+Workers never read or capture another thread's native input. Source cursor and
+identity metadata are removed with task retention. Existing tasks without a source
+cursor begin with the current native turn; earlier unarchived steering is not
+retroactively guaranteed.

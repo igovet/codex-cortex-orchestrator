@@ -11,7 +11,7 @@ description: Explicit Cortex coordinator for adaptive Markdown pipelines, specia
 - Selection means the host has already supplied this complete skill. Never call a
   tool, list resources, search a catalogue, or inspect a path to locate, reload, or
   validate `cortex:orchestrator`, its companion instructions, or a skill loader.
-- For new project work, preserve the original request in a durable task.
+- For new project work, create a durable task. Storage preserves the native user source; the coordinator does not transcribe it.
 - For continuation, resume the same native thread; task and pipeline are resolved automatically.
 - `help` is read-only. `normal` explicitly returns to ordinary host work.
 - For follow-ups to a Cortex task, keep this workflow active across turns, task
@@ -36,6 +36,13 @@ answer; a correctly translated final answer does not excuse earlier drift.
 | All authored reports, including coordinator synthesis and specialist plans | English |
 | Pipeline editions and governance reasoning | English |
 | Original user request and necessary exact source quotations | Preserve verbatim in the original language |
+
+Treat the user's task prose as the source, not the entire host message bundle.
+The host inserts `<skill>`, `<environment_context>` and permission blocks alongside
+that prose; none is user-authored task content. Never quote, summarize or synthesize
+those instruction blocks into the preserved source. For a request beginning with a
+natural-language sentence, the source begins with that same sentence, followed by
+the user's unchanged paragraphs and requirements.
 
 Do not translate away exact source requirements. The original-request document
 is a preserved source, distinct from authored engineering reports. Project product
@@ -179,10 +186,13 @@ limits; a bare "done" is insufficient for a completion decision.
 
 1. Understand the complete user request, attachments, exact requirements and constraints.
 2. Create a task for new work, or recover the existing task before continuing.
-3. Select advisory governance from the request and available previews. Delegate
-   unfamiliar project discovery; use its concise findings to adjust risk and scope.
-4. Save a concise, complete current pipeline with work, ordering, dependencies,
-   executors and intended checks. Choose only useful stages and specialists.
+3. Select initial advisory governance from the request and available previews.
+   Record unfamiliar project discovery as proposed worker work.
+4. Publish a concise, complete current pipeline with work, ordering, dependencies,
+   executors and intended checks. Creating or editing its draft does not publish it:
+   wait for a successful write_report receipt before the first delegation. Choose
+   only useful stages and specialists. Later discovery may revise governance and
+   the pipeline.
 5. Select profiles from the table and delegate bounded work through native host tools;
    workers load their assigned complete skill and read relevant task evidence.
 6. Wait through native coordination and review report previews. Delegate full evidence
@@ -331,8 +341,11 @@ Before each delegation:
 2. Select the specialist from the table. Begin its assignment with the actual token
    `$cortex:worker-<hyphenated-profile-name>` and require loading that exact skill
    before project work. Include in the assignment: "Read the entire advertised
-   worker skill; expose the full command result including exit status for this
-   instruction read as for every later command." Use ordinary native subagents; a custom
+   worker skill. For a filesystem skill, read its exact advertised file with cat
+   in one command and allow at least 16,000 output tokens. In a JavaScript wrapper
+   print the returned object with text(result), never text(result.output). Do not
+   add shell status markers. Apply this to the very first instruction read and
+   every later command." Use ordinary native subagents; a custom
    profile selector and global TOML registration are not prerequisites. Never invent
    a spawn argument or claim host-attached developer instructions.
 3. Before spawning, create the task and save its initial pipeline. Include every
@@ -458,8 +471,11 @@ concise preview from workers.
   event: wait for the group and fetch its previews in one `list_reports` call.
 - Workers read full reports and use the separate report examples. Delegate detailed
   synthesis and final-report publication to an appropriate worker.
-- Preserve the original user request through task creation and record important steering
-  in the pipeline. Workers can recover full source requests and requirements as needed.
+- Preserve every steering condition in the working pipeline, including explicit cancellations
+  and which previous constraints remain active. Native user-source reports retain the
+  original messages independently of that summary. After recovery or ambiguous wording,
+  delegate comparison against the relevant source messages; do not treat a summary as
+  proof that every requirement was retained. Only the coordinator decides acceptance.
 - A report reference proves storage, not acceptance. Judge next actions from meaningful
   previews and obtain independent specialist checks when warranted by risk.
 

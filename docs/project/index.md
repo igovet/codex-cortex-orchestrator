@@ -13,6 +13,7 @@ execution and semantic judgment. The complete runtime is packaged below
 
 The implementation consists of the advertised [contracts](../../plugins/cortex/scripts/cortex_runtime/contracts.py),
 [store](../../plugins/cortex/scripts/cortex_runtime/store.py),
+[host user-source reader](../../plugins/cortex/scripts/cortex_runtime/host_source.py),
 [MCP server](../../plugins/cortex/scripts/cortex_runtime/server.py),
 [coordinator skill](../../plugins/cortex/skills/orchestrator/SKILL.md) and
 [shared worker protocol](../../plugins/cortex/agent-sources/worker-protocol.md).

@@ -11,6 +11,7 @@ import time
 import uuid
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
+from .host_source import original_request, pending_requests
 from .store import Store, private_directory
 
 PLUGIN = Path(__file__).resolve().parents[2]
@@ -35,6 +36,8 @@ def thread_context(meta):
 def safe_observation_fields(operation,arguments,result=None):
     """Expose only bounded routing selectors needed to audit agent behavior."""
     arguments=arguments if isinstance(arguments,dict) else {}
+    if operation=='create_task':
+        return dict(original_request_sha256=(result or {}).get('original_request_sha256'))
     if operation=='read_report':
         result=result if isinstance(result,dict) else {}
         report_id=result.get('report_id') or arguments.get('report_id')
@@ -96,13 +99,15 @@ class Server:
     def __init__(self, directory=None):
         self.directory = directory or os.environ.get('CORTEX_DATA_DIR') or str(Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex'))) / 'cortex')
         self.store = None
+        self.request_source = original_request
+        self.steering_source = pending_requests
 
     def dispatch(self, method, params):
         if method == 'initialize':
             if not isinstance(params,dict) or not isinstance(params.get('protocolVersion'),str) or not isinstance(params.get('capabilities'),dict) or not isinstance(params.get('clientInfo'),dict) or any(not isinstance(params['clientInfo'].get(k),str) for k in ('name','version')):
                 raise ProtocolError(-32602,'Invalid initialize parameters. Supply protocolVersion (string), capabilities (object), and clientInfo with name and version strings.')
             observe('initialize','success')
-            return dict(protocolVersion='2025-11-25', capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex resolves the current task only from native MCP thread metadata, including registered parent inheritance; task and thread identifiers never appear in tool arguments or results. SQLite metadata lives under $CODEX_HOME/cortex, where CODEX_HOME is already the .codex directory. create_draft chooses an editable path under <project_root>/.cortex, binds the short draft identifier to the calling native thread, pre-fills English report or pipeline headings, and returns the complete initial Markdown; the same identifier appears in the filename and Markdown. Use that returned Markdown as the source of truth and update its body in place with native file tools; do not call read_draft immediately after creation. read_draft remains available for recovery or a genuinely needed later read of an existing draft. Give only draft_id and short metadata to write_report. Markdown report bodies never cross write_report and are streamed without an application size limit into task files under <project_root>/.codex/cortex/<task>. Report files are immutable, while the writer prepends each pipeline edition to that task pipeline.md. Catalogue, report and draft reads are cursor-bounded. Coordinators read previews, the current pipeline beginning and only their exact pipeline draft content returned by create_draft or recovered through read_draft. Workers read selected relevant report bodies, their own returned or recovered draft, and project evidence. Native spawn attaches one complete Agent v2 profile. Skills load through the standard Codex mechanism only when applicable; no actor inspects plugin installation files. After compaction or restart both roles refresh their live catalogue and durable context before continuing. All seven tools remain available to both roles; governance is advisory and storage has no semantic role gate.')
+            return dict(protocolVersion='2025-11-25', capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex resolves the current task only from native MCP thread metadata, including registered parent inheritance; task and thread identifiers never appear in tool arguments or results. SQLite metadata lives under $CODEX_HOME/cortex, where CODEX_HOME is already the .codex directory. create_draft chooses an editable path under <project_root>/.cortex, binds the short draft identifier to the calling native thread, pre-fills English report or pipeline headings, and returns the complete initial Markdown; the same identifier appears in the filename and Markdown. Use that returned Markdown as the source of truth and update its body in place with native file tools; do not call read_draft immediately after creation. read_draft remains available for recovery or a genuinely needed later read of an existing draft. Give only draft_id and short metadata to write_report. Markdown report bodies never cross write_report and are streamed without an application size limit into task files under <project_root>/.codex/cortex/<task>. Report files are immutable, while the writer prepends each pipeline edition to that task pipeline.md. Catalogue, report and draft reads are cursor-bounded. Coordinators read previews, the current pipeline beginning and only their exact pipeline draft content returned by create_draft or recovered through read_draft. Workers read selected relevant report bodies, their own returned or recovered draft, and project evidence. Native workers load their complete assigned bundled skill through its advertised standard mechanism. They may read that exact skill file but never explore plugin internals. Original user source is captured by storage from the current native UserMessage receipt, not transcribed by the model. After compaction or restart both roles refresh their live catalogue and durable context before continuing. All seven tools remain available to both roles; governance is advisory and storage has no semantic role gate.')
         if method == 'ping':
             return {}
         if method == 'tools/list':
@@ -121,7 +126,13 @@ class Server:
             thread,parent=thread_context(params.get('_meta'))
             if self.store is None:
                 self.store = Store(self.directory)
-            data = self.store.call(name, params.get('arguments',{}),thread,parent)
+            source=None
+            if name=='create_task':
+                if parent is not None:raise StoreError('child_creation')
+                source=lambda:self.request_source(thread,params['arguments']['project_root'])
+            steering=lambda project,cursor:self.steering_source(thread,project,cursor)
+            data = self.store.call(name, params.get('arguments',{}),thread,parent,
+                                   original_request=source,steering_source=steering if parent is None else None)
             observe(name,'success',data.get('replayed',False),params.get('_meta'),params.get('arguments'),data)
             return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
         except StoreError as exc:

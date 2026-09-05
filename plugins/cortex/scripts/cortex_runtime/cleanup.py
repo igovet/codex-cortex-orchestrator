@@ -33,6 +33,8 @@ def finish_deletions(store,db):
         db.execute("DELETE FROM pending_source_deletions WHERE task_id=?",(task,))
         db.execute("DELETE FROM drafts WHERE task_id=?",(task,))
         db.execute("DELETE FROM governance WHERE task_id=?",(task,))
+        db.execute("DELETE FROM source_messages WHERE task_id=?",(task,))
+        db.execute("DELETE FROM source_cursors WHERE task_id=?",(task,))
         db.execute("DELETE FROM editions WHERE report_id IN (SELECT id FROM reports WHERE task_id=?)",(task,))
         db.execute("DELETE FROM reports WHERE task_id=?",(task,))
         db.execute("DELETE FROM deliveries WHERE scope=? OR (operation=? AND json_extract(response,?)=?)",(task,"create_task","$.task_id",task))

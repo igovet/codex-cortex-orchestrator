@@ -51,3 +51,27 @@ Every draft class rejects unchanged packaged guidance markers before publication
 Failed validation leaves the same draft editable. A process interruption between
 pipeline rename and metadata commit restores the previously committed edition;
 an exact subsequent publication adds the new edition once.
+
+The original-request report comes from the host's typed user-message receipt for
+the current native turn. Cortex resolves that source itself within the current
+thread and canonical project; the coordinator does not retype it. Explicit literal
+credential redactions are applied before immutable publication. Missing host source
+fails closed, and the creation receipt exposes its digest without returning text.
+
+
+Native steering is archived on the next successful coordinator Cortex operation,
+including catalogue reads. Each typed native user message becomes a separate
+immutable report in its original order; the pipeline remains a model-authored
+working summary. Capture is not an idle background service and cannot prove that
+the model correctly applied every requirement. Text is preserved without trimming,
+translation or summarization, except explicitly requested literal credential
+redactions. Attachments are not copied by this text-source reader.
+
+The private host-file cursor and native message identities commit atomically with
+report metadata and the requested operation. Retries, restart and repeated native
+receipts do not duplicate messages. Failed operations retain the previous cursor;
+changed files, conflicting message identities or unavailable source fail closed.
+Workers never read or capture another thread's native input. Source cursor and
+identity metadata are removed with task retention. Existing tasks without a source
+cursor begin with the current native turn; earlier unarchived steering is not
+retroactively guaranteed.

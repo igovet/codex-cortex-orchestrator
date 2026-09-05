@@ -29,10 +29,15 @@ DRAFT = string(
 
 
 def tool(name, description, properties, required, read=False):
+    properties=dict(properties)
+    properties.setdefault("redact_values",dict(type="array",maxItems=32,uniqueItems=True,
+        items=string("Exact credential value only; never requirements, restrictions or ordinary prose.",16_000),
+        description="Optional literal credentials to redact in newly captured native user messages. Omit otherwise; all other text is preserved."))
+    description += " On coordinator task calls other than create_task, the server archives pending native user text as immutable User steering reports before this operation, atomically. Workers never capture user input. Read operations may therefore create source reports. No model-authored copy is accepted. Capture occurs on the next successful Cortex call, not while the host is idle."
     return dict(name=name, title=name.replace("_", " ").capitalize(), description=description,
                 inputSchema=dict(type="object", properties=properties, required=required,
                                  additionalProperties=False),
-                annotations=dict(readOnlyHint=read, destructiveHint=False,
+                annotations=dict(readOnlyHint=False, destructiveHint=False,
                                  idempotentHint=True, openWorldHint=False))
 
 
@@ -43,12 +48,14 @@ TOOLS = [
          "<project_root>/.cortex/draft-reports and <project_root>/.cortex/pipeline-drafts directories, and saves the original request as an "
          "immutable Markdown report in <project_root>/.codex/cortex/<task>. SQLite metadata "
          "lives under $CODEX_HOME/cortex; CODEX_HOME is already the .codex directory. "
-         "Returns only the original report reference. Child threads inherit their registered "
+         "Reads the current native turn\'s typed UserMessage receipt from the current CODEX_HOME host state, scoped to the exact host thread and canonical project. The model does not copy or supply the original task text. Fails closed if that source is unavailable; never substitute a summary. Returns its immutable report reference and source digest. Child threads inherit their registered "
          "parent task and cannot create tasks. Never pass task or thread IDs.", {
              "project_root": string("Absolute existing canonical project directory supplied by the host.", 4096),
-             "request": string("The exact original user request, stored privately and verbatim; omit credentials.", 250_000),
              "request_key": KEY,
-         }, ["project_root", "request", "request_key"]),
+             "redact_values": dict(type="array",maxItems=32,uniqueItems=True,
+                 items=string("One exact credential value to replace with [REDACTED]; never task prose, commands, requirements or restrictions.",16_000),
+                 description="Optional exact credential values present in the native user source. The server redacts only these literal values; all other original text is retained. Omit when no credentials need redaction."),
+         }, ["project_root", "request_key"]),
     tool("set_governance",
          "Append an advisory governance choice for the task resolved from current host thread "
          "metadata. Governance guides coordinator depth but never blocks storage operations, "
@@ -85,7 +92,7 @@ TOOLS = [
          "another thread's draft, a published report, or an invented path.", {
              "draft_id": DRAFT,
              "cursor": string("Exact opaque next_cursor from the preceding page of this same draft.", 512),
-             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Continue only with the returned cursor.", 4_000),
+             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, ["draft_id"], read=True),
     tool("write_report",
          "Publish either one immutable report or a new current pipeline edition for the task "
@@ -123,9 +130,9 @@ TOOLS = [
          "to start only the ordinary report needed for the assignment. Coordinators read the "
          "pipeline beginning only; workers read selected relevant report bodies. A pipeline update "
          "makes older pipeline cursors stale. Ordinary reports are immutable.", {
-             "report_id": REPORT,
+             "report_id": dict(REPORT, description="Exact server-issued report identifier copied unchanged from the relevant receipt or assignment. Before dispatch, validate the whole value locally against this property's pattern and length constraints. In an execution wrapper, use a conditional pattern check before invoking the MCP tool; the invalid branch must make no storage call and must not throw a synthetic tool error. Ask the reference owner for its authoritative correction and wait instead. Preserve every character; do not guess, shorten, repair, or probe another report."),
              "cursor": string("Exact opaque next_cursor from the preceding page.", 512),
-             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Continue only with the returned cursor.", 4_000),
+             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, [], read=True),
 ]
 
@@ -151,7 +158,7 @@ METADATA = dict(report_id=REPORT, title=output_string("Report title."),
                 kind=output_string("Document kind.", enum=["report", "pipeline"]),
                 size_bytes=SIZE, sha256=HASH)
 OUTPUTS = {
-    "create_task": object_schema(dict(original_report_id=REPORT, replayed=REPLAY)),
+    "create_task": object_schema(dict(original_report_id=REPORT, original_request_sha256=HASH, replayed=REPLAY)),
     "set_governance": object_schema(dict(
         governance_id=output_string("Short advisory governance record identifier.", pattern=r"^g_[0-9a-f]{12}$"),
         report_id=REPORT, replayed=REPLAY)),
@@ -201,6 +208,8 @@ ERROR_HELP = {
     "invalid_project": "Use the absolute existing canonical project directory supplied by the host.",
     "invalid_draft_path": "The server-created draft moved or changed file type. Keep it at the exact create_draft path as an owned regular .md file; create a new draft if it cannot be restored safely.",
     "draft_missing": "The server-created Markdown draft no longer exists. Create a new draft and fill it completely; retry an uncertain accepted write only with its original draft_id, key, and metadata.",
+    "host_request_unavailable": "The current native user source is unavailable or does not belong to this thread and project. Keep the task incomplete; verify host source availability or start the requested work in a fresh native thread. Never copy a replacement request into tool arguments.",
+    "invalid_redaction": "A requested credential value is absent from the native source. Correct the exact redaction value; never redact task requirements.",
     "draft_not_found": "No draft with this identifier exists. Copy the exact short draft_id from the create_draft result, filename, or Markdown marker; otherwise create a new draft.",
     "draft_not_owned": "The draft does not belong to this native thread or task. Use a draft_id returned to this same thread by create_draft; create a new draft instead of sharing identifiers.",
     "draft_published": "This draft was already published. Retry only the identical write and delivery key to recover its receipt, or create a new draft for changed content.",
@@ -273,9 +282,15 @@ def validate(name, args):
                 allowed=", ".join(rule["enum"])
                 raise StoreError("invalid_arguments",key,_received(value),allowed,f"Choose exactly one advertised value: {allowed}.")
             if "pattern" in rule and not re.fullmatch(rule["pattern"],value):
-                raise StoreError("invalid_arguments",key,_received(value),rule["pattern"],"Use the exact server-issued identifier from the relevant receipt or catalogue.")
+                raise StoreError("invalid_arguments",key,_received(value),rule["pattern"],"Copy the server-issued identifier unchanged from its authoritative receipt or assignment. Never insert or remove characters to repair it. If that source is missing or itself invalid, obtain the exact reference from its owner before retrying; do not probe a different report.")
             if not rule["minLength"]<=len(value)<=rule["maxLength"]:
                 target=("within 160 characters" if key=="summary" else f"between {rule['minLength']} and {rule['maxLength']} characters")
                 raise StoreError("invalid_arguments",key,f"{len(value)} Unicode characters",target,f"Rewrite {key} {target} and verify its character count.")
+        elif rule["type"]=="array":
+            item=rule["items"]
+            if (not isinstance(value,list) or len(value)>rule["maxItems"]
+                    or any(not isinstance(part,str) or not item["minLength"]<=len(part)<=item["maxLength"] for part in value)
+                    or len(set(value))!=len(value)):
+                raise StoreError("invalid_arguments",key,"invalid credential redaction list","bounded unique literal strings","Use only exact credential strings matching the advertised array constraints.")
         elif type(value) is not int or value<rule["minimum"] or value>rule["maximum"]:
             raise StoreError("invalid_arguments",key,_received(value),f"integer {rule['minimum']}..{rule['maximum']}",f"Use a JSON integer from {rule['minimum']} through {rule['maximum']}.")

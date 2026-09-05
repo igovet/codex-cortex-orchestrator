@@ -27,6 +27,11 @@ persist, evade, use credentials, modify code, or attack a system.
 Requirements apply regardless of which optional reports you choose to read.
 Do not infer missing obligations from unrelated reports. Ask the coordinator
 for missing assignment conditions; do not broaden the work yourself.
+If an assigned evidence reference is absent or invalid, send a concise native
+message to the coordinator requesting the exact source reference, then wait for
+its reply. This is an unresolved input, not a completed assignment: do not send a
+final answer without a report merely to ask that question. Continue on the same
+assignment when the coordinator supplies the missing input.
 
 ## Skills and tool authority
 
@@ -40,6 +45,96 @@ the same standard mechanism. Never search the general tool catalogue for `skill`
 If the assigned skill is unavailable, tell the coordinator what is missing before
 project work. Do not substitute a role label for the complete instructions.
 Use `python3` for Python commands.
+
+## Read the complete instructions and retain command receipts
+
+Read this entire assigned skill before acting; if the first bounded page ends before
+EOF, read the remaining pages. The publication protocol near the end is mandatory.
+Every command wrapper must expose the complete returned object with `text(result)`.
+Do not use `text(result.output)`, add shell status markers, or invent status evidence:
+the host object already carries exit status or a live session handle. This applies to
+instruction reads too. No-op calls, placeholder browser calls, and calls that only
+print an empty string are never useful evidence; do not make them.
+
+## Report and handoff
+
+If the coordinator supplies a profile-appropriate report example, treat it only as
+a content guide; the evidence requirements below remain authoritative.
+
+Report consumed predecessor evidence, severity, exact path and line, preconditions,
+attack or failure path, impact, sanitized proof, remediation, compensating
+controls, contradictions, uncertainty, and residual risk. List commands with
+cwd and exit codes, or explain non-execution.
+
+Once evidence is ready, proceed directly to publication. Do not reread a known
+report as a connectivity check, reference check or publication preflight; existing
+report evidence remains valid. A newly discovered project defect does not require
+probing an already-read Cortex report.
+
+Every profile uses this publication sequence:
+
+1. Before creating the report draft, close every command session opened by this
+   assignment and inspect its terminal receipt. Do not publish while any server,
+   watcher, browser helper or command is still running. Immediately before the
+   `create_draft` call, check the session handles returned by this assignment: every
+   one must already have a terminal `success`, `stopped`, or explained `error`
+   receipt. If any handle is still active, call its stop operation first and wait for
+   that terminal receipt. Calling `create_draft` and stopping the session afterward
+   is a protocol violation even when the session is closed before `write_report`.
+2. Call the live draft creator once with the report template attached to this
+   profile. It chooses the only Cortex project file you may write, binds it to
+   this native thread, and returns a short draft identifier, its absolute path, and
+   the complete initial Markdown. Confirm that the same identifier appears in the
+   filename and `required_first_line`. Use the returned `markdown` as the exact source
+   of truth; do not call `read_draft` immediately after creation.
+3. Preserve `required_first_line` byte-for-byte as line 1 and preserve its following
+   blank line. Invoke the built-in `apply_patch` file tool once, with
+   one independent exact replacement hunk per returned marker. Do not batch the report into one large
+   executable wrapper. Use the guidance comments returned in `markdown`. Each
+   hunk must match only one exact guidance comment or placeholder line; do not include
+   an unchanged heading, another section, or the whole template as patch context.
+   In `apply_patch`, prefix that exact old line with the required patch removal marker
+   `-` and prefix its replacement with `+`; never leave the old marker as an unchanged
+   context line and merely insert report text after it.
+   Before dispatch, compare the old line in the hunk against the retained `markdown`.
+   Do not construct a large context replacement for the template. Replace every
+   guidance marker with complete English report content. The report body may appear
+   only as the exact input of the built-in `apply_patch` file tool. If the host makes
+   that tool callable through its execution wrapper, encode the patch input as a
+   valid escaped string and pass it straight to `tools.apply_patch`; never use a
+   JavaScript template literal, `String.raw`, an array, shell command, heredoc,
+   command substitution, or interpolation. Never pass the body to a Cortex MCP tool.
+   Never delete, rename, replace, recreate, truncate, or rewrite the whole draft file.
+4. Keep the report free-form but complete. Separate observations, inference, failed
+   checks and checks not run. Include exact paths and commands with cwd and exit
+   status when applicable. A supplied report example is a content guide only.
+5. Choose a useful title and one decision-ready summary within the lower target
+   advertised by the live schema. Before `write_report`, ensure the summary is at
+   most 100 Unicode characters; aim near 80 when estimating manually. Do not rely
+   on the schema's larger transport maximum as permission to exceed this operating
+   limit. The preview must state the result, observed
+   checks, blockers and material limits.
+6. Use the retained live writer schema, call it once with the returned draft identifier
+   and short metadata, and inspect the result. Never send the path or report body through it.
+7. Do not delete, rename or move the draft yourself. The server streams, validates,
+   atomically publishes and removes it only after the task file and database commit.
+   A rejected or uncertain publication leaves the draft available for exact retry.
+8. Never read the Cortex SQLite database, final report paths, or any
+   plugin/install/cache file directly except the exact advertised skill instructions. Use the catalogue and cursor reader.
+9. Preserve an acknowledged publication and follow the live schema's retry guidance.
+   Changed content requires a newly created draft and a new write.
+10. Use `read_draft` only when recovering an existing unpublished draft after
+   summarization, restart, or an interrupted edit, or when its later current contents
+   are genuinely required. Follow its cursor only when needed; never use it to
+   reconfirm the unchanged Markdown already returned by `create_draft`. A failed edit
+   before any successful hunk does not change the draft: correct that edit from the
+   retained `markdown` and the tool error without a shell read or `read_draft`.
+11. Return only the saved short report identifier and compact English handoff to the
+   coordinator. Do not paste the report body or ask the coordinator to read it.
+12. A successful `write_report` is the final tool call for this assignment. Immediately
+   return the short report identifier and compact handoff through the native final
+   response. Do not call messaging, thread, status, catalogue, report, shell, file,
+   browser, or any other tool after the publication receipt.
 
 ## Tool-call necessity
 
@@ -286,81 +381,6 @@ that returns the missing fact without truncation, or report the check as incompl
 - Confirmed vulnerability, defense-in-depth gap, environment assumption, and
   unverified risk remain distinct.
 - **Completion:** every material claim has sanitized evidence and a proportionate remedy.
-
-## Report and handoff
-
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, severity, exact path and line, preconditions,
-attack or failure path, impact, sanitized proof, remediation, compensating
-controls, contradictions, uncertainty, and residual risk. List commands with
-cwd and exit codes, or explain non-execution.
-
-Every profile uses this publication sequence:
-
-1. Before creating the report draft, close every command session opened by this
-   assignment and inspect its terminal receipt. Do not publish while any server,
-   watcher, browser helper or command is still running. Immediately before the
-   `create_draft` call, check the session handles returned by this assignment: every
-   one must already have a terminal `success`, `stopped`, or explained `error`
-   receipt. If any handle is still active, call its stop operation first and wait for
-   that terminal receipt. Calling `create_draft` and stopping the session afterward
-   is a protocol violation even when the session is closed before `write_report`.
-2. Call the live draft creator once with the report template attached to this
-   profile. It chooses the only Cortex project file you may write, binds it to
-   this native thread, and returns a short draft identifier, its absolute path, and
-   the complete initial Markdown. Confirm that the same identifier appears in the
-   filename and `required_first_line`. Use the returned `markdown` as the exact source
-   of truth; do not call `read_draft` immediately after creation.
-3. Preserve `required_first_line` byte-for-byte as line 1 and preserve its following
-   blank line. Invoke the built-in `apply_patch` file tool once, with
-   one independent exact replacement hunk per returned marker. Do not batch the report into one large
-   executable wrapper. Use the guidance comments returned in `markdown`. Each
-   hunk must match only one exact guidance comment or placeholder line; do not include
-   an unchanged heading, another section, or the whole template as patch context.
-   In `apply_patch`, prefix that exact old line with the required patch removal marker
-   `-` and prefix its replacement with `+`; never leave the old marker as an unchanged
-   context line and merely insert report text after it.
-   Before dispatch, compare the old line in the hunk against the retained `markdown`.
-   Do not construct a large context replacement for the template. Replace every
-   guidance marker with complete English report content. The report body may appear
-   only as the exact input of the built-in `apply_patch` file tool. If the host makes
-   that tool callable through its execution wrapper, encode the patch input as a
-   valid escaped string and pass it straight to `tools.apply_patch`; never use a
-   JavaScript template literal, `String.raw`, an array, shell command, heredoc,
-   command substitution, or interpolation. Never pass the body to a Cortex MCP tool.
-   Never delete, rename, replace, recreate, truncate, or rewrite the whole draft file.
-4. Keep the report free-form but complete. Separate observations, inference, failed
-   checks and checks not run. Include exact paths and commands with cwd and exit
-   status when applicable. A supplied report example is a content guide only.
-5. Choose a useful title and one decision-ready summary within the lower target
-   advertised by the live schema. Before `write_report`, ensure the summary is at
-   most 100 Unicode characters; aim near 80 when estimating manually. Do not rely
-   on the schema's larger transport maximum as permission to exceed this operating
-   limit. The preview must state the result, observed
-   checks, blockers and material limits.
-6. Use the retained live writer schema, call it once with the returned draft identifier
-   and short metadata, and inspect the result. Never send the path or report body through it.
-7. Do not delete, rename or move the draft yourself. The server streams, validates,
-   atomically publishes and removes it only after the task file and database commit.
-   A rejected or uncertain publication leaves the draft available for exact retry.
-8. Never read the Cortex SQLite database, final report paths, or any
-   plugin/install/cache file directly except the exact advertised skill instructions. Use the catalogue and cursor reader.
-9. Preserve an acknowledged publication and follow the live schema's retry guidance.
-   Changed content requires a newly created draft and a new write.
-10. Use `read_draft` only when recovering an existing unpublished draft after
-   summarization, restart, or an interrupted edit, or when its later current contents
-   are genuinely required. Follow its cursor only when needed; never use it to
-   reconfirm the unchanged Markdown already returned by `create_draft`. A failed edit
-   before any successful hunk does not change the draft: correct that edit from the
-   retained `markdown` and the tool error without a shell read or `read_draft`.
-11. Return only the saved short report identifier and compact English handoff to the
-   coordinator. Do not paste the report body or ask the coordinator to read it.
-12. A successful `write_report` is the final tool call for this assignment. Immediately
-   return the short report identifier and compact handoff through the native final
-   response. Do not call messaging, thread, status, catalogue, report, shell, file,
-   browser, or any other tool after the publication receipt.
 
 ## Questions and limits
 

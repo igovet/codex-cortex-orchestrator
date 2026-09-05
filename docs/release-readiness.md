@@ -1,3 +1,150 @@
+# Native steering qualification — 2026-09-05
+
+Qualified payload: `1.15.6+codex.sha256.cc786ae2fbd04cf1`, full SHA-256
+`cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698`.
+The ordinary installed plugin and user configuration were not updated. Only the
+isolated dev candidate was prepared through the repository launchers.
+
+The same unchanged payload passed consecutive real interactive CLI continuation
+and actual Desktop runs. CLI resumed the existing CSV task after two live steering
+messages, then added an inclusive decimal threshold combined with currency filtering,
+whole-input validation, atomic output and preservation constraints. Four new native
+workers exercised implementation, independent rejection, bounded correction and
+fresh verification. Desktop ran the original ten-requirement CSV brief from an
+untouched fixture, using implementation and independent verification workers.
+These were ordinary product prompts, without orchestration-test instructions.
+
+| Qualified phase | New workers | MCP events including initialization | Call records | Final Cortex audit |
+| --- | ---: | ---: | ---: | --- |
+| Real CLI after restart and further steering | 4 | 32 | 238 | passed |
+| Actual Desktop, same payload | 2 | 18 | 108 | passed |
+
+Every coordinator and worker reached native task completion. The full call records
+were reviewed; Cortex contract errors, report-write failures, unexplained replays,
+truncated orchestration output and role/order violations were absent. Project-code
+and test-command failures were assessed separately and handled by the live task;
+this does not claim that every project-development invocation succeeded.
+CLI exited with the explicit zero marker. The exact CLI session and disposable
+Desktop process were stopped through their helpers. Desktop's prepared composer
+was visually confirmed before one submission with a new task receipt. Passive
+initialization matched the candidate path and seven-tool catalogue on both hosts.
+
+The CLI archive contains the original source plus three separate steering messages,
+including the post-restart request. Every stored source matched the actual native
+UserMessage text and its digest. Desktop's original source also matched its native
+receipt; native editor formatting was checked against the prepared prompt.
+Desktop steering and Desktop resume were not separately exercised in this pass.
+
+Storage checks passed SQLite integrity, foreign keys, report file hashes, sizes and
+permissions, and absence of unpublished drafts. CLI retained one task, 14 documents,
+one pipeline and 24 editions across both phases. Desktop retained one task, five
+documents, one pipeline and six editions. The original CSV and protected user note
+remained byte-identical in both fixtures. Raw evidence and screenshots remain private
+outside the repository.
+
+Source checks on this payload: **110 tests passed**, package/marketplace validation,
+source-only sync check and Markdown links passed. Tests include queued corrections,
+exact Unicode/whitespace, restart, duplicate native receipts, delivery replay with
+new input, partial host records, source replacement/conflicting identities, disk-failure
+rollback, literal credential redaction, size rejection without truncation and retention.
+
+An earlier run on `f942d09fa00a961c` was rejected for one worker's unnecessary
+one-character reread of an immutable report before publication. Its complete tails
+and audit were retained and the run was followed through completion. The final
+contract and all 22 shared profiles explicitly exclude such probes. A separate
+observer defect incorrectly classified real user steering delivery after a wait;
+typed native user-input events now provide the narrowly scoped audit evidence.
+
+Steering capture commits on the next successful coordinator task operation after
+creation, except replaying create_task. It is not a background hook. The archive
+preserves source text independently of the pipeline; semantic interpretation and
+acceptance still belong to the coordinator. Missing or oversized source fails closed
+rather than silently truncating requirements. Only explicit literal credential
+redactions change captured steering text. Attachments are outside this text reader.
+
+# Complex CLI/Desktop qualification — 2026-09-05
+
+Qualified payload: `1.15.6+codex.sha256.e5e7f2252bcdf325`, full SHA-256
+`e5e7f2252bcdf325037dc861f65e9f42f038adb0607924a6094cda44f475cd2a`.
+Semantic version remains 1.15.6; the ordinary installed plugin was not updated.
+
+The unchanged isolated candidate passed consecutive real CLI, resumed CLI and
+Desktop runs. The initial ordinary Russian product prompt had ten requirements:
+offline CSV reconciliation, exact decimal arithmetic, Unicode/multiline fields,
+strict duplicates and validation, atomic output, error preservation, dry-run,
+protected existing edits, a specific test command, documentation and independent
+verification. The resumed task added currency filtering while retaining all prior
+validation and preservation requirements. No orchestration-test instructions were
+inserted into the product workload.
+
+| Real-host phase | Native workers | MCP events, including initialization | Host-call records | Cortex audit |
+| --- | ---: | ---: | ---: | --- |
+| CLI initial task | 2 | 16 | 115 | passed |
+| Same CLI thread after restart and new requirement | 2 | 16 | 104 | passed |
+| Actual Desktop initial task with corrective work and re-verification | 4 | 28 | 174 | passed |
+
+All coordinators and workers produced native task-complete receipts. Both CLI
+phases ended with the explicit exit-zero marker. Desktop's prepared composer was
+visually confirmed and submitted once to its exact isolated window; completion
+was verified from native task and MCP receipts, not inferred from the UI. Every
+host-call record was reviewed. Cortex calls, draft patches, publication, selective
+report reads, role boundaries and session closure passed without Cortex errors,
+truncation, unexplained write replays or post-publication worker calls. Project
+implementation and command diagnostics were assessed separately from Cortex,
+as required; this is not a claim that every project-development tool call succeeded.
+
+CLI retained one task, seven documents, one canonical pipeline and ten editions
+after continuation. Desktop retained one task, seven documents, one pipeline and
+eight editions. Both passed SQLite integrity and foreign-key checks, stored-file
+size/hash/permission checks, and absence of unpublished drafts or pending deletes.
+Input CSV and the pre-existing user note remained byte-identical to the initial
+fixture. Exact test sessions and the disposable Desktop process were stopped.
+Private full calls, events and screenshots remain outside the repository.
+
+The original request now comes from the host's typed user-message receipt, scoped
+to the current thread and canonical project. It is no longer retyped by the model.
+The observer verifies its stored digest against independently delivered input;
+Desktop-only rich-text serialization is accepted only with observed provenance.
+The source reader uses the tested host state/session format and fails closed if
+that source cannot be established. Literal credential redaction and source
+isolation are unit-tested; no real credentials were used in live workloads.
+
+All 101 source tests passed. Package validation, source-only synchronization,
+generated profiles, relative documentation links and diff checks passed.
+All 22 specialist profiles and seven MCP operations remain packaged. Hooks,
+custom global agent registration and stable-user installation changes were not
+used. The earlier sections below are historical evidence, not the current result.
+
+# Rejected intermediate complex candidates — 2026-09-05
+
+The previous marketplace checks below cover their named simple scenarios only.
+The new offline reconciliation scenario has ten simultaneous requirements,
+independent verification, immutable input and existing output preservation,
+Unicode CSV, exact decimal validation, and a protected pre-existing user edit.
+
+The first complex CLI run completed with 20 MCP events and no MCP errors, but
+failed qualification: task creation included a host environment envelope and
+several instruction-read wrappers omitted structured command receipts. The
+second candidate improved instruction receipts but still added a synthetic
+skill envelope to the saved task. These runs are rejected, not success evidence.
+The observer checks task-text fidelity without exposing content, and the
+coordinator now distinguishes user prose from injected instruction envelopes.
+The third candidate preserved the exact request and published the implementation
+report, but still omitted the first skill-read command receipt. The assignment
+now specifies whole-file instruction loading and structured result forwarding;
+the report protocol appears before ancillary execution guidance in every profile.
+The fourth run exposed delegation after editing an unpublished pipeline draft.
+The working sequence had placed discovery before pipeline publication; that
+ordering is corrected, and the observer now rejects premature delegation.
+Candidate `35d68aa0c27151a5` passed complex CLI and restart/continuation checks,
+but Desktop exposed a shortened report reference and premature worker final.
+A later CLI run still omitted an input-preservation sentence from copied user text.
+The current implementation removes model transcription from task creation: it
+captures typed native user input within the current host thread/project boundary.
+It also validates reference shape before MCP dispatch and keeps missing-reference
+questions inside an unfinished assignment. Source tests cover these changes.
+No ordinary installed plugin was changed during this work. These intermediate candidates do not establish final qualification.
+
 # Marketplace-only orchestration — 2026-09-05
 
 The follow-up ordinary Desktop session still stopped before its first native worker

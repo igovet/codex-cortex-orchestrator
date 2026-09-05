@@ -127,7 +127,7 @@ def observed_outcome(raw,tool=None,arguments=''):
     # A wrapper may emit the command receipt as a separate labelled text item.
     for item in raw if isinstance(raw,list) else []:
         value=item.get('text','') if isinstance(item,dict) else ''
-        match=re.fullmatch(r'\s*(?:exit_status|__EXEC_EXIT_CODE__)=(-?\d+)\s*',value)
+        match=re.fullmatch(r'\s*(?:exit_code|exit_status|__EXEC_EXIT_CODE__)=(-?\d+)\s*',value)
         if match:exit_codes.append(int(match.group(1)))
     session_match=re.search(r'\\?"session_id\\?"\s*:\s*[0-9]+',rendered)
     cell_match=re.search(r'Script running with cell ID\s+[A-Za-z0-9_-]+',rendered)
@@ -235,6 +235,29 @@ def requested_identifiers(arguments,key,numeric=False):
     return sorted(set(int(value) for value in values)) if numeric else sorted(set(values))
 
 
+def original_request_digest(text):
+    text=text.strip()
+    token='$cortex:orchestrator'
+    if text.startswith(token) and (len(text)==len(token) or text[len(token)].isspace()):
+        text=text[len(token):].strip()
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def desktop_editor_source(text):
+    # Desktop serializes its rich-text list and literal underscores as Markdown.
+    # Retain all other whitespace and characters; this is not general normalization.
+    return re.sub(r'(?m)([^\n])\n\n(?=1\. )',r'\1\n',text.replace('\\_','_'))
+
+
+def delivered_request_digests(state,text):
+    accepted={state.get('original_request_sha256')}
+    expected=state.get('desktop_editor_source_sha256')
+    if expected and original_request_digest(desktop_editor_source(text))==expected:
+        accepted.update((original_request_digest(text),
+                         original_request_digest(text.replace('\\_','_'))))
+    return accepted
+
+
 def assigned_worker_profile(text):
     matches=re.findall(r'\$cortex:worker-([a-z-]+)',text)
     profiles={p['name'] for p in json.loads((ROOT/'plugins/cortex/profiles.json').read_text())['profiles']}
@@ -254,10 +277,17 @@ def worker_skill_read(tool,arguments):
     except (ValueError,SyntaxError):return False
     if ';' in parts:
         index=parts.index(';');tail=parts[index:]
-        # Permit only the observed exit-preserving receipt suffix, never extra work.
-        if (len(tail)!=9 or tail[:4]!=[';','rc=$?',';','printf']
-                or tail[5:]!=['$rc',';','exit','$rc']
-                or tail[4] not in {r'\n__EXIT_STATUS__=%s\n',r'__EXIT_STATUS__=%s\n'}):return False
+        # Recognize bounded status-printing suffixes; command success is checked
+        # separately from the host receipt, never inferred from shell output.
+        if len(tail)<5 or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=\$\?',tail[1]):return False
+        var=tail[1].split('=',1)[0]
+        if tail[:1]!=[';'] or tail[2]!=';':return False
+        rest=tail[3:]
+        if rest[-3:]==[';','exit','$'+var]:rest=rest[:-3]
+        echo=rest==['echo','__EXIT_STATUS__=$'+var]
+        printf=(len(rest)==3 and rest[0]=='printf' and rest[2]=='$'+var
+                and re.fullmatch(r'(?:\\n)?[A-Z_]+=%s\\n',rest[1]) is not None)
+        if not (echo or printf):return False
         parts=parts[:index]
     if len(parts)==2 and parts[0]=='cat':path=Path(parts[1])
     elif len(parts)==3 and parts[:2]==['wc','-l']:path=Path(parts[2])
@@ -437,6 +467,7 @@ def observed_tool_calls(state):
                     if profile:row['agent_role']=profile;break
     threads=list(thread_details.values())
     for thread in threads:
+        request_digests={state.get('original_request_sha256')}
         path=Path(thread['rollout_path'])
         if not path.is_file():continue
         with path.open(encoding='utf-8') as source:
@@ -448,7 +479,18 @@ def observed_tool_calls(state):
                     if observed_at<state['started_at']:continue
                 payload=entry.get('payload',{})
                 if not isinstance(payload,dict):continue
+                if (thread['id']==state.get('thread_id') and payload.get('type')=='message'
+                        and payload.get('role')=='user' and state.get('desktop_editor_source_sha256')):
+                    delivered='\n'.join(part.get('text','') for part in payload.get('content',[]) if isinstance(part,dict))
+                    request_digests.update(delivered_request_digests(state,delivered))
                 item=payload.get('item') if payload.get('type')=='item_completed' else None
+                if (entry.get('type')=='event_msg' and isinstance(item,dict)
+                        and item.get('type')=='UserMessage'
+                        and payload.get('thread_id')==thread['id']
+                        and not edges.get(thread['id'])):
+                    calls.append(dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
+                                      parent_thread_id=None,role='coordinator',tool='native_user_input',
+                                      outcome='success',argument_digest=None))
                 if (isinstance(item,dict) and item.get('type')=='SubAgentActivity'
                         and item.get('kind')=='started' and item.get('agent_path')
                         and item.get('agent_thread_id')):
@@ -493,6 +535,15 @@ def observed_tool_calls(state):
                     receipt_tool=receipt['tool']
                     row.update({key:value for key,value in receipt.items() if key!='tool'})
                     if row.get('tool') is None:row['tool']=receipt_tool
+                    if receipt['tool']=='mcp__cortex__create_task' and state.get('original_request_sha256'):
+                        result=item.get('result') or {}
+                        captured=(result.get('structuredContent') or {}).get('original_request_sha256')
+                        # Historical observations used model-authored request bodies.
+                        original=arguments.get('request')
+                        source_digest=captured or (original_request_digest(original) if isinstance(original,str) else None)
+                        row['original_request_preserved']=source_digest in request_digests
+                        if row['original_request_preserved'] and source_digest!=state['original_request_sha256']:
+                            row['desktop_editor_formatting_observed']=True
                     row['host_receipt_observed']=True
                     if row.get('outcome') in {None,'pending'}:row['outcome']=receipt['host_receipt_outcome']
                     if receipt.get('host_error_code'):row['error_code']=receipt['host_error_code']
@@ -842,13 +893,25 @@ def call_policy_violations(rows):
     }
     mutating_profiles={'accessibility_fixer','backend_dev','data_engineer','devops_engineer',
                        'frontend_dev','fullstack_dev','mobile_dev','refactorer'}
-    violations=[];published=set();published_reports=set();bootstrap={};generation=0;last_catalogue={};last_document={};active_sessions={};active_cells={};browser_state={};coordinator_waited=set();active_mutation_owners=set()
+    violations=[];clarification_parents=set();published=set();published_reports=set();bootstrap={};generation=0;last_catalogue={};last_document={};active_sessions={};active_cells={};browser_state={};coordinator_waited=set();active_mutation_owners=set()
     for row in rows:
         flags=list(row.get('policy_flags',[]))
         thread=row.get('thread_id')
         role=row.get('role')
         tool=row.get('tool')
+        if tool=='native_user_input' and role=='coordinator':
+            coordinator_waited.discard(thread)
+            generation+=1
+        if tool=='native_agent_result' and not row.get('report_id') and row.get('parent_thread_id'):
+            clarification_parents.add(row['parent_thread_id'])
+        if row.get('original_request_preserved') is False:
+            flags.append('coordinator_original_request_changed')
         state=bootstrap.setdefault(thread,dict(catalogue=False,reports=False,pipeline=False))
+        if role=='coordinator' and row.get('outcome')=='success':
+            if tool=='mcp__cortex__create_task':state['needs_initial_pipeline']=True
+            elif tool=='mcp__cortex__write_report':state['needs_initial_pipeline']=False
+        if role=='coordinator' and tool=='spawn_agent' and state.get('needs_initial_pipeline'):
+            flags.append('coordinator_delegation_before_pipeline_publication')
         sessions=active_sessions.setdefault(thread,set())
         cells=active_cells.setdefault(thread,set())
         browser=browser_state.setdefault(thread,dict(create_attempts=0,origin=None,ready_origins=set()))
@@ -897,7 +960,8 @@ def call_policy_violations(rows):
             elif tool=='list_agents' and thread in coordinator_waited:
                 flags.append('coordinator_status_probe_after_wait')
             elif tool in {'send_message','followup_task'} and thread in coordinator_waited:
-                flags.append('coordinator_unsolicited_message_after_wait')
+                if thread in clarification_parents:clarification_parents.remove(thread)
+                else:flags.append('coordinator_unsolicited_message_after_wait')
         if tool=='mcp__cortex__create_draft' and row.get('outcome')=='success':
             expected_template='pipeline' if role=='coordinator' else profile_templates.get(role)
             if expected_template and row.get('template')!=expected_template:
@@ -1048,6 +1112,9 @@ def main():
                 raise
         finally:os.close(fd)
         state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),profile=str(profile),events=str(events),data=str(data),data_owned=data_owned,workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
+        if prompt is not None:
+            state['original_request_sha256']=original_request_digest(prompt)
+            state['desktop_editor_source_sha256']=original_request_digest(desktop_editor_source(prompt))
         write_state(state_file,state)
         print('Actual Desktop launched with disposable profile; pid='+str(child.pid))
     else:

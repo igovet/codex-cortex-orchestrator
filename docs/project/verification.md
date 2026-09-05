@@ -143,3 +143,44 @@ For marketplace skills, the observer identifies the worker role from the exact
 skill instruction read; it does not call that native TOML attachment. Encrypted
 assignment content remains opaque. A standalone wrapper text item `exit_status=N`
 is an explicit command receipt; stdout containing that string is not sufficient.
+
+CLI submission uses one named tmux buffer and bracketed paste, preserving internal
+newlines, indentation and repeated spaces. Receipt matching no longer collapses
+whitespace. Only trailing line terminators from the prompt file are removed.
+
+The isolated live observer compares a private SHA-256 of the submitted task text
+with the request retained by task creation. It ignores only the leading route
+token and outer whitespace; added host envelopes, translations and internal
+formatting changes fail qualification. Diagnostics expose only the comparison,
+not the request. CLI submission preserves multiline text with a single bracketed
+paste, and resume preserves the original comparison reference. Worker instructions
+require complete skill reads and structured command receipts, including for
+instruction loading; printed shell markers alone are not success evidence.
+
+Live qualification also rejects delegation on a newly created task before the
+coordinator has received a successful pipeline publication receipt. A created
+or edited draft is not a published pipeline; discovery may revise the initial
+pipeline after delegation, but cannot precede its publication.
+
+Desktop rich-text formatting is accepted only when independently present in the
+recorded user message and traceable to the prepared prompt: a blank line before
+an ordered list and literal underscore escaping. Other spacing and source changes
+remain failures. This exception does not apply to CLI or unobserved model changes.
+
+Native-source tests exercise the real read-only host index and typed rollout
+records: exact current-turn selection, thread/project isolation, bounded tails,
+symlink rejection, absent-source failure, literal credential redaction and replay
+without a remaining host source. Live creation receipts now expose the server's
+stored-source digest; the observer compares that receipt against independently
+recorded input rather than a model-authored request argument.
+
+Steering tests cover multiple queued corrections, exact whitespace and Unicode,
+restart, repeated native receipts, operation replay with new input, transactional
+rollback, source rewrite, partial host records, foreign-thread exclusion and
+literal credential redaction. Real-host qualification must additionally compare
+archived source against native UserMessage receipts across steering and resume.
+
+The passive call audit records typed native coordinator user-input events without
+message bodies. A new user event permits delivery of steering after a native wait
+and invalidates a previous unchanged-catalogue observation. An unrelated injected
+user-role envelope does not provide that permission.

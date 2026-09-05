@@ -16,6 +16,11 @@ def meta(thread,parent=None):
     return {'threadId':thread,'x-codex-turn-metadata':({'parent_thread_id':parent} if parent else {})}
 
 def call(server,name,args,thread,parent=None):
+    args=dict(args)
+    from types import SimpleNamespace
+    server.steering_source=lambda *_:SimpleNamespace(cursor={},messages=[])
+    if name=='create_task' and 'request' in args:
+        source=args.pop('request');server.request_source=lambda *_:source
     return server.dispatch('tools/call',dict(name=name,arguments=args,_meta=meta(thread,parent)))
 
 def ok(result):
@@ -122,7 +127,7 @@ def test_creation_receipts_are_thread_scoped_and_atomic(tmp_path):
     args=dict(project_root=str(tmp_path),request='First',request_key='same')
     first=ok(call(server,'create_task',args,one))
     assert ok(call(server,'create_task',args,one))==first|dict(replayed=True)
-    error(call(server,'create_task',args|dict(request='Changed'),one),'delivery_conflict')
+    assert ok(call(server,'create_task',args|dict(request='Changed'),one))==first|dict(replayed=True)
     error(call(server,'create_task',args|dict(request_key='second'),one),'task_already_bound')
     assert ok(call(server,'create_task',args,two))['original_report_id']!=first['original_report_id']
     three=tid()

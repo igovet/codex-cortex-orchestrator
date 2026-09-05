@@ -159,7 +159,7 @@ def test_replay_all_writes_and_conflicts(store,tmp_path):
         assert call_store(store,operation,arguments)==result|dict(replayed=True)
         changed=arguments|({'rationale':'changed'} if operation=='set_governance' else {'title':'changed'})
         with pytest.raises(StoreError,match='delivery_conflict'):call_store(store,operation,changed)
-    with pytest.raises(StoreError,match='delivery_conflict'):call_store(store,'create_task',args|dict(request='Changed'))
+    assert call_store(store,'create_task',args|dict(request='Changed'))==first|dict(replayed=True)
     assert len(call_store(store,'list_reports',dict(task_id=task))['reports'])==3
 
 

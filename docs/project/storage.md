@@ -25,7 +25,16 @@ Codex reserves the project `.codex` directory against ordinary agent writes.
 Drafts therefore live under `.cortex`, where native file tools can edit them. Only
 the MCP server writes published documents below `.codex/cortex`.
 
-The original request and governance choices are ordinary immutable reports. Before
+The original request and governance choices are ordinary immutable reports.
+Task creation obtains the original source from the current native turn's typed
+user-message receipt through `host_source.py`. The active host index is queried
+read-only by the trusted thread identity and matched canonical project. Only that
+owned session file below the active home's sessions tree is read, with an 8 MiB
+tail bound; missing current-turn evidence fails closed. No source body is supplied
+by the model. Explicit literal credential redactions preserve surrounding text.
+The accepted source digest is returned with its report reference. Delivery keys
+cover public arguments; replay returns the accepted source without consulting a
+later turn or requiring the old session file to remain available. Before
 authored publication, `create_draft` allocates a short identifier, writes a matching
 identifier marker and selected heading template, and stores its task, calling thread,
 kind and exact path in SQLite. Report drafts go under `draft-reports`; pipeline
@@ -89,3 +98,21 @@ been restored or confirmed. A destination rename is registered for rollback befo
 its directory sync, so a sync failure cannot strand an uncommitted edition.
 All packaged template markers, including ordinary report guidance, must be filled
 before publication; rejection preserves the editable draft and accepts no receipt.
+
+
+Native steering is archived on the next successful coordinator Cortex operation,
+including catalogue reads. Each typed native user message becomes a separate
+immutable report in its original order; the pipeline remains a model-authored
+working summary. Capture is not an idle background service and cannot prove that
+the model correctly applied every requirement. Text is preserved without trimming,
+translation or summarization, except explicitly requested literal credential
+redactions. Attachments are not copied by this text-source reader.
+
+The private host-file cursor and native message identities commit atomically with
+report metadata and the requested operation. Retries, restart and repeated native
+receipts do not duplicate messages. Failed operations retain the previous cursor;
+changed files, conflicting message identities or unavailable source fail closed.
+Workers never read or capture another thread's native input. Source cursor and
+identity metadata are removed with task retention. Existing tasks without a source
+cursor begin with the current native turn; earlier unarchived steering is not
+retroactively guaranteed.

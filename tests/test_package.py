@@ -12,7 +12,7 @@ def test_stamped_package_and_profiles():
     assert validate().startswith('1.15.6+codex.sha256.')
     assert not (PLUGIN/'hooks').exists()
     assert len(list((PLUGIN/'agents').glob('*.toml')))==22
-    assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}=={'__init__.py','contracts.py','server.py','store.py','cleanup.py'}
+    assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}=={'__init__.py','contracts.py','server.py','store.py','cleanup.py','host_source.py'}
 
 
 def test_native_profiles_keep_roles_and_use_mcp_task_documents():
@@ -565,16 +565,18 @@ def test_cli_uncertain_submission_never_sends_again(monkeypatch,tmp_path):
     main=helper['main']
     namespace=main.__globals__
     sent=[]
-    prompt=tmp_path/'prompt.txt';prompt.write_text('An ordinary task')
+    prompt=tmp_path/'prompt.txt';prompt.write_text('An ordinary task\n\n  Preserve indentation and  two spaces.\n')
     monkeypatch.setattr(sys,'argv',['cortex-live-smoke','send','--prompt-file',str(prompt)])
     monkeypatch.setitem(namespace,'state',lambda: {})
+    monkeypatch.setitem(namespace,'save',lambda _: None)
     monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_: 0)
     monkeypatch.setitem(namespace,'tmux',lambda *args,**kwargs: sent.append(args))
     monkeypatch.setitem(namespace,'time',types.SimpleNamespace(sleep=lambda _: None))
     import pytest
     with pytest.raises(RuntimeError,match='inspect the composer'):
         main()
-    assert sum('-l' in call for call in sent)==1
+    assert sum(call[0]=='paste-buffer' and '-p' in call for call in sent)==1
+    assert next(call[-1] for call in sent if call[0]=='set-buffer')=='An ordinary task\n\n  Preserve indentation and  two spaces.'
     assert sum(call[-1]=='Enter' for call in sent)==1
     assert all('C-u' not in call for call in sent)
 
@@ -603,6 +605,8 @@ def test_resumed_cli_observes_existing_thread_without_replaying_old_calls(monkey
     state=dict(workdir='/project',started_at=200,thread_created_since=100,resumed=True,events=str(tmp_path/'events'))
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
     assert cli['user_prompt_receipts'](state,'Continue this task')==1
+    assert cli['user_prompt_receipts'](state,'Continue  this task')==0
+    assert cli['user_prompt_receipts'](state,'Continue\nthis task')==0
     desktop=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
     rows=desktop['observed_tool_calls'](state)
     assert len(rows)==1
@@ -652,6 +656,7 @@ def test_labelled_command_status_is_a_receipt_but_stdout_alone_is_not():
     import runpy
     check=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')['observed_outcome']
     assert check([{'text':'file content'},{'text':'exit_status=0'}],'exec_command')[0]=='success'
+    assert check([{'text':'file content'},{'text':'exit_code=0'}],'exec_command')[0]=='success'
     assert check([{'text':'file content'},{'text':'exit_status=2'}],'exec_command')[:2]==('error','command_exit_2')
     assert check([{'text':'file content with exit_status=0'}],'exec_command')[0]=='unverified'
 
@@ -666,7 +671,71 @@ def test_skill_read_allows_only_an_exit_preserving_suffix(tmp_path,monkeypatch):
     check=helper['worker_skill_read']
     assert check('exec_command',json.dumps({'cmd':f"sed -n '1,240p' {path}"+suffix}))
     assert check('exec_command',json.dumps({'cmd':f'wc -l {path}'+suffix}))
+    assert check('exec_command',json.dumps({'cmd':f'cat {path}; s=$?; echo "__EXIT_STATUS__=$s"; exit $s'}))
+    assert check('exec_command',json.dumps({'cmd':f'cat {path}'+suffix.replace('rc','s').removesuffix('; exit "$s"')}))
+    assert not check('exec_command',json.dumps({'cmd':f'cat {path}; s=$?; echo "__EXIT_STATUS__=$other"'}))
     assert not check('exec_command',json.dumps({'cmd':f'cat {path}'+suffix+'; touch /tmp/unrelated'}))
     assert helper['observed_outcome']([{'text':'__EXEC_EXIT_CODE__=3'}],'exec_command')[:2]==('error','command_exit_3')
     assert helper['is_orchestration_call']({'role':'general','tool':'exec_command','skill_instruction_read':True})
     assert not helper['is_orchestration_call']({'role':'general','tool':'exec_command'})
+
+
+def test_original_request_audit_rejects_translation_and_lost_formatting():
+    import runpy
+    h=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    digest=h['original_request_digest']
+    request='Сохрани исходные данные.\n\n  command --flag  value'
+    assert digest('$cortex:orchestrator '+request)==digest(request+'\n')
+    assert digest(request)!=digest(request.replace('  ',' '))
+    assert digest(request)!=digest('Preserve the original data.')
+    rows=[{'thread_id':'root','role':'coordinator','tool':'mcp__cortex__create_task','outcome':'success','original_request_preserved':False}]
+    violations=h['orchestration_policy_violations'](h['call_policy_violations'](rows))
+    assert [r['violation'] for r in violations]==['coordinator_original_request_changed']
+
+
+def test_new_task_requires_publication_before_delegation():
+    import runpy
+    check=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')['call_policy_violations']
+    def row(tool,**extra):return dict(thread_id='root',role='coordinator',tool=tool,outcome='success',**extra)
+    begin=[row('mcp__cortex__create_task'),row('mcp__cortex__create_draft',template='pipeline')]
+    spawn=row('spawn_agent',fork_turns='none',assigned_profile='general')
+    flag='coordinator_delegation_before_pipeline_publication'
+    assert flag in [x['violation'] for x in check(begin+[spawn])]
+    assert flag not in [x['violation'] for x in check(begin+[row('mcp__cortex__write_report'),spawn])]
+    assert flag not in [x['violation'] for x in check([row('mcp__cortex__read_report',document_kind='pipeline'),spawn])]
+
+
+def test_desktop_request_fidelity_requires_observed_editor_provenance():
+    import runpy
+    h=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    digest=h['original_request_digest'];allowed=h['delivered_request_digests']
+    source='Task requirements:\n1. Keep invoice_id and  two spaces.\n2. Do not translate.'
+    delivered='$cortex:orchestrator '+source.replace(':\n',':\n\n').replace('_',r'\_')
+    state=dict(original_request_sha256=digest(source),desktop_editor_source_sha256=digest(h['desktop_editor_source'](source)))
+    assert digest(delivered.replace(r'\_','_')) in allowed(state,delivered)
+    assert digest(delivered) in allowed(state,delivered)
+    assert digest(delivered) not in allowed(dict(original_request_sha256=digest(source)),delivered)
+    for changed in [delivered.replace('  ',' '),delivered+' extra',delivered.replace('invoice','customer')]:
+        assert allowed(state,changed)=={digest(source)}
+
+
+def test_coordinator_may_reply_once_to_unresolved_worker_handoff():
+    import runpy
+    check=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')['call_policy_violations']
+    wait=dict(thread_id='root',role='coordinator',tool='wait_agent',outcome='success')
+    handoff=dict(thread_id='worker',parent_thread_id='root',role='general',tool='native_agent_result',outcome='success')
+    reply=dict(thread_id='root',role='coordinator',tool='followup_task',outcome='success')
+    flag='coordinator_unsolicited_message_after_wait'
+    assert flag not in [x['violation'] for x in check([wait,handoff,reply])]
+    assert [x['violation'] for x in check([wait,handoff,reply,reply])].count(flag)==1
+
+
+def test_live_audit_user_steering_allows_delivery_after_wait():
+    import runpy
+    check=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')['call_policy_violations']
+    root=dict(thread_id='root',role='coordinator',outcome='success')
+    rows=[root|dict(tool='wait_agent'),root|dict(tool='native_user_input'),
+          root|dict(tool='send_message'),root|dict(tool='send_message')]
+    assert not check(rows)
+    flags=check(rows+[root|dict(tool='wait_agent'),root|dict(tool='send_message')])
+    assert [r['violation'] for r in flags]==['coordinator_unsolicited_message_after_wait']

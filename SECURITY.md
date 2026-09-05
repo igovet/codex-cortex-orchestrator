@@ -83,3 +83,56 @@ Marketplace workers load the exact specialist skill advertised by Codex before
 project access. This narrow instruction read does not allow cache exploration or
 direct report/database reads. Installation does not register personal agents or
 run setup hooks. The optional explicit TOML export installer remains separate.
+
+When recording the original request, redact credential values while preserving
+surrounding constraints. Translation or summarization is not credential redaction
+and must not remove safety or acceptance conditions.
+
+Malformed report identifiers remain rejected. Recovery must use an authoritative
+reference; it never broadens access by searching or guessing another task report.
+
+The isolated live observer compares a private SHA-256 of the submitted task text
+with the request retained by task creation. It ignores only the leading route
+token and outer whitespace; added host envelopes, translations and internal
+formatting changes fail qualification. Diagnostics expose only the comparison,
+not the request. CLI submission preserves multiline text with a single bracketed
+paste, and resume preserves the original comparison reference. Worker instructions
+require complete skill reads and structured command receipts, including for
+instruction loading; printed shell markers alone are not success evidence.
+
+Live qualification also rejects delegation on a newly created task before the
+coordinator has received a successful pipeline publication receipt. A created
+or edited draft is not a published pipeline; discovery may revise the initial
+pipeline after delegation, but cannot precede its publication.
+
+Desktop rich-text formatting is accepted only when independently present in the
+recorded user message and traceable to the prepared prompt: a blank line before
+an ordered list and literal underscore escaping. Other spacing and source changes
+remain failures. This exception does not apply to CLI or unobserved model changes.
+
+Task creation reads only the host thread selected by trusted MCP metadata. It
+opens the active Codex home's host index read-only, verifies the thread's project,
+and permits only an owned regular session file below that home's sessions tree.
+The bounded reader selects typed user-message receipts from the latest native turn,
+never assistant text, injected skill messages, or another thread's input. Raw
+session content and credential values are not emitted in diagnostics. Explicit
+literal credential redactions affect only matching source values; unmatched values
+are rejected. Host source absence never authorizes model-authored replacement text.
+
+
+Native steering is archived on the next successful coordinator Cortex operation,
+including catalogue reads. Each typed native user message becomes a separate
+immutable report in its original order; the pipeline remains a model-authored
+working summary. Capture is not an idle background service and cannot prove that
+the model correctly applied every requirement. Text is preserved without trimming,
+translation or summarization, except explicitly requested literal credential
+redactions. Attachments are not copied by this text-source reader.
+
+The private host-file cursor and native message identities commit atomically with
+report metadata and the requested operation. Retries, restart and repeated native
+receipts do not duplicate messages. Failed operations retain the previous cursor;
+changed files, conflicting message identities or unavailable source fail closed.
+Workers never read or capture another thread's native input. Source cursor and
+identity metadata are removed with task retention. Existing tasks without a source
+cursor begin with the current native turn; earlier unarchived steering is not
+retroactively guaranteed.
