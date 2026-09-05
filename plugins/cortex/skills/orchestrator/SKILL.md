@@ -354,7 +354,11 @@ Before each delegation:
    it must never shell-read `.codex/cortex/` or installation/plugin files.
    The native profile contains the complete shared worker protocol.
 5. If native profile selection is not advertised or the profile is unavailable, report
-   the exact host limitation. Do not fake attachment, invent a spawn field, ask a worker
+   the exact host limitation and the missing native-profile installation prerequisite.
+   Plugin installation alone does not register profiles. Direct the user to the
+   installed package's explicit native-profile setup and a fresh Codex session;
+   retain the existing task for continuation. Do not suggest `normal` as a repair,
+   claim execution has begun, fake attachment, invent a spawn field, ask a worker
    to inspect the plugin or silently fall back to an unconfigured generic agent.
 6. Provide the exact short identifiers of every predecessor report the worker needs.
    A worker must not call `list_reports` to rediscover references the coordinator

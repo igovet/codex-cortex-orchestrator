@@ -72,3 +72,9 @@ Publication checks exact packaged guidance markers for all draft classes. This
 prevents accidentally publishing an unfinished template; it does not validate
 semantic completeness. Recovery keeps pipeline backups until the committed digest
 is verified or restored, and registers rename rollback before directory sync.
+
+Native profile setup is a separate explicit host operation. Its default is read-only;
+`--install` registers packaged profiles and a digest receipt inside the selected
+Codex home. It rejects symlinks, unsafe file identities and conflicting user profiles,
+updates only unchanged managed copies, and does not alter config.toml or project code.
+Plugin installation alone does not register custom native profiles.

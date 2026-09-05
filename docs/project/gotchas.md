@@ -24,3 +24,9 @@ a task. Plugin-cache TOML files alone are not native profile registration. The
 isolated candidate setup registers all 22 without modifying stable agents. The
 coordinator selects the profile through the advertised spawn contract; workers
 never initialize themselves by reading TOML or plugin source.
+
+Ordinary plugin installation must run the packaged `scripts/cortex_setup.py --install`
+and then its read-only check. Dev preparation now uses this identical program.
+A host with zero registered profiles can use all Cortex MCP tools yet stop before
+its first worker. Check the native spawn catalogue after restarting Codex; testing
+only MCP availability does not establish a working installation.

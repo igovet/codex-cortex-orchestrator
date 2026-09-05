@@ -60,7 +60,11 @@ Then complete the setup end to end:
    Cortex-required setting documented in the README: multi_agent_v2 = true and
    agents.default_subagent_model = "gpt-5.6-luna".
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
-5. Confirm that the installed package exposes exactly the seven documented
+5. Register the 22 native specialist profiles with the installed package's
+   scripts/cortex_setup.py --install, then run that script without --install
+   to verify exact installed bytes. Do not overwrite conflicting user profiles.
+   Restart Codex and confirm the native spawn tool advertises Cortex profiles.
+6. Confirm that the installed package exposes exactly the seven documented
    storage tools and ships no orchestration hooks. Run the relevant
    verification checks and start a new Codex task.
 
@@ -237,14 +241,24 @@ user's configured approval policy.
 
 Codex discovers native profiles in `~/.codex/agents/` or the project's
 `.codex/agents/`. Merely storing TOML files inside a plugin cache does not register
-them. Copy the 22 files from the installed Cortex package's `agents/` directory
-into the chosen native agents directory during setup, without overwriting unrelated
-profiles. Refresh these copies when updating Cortex, then start a new task.
+them. Run the setup program from the exact installed Cortex package (replace the
+example absolute package path with the installed location):
+
+```bash
+python3 -B /absolute/path/to/installed/cortex/scripts/cortex_setup.py --install
+python3 -B /absolute/path/to/installed/cortex/scripts/cortex_setup.py
+```
+
+The default operation is read-only verification. Explicit installation registers
+all 22 profiles under `$CODEX_HOME/agents` (default `~/.codex/agents`) and records
+managed digests. It refuses conflicting user files before writing any profile.
+Run setup again after plugin updates, then restart Codex and resume the task.
+A plugin-only installation is incomplete even when all seven MCP tools work.
 The selected TOML is a native configuration layer with `developer_instructions`;
 it is never a file-reading assignment for the worker. See the
 [official custom-agent documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents).
 
-The isolated `scripts/cortex-dev` preparation performs this registration only in
+The isolated `scripts/cortex-dev` preparation runs this same setup program only in
 `.cortex-dev/.codex/agents/`. Development checks never update stable profiles.
 If the host does not advertise native profile selection, orchestration reports
 that limitation rather than pretending to attach a profile through message text.

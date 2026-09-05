@@ -60,3 +60,8 @@ Bounded changes may combine inspection, implementation, tests, and related docs 
 one specialist assignment. Separate discovery and planning serve concrete unresolved
 decisions; neither file counts nor acceptance-category counts impose fixed stages.
 Dependencies still prevent implementation from racing governing investigations.
+
+Ordinary setup explicitly registers the packaged native profiles through
+`scripts/cortex_setup.py --install`; plugin-cache presence is insufficient.
+When profile selection is absent, the coordinator identifies incomplete setup
+instead of presenting `normal` as a repair or claiming worker execution began.

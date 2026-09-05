@@ -34,15 +34,6 @@ cache=dev/'.codex/plugins/cache/cortex/cortex'/receipt['version']
 validate(cache)
 if payload_digest(cache)!=receipt['digest']:
     raise SystemExit('Installed candidate differs from source.')
-# Native Agent v2 discovers standalone profiles here and attaches their developer
-# instructions at spawn. The plugin cache alone is not a native role registry.
-# This preparation is explicitly restricted above to the disposable dev home.
-agent_dir=dev/'.codex/agents'
-private_dir(agent_dir)
-for source in (cache/'agents').glob('*.toml'):
-    target=agent_dir/source.name
-    if target.is_symlink():
-        raise SystemExit('Unsafe isolated agent profile target.')
-    target.write_bytes(source.read_bytes())
-    target.chmod(0o600)
+# Exercise the same explicit profile setup shipped to ordinary plugin users.
+subprocess.run(['python3','-B',str(cache/'scripts/cortex_setup.py'),'--install'],check=True)
 print('Cortex isolated candidate installed and verified: '+receipt['version'])

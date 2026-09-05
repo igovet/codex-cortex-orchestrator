@@ -127,3 +127,9 @@ Resume observation retains the original thread-creation boundary while selecting
 only rollout calls made after the resumed session started. Prompt receipts include
 the existing coordinator thread. Old calls are neither lost nor mistaken for new
 MCP deliveries; the previous run's audit remains separate.
+
+Native-profile installation regression checks must begin with an empty agents
+registry. Verify that the package alone reports 22 missing profiles, explicit setup
+registers exact bytes, conflicting user files prevent all writes, and subsequent
+managed updates preserve unrelated profiles. Isolated live preparation must call
+this same packaged setup, not maintain its own privileged copying path.

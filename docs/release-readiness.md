@@ -1,3 +1,33 @@
+# Ordinary-install regression — 2026-09-05
+
+An ordinary Desktop task on `e3cbb23ec9b5e373` saved its initial pipeline but
+stopped before delegation because native specialist selection was unavailable.
+The ordinary Codex home had zero native profile files; the dev home had 22.
+The earlier real-host checks established operation in the prepared dev environment,
+not completeness of marketplace-only installation. That distinction was missing
+from the earlier readiness conclusion.
+
+Candidate `1.15.6+codex.sha256.9e278fd21933f3c0` adds the explicit packaged
+`cortex_setup.py` registration/check operation. The dev preparer now calls this
+same installer instead of maintaining a separate copy path. The recommended
+installation prompt includes registration and native-spawn verification; missing
+profiles no longer lead to a misleading suggestion to switch to `normal`.
+
+All 87 source tests pass, including empty native registry detection, explicit
+registration, exact-byte verification, conflict refusal before any profile writes,
+managed refresh, unrelated-file preservation and symlink rejection. Stable setup
+was checked read-only: 22 missing, no conflicts. Registration is a distinct user
+operation and is not performed by MCP initialization or a workflow hook.
+CLI and actual Desktop passed consecutive Cortex audits on this unchanged
+candidate using the common installer. CLI: 15 MCP events including initialization,
+80 host-call records, two native specialists, no Cortex errors or coordination
+violations, and exit zero. Desktop: 13 MCP events including initialization,
+46 host-call records, one native specialist, and no Cortex errors or coordination
+violations; its task completed and the disposable process was stopped. Both hosts
+attached the selected profiles and published worker reports successfully. These
+runs verify the setup route; they do not claim that marketplace installation by
+itself installs native profiles or that the ordinary user registry was modified.
+
 # Current Cortex reliability verification — 2026-09-05
 
 The current candidate retains semantic version **1.15.6**:

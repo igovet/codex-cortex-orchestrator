@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.15.6+codex.sha256.e3cbb23ec9b5e373",
+  "version": "1.15.6+codex.sha256.9e278fd21933f3c0",
   "description": "Durable tasks, advisory governance and immutable Markdown reports for model-owned coordination.",
   "author": {
     "name": "igovet"
