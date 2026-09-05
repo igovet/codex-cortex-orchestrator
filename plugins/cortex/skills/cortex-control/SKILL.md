@@ -8,9 +8,10 @@ description: Cortex retention command and optional report-writing examples. Load
 ## Loading boundary
 
 Load this skill through the standard Codex skill mechanism only for one of the
-declared purposes. Do not search for or inspect plugin, cache, installation, MCP
-server, profile, or database files. Ordinary workers already receive their complete
-self-contained Agent v2 profile and do not load this skill.
+declared purposes. Ordinary workers load their complete self-contained worker skill
+and do not load this skill. Use an attached body or read this exact advertised
+SKILL.md path. Needed declared Markdown references may be read on demand. Do not
+read agent TOML, manifests, databases or server internals, or enumerate the installation.
 
 ## Explicit retention maintenance
 
@@ -27,9 +28,10 @@ unknown drafts. Return only deletion and protection counts.
 
 ## Optional report examples
 
-Use the [report example catalogue](references/index.md) only when the coordinator
-explicitly asks for a report example. Read one matching example, then adapt it to the
-assignment. Examples guide content and never replace the profile's requirements,
+The [report example catalogue](references/index.md) routes optional examples.
+Read a relevant declared example only when the assignment asks for one. Otherwise use the
+headings and guidance returned by the live draft creator. Examples guide content
+and never replace the profile's requirements,
 live writer schema, observable evidence, or honest unrun checks.
 
 All worker reports remain complete English Markdown files first allocated by the

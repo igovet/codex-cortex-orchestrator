@@ -1,6 +1,6 @@
 # General Report
 
-<!-- State the assignment result and current status. -->
+<!-- Opening decision brief: conclusion and decisive observations; checked and open requirements; contradictions and limits; what could disprove the conclusion; next action. Keep the opening, including title and marker, within the first bounded report page. Put detailed evidence below. -->
 
 ## Evidence and work
 

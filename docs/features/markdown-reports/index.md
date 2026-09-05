@@ -1,5 +1,20 @@
 # Markdown coordination
 
+Authored reports open with a decision brief fitting in the first bounded page,
+including its marker and title. It summarizes decisive observations, checked/open
+requirements, contradictions, limits, disconfirming evidence and the next useful
+action. The coordinator selects these openings for consequential choices; detailed
+evidence remains worker-owned. Storage does not parse or certify the brief.
+
+A completed worker can receive a new explicit bounded assignment after its final
+handoff when its subject and role remain useful. It checks intervening changes and
+publishes a new immutable report referencing its predecessor. The final handoff must
+identify the latest report; it may also cite reports previously published by that
+same worker. Unknown or other-worker references and a handoff naming only an old
+report fail the ownership audit. Every verification-role assignment
+uses a fresh worker, including after steering; a previous verifier retains old conclusions. Publication is still the final tool call of each assignment;
+the observer requires a successful parent follow-up before further worker tools.
+
 The coordinator keeps work order, dependencies, executors, model/effort choices
 and intended checks in one task `pipeline.md`. Each complete new edition is
 prepended, so the beginning always contains the freshest state and older editions
@@ -7,14 +22,14 @@ remain available through the same cursor reader.
 
 The native host supplies thread and parent metadata. The server binds a coordinator
 thread once and lets registered children inherit that task without model-authored
-task identifiers. Every one of the 22 specialists loads its complete packaged worker skill alongside its concrete assignment and mandatory requirements.
+task identifiers. Every one of the 22 specialists requires its complete packaged worker skill attached by the host alongside its concrete assignment and mandatory requirements. Installed plugin-file reads are forbidden, including SKILL.md and TOML. See the current [host compatibility limitation](../../project/host-compatibility.md).
 
 The coordinator supplies exact short references for predecessor reports whose bodies
 a worker needs. Workers read only those report pages; they do not list the catalogue
 or read the current pipeline for routine startup. Catalogue and pipeline reads remain
-available for a concrete missing fact or recovery after context loss. Coordinators do not read report
-bodies, project files or project indexes; they delegate that evidence work and use
-previews plus the current pipeline beginning. Each document page is at most 4,000
+available for a concrete missing fact or recovery after context loss. Coordinators may read the first bounded page of a selected authored report for a
+consequential decision; they never follow its cursor into detailed evidence. Project
+files, indexes and detailed evidence remain worker-owned. Previews provide navigation. Each document page is at most 4,000
 Unicode characters; agents follow its opaque cursor only for a concrete missing fact.
 
 A worker requests a typed draft, receives its complete initial Markdown in the

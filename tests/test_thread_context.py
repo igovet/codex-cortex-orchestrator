@@ -45,6 +45,18 @@ def write(server,project,thread,parent=None,**extra):
     return ok(call(server,'write_report',arguments,thread,parent))
 
 
+def test_report_reference_typos_never_resolve_to_another_report(tmp_path):
+    server=Server(tmp_path/'store');root,child=tid(),tid()
+    create(server,tmp_path,root)
+    published=write(server,tmp_path,child,root)
+    reference=published['report_id']
+    for malformed in (reference[:-1],reference+'0',reference.upper(),reference+'\n'):
+        error(call(server,'read_report',dict(report_id=malformed),root),'invalid_arguments')
+    missing=reference[:-1]+('0' if reference[-1]!='0' else '1')
+    error(call(server,'read_report',dict(report_id=missing),root),'not_found')
+    assert ok(call(server,'read_report',dict(report_id=reference),root))['report_id']==reference
+
+
 def test_root_child_nested_restart_and_automatic_pipeline(tmp_path):
     server=Server(tmp_path/'store');root,child,nested=tid(),tid(),tid()
     create(server,tmp_path,root)
@@ -59,6 +71,23 @@ def test_root_child_nested_restart_and_automatic_pipeline(tmp_path):
     with Store(tmp_path/'store').connection() as db:
         assert db.execute('SELECT COUNT(DISTINCT task_id) FROM thread_bindings').fetchone()[0]==1
         assert db.execute('SELECT COUNT(*) FROM thread_bindings').fetchone()[0]==3
+
+
+def test_same_worker_new_assignment_preserves_report_and_pipeline_after_restart(tmp_path):
+    server=Server(tmp_path/'store');root,child=tid(),tid()
+    create(server,tmp_path,root)
+    pipeline=write(server,tmp_path,root,kind='pipeline')
+    first=write(server,tmp_path,child,root)
+    before=ok(call(server,'read_report',{'report_id':first['report_id']},root))
+    restarted=Server(tmp_path/'store')
+    second=write(restarted,tmp_path,child,root,title='Bounded follow-up')
+    assert second['report_id']!=first['report_id']
+    assert ok(call(restarted,'read_report',{'report_id':first['report_id']},root))==before
+    assert ok(call(restarted,'read_report',{},root))['report_id']==pipeline['report_id']
+    assert ok(call(restarted,'read_report',{'report_id':second['report_id']},root))['sha256']==second['sha256']
+    # Storage retains ownership; it does not implement an assignment approval gate.
+    with Store(tmp_path/'store').connection() as db:
+        assert db.execute('SELECT COUNT(*) FROM thread_bindings').fetchone()[0]==2
 
 
 def test_missing_invalid_unknown_and_conflicting_context_cannot_select_latest(tmp_path):

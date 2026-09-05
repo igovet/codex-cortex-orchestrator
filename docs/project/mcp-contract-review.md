@@ -21,7 +21,7 @@ English descriptions, exact input constraints, output schemas and safety hints.
 The model receives data through tool results, not through hidden client metadata.
 Successful structured data is also serialized as an identical text content item.
 Skills contain execution policy rather than duplicated argument contracts.
-Tool descriptions reinforce that coordinators read only catalogue previews and
+Tool descriptions allow selected authored report opening decision briefs as well as catalogue previews and
 the current pipeline; the native host attaches profiles and workers inspect full evidence. The server
 keeps the same tools available to both roles without an actor-binding mechanism.
 
@@ -147,3 +147,9 @@ workflow hook or model-authored steering argument is introduced.
 Report page reads answer a concrete missing fact. Tiny connectivity/reference
 probes before publication are explicitly prohibited in the live property contract
 and shared worker guidance; the audit retains duplicate immutable-start findings.
+
+Report reference descriptions require exact equality with the retained authoritative
+receipt and validation before delegation/read dispatch. The fixed-length schema
+rejects truncated, extended or malformed references; a well-formed unknown reference
+still returns not_found and never selects a neighbouring report. These are the same
+seven operations with no storage migration or alias/correction route.

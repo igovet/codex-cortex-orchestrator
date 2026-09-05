@@ -20,7 +20,7 @@ ad hoc production queries, and destructive migration execution.
 - The concrete assignment from the coordinator and the native parent context.
 - Every mandatory requirement, acceptance condition, scope limit and constraint.
 - Relevant documentation routes, known gaps and useful report references.
-- The coordinator names your exact Cortex worker skill; load it before project work.
+- The complete assigned Cortex worker skill, loaded before project work.
 
 Requirements apply regardless of which optional reports you choose to read.
 Do not infer missing obligations from unrelated reports. Ask the coordinator
@@ -30,15 +30,24 @@ message to the coordinator requesting the exact source reference, then wait for
 its reply. This is an unresolved input, not a completed assignment: do not send a
 final answer without a report merely to ask that question. Continue on the same
 assignment when the coordinator supplies the missing input.
+Check a reference against its retained source and live schema before dispatch.
+Never append, delete or guess a character after an invalid-reference or not-found
+result. A failed lookup is not permission to try a plausible neighbouring report.
 
 ## Skills and tool authority
 
 This skill contains your complete specialist profile and shared report protocol.
-Load only this assigned skill through the host's documented skill mechanism. For a
-filesystem-backed skill, read the exact SKILL.md path advertised in the host catalogue;
-this instruction read is allowed before Cortex bootstrap. Do not search installation
-directories, read agent TOML files, or reconstruct paths. Other applicable skills use
-the same standard mechanism. Never search the general tool catalogue for `skill`,
+Use instructions already attached by the host when complete. Otherwise read the
+assigned SKILL.md at its exact path in the host's available-skills catalogue,
+expanding a documented skill-root alias if needed. This is standard Codex skill
+loading, including when the skill lives in the marketplace plugin cache. A catalogue
+name and description alone are not the skill. Read only the selected skill and
+declared supporting Markdown references needed for this assignment; do not enumerate
+the installation, guess cache versions, inspect agent TOML, manifests, databases or
+server implementation, or create a custom loader. Other applicable skills follow
+the same progressive loading rule. Never reread a complete retained skill merely
+because a new assignment arrived.
+Never search the general tool catalogue for `skill`,
 `resource`, `plugin`, `cortex`, or a loader.
 If the assigned skill is unavailable, tell the coordinator what is missing before
 project work. Do not substitute a role label for the complete instructions.
@@ -46,8 +55,15 @@ Use `python3` for Python commands.
 
 ## Read the complete instructions and retain command receipts
 
-Read this entire assigned skill before acting; if the first bounded page ends before
-EOF, read the remaining pages. The publication protocol near the end is mandatory.
+Read this entire skill before acting; do not stop at a truncated first page. For a
+first load, keep instruction reads separate from catalogue discovery and project
+tools: these depend on the complete instructions and cannot run alongside loading.
+For a
+shell read, return the full command receipt and enough output to include the complete
+body, or continue explicit bounded line ranges to its end. If neither the body nor
+its advertised path/standard read mechanism is available, tell the coordinator and
+wait without project tools. Do not search the plugin tree. The publication protocol
+is mandatory.
 Every command wrapper must expose the complete returned object with `text(result)`.
 Do not use `text(result.output)`, add shell status markers, or invent status evidence:
 the host object already carries exit status or a live session handle. This applies to
@@ -63,6 +79,18 @@ Report consumed predecessor evidence, exact changed paths, schemas and invariant
 row or event reconciliation, quality or checksum evidence, checkpoint and rerun
 behavior, rollback state, contradictions, uncertainty, cost and privacy risk.
 List commands with cwd and exit codes, or explain non-execution.
+
+Open each report with a compact decision brief before detailed evidence. State the
+conclusion and decisive observations; checked and open requirements; contradictions
+and material limits; what could disprove the conclusion; and the next useful action.
+Keep that entire opening within the first bounded report page, including its marker
+and title. This is human-readable Markdown, not a parsed acceptance form. Summarize
+observations rather than embedding logs, source dumps or private user text. The
+coordinator may read this opening for a consequential decision; specialists own
+the detailed evidence. Do not confuse a stored report with verified correctness.
+For code evidence, identify the actual workspace and, when used, the selected graph
+index and its returned root in the brief. Distinguish a verified matching index from
+a scoped filesystem fallback; never label evidence from another checkout as current.
 
 Once evidence is ready, proceed directly to publication. Do not reread a known
 report as a connectivity check, reference check or publication preflight; existing
@@ -117,8 +145,9 @@ Every profile uses this publication sequence:
 7. Do not delete, rename or move the draft yourself. The server streams, validates,
    atomically publishes and removes it only after the task file and database commit.
    A rejected or uncertain publication leaves the draft available for exact retry.
-8. Never read the Cortex SQLite database, final report paths, or any
-   plugin/install/cache file directly except the exact advertised skill instructions. Use the catalogue and cursor reader.
+8. Never read the Cortex SQLite database or final report paths directly. Use the
+   catalogue and cursor reader for reports. The exact skill/reference reads above
+   do not authorize reading other plugin/install/cache files.
 9. Preserve an acknowledged publication and follow the live schema's retry guidance.
    Changed content requires a newly created draft and a new write.
 10. Use `read_draft` only when recovering an existing unpublished draft after
@@ -127,14 +156,31 @@ Every profile uses this publication sequence:
    reconfirm the unchanged Markdown already returned by `create_draft`. A failed edit
    before any successful hunk does not change the draft: correct that edit from the
    retained `markdown` and the tool error without a shell read or `read_draft`.
-11. Return only the saved short report identifier and compact English handoff to the
-   coordinator. Do not paste the report body or ask the coordinator to read it.
+11. Return the newly saved short report identifier and compact English handoff to the
+   coordinator. Identify the current assignment's report clearly. A reference to your
+   own prior published report is allowed when it explains the continuation; it cannot
+   replace the new report. Put detailed history and predecessor links in the report.
+   Do not paste the report body or ask the coordinator to read it.
 12. A successful `write_report` is the final tool call for this assignment. Immediately
    return the short report identifier and compact handoff through the native final
-   response. Do not call messaging, thread, status, catalogue, report, shell, file,
-   browser, or any other tool after the publication receipt.
+   response. Do not call any further tool on your own authority. Only an explicit
+   new coordinator assignment through the native follow-up operation, after your
+   final handoff, permits a new turn of work. A message alone is not a new assignment.
+   Reuse retained instructions and evidence when still applicable; inspect relevant
+   intervening source changes and new requirements before editing. Publish a new
+   immutable report referencing the predecessor, never revise the old report.
+   If the role or subject changed, request a fresh worker instead. Independent
+   verification belongs to a fresh worker, not the implementer's or prior verifier's
+   reused context. If you previously published in a verification role and receive
+   another assignment, return the ownership issue to the coordinator without project
+   tools; the coordinator must assign a fresh verification worker.
 
 ## Tool-call necessity
+
+Use MCP operations only through their advertised callable or its host execution
+wrapper. A browser/computer-use JavaScript session is not that wrapper and does
+not expose the host tools object. Never send Cortex draft or report calls through
+browser JavaScript, even when both surfaces accept JavaScript text.
 
 Before every tool call, identify the concrete new information or state change it
 must produce for this assignment. Do not call a tool when an earlier result is
@@ -192,6 +238,9 @@ files or a later command, and never start dependent work while the cell is activ
 
 Use a project, browser, file, or collaboration tool directly when it is already
 callable. The mandatory exact Cortex lookup is the only general catalogue scan.
+The Codebase Memory route below additionally permits exact provider-qualified
+discovery of the particular graph tools needed for a structural question. This is
+not permission for a broad catalogue dump; retain each selected live schema once.
 Never search `ALL_TOOLS` again for broad names, descriptions, synonyms, categories,
 or regular expressions such as browser, viewport, test, edit, file, message, or
 skill. If a later required capability is genuinely unavailable, make at most one
@@ -260,7 +309,8 @@ binding. Register your own context through the first operation your assignment
 actually needs before nested delegation. Completion requires saving your report and
 returning its reference; an unsaved native summary is incomplete.
 
-1. Load the assigned worker skill, apply its complete role instructions, and confirm the scope.
+1. Load the complete assigned worker skill by its advertised path unless already
+   attached, then confirm the scope. Never read an agent TOML to bootstrap.
 2. Make the first and only general catalogue query for the exact operation basenames
    this assignment actually needs. Every worker needs `create_draft` and
    `write_report`. Add `read_report` only when the assignment supplies an exact
@@ -289,6 +339,10 @@ returning its reference; an unsaved native summary is incomplete.
    for that exact item instead of scanning the catalogue or pipeline.
    Never inspect the Cortex database or final task files directly.
    Do not read the original-request or governance report body for reassurance.
+   For risky independent verification, first derive expected properties from the
+   assignment. Defer the implementer's report until after inspecting current source
+   behavior against those properties; completing bootstrap here means selecting the
+   supplied reference for that later comparison, not reading its conclusion early.
    Retain document pages already read; do
    not refresh them unless a confirmed publication, task change or recovery can have
    changed the needed evidence.
@@ -303,13 +357,78 @@ returning its reference; an unsaved native summary is incomplete.
    and keep the assignment incomplete.
 5. When project knowledge is needed, read the routed project/feature indexes and
    relevant linked pages. Confirm consequential claims in current source.
-6. Prefer Codebase Memory for structural discovery. If unavailable or insufficient,
-   record the concrete limitation and use one bounded repository-native fallback.
+6. For code definitions, ownership, callers, dependencies or impact, use the Codebase
+   Memory route below before filesystem code search or broad source reads when its
+   tools are available. Documentation routing and exact instruction reads are separate.
+   If unavailable or insufficient, record the concrete limitation and use one bounded repository-native fallback.
    Batch the initial fallback so one result answers the known discovery questions.
    If it establishes that the workspace is empty or already answers the assignment,
    stop discovery. A second command is allowed only for one new, explicit unanswered
    question produced by the first result; never overlap `ls`, `find`, `rg`, Git, or
    file reads over the same surface.
+
+## Codebase Memory: graph first, source grounded
+
+Use available `codebase_memory` tools for structural questions; do not merely mention
+them in the report and then start with recursive grep. A supplied filename or function
+name is not knowledge of its implementation: use graph lookup and an exact snippet
+before reading unknown code, even in a small repository. Skip that lookup only when
+the relevant current source is already retained or the edit is purely non-code text.
+Discover only the exact named
+operations below that the current question needs, using their live schemas for all
+arguments, limits and pagination. Never invent an operation or copy a schema from
+these instructions. This route belongs to workers, not the coordinator.
+
+Before initial use, call `list_projects` and select the returned project whose root
+matches the canonical assignment workspace, not a similar name or another worktree.
+Compare the full normalized path strings in code before dispatching a graph query;
+visual name similarity is not validation. Keep the matched entry and derive the
+query's project identity from that entry. If equality is false or the root is absent,
+do not query that index, even when it contains apparently identical code. Create the
+exact workspace index or use the documented scoped fallback. Report both roots so
+the coordinator can assess the scope of your evidence.
+Keep that selection for the assignment. If multiple indexes match, use `index_status`
+to choose the healthy index covering the relevant scope; if ambiguity remains, use
+bounded source discovery and report it. Stop listing once the relevant match is
+established; inspect additional pages only when needed to resolve selection.
+If no matching index exists, use `index_repository` for this exact authorized code
+workspace when the tool is available. A new index is local derived data, not authority
+to change ignore rules, global settings, publish artifacts or index other projects.
+Do not repeatedly rebuild a watched index: normally it refreshes in the background.
+Use status or coverage to diagnose staleness; immediate reindexing serves an observed
+large external update or missing index, not every read or small edit.
+
+| Information needed | Preferred operation |
+| --- | --- |
+| Find a definition or implementation from a concept or symbol | `search_graph` |
+| Callers, callees, dependency paths, data flow or service boundaries | `trace_path` after resolving the symbol |
+| Exact implementation of a selected symbol | `get_code_snippet` after `search_graph` |
+| Unfamiliar subsystem orientation | A scoped `get_architecture` overview |
+| Complex multi-hop relationship not answered by ordinary tracing | `get_graph_schema`, then a bounded `query_graph` |
+| Change impact for an established Git comparison | `detect_changes`, then inspect consequential paths |
+| Literal error, configuration, documentation or non-code text | Scoped `search_code` or repository-native text search |
+
+Resolve symbols from returned graph identities rather than guessed qualified names.
+Use compact results and narrow scope before expanding. Check returned truncation and
+pagination signals; a first page is not an exhaustive result. Follow the operation's
+own live pagination contract, which differs between graph search and tracing. Graph
+degree is not a caller count. Include test relationships when assessing test impact;
+do not infer lack of tests from a trace that excludes them.
+
+After discovery, batch `check_index_coverage` for cited or operated-on paths. Check
+the relevant scopes before negative or exhaustive claims: skipped files cannot appear
+in symbol results. Coverage is best-effort, not completeness proof. Inspect flagged,
+excluded, stale or unsupported source ranges directly and qualify remaining gaps.
+Use exact snippets or bounded current source to confirm consequential conclusions
+and the text being edited. Do not reread entire files when a current snippet suffices.
+Fresh source, tests and executable configuration outrank graph relationships.
+
+When a tool is absent, denied, fails, times out, or cannot answer the question, record
+the specific limitation once and use scoped source discovery for that question.
+Never loop through graph calls for availability reassurance, silently guess project
+identity, treat no hits as proof of absence, or stop useful work merely because this
+optional MCP is unavailable. Retain the selected project, useful symbols, coverage
+gaps and fallback reason in the report so later assignments can avoid rediscovery.
 
 ## Required report template
 

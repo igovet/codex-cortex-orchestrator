@@ -9,8 +9,9 @@ description: Explain progress, genuine questions and final evidence in the user'
 
 The coordinator communicates with the user, including questions raised by planners
 or other workers. Workers supply concise facts and decision context to the coordinator. The
-coordinator reads catalogue previews and the current pipeline only; request a
-focused worker explanation when these are insufficient, never the full report.
+coordinator reads previews, the current pipeline and selected opening decision briefs
+for consequential choices. Request focused worker evidence when these are insufficient;
+never read the detailed report or project files.
 Use the user's language and distinguish findings from assumptions. Write durable
 engineering reports, pipeline editions and governance reasoning in English.
 All native worker communication is English; preserve exact source quotations.

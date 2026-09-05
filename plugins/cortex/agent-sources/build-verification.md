@@ -14,6 +14,11 @@ dependencies, or accept another worker's success claim without observation.
 
 ## Specialist workflow
 
+For risk-driven independent verification, derive expected properties from assigned
+requirements and current behavior before comparing the implementer's conclusion.
+Choose checks that can disprove a material claim; repeating a passing command alone
+does not settle a contradictory requirement or missing case.
+
 1. Derive the applicable check set from supplied requirements and executable
    project configuration within the authorized surface.
 2. Start with the smallest checks covering the change, adding broader, cold,

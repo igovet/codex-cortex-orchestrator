@@ -92,8 +92,9 @@ selectors, tool name, argument/result digests, bounded routing selectors and saf
 error codes. Review
 every call for a concrete need and correct role ownership. The final `audit` rejects
 unsuccessful MCP events, Cortex call errors or truncation, missing Cortex outcomes,
-forbidden coordinator, plugin, or draft access, worker calls after a successful
-`write_report`, oversized document pages and command sessions without a terminal
+forbidden coordinator, plugin, or draft access, worker calls after publication without a successful explicit parent follow-up
+after the final handoff, handoffs missing the latest same-worker publication or
+including unknown/other-worker report references, oversized document pages and command sessions without a terminal
 result. It also rejects a second mutation worker with the same active profile before
 the first owner publishes its terminal report. Every tool error remains in the
 chronological `tool_error_history`; its Cortex subset fails the run, so a corrected
@@ -136,12 +137,15 @@ live preparation must not install these exports.
 
 Marketplace parity requires a personal agents directory with no Cortex TOMLs;
 `prepare_codex.py` must only install the plugin through the marketplace. Verify
-that each native worker loads its exact packaged skill and publishes its own report.
-An MCP-only pass or a dev-only native registry does not prove ordinary installation.
+that each native worker loads its complete packaged skill by native injection or
+its exact advertised SKILL.md path, then publishes its own report. An MCP-only pass
+or a dev-only native registry does not prove ordinary installation.
 
-For marketplace skills, the observer identifies the worker role from the exact
-skill instruction read; it does not call that native TOML attachment. Encrypted
-assignment content remains opaque. A standalone wrapper text item `exit_status=N`
+Targeted skill/declared Markdown reference reads are valid instruction loading;
+TOML, server internals, broad enumeration and mixed read/side-effect commands remain
+violations. Review full loading evidence and truncation, not merely a role label.
+Encrypted assignment content remains opaque. See [host compatibility](host-compatibility.md).
+A standalone wrapper text item `exit_status=N`
 is an explicit command receipt; stdout containing that string is not sufficient.
 
 CLI submission uses one named tmux buffer and bracketed paste, preserving internal
@@ -154,8 +158,12 @@ token and outer whitespace; added host envelopes, translations and internal
 formatting changes fail qualification. Diagnostics expose only the comparison,
 not the request. CLI submission preserves multiline text with a single bracketed
 paste, and resume preserves the original comparison reference. Worker instructions
-require complete skill reads and structured command receipts, including for
-instruction loading; printed shell markers alone are not success evidence.
+require complete loaded skills and structured command receipts. Exact advertised
+skill and needed declared Markdown reference reads are valid; installation exploration,
+TOML and server-internal reads are forbidden. Printed shell markers alone are not
+success evidence. A successful backend execution does not excuse a wrapper
+that exposes only stdout: the observer retains `wrapper_outcome=unverified` and
+reports `command_wrapper_missing_receipt`, including for skill reads.
 
 Live qualification also rejects delegation on a newly created task before the
 coordinator has received a successful pipeline publication receipt. A created
@@ -184,3 +192,54 @@ The passive call audit records typed native coordinator user-input events withou
 message bodies. A new user event permits delivery of steering after a native wait
 and invalidates a previous unchanged-catalogue observation. An unrelated injected
 user-role envelope does not provide that permission.
+
+Decision-brief checks allow a selected ordinary report start page for the coordinator,
+reject its continuation pages and preserve forbidden project-tool checks. Follow-up
+checks resolve the exact target in the observed native lineage, require prior report
+publication and final handoff, and retain command/session accounting for each assignment.
+Failed delivery, a plain message, an unrelated target or a report from another worker
+never reopens ownership. Role suitability and independent review remain model decisions.
+On resume, prior successful publication receipts and matching final handoffs reduce
+to metadata-only assignment snapshots. Old calls are not replayed as current-run
+evidence. An intervening worker action invalidates the completed snapshot until a
+new publication and handoff are observed. Intact worker context may retain its schemas;
+actual context loss still requires the documented recovery procedure.
+
+Use the separate [outcome suite](quality-evaluation.md) to measure quality and cost;
+protocol qualification alone does not demonstrate improved task-solving ability.
+
+The bounded ASCII fixture steering route has an exact native receipt check. A prior
+run changed a typed Latin character to a Cyrillic lookalike and was rejected; after
+allowing composer focus to settle and slowing synthetic typing, the same fixture
+text arrived exactly in the real Desktop task. This is evidence for this host route,
+not a guarantee for arbitrary keyboard layouts. Inspect the actual message before
+any further input after failure; never replay an uncertain submission. Visually confirm
+the empty composer and use `scripts/cortex-desktop-dev steer --prompt-file FILE
+--composer-x X --composer-y Y` with coordinates observed inside that exact window.
+The helper checks the isolated PID, types once and submits with Ctrl+Enter, then
+requires one exact typed UserMessage receipt on the retained task, allowing only the
+observed single editor-added paragraph newline. It does not infer
+readiness or semantic acceptance, change the clipboard, or replay uncertain input.
+Non-ASCII follow-up transport is unverified; the initial prepared-prompt route keeps
+its existing Unicode behavior. Initial submission still uses `send` and verifies a
+new task receipt.
+
+Audit regressions also cover an active worker message followed by one coordinator
+reply after a wait. A reply to a different worker, a duplicate reply or a failed
+inbound message must not receive that exception. Message bodies remain private.
+
+Patch-access regressions distinguish evidence text mentioning a skill path from
+actual add/update/delete/move targets inside the installed plugin. The observation
+layer records accesses and outcomes; report prose alone is not filesystem access.
+
+Concurrent report-read correlation uses retained literal report identities where
+available, including a single local const binding. Ambiguous intervals or bindings
+remain separate evidence rather than being matched by call order.
+
+Generated skill boundary checks compare the declared line count with the complete
+file and require one final completion marker. The full profile body must still
+match its generated TOML export; framing cannot remove any role or protocol text.
+
+A successful native MCP receipt must not inherit a later JavaScript consumer error
+as an MCP-error policy flag. The consumer failure remains in the complete audit;
+a genuine MCP error or absent receipt is not exempted.

@@ -28,7 +28,9 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
         assert 'first and only general catalogue query for the exact operation basenames' in instructions
         assert 'Never discover an unused operation.' in instructions
         assert 'Never search the general tool catalogue for `skill`' in instructions
-        assert 'read the exact SKILL.md path advertised in the host catalogue' in instructions
+        assert 'exact path in the host\'s available-skills catalogue' in instructions
+        assert 'do not stop at a truncated first page' in instructions
+        assert 'inspect agent TOML' in instructions
         assert 'A successful `write_report` is the final tool call' in instructions
         assert 'Never use a Git-specific command until retained project evidence' in instructions
         assert 'The initial discovery call must not contain a `git` executable' in instructions
@@ -134,11 +136,11 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert 'A truncated catalogue result does not establish any schema.' in orchestrator
     assert 'final `__`-delimited\n  segment of its full name' in orchestrator
     assert "live native spawn contract's no-history" in orchestrator
-    assert 'Use at least medium effort for every spawned Cortex project worker.' in orchestrator
+    assert 'Use at least medium effort for Cortex workers until a lower effort is qualified' in orchestrator
     assert '### Evidence-dependent ordering' in orchestrator
     assert 'Do not\nrun a mutation owner alongside an active investigation' in orchestrator
     assert 'Count neither files nor acceptance categories as an automatic' in orchestrator
-    assert 'For Luna, omit the model property from spawn' in orchestrator
+    assert 'never equate an omitted override with Luna' in orchestrator
     assert "A timeout never releases the assigned worker's ownership." in orchestrator
     assert 'never replace\n  an active Terra worker with Luna' in orchestrator
 
@@ -413,7 +415,7 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'thread_id':'root','role':'coordinator','tool':'spawn_agent','outcome':'success',
          'agent_type':'planner','model':'gpt-5.6-luna'},
     ])
-    assert [item['violation'] for item in model_route]==['complex_planning_without_terra']
+    assert model_route==[]  # Model selection is evidence-based, not a profile gate.
     preview_policy=helper['call_policy_violations']([
         {'thread_id':'root','role':'coordinator','tool':'mcp__cortex__write_report',
          'outcome':'success','summary_characters':141},
@@ -431,7 +433,7 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
          'tool':'native_agent_result','outcome':'success','report_id':'r_123456789abc'},
     ])
     assert [item['violation'] for item in lifecycle_policy]==[
-        'worker_final_without_single_report_id','worker_final_with_unobserved_report'
+        'worker_final_without_report_id','worker_final_with_unobserved_report'
     ]
     assert helper['orchestration_policy_violations'](lifecycle_policy)==lifecycle_policy
     unresolved,resolved=helper['classify_host_failures']([
@@ -553,7 +555,7 @@ def test_native_instruction_boundaries_cover_observed_live_failures():
     assert 'A Markdown body never belongs in a writer wrapper.' in discipline
     assert 'use its returned `markdown` as the exact initial contents' in discipline
     assert 'Do not call `read_draft` to repeat an unchanged' in discipline
-    assert 'Ordinary workers already receive their complete' in worker
+    assert 'Ordinary workers load their complete self-contained worker skill' in worker
     assert 'Never substitute direct database\n   or final task-file access' in discipline
 
 
@@ -622,7 +624,9 @@ def test_marketplace_skills_deliver_every_complete_profile_without_registry():
         assert path.read_bytes()==body
         name=path.parent.name.removeprefix('worker-')
         profile=tomllib.loads((PLUGIN/'agents'/f'{name}.toml').read_text())
-        assert body.decode().split('---\n',2)[2].lstrip()==profile['developer_instructions']
+        skill_body=body.decode().split('---\n',2)[2].lstrip()
+        profile_body=skill_body.partition('\n\n')[2].removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
+        assert profile_body==profile['developer_instructions']
     prepare=(ROOT/'scripts/prepare_codex.py').read_text()
     assert 'cortex_setup.py' not in prepare
 

@@ -20,11 +20,14 @@ A summary is an orientation aid, not a replacement for rereading saved materials
 - The same native thread and parent lineage; relevant report references.
 - Direct assignments, exact requirements, constraints and acceptance checks.
 - Selected worker skill identities, models and reasoning effort.
-- Native worker handles, current intent, known findings and remaining work.
+- Native worker handles, current assignment and predecessor report, known findings
+  and remaining work; selected decision briefs, unresolved alternatives and checks.
 
-Do not retain secrets or raw logs. Both roles load required named skills through
-the normal Codex skill procedure and apply them completely. Use the declared
-catalogue and skill references without inspecting installation internals.
+Do not retain secrets or raw logs. Restore complete named skills from retained host
+attachments or their exact advertised SKILL.md paths. Read only needed declared
+Markdown references; never inspect agent TOML, server internals or the installation
+tree. A catalogue entry alone is not the skill body. Missing automatic injection
+does not prevent standard skill-file loading.
 
 ## Coordinator recovery
 
@@ -32,12 +35,15 @@ catalogue and skill references without inspecting installation internals.
 2. Obtain fresh newest-first catalogue previews and read the current pipeline beginning.
 3. Restore requirements, constraints, decisions, ownership, models/effort and native handles.
 4. Reconcile native worker status before overlapping work; silence is not failure.
+   Preserve the distinction between completed assignment, interrupted turn and
+   released slot. Do not interrupt pending_init contexts to free capacity or repeat
+   rejected spawns without an observed capacity change.
 5. Apply queued changes, update the pipeline and resume delegation or native wait.
 
-Do not read original-request bodies, result reports, project indexes or source.
-The coordinator reads task previews and the current pipeline only; normal skill
-loading supplies its instructions and does not authorize project-file reading.
-If a detail is missing, delegate its recovery to a worker and request a concise answer.
+Do not read original-request bodies, project indexes or source. Restore a selected
+result report's opening decision brief only when a consequential decision needs it;
+never continue into its detailed evidence. Normal skill loading does not authorize
+project-file reading. If a detail remains missing, delegate its recovery.
 
 ## Worker recovery
 

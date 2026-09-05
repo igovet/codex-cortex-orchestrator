@@ -56,13 +56,14 @@ Then complete the setup end to end:
    documented update flow instead of adding a duplicate. Then install the
    plugin (or use the README's documented remove/reinstall update flow) with:
    codex plugin add cortex@cortex --json
-4. Preserve existing ~/.codex/config.toml settings and add or correct every
-   Cortex-required setting documented in the README: multi_agent_v2 = true and
-   agents.default_subagent_model = "gpt-5.6-luna".
+4. Preserve existing ~/.codex/config.toml and model preferences. Verify native
+   subagent support; enable multi_agent_v2 only when needed by the installed host.
+   Cortex does not require changing agents.default_subagent_model.
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
 5. Confirm the plugin catalogue includes the 22 `cortex:worker-*` specialist
-   skills. Native subagents load those skills; global agent registration is not
-   required. Start a fresh task after updating the plugin.
+   skills. Verify complete native skill loading or exact advertised SKILL.md reads;
+   catalogue discovery alone is insufficient. Do not read TOML or server internals. See the current
+   host compatibility limitation below. Start a fresh task after updating the plugin.
 6. Confirm that the installed package exposes exactly the seven documented
    storage tools and ships no orchestration hooks. Run the relevant
    verification checks and start a new Codex task.
@@ -185,26 +186,20 @@ Python versions and launch environments. No hook setup is required.
 
 > [!IMPORTANT]
 > Configure Codex before the first Cortex 1.15.6 orchestration, then start a **new task**.
-> Cortex requires the Codex multi-agent runtime, and the global default model
-> for internal subagents must be **Luna**.
+> Cortex requires available native subagents. It does not require Luna or a
+> change to the user's global default subagent model.
 
-Add the following settings to `~/.codex/config.toml`:
+On hosts where it is not already enabled, the current V2 route uses:
 
 ```toml
 [features]
 multi_agent_v2 = true
-
-[agents]
-default_subagent_model = "gpt-5.6-luna"
 ```
 
-The settings have distinct purposes:
-
-- `multi_agent_v2 = true` enables exact native model and reasoning-effort
-  selection for each subagent.
-- `default_subagent_model = "gpt-5.6-luna"` lets Cortex select logical Luna
-  without copying Luna into a native `model` override. Terra and Sol remain
-  explicit overrides. Every selected effort is passed unchanged.
+Use only settings supported by the installed Codex version. Preserve unrelated
+configuration. An omitted worker model override inherits the actual host model;
+intentional overrides use exact available model identities and supported effort.
+Do not silently switch native interfaces or register personal agent profiles.
 
 For clearer coordinator explanations and full plain-text question/answer
 context, the recommended top-level Codex setting is:
@@ -238,12 +233,22 @@ user's configured approval policy.
 
 ### Marketplace specialist delivery
 
-All 22 specialist profiles are distributed as `cortex:worker-*` skills in the
-plugin. The coordinator assigns one exact skill token to each native subagent;
-the worker loads its complete instructions through the host skill mechanism before
-project work. Marketplace installation needs no copying into `~/.codex/agents`,
-setup command, configuration hook, or custom profile selector. After an update,
-start a fresh task so the host provides the current skill catalogue.
+All 22 specialist profiles are distributed as `cortex:worker-*` skills through the
+standard plugin manifest. Each native worker loads its complete selected skill
+before project work: use an attached body or read the exact SKILL.md path supplied
+in the host's available-skills catalogue. Needed declared Markdown references load
+on demand. Complete instruction loading before tool discovery; the latter depends
+on the loaded rules and must not share the first read call. Generated worker skills
+declare their line count and end with a completion marker, so a successful partial
+range cannot be mistaken for a complete file. This is normal Codex
+progressive skill loading, including in the plugin
+cache; it does not authorize reading agent TOML or server internals.
+
+Marketplace installation needs no personal agent registration, setup hook, custom
+loader or profile selector. After an update, start a fresh task for the current
+catalogue. Missing automatic skill injection in an inter-agent message does not
+prevent loading the advertised skill file. See [host compatibility](docs/project/host-compatibility.md)
+and the [completed 12-trial decision](docs/project/quality-evaluation.md#shortened-series-decision-2026-09-06).
 
 Generated TOML exports remain available for explicit personal custom-agent use,
 but Cortex orchestration always uses the packaged worker skills. The optional
@@ -307,7 +312,7 @@ user workflow is documented in the
 4. Install the available newer Cortex version. If the UI offers only uninstall
    and install actions, uninstall Cortex and install it again from **Personal**.
 5. Confirm the seven storage operations and absence of orchestration hooks.
-6. Recheck `multi_agent_v2` and the Luna default.
+6. Recheck native subagent availability and the host's actual model/effort support.
 7. Start a **new Codex task**. An existing task may retain the previous plugin
    cache and catalog.
 
@@ -420,7 +425,7 @@ docs/features/<feature>/index.md
 `harvest-refresh` rebuilds inventory from current source, audits every in-scope
 page, independently checks completeness and performs a second no-change planning
 comparison. Harvest preserves manual material outside generated blocks. The
-coordinator reads only report previews and the current pipeline; workers own
+coordinator reads previews, the current pipeline and selected opening decision briefs; workers own
 index-driven routing, source discovery, documentation edits and checks.
 Workers receive mandatory requirements directly and select only useful reports.
 Missing indexes do not force harvest during an ordinary task.
@@ -439,7 +444,31 @@ documentation.
 
 ---
 
+Completed assignments can retain their context for explicit bounded follow-ups.
+Each follow-up publishes a new immutable report. A handoff must identify that latest
+report; useful links to the same worker's earlier reports are allowed. Coordinators
+record acceptance in the pipeline and answer the user directly; a worker-authored
+synthesis artifact is optional, not an extra completion requirement.
+
 ## Preferred worker route: Codebase Memory MCP
+
+A known filename or symbol does not establish its implementation: workers resolve
+unknown code through Codebase Memory first, including in small repositories. Retained
+current source and purely non-code text edits do not need redundant graph discovery.
+
+Workers use available graph tools before filesystem searches for definitions,
+callers, dependencies and impact. They match `list_projects` to the exact workspace,
+resolve symbols with `search_graph`, trace relationships with `trace_path`, and read
+selected implementations with `get_code_snippet`. Scoped `get_architecture` and
+schema-grounded `query_graph` serve broader questions; literal/configuration/docs
+searches can use `search_code` or ordinary text search directly.
+
+Workers check relevant index coverage, handle pagination and confirm consequential
+facts in current source. Duplicate project names, stale/partial indexes and empty
+results are not proof that code is absent. Missing indexes may be built for the
+authorized workspace; watched indexes are not rebuilt for every task. A missing or
+insufficient MCP produces a concrete limitation and scoped source fallback. See
+[knowledge routing](docs/features/knowledge-routing/index.md).
 
 > [!WARNING]
 >
@@ -508,11 +537,11 @@ flowchart TD
     Recovery[Context recovery] --> DraftRead[Read existing draft through cursor]
     DraftRead --> Fill
     Fill --> Result[Publish draft ID and compact metadata]
-    Result -->|Catalogue preview| Assess[Coordinator reviews concise previews]
+    Result -->|Catalogue preview| Assess[Coordinator reviews previews and selected decision briefs]
     Assess -->|More work or new requirements| Pipeline
     Assess -->|Genuine missing user decision| Question[Detailed question and options in chat]
     Question --> User
-    Assess -->|Task complete| Final[Explain verified result from previews]
+    Assess -->|Task complete| Final[Explain verified result and limits]
 
     subgraph Storage[Cortex: seven storage operations]
         API[Create task, set governance, create/read draft, write, list and read reports]
@@ -530,7 +559,7 @@ flowchart TD
     Read --> API
     Result --> API
     Recovery[Worker recovery: restore profile, load skills, reread relevant context] --> Select
-    Coordinator -.-> CoordinatorRecovery[Restore previews and current pipeline only]
+    Coordinator -.-> CoordinatorRecovery[Restore pipeline and relevant decision evidence]
     CoordinatorRecovery --> Assess
     Worker -.-> Recovery
 ```
@@ -546,9 +575,9 @@ one bounded fallback when needed; documentation routing starts at index files.
 Before project mutation, the coordinator resolves read-only predecessors whose
 answers can change implementation and never overlaps an implementation worker with
 an active explorer, designer, architect or planner governing that same result.
-Greenfield or unfamiliar work spanning at least three acceptance domains uses full
-governance, parallel independent investigations, then a plan grounded in their
-saved reports before implementation; bounded familiar work remains adaptive.
+Unresolved consequential questions justify separate investigation or planning.
+Record competing explanations and a discriminating check when useful; neither
+file counts nor acceptance-category counts force extra stages.
 Workers that need the same externally shared browser, emulator, port or interactive
 application run sequentially unless the host supplies isolated instances. Other
 independent discovery and verification can still run in parallel.
@@ -587,7 +616,8 @@ the filesystem and available space.
 Only explicit selection of `cortex:orchestrator` activates coordination. Help is
 read-only; normal returns to ordinary work. The coordinator saves the original
 request, selects advisory governance and writes an initial pipeline. Its only
-durable-content reads are catalogue previews, the current pipeline beginning and
+durable-content reads are catalogue previews, selected authored report opening
+decision briefs for consequential choices, the current pipeline beginning and
 the exact initial pipeline Markdown returned when it creates its draft. A later
 `read_draft` is allowed only for recovery or a genuinely changed draft.
 It never runs shell, Git, package, build, test, browser or project-file operations.
@@ -595,7 +625,7 @@ Its sole project-file exception is filling the exact pipeline draft returned by
 `create_draft`; every other read, edit and check belongs to a native worker.
 Native subagents load their assigned packaged worker skill before project work. Workers read relevant indexes and reports, and own
 project inspection, implementation, verification and documentation. The coordinator
-does not open project/plugin files, report bodies, diffs, logs or report examples.
+does not open project/plugin files, detailed report evidence, diffs, logs or report examples.
 
 ### Markdown pipeline and readiness
 
@@ -614,8 +644,8 @@ order its evidence requires and avoid overlapping edits.
 ### Native workers and results
 
 Packaged worker skills contain complete specialist role instructions and are loaded before project work. Applicable skills are supplied only through Codex's ordinary host skill
-mechanism when relevant. Worker assignments never name internal skills, loaders,
-plugin files or installation paths, and workers never locate those files themselves.
+mechanism when relevant. Assignments name the exact advertised specialist token,
+not loaders, plugin files or installation paths; workers never locate those themselves.
 
 The coordinator selects its conversation language from the user’s own request
 and checks every progress message, question and final answer. Project language,
@@ -717,6 +747,18 @@ backup and filesystem limits. Do not commit private task artifacts inadvertently
 
 ## Profiles and model routing
 
+For consequential decisions, coordinators may read a selected report's opening
+decision brief through the existing bounded reader. It states observations, checked
+and open requirements, limits, contradictions and a useful next check. Detailed
+evidence and project execution remain with specialists.
+
+Publication completes an assignment, not the useful lifetime of its native context.
+An explicit follow-up after its final handoff may reuse the same specialist for a
+bounded clarification or repair, with a new immutable report. Independent verification
+uses a fresh context. Model escalation responds to a reasoning bottleneck; a role
+name alone never mandates a model. These improvements require measured outcome
+evidence; see the [comparative evaluation procedure](docs/project/quality-evaluation.md).
+
 Cortex includes 22 advisory specialist profiles:
 
 | Area | Profiles |
@@ -729,8 +771,10 @@ Cortex includes 22 advisory specialist profiles:
 
 The host-supplied orchestrator skill contains a routing table for all profiles.
 The coordinator names the exact packaged worker skill and supplies the
-complete English assignment and constraints with `fork_turns: "none"`. The worker loads that complete skill before project work. Neither role reads profile TOML
-or explores the plugin. Workers read only the exact skill paths advertised by the host.
+complete English assignment and constraints with `fork_turns: "none"`. The worker
+loads its complete skill through host attachment or the exact advertised SKILL.md
+path before project work. Neither role explores the installation or reads profile
+TOML, manifests or server internals. No custom loader is needed.
 
 Profiles have structured role, input, workflow, quality, reporting and recovery
 sections. One shared source protocol plus 22 specialization fragments generates
@@ -760,23 +804,23 @@ calls and unexplained mutation replays. Profiles do not authorize tools or selec
 
 ### Adaptive model policy
 
-The coordinator chooses the model and supported reasoning effort per assignment;
-Luna remains the default, while Terra also covers genuinely cross-cutting
-implementation with several interdependent behavioral and verification contracts;
-governance does not determine a single pair for the entire task. The bundled
-orchestrator skill owns this policy.
+The coordinator selects an available model and supported effort for each assignment.
+It does not assume Luna when an override is omitted, or require a global model change.
+For uncalibrated multi-step code work, establish a capable quality baseline at medium
+effort using the strongest suitable advertised model within the user's requirements.
+A cheaper model is appropriate once scoped outcome and protocol checks support it;
+bounded retrieval and formatting need not use the strongest model.
 
-| Exact model | Effort | Choose for |
-| --- | --- | --- |
-| `gpt-5.6-luna` | Up to `max` | Default for most bounded work, ordinary discovery, implementation and checks |
-| `gpt-5.6-terra` | Up to `max` | Genuinely complex planning, architecture, or cross-cutting implementation |
-| `gpt-5.6-sol` | Rare, up to `max` | Materially risky security-sensitive work |
+For example, an advertised Astra model can establish that baseline, with Sol or smaller
+models evaluated as economical alternatives. These are capability examples, not an
+allowlist or a permanent ranking. Profile names and file counts do not select models.
+Repeated scope, identity, tool-evidence or reasoning failures require reconsidering the
+route after the active assignment ends. Missing facts or unavailable tools need their
+own remedy; a slower response alone never justifies replacing a worker.
 
-Choose effort proportionally from the host's advertised range; do not make max
-an automatic default. Ultra is not used. Luna uses the configured native default
-without an explicit model override. Terra and Sol use explicit native overrides.
-Respect explicit user selections and report unavailable choices rather than
-silently substituting them. The server neither selects nor enforces models.
+Evaluate end-to-end cost including retries, rather than token price alone. Respect
+explicit user choices and supported effort ranges; the highest effort is not automatic.
+The server neither selects nor enforces models.
 
 ---
 
@@ -849,7 +893,8 @@ worker wrapper, nested host invocation and actual Cortex MCP event while retaini
 only argument/result digests and safe routing metadata. `audit` reads the same
 complete history and fails on MCP or host errors, truncation, missing command
 outcomes, forbidden role or file access, calls made by a worker after successful
-publication, oversized document pages, or a command session without a terminal result.
+publication without an explicit successful parent follow-up after final handoff,
+oversized document pages, or a command session without a terminal result.
 Every observed error is retained chronologically in `tool_error_history` and fails
 the run even when a later retry succeeds. `resolved_host_failures` explains a later
 correction but never makes that run acceptable. Pre-dispatch wrapper syntax errors
@@ -1019,8 +1064,10 @@ token and outer whitespace; added host envelopes, translations and internal
 formatting changes fail qualification. Diagnostics expose only the comparison,
 not the request. CLI submission preserves multiline text with a single bracketed
 paste, and resume preserves the original comparison reference. Worker instructions
-require complete skill reads and structured command receipts, including for
-instruction loading; printed shell markers alone are not success evidence.
+require complete loaded skills and structured command receipts. Exact advertised
+skill and needed declared Markdown reference reads are valid; installation exploration,
+TOML and server-internal reads are forbidden. Printed shell markers alone are not
+success evidence.
 
 Live qualification also rejects delegation on a newly created task before the
 coordinator has received a successful pipeline publication receipt. A created

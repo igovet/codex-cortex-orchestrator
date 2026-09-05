@@ -7,6 +7,8 @@ execution and semantic judgment. The complete runtime is packaged below
 - [Report storage and reliability](storage.md)
 - [Development conventions](conventions.md)
 - [Verification](verification.md)
+- [Marketplace skills and native agent capacity](host-compatibility.md)
+- [Comparative outcome evaluation](quality-evaluation.md)
 - [MCP contract review](mcp-contract-review.md)
 - [Markdown coordination feature](../features/markdown-reports/index.md)
 - [Release evidence](../release-readiness.md)
@@ -24,3 +26,5 @@ Knowledge maintenance retains `harvest` and `harvest-refresh`, index-driven
 routing, preservation of manual docs and source-based completeness checks.
 See [knowledge routing](../features/knowledge-routing/index.md),
 [decisions](decisions.md) and [gotchas](gotchas.md).
+
+- [Orchestration review](orchestration-review.md): primary guidance, observed faults and bounded corrections.

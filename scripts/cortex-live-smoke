@@ -87,10 +87,12 @@ def start(args):
     started_at=time.time()
     created_since=(previous.get('thread_created_since',previous['started_at'])
                    if args.resume_last else started_at)
+    graph_enabled=(getattr(args,'codebase_memory',False)
+                   or (args.resume_last and previous.get('codebase_memory',False)))
     save(dict(workdir=str(workdir),started_at=started_at,thread_created_since=created_since,
               resumed=args.resume_last,events=str(events),
               original_request_sha256=previous.get('original_request_sha256') if args.resume_last else None,
-              data=str(data_dir) if data_dir else None))
+              data=str(data_dir) if data_dir else None,codebase_memory=graph_enabled))
     tmux('new-session','-d','-s',SESSION,'-c',str(workdir),'bash')
     tmux('set-option','-t',SESSION,'remain-on-exit','on')
     sink=' '.join(map(shlex.quote,['python3','-B',str(ROOT/'scripts/cortex-live-capture-sink'),'--path',str(capture)]))
@@ -102,7 +104,7 @@ def start(args):
         command.insert(command.index(str(ROOT/'scripts/cortex-dev')), 'CORTEX_DATA_DIR='+selected_data)
     if args.resume_last:command+=['resume','--last']
     command+=['-c','features.multi_agent_v2=true','-c','features.apps=false',
-              '-c','mcp_servers.codebase_memory.enabled=false',
+              '-c','mcp_servers.codebase_memory.enabled='+('true' if graph_enabled else 'false'),
               '-c','mcp_servers.node_repl.enabled=false',
               '-c','sandbox_workspace_write.network_access=true']
     launch=shlex.join(command)+"; live_status=$?; printf 'Cortex live-dev exit=%s\\n' \"$live_status\"; exit \"$live_status\""
@@ -113,7 +115,7 @@ def start(args):
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
-    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--data-dir',type=Path);s.add_argument('--resume-last',action='store_true')
+    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--data-dir',type=Path);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification')
     s=sub.add_parser('send');s.add_argument('--prompt-file',type=Path,required=True)
     sub.add_parser('enter');sub.add_parser('status');sub.add_parser('audit')
     for name in ['capture','events']:

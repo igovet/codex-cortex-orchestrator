@@ -18,9 +18,12 @@ KEY = string(
     "Reuse the exact key and arguments only after an uncertain response. The same key "
     "with changed metadata or draft contents conflicts.", 128)
 REPORT = string(
-    "Server-issued short report identifier from write_report or list_reports. Supply it "
+    "Opaque server-issued report identifier from an acknowledged write_report or list_reports result. "
+    "Retain and copy the entire value, including its last character; never retype an abbreviation. "
+    "Before handing it to another worker or using it, check exact equality with that retained source "
+    "and validate this property's pattern and length. A matching pattern alone does not prove identity. Supply it "
     "to start an ordinary report read; omit it to start the current pipeline or when an "
-    "unchanged next_cursor already selects the document.", 14,
+    "unchanged next_cursor already selects the document.", 14, minimum=14,
     pattern=r"^r_[0-9a-f]{12}$")
 DRAFT = string(
     "Server-issued short draft identifier from create_draft. Use it only from the "
@@ -78,7 +81,7 @@ TOOLS = [
          "edition; one coordinator thread may own several drafts. Never pass a path, task ID, "
          "thread ID, or Markdown body.", {
              "template": string(
-                 "Select the document headings. pipeline creates a current coordinator pipeline edition; every other value creates an ordinary report.",
+                 "Select the document headings. Coordinators select pipeline for their current pipeline edition. Workers select their assigned report class. Every other value creates an ordinary report; synthesis is a worker-authored artifact, not an additional coordinator completion step.",
                  14, enum=["general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis", "pipeline"]),
              "request_key": KEY,
          }, ["template", "request_key"]),
@@ -105,7 +108,7 @@ TOOLS = [
          "request, writer metadata, arrays, chunks, or shell interpolation; only the built-in "
          "apply_patch file tool may carry draft content. A pipeline draft's bytes are "
          "prepended to the task's single pipeline.md and earlier editions "
-         "remain below. Before publication, stop every command session opened for this "
+         "remain below. Open authored reports with a decision brief that fits within the first 4000 Unicode characters including marker and title: conclusion, decisive observations, checked/open requirements, contradictions, limits, disconfirming evidence and next action. This is Markdown guidance, not server semantic validation. Publication ends this assignment; a later explicit native follow-up may produce another immutable report from the same thread. Before publication, stop every command session opened for this "
          "assignment and inspect its terminal result. After success keep "
          "the short report reference and preview. Retry an uncertain write only with its exact "
          "key and arguments.", {
@@ -118,8 +121,8 @@ TOOLS = [
     tool("list_reports",
          "Return compact report metadata newest first for the task resolved from host thread "
          "metadata. Each report appears once; the single pipeline moves to the top after an "
-         "update. Cursor pages retain their initial snapshot. Coordinators use only these previews "
-         "and the current pipeline beginning. Workers select and read only reports required by "
+         "update. Cursor pages retain their initial snapshot. Coordinators use these previews for navigation "
+         "and may read selected report opening decision briefs when a consequential choice needs evidence. Workers select and read only reports required by "
          "their assignment.", {
              "cursor": string("Exact opaque next_cursor from the preceding catalogue page.", 256),
              "limit": integer("Entries per page; default 25.", 100),
@@ -128,10 +131,10 @@ TOOLS = [
          "Read a stored Markdown document through bounded cursor pages. Omit report_id and cursor "
          "to start at the newest beginning of the current pipeline. Supply a catalogue report_id "
          "to start only the ordinary report needed for the assignment. Coordinators read the "
-         "pipeline beginning only; workers read selected relevant report bodies. A pipeline update "
+         "current pipeline beginning and the first page of a selected authored report for architecture, dependencies or acceptance; never follow an ordinary report cursor. Do not read original-request, steering or governance bodies as decision briefs. Workers read selected relevant report bodies. A pipeline update "
          "makes older pipeline cursors stale. Ordinary reports are immutable.", {
-             "report_id": dict(REPORT, description="Exact server-issued report identifier copied unchanged from the relevant receipt or assignment. Before dispatch, validate the whole value locally against this property's pattern and length constraints. In an execution wrapper, use a conditional pattern check before invoking the MCP tool; the invalid branch must make no storage call and must not throw a synthetic tool error. Ask the reference owner for its authoritative correction and wait instead. Preserve every character; do not guess, shorten, repair, or probe another report."),
-             "cursor": string("Exact opaque next_cursor from the preceding page.", 512),
+             "report_id": dict(REPORT, description="Exact opaque report identifier copied unchanged from an acknowledged receipt or a coordinator-validated assignment. Before dispatch, check whole-value equality with that retained source as well as this property's pattern and length constraints. In an execution wrapper, retain the reference in a variable and use a conditional validation before invoking the MCP tool with that same variable. The invalid branch must make no storage call and must not throw a synthetic tool error. Ask the reference owner for its authoritative correction and wait instead; remain on the same assignment. A not_found result also requires source correction, never character guessing or trying another report. Do not use a native final merely to request the correction."),
+             "cursor": string("Exact opaque next_cursor from the preceding page. Coordinators must not follow an ordinary report cursor; its first page is their decision brief. Workers may continue selected detailed evidence.", 512),
              "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, [], read=True),
 ]

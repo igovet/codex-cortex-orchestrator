@@ -11,8 +11,12 @@ Apply this skill to every tool call by the coordinator and native workers.
 The current host-advertised tool declaration is the sole argument authority.
 Skills, examples, previous calls and remembered schemas do not replace it.
 This skill defines call discipline, not additional Cortex operations or server gates.
-Both roles load required skills through the normal Codex procedure. The
-coordinator keeps project evidence reading limited to previews and the pipeline.
+Both roles load needed skills normally: use an attached complete body, an advertised
+standard skill operation, or the exact SKILL.md path in the host catalogue. Targeted
+skill and declared Markdown reference reads are allowed in the plugin cache; agent
+TOML, manifests, server internals and installation enumeration are not. Never invent
+a loader. The coordinator's project evidence remains limited to previews, the current
+pipeline and selected opening decision briefs.
 
 ## Before each call
 
@@ -33,8 +37,11 @@ coordinator keeps project evidence reading limited to previews and the pipeline.
 5. Construct one complete request. Check required values, types, enumerations, nesting,
    allowed fields, identifiers, boundaries, size limits and conditional requirements.
    Omit optional properties when absent rather than guessing placeholders or nulls.
-6. Obtain identifiers and cursors from the actual returned result for this task. Never
-   invent them, confuse report references or alter an opaque continuation token.
+6. Obtain identifiers and cursors from the actual returned result for this task.
+   Compare the complete reference with that retained result before delegation or
+   dispatch; validate it using the live schema. Never invent, shorten or repair it.
+   An invalid or missing reference requires authoritative correction from its owner,
+   not another guessed lookup or a final response abandoning the assignment.
 7. Confirm actual dependencies and authorization. Do not issue dependent calls before
    earlier results exist, launch workers with incomplete assignments, or use tools to
    bypass native host permissions.
@@ -47,6 +54,10 @@ When the declaration is genuinely missing, discover it through supported host fa
 If an essential fact remains unavailable, explain the limitation rather than inventing it.
 
 ## Code wrappers
+
+A browser/computer-use JavaScript session is not the host's MCP execution wrapper.
+Never invoke Cortex tools there or assume that its JavaScript runtime exposes
+the host tools object. Use the advertised callable namespace unchanged.
 
 Prefer a direct advertised tool invocation when the host exposes one. If the host
 requires JavaScript or another code wrapper, keep it minimal: construct the request,

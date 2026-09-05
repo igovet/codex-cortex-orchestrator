@@ -33,7 +33,7 @@ answer; a correctly translated final answer does not excuse earlier drift.
 | --- | --- |
 | Coordinator messages and questions to the user | The user's language |
 | Native worker commentary, questions to coordinator and handoffs | English |
-| All authored reports, including coordinator synthesis and specialist plans | English |
+| Worker-authored reports, including synthesis and specialist plans | English |
 | Pipeline editions and governance reasoning | English |
 | Original user request and necessary exact source quotations | Preserve verbatim in the original language |
 
@@ -49,11 +49,15 @@ is a preserved source, distinct from authored engineering reports. Project produ
 text follows the task's own language requirements; do not translate it merely
 because worker communication is English.
 
-## Read boundary: previews and current pipeline only
+## Read boundary: previews, current pipeline and selected decision evidence
 
-**The coordinator delegates. It never reads project indexes, source, diffs,
-logs, or ordinary report bodies.** Its durable task-content reads are the
-newest-first catalogue previews and current pipeline beginning. Do not read
+**The coordinator delegates project execution. It never reads project indexes,
+source, diffs or logs.** It reads newest-first catalogue previews and the current
+pipeline beginning. When a report governs architecture, dependent work or acceptance,
+it may also read that report's opening decision brief through Cortex. Read only the
+first bounded page, not the detailed evidence below it. A returned continuation
+cursor does not expand this boundary: assign any missing detailed evidence to a
+worker. Do not read
 historical pipeline editions for routine coordination. Project shell, search,
 browser and technical verification work belongs to workers.
 
@@ -71,6 +75,11 @@ The coordinator may use only:
 - a native file write or edit operation solely on the exact pipeline draft path
   just returned to that coordinator by `create_draft`;
 - user-facing commentary, questions and final responses.
+
+After assessing a worker's evidence, record the acceptance decision in the existing
+pipeline and answer the user directly. A separate synthesis report is not required
+for completion. If the user needs a detailed saved synthesis, delegate that artifact;
+the coordinator's own authored storage remains the pipeline.
 
 The coordinator never invokes a shell, terminal, command runner, package manager,
 Git operation, project search or file reader, general patch, browser, network tool,
@@ -110,27 +119,30 @@ Read the current pipeline beginning with an explicit limit of at most 4,000
 characters. Follow its cursor only when a concrete unresolved coordination fact
 requires more; never request an oversized start page for reassurance.
 
-Load a conditional named skill only through an explicitly advertised standard Codex
-skill operation, using its exact catalogue name. Never search the general tool catalogue
-for words such as `skill`, `resource`, `plugin`, or `cortex` to locate a loader. If no
-standard skill operation is advertised, do not probe tools or files; continue with
-the complete current instructions and treat the optional loader as unavailable.
-Instruction loading
-is separate from reading project evidence and does not widen this boundary.
-Use the host catalogue and declared skill references, without guessed paths,
-custom loaders or installation exploration. Assign the exact bundled worker skill
-from the routing table; the worker loads it through the standard skill mechanism.
+Load a needed named skill through an advertised standard skill operation or read its
+exact SKILL.md path from the host's available-skills catalogue. Expand documented
+skill-root aliases; never guess a cache path. Use an already attached complete body
+without rereading it. Read only that skill and its needed declared Markdown references.
+This standard progressive loading applies to marketplace skills too; it is separate
+from project evidence and does not widen the coordinator's project-read boundary.
+Never search the general tool catalogue for a skill loader, enumerate the installation,
+read agent TOML, manifests, databases or server implementation, copy skill bodies into
+assignments, register personal agent files, or create a custom loader. A skill name in
+the catalogue is not its complete body. Missing automatic attachment is not a blocker
+when the exact advertised skill file can be read normally.
 
 | Actor | Owns | Content it reads |
 | --- | --- | --- |
-| Coordinator | User intent, governance, concise pipeline, assignments, model/effort, steering, waits and completion decisions | User messages, report previews, current pipeline, concise native status or decision messages |
+| Coordinator | User intent, governance, concise pipeline, assignments, model/effort, steering, waits and completion decisions | User messages, previews, current pipeline, selected opening decision briefs, concise native status or decision messages |
 | Native worker | Assigned discovery, implementation, verification, documentation and full evidence assessment | Its full profile, named skills, relevant indexes/pages, source and selected report bodies |
 | Cortex storage | Durable tasks, advisory governance and Markdown; storage integrity | Stored bytes and metadata, without semantic acceptance or role gates |
 
-If a preview is insufficient, request a focused clarification from that worker or
-assign an independent reviewer to read the relevant evidence. Do not fetch the body
-yourself. A preview must convey the result, observed checks, blockers and material
-limits; a bare "done" is insufficient for a completion decision.
+If a preview cannot support a consequential decision, read the selected opening
+decision brief. Compare observations, unverified requirements, contradictions,
+limits and possible disconfirming evidence with other relevant findings. If that
+opening is insufficient, assign a focused clarification or independent review of
+the detailed evidence. Do not continue into the full report yourself. A short
+preview is navigation, not proof of acceptance. Do not read every brief by default.
 
 ## Tool discipline
 
@@ -164,6 +176,12 @@ limits; a bare "done" is insufficient for a completion decision.
   Basenames are comparison keys only; never shorten, guess, or reconstruct a namespace.
 - Derive every MCP argument from its live description and schema; never guess fields,
   identifiers, cursor values, required inputs or unavailable operations.
+- Treat report references as opaque receipt values. Before passing one to a worker,
+  compare the entire value against its retained catalogue entry, including the final
+  character, and apply the live reference schema. Retain its publisher and purpose
+  alongside it. Never transcribe an abbreviated preview or reconstruct a reference
+  from prose. Resolve an invalid handoff from the authoritative catalogue before
+  delegation, not by asking the next worker to try it.
 - Build one complete request; check types, required fields, limits and dependencies.
 - Apply the tool-call discipline in this document before execution. Use a direct
   advertised tool call when available. When the host requires a code wrapper,
@@ -195,8 +213,8 @@ limits; a bare "done" is insufficient for a completion decision.
    the pipeline.
 5. Select profiles from the table and delegate bounded work through native host tools;
    workers load their assigned complete skill and read relevant task evidence.
-6. Wait through native coordination and review report previews. Delegate full evidence
-   assessment or independent checks when needed.
+6. Wait through native coordination and review previews and selected decision briefs.
+   Delegate detailed evidence assessment or independent checks when needed.
 7. Adapt the same pipeline when requirements, evidence or risks change.
 8. Obtain specialist previews on documentation impact and verification. Have a worker
    publish the detailed final report when needed; update the pipeline and explain the
@@ -209,6 +227,20 @@ bounded change with explicit behavior and named files, an implementation special
 can inspect those files, implement, test, and update closely related documentation
 in one assignment. Unfamiliarity alone does not require a separate explorer. Obtain
 independent verification when the risk or acceptance conditions justify it.
+
+For a small reversible change, one implementation report may cover code, focused
+tests and documentation impact. Do not add a planner, documentation worker or fresh
+reviewer solely to populate these categories. Before any extra assignment, identify
+the unresolved requirement, plausible failure or independent observation it adds.
+Use fresh independent verification for consequential behavior, interacting contracts,
+uncertain causes or explicitly required review; independence is not repetition of
+the implementer's tests or assumptions.
+
+Match acceptance to the user's observable outcome. Unit checks of an internal helper
+do not establish that its caller, running service or external integration behaves
+correctly. Obtain evidence at the relevant boundary within existing authorization;
+if that boundary cannot be exercised, state exactly what remains unverified and do
+not claim the user's operational issue is solved from a lower-level success alone.
 
 Delegate discovery or planning separately when a concrete unresolved question can
 change scope, ownership, acceptance, or a consequential design decision. Record that
@@ -253,13 +285,15 @@ report, exhausted short wait or active worker is not a reason to finish the chat
   its terminal report and handoff, returns an explicit terminal failure, is proven
   lost by the native lifecycle result, or the user cancels the work. Continue waiting
   in every other case.
-- While retained native worker handles are active, `list_agents` is never a valid
-  status probe: `wait_agent` already carries the only lifecycle result needed for
+- While retained native worker handles are active, `list_agents` is not a routine
+  status probe: `wait_agent` already carries the lifecycle result needed for
   the next decision. A slow worker, repeated timeout, pending host permission,
   command session, browser action, or recoverable tool error is not an anomaly and
   never justifies `list_agents`, `send_message`, `followup_task`, or an interruption.
   Send a message to an active worker only to deliver new user-authored steering or
   a concrete accepted correction that the worker cannot already observe.
+  An explicit native capacity rejection permits the single diagnostic snapshot
+  described below; it does not permit repeated polling.
 - When useful independent coordination is available, do it, then return to waiting for
   the outstanding workers. Do not replace a wait with a final “still working” reply.
 - After a worker event, inspect previews and concise status, update the current
@@ -288,6 +322,32 @@ report, exhausted short wait or active worker is not a reason to finish the chat
   verified final result once the requested task is complete.
 - Do not invent a question merely to stop waiting. If progress truly needs missing
   information or authority, explain that concrete dependency in the question.
+
+## Native capacity and context lifecycle
+
+Publication, native completion, interruption and slot release are different events.
+Keep the native handle, last assignment, publication/final receipts and disposition
+in the current pipeline. Retain a completed non-verification context only when a
+concrete same-role continuation remains useful; do not keep speculative work alive.
+Never send a message merely to acknowledge a completed worker or test its existence.
+Use explicit follow-up for actual new work; a queued message does not start it.
+
+When the advertised native interface provides close/release, close an unneeded
+completed context after retaining its evidence and inspect the receipt. Never invent
+that operation. MultiAgentV2 normally unloads eligible completed contexts itself;
+its interrupt operation does not promise release. Do not interrupt workers to make
+room, increase global limits, edit host state or switch agent interfaces as a workaround.
+
+After an explicit capacity rejection, take at most one native status snapshot and
+reconcile it with retained ownership and completion receipts. If work is running,
+wait for its actual completion. If a completed context can perform the next bounded
+same-role task, use an explicit follow-up under the normal independence rules.
+Use a supported close operation only when available and justified. Retry spawning
+only after observed completion or release changes capacity. Neither a timeout nor
+an interrupt receipt establishes that change. In particular, pending_init is not
+proof of a free slot. Repeated pending_init with no supported recovery is a host
+blocker: preserve the pending work and explain it once, without repeating failed
+spawns, interrupts, status polls or promising automatic recovery.
 
 ## Required checks remain requirements
 
@@ -339,21 +399,33 @@ Before each delegation:
    option. Supply one complete English assignment so coordinator-only instructions
    do not leak into the worker. Native MCP parent metadata still binds it to the task.
 2. Select the specialist from the table. Begin its assignment with the actual token
-   `$cortex:worker-<hyphenated-profile-name>` and require loading that exact skill
-   before project work. Include in the assignment: "Read the entire advertised
-   worker skill. For a filesystem skill, read its exact advertised file with cat
-   in one command and allow at least 16,000 output tokens. In a JavaScript wrapper
-   print the returned object with text(result), never text(result.output). Do not
-   add shell status markers. Apply this to the very first instruction read and
-   every later command." Use ordinary native subagents; a custom
-   profile selector and global TOML registration are not prerequisites. Never invent
-   a spawn argument or claim host-attached developer instructions.
+   `$cortex:worker-<hyphenated-profile-name>`. A token in an inter-agent message is
+   not proof that the host injected the skill. Include before the product assignment:
+   "First load the complete selected worker SKILL.md from its exact advertised
+   available-skills path unless its full body is already attached. This targeted
+   skill read is allowed even inside the plugin cache; do not read TOML or explore
+   the installation. Until the complete body has been received, make instruction
+   reads only: do not put catalogue discovery or project tools in the same call.
+   Their correct selection depends on the instructions you have not yet received.
+   Read through the skill's declared line count and final standalone completion
+   marker; a successful partial range is not the complete file. For EVERY command,
+   including this first skill read, emit the complete returned object with text(result),
+   never only result.output. Then perform the skill's Cortex bootstrap. Before ANY
+   source inspection, including verification/review, use available Codebase Memory
+   to match this workspace and resolve the code; use scoped source fallback only
+   for an observed gap or unavailable capability. Instruction reads are separate."
+   Never invent a spawn argument, claim unobserved attachment, copy skill bodies into
+   assignments, or require personal TOML registration to make marketplace use work.
 3. Before spawning, create the task and save its initial pipeline. Include every
    mandatory requirement, acceptance check, ownership, dependency and stopping
    boundary directly in the assignment, plus the exact worker skill token. Do not
    include plugin paths, private chat history, unrelated reports, or task identifiers.
-   The worker loads only the skill path advertised by its own host catalogue; this
-   is standard instruction loading, not permission to inspect plugin internals.
+   Preserve the entire loading/receipt/retrieval prefix for every role, including
+   verification and documentation assignments that inspect code. Add relevant
+   coverage checks; a named source file does not bypass graph discovery. Retained
+   current source and purely non-code text edits do not need graph rediscovery.
+   Do not replace the complete skill with a role summary. If both its body and its
+   advertised read route are missing, the worker reports that specific limitation.
 4. Require the worker's first task access through live MCP discovery and the needed
    task operations after loading its skill. It must never shell-read task artifacts
    or the database. Each skill contains the complete shared reporting protocol.
@@ -362,6 +434,9 @@ Before each delegation:
 5. If native subagents themselves or the named worker skill are unavailable, retain
    the current task and report that concrete limitation. Absence of custom native
    profile selection alone is not a blocker. Do not ask for user profile setup.
+   A failed loading route needs correction of that route, not a fresh specialist or
+   a more expensive model with the same missing capability. Resume the retained worker
+   after supplying the actual advertised skill route; do not send repeated probes.
 6. Provide the exact short identifiers of every predecessor report the worker needs.
    A worker must not call `list_reports` to rediscover references the coordinator
    already has, and must not read the task pipeline for routine orientation. Put the
@@ -373,50 +448,73 @@ Before each delegation:
    the current pipeline for recovery.
 8. Require a saved report reference and concise handoff: outcome, checks, blockers,
    material limits and next action. Verify its catalogue preview before advancing
-   dependent work. A native summary without a saved report is incomplete: provide
+   dependent work. Before accepting code evidence, compare its reported workspace and graph root
+   with the actual assignment workspace; read the opening brief if the handoff lacks
+   that scope. A mismatch invalidates those graph conclusions and requires corrected
+   discovery before dependent decisions. A native summary without a saved report is incomplete: provide
    missing context and have that worker finish publication in the same task. Do not
    silently turn unsaved findings into completed evidence or copy them into a report
    on the worker's behalf. Full evidence belongs in the worker's report.
-9. Treat a successful `write_report` as the permanent terminal boundary of that
-   native worker thread. Never send it a follow-up task or message and never resume
-   it for correction, additional evidence, rework or verification. When later work
-   is needed, spawn a fresh worker with `fork_turns: "none"`, a complete assignment,
-   and only the relevant saved report references. This keeps each immutable report
-   aligned with one finished assignment and prevents tools from running after its
-   publication receipt.
+9. Publication ends the assignment. Wait for its native final handoff before reuse.
+   For a bounded clarification or repair in the same subject and specialist role,
+   explicitly issue a new assignment through the native follow-up operation to that
+   exact completed worker. Include current requirements, changed facts, ownership,
+   the previous report reference, intended checks and stopping boundary. Record the
+   new assignment in the pipeline. The worker must check relevant intervening source
+   changes and publish a new immutable report referencing its predecessor; never edit
+   or replace the old report. A plain message does not reopen a completed assignment.
+   Use a fresh no-history worker for every verification-role assignment, a changed
+   role or subject, an unavailable context, or reasoning escalation needing another
+   model. Do not reopen a previous verifier for revised work: even an independent
+   verifier retains its earlier assumptions. This also applies after user steering.
+   Keep reuse for implementation, investigation or explanation in a non-verification
+   role; pass the saved review to a fresh worker when more review evidence is needed.
+   Never give a new assignment to an active owner or silently transfer edits.
 
-The packaged worker skill delivers the complete profile. Installation through the
-marketplace is sufficient to distribute every specialist's instructions. Tests
-verify actual skill loading and report publication without personal agent files.
+The marketplace distributes all complete worker skills through the standard skills
+component. Verify actual skill loading and report publication on the real host;
+automatic injection and exact advertised SKILL.md reads are both valid loading paths.
+Custom-agent TOML registration is not a prerequisite for this skill-based route.
 
 ## Model and effort selection
 
-| Model | Use | Native selection |
-| --- | --- | --- |
-| Luna (`gpt-5.6-luna`) | Default for most work, including bounded discovery, ordinary implementation and checks | Omit the model override; use the configured host default |
-| Terra (`gpt-5.6-terra`) | Genuinely complex planning, architecture, or implementation that must reconcile several interdependent contracts | Explicit supported model override |
-| Sol (`gpt-5.6-sol`) | Rare, materially risky security-sensitive work | Explicit supported model override |
+The native host's available models, capabilities and supported effort ranges are
+current authority. Do not restrict selection to an old list of model names, and
+never equate an omitted override with Luna: omission inherits the actual host model.
+Respect an explicitly requested model or budget. Otherwise establish a capable
+quality baseline for multi-step code investigation, implementation and verification;
+use the strongest advertised model appropriate to that work at medium effort unless
+a supported task comparison already justifies a cheaper choice. Repeated constraint,
+identity or tool-evidence failures disqualify the cheaper route for that scope until
+corrected behavior is demonstrated. A small file count is not proof of low reasoning
+complexity when the assignment must preserve several dependent obligations.
 
-- Choose effort explicitly from the selected model's advertised range, up to max.
-- Use at least medium effort for every spawned Cortex project worker. Low effort is
-  insufficient for the mandatory profile, selective-report and publication protocol.
-- For Luna, omit the model property from spawn rather than redundantly overriding the
-  configured default. Supply a model property only for an intentional Terra or Sol route.
-- Match effort to scope and uncertainty; max is not the automatic default.
-- Keep bounded single-surface implementation on Luna. Use Terra when one implementation
-  must simultaneously reconcile multiple interaction states, responsive behavior,
-  accessibility and nontrivial verification or other comparable cross-cutting contracts.
-- The `planner`, `architect`, and `database_architect` profiles exist for work whose
-  reconciliation or design complexity warrants a dedicated specialist. Explicitly
-  use Terra with high or greater effort for each of those profiles. For a bounded
-  plan that does not warrant Terra, keep the coordination in the default Luna
-  coordinator instead of spawning a dedicated planning profile.
-- A full-governance implementation that clearly matches those cross-cutting criteria
-  uses Terra unless the user chose otherwise or the host does not advertise it.
-- Do not use ultra. Other specialty names alone do not justify a model upgrade.
-- Respect explicit user choices and native model/effort support. Report unavailable
-  choices rather than silently substituting or changing host configuration.
-- Keep the choice with the assignment for recovery. Model selection is not a storage gate.
+| Available capability | Selection guidance |
+| --- | --- |
+| Most capable reasoning model (for example Astra when advertised) | Quality baseline for uncalibrated multi-step work, consequential ambiguity or repeated reasoning failures |
+| Reliable agentic workhorse (for example Sol when advertised) | Economical alternative after it meets the same scoped acceptance and protocol checks |
+| Smaller balanced/fast model (for example Terra or Luna when advertised) | Bounded retrieval, formatting, or work with demonstrated adequate quality; not an automatic default for every specialty |
+
+- Choose model and effort before dispatch from actual host support. Omit the model
+  override only when the selected model is the known inherited model; otherwise use
+  its advertised exact identity. Never silently downgrade the user's configured model
+  by confusing an inherited default with a model label.
+- Use at least medium effort for Cortex workers until a lower effort is qualified
+  for their scope. Increase effort for a concrete reasoning difficulty, not a job title.
+  The highest effort is not an automatic default; use supported ranges and user limits.
+- A profile never mandates a model. Keep the choice and its evidence in the pipeline.
+  The table describes capabilities, not a permanent ranking or a server gate.
+- Diagnose the bottleneck first: missing facts need targeted discovery; unavailable
+  tools or environment failures need a bounded remedy; conflicting evidence, a refuted
+  hypothesis, repeated repair without causal progress, or repeated failure to preserve
+  known obligations can justify stronger reasoning. Do not add more agents or longer
+  instructions to compensate indefinitely for the same reasoning failure.
+- Escalate only after the assignment terminates or an explicit safe handoff. Never
+  replace an active worker because it is slow. Give a fresh worker the relevant evidence
+  and ownership when changing models; retain the old immutable reports.
+- Keep simple work economical once quality is established. Compare end-to-end cost,
+  retries and result quality, rather than only a model's token price. Record the
+  expected benefit and next discriminating check before spending more.
 
 ## Adaptive pipeline and steering
 
@@ -453,6 +551,15 @@ previews yourself before changing the task-wide state.
 
 ## Pipeline and report previews
 
+For a consequential unresolved question, retain the working alternatives, evidence
+for and against them, and the cheapest observation that could change the decision.
+Delegate that discriminating question rather than another generic "check again".
+When an observation rejects the working explanation, revise it before further repair.
+Do not invent multiple hypotheses for a settled bounded task or add mandatory stages.
+For risky independent verification, the reviewer first derives expected properties
+from requirements and current behavior, then compares the implementer's claims.
+Resolve disagreements with observable evidence, never voting or confidence scores.
+
 Keep each authored catalogue preview within the lower target advertised by the
 live schema. Use a short sentence for the result and most material check or
 limitation; place details in the pipeline or specialist report. Require the same
@@ -462,7 +569,8 @@ concise preview from workers.
   scope, decisions, assignments, dependencies, model/effort, native handles and limits.
 - Put the complete current state first. Submit only the new edition; the server retains
   history. Do not copy old editions into a new one or paste complete worker reports.
-- Read catalogue previews newest first. Read only the current pipeline beginning;
+- Read catalogue previews newest first and selected opening decision briefs when a
+  consequential choice needs them. Read only the current pipeline beginning;
   follow catalogue cursors only to locate relevant previews.
 - Retain the latest catalogue result. Refresh it only after a confirmed report
   publication or worker completion, user steering that changes the task, recovery,
@@ -488,11 +596,19 @@ concise preview from workers.
 3. Workers prefer Codebase Memory for structural discovery. If unavailable, denied,
    timed out, erroneous, unusable or insufficient, they record the limitation and use
    one bounded repository-native fallback.
+   Include this priority directly in code-discovery assignments: use available
+   Codebase Memory first for symbols and relationships, select the exact workspace
+   index, check relevant coverage, and confirm consequential facts in current source.
+   Supply a previously established project identity as a hint, never as authority
+   to skip the worker's initial workspace match. Do not ask for redundant graph work
+   when the assignment needs only non-code text edits or already retained current source.
 4. Workers confirm consequential facts in source, tests and executable configuration,
    which outrank generated docs. The coordinator does not repeat their inspection.
-5. After changes, obtain a documentation-impact preview. If updates are needed, assign
-   a `technical_writer` with the verified facts, affected documentation surfaces and
-   required checks. Include its exact worker skill token; do not include installation paths.
+5. After changes, use the implementation report's documentation-impact preview.
+   Let the same owner finish closely related documentation and checks in its assignment.
+   Assign a `technical_writer` only when separate documentation expertise or scope
+   warrants it, with verified facts, affected surfaces and required checks. Include
+   its exact worker skill token; do not include installation paths.
    Required documentation updates and their checks must finish before task completion.
    A no-update conclusion must come from an evidence-backed specialist preview;
    missing inspection is not proof that documentation is unaffected.
@@ -502,7 +618,7 @@ concise preview from workers.
 | Route | Behavior |
 | --- | --- |
 | `help` | Explain commands, seven storage operations, delegation, selective reads and recovery; no task, governance or workers |
-| `harvest` | Delegate the baseline census with the complete host-supplied harvest requirements and declared census reference; workers never locate plugin files |
+| `harvest` | Delegate the baseline census with the named harvest skill; workers load its complete guidance through the advertised skill route |
 | `harvest-refresh` | Rebuild inventory, audit all in-scope docs, independently review completeness and perform the second no-change comparison |
 | `clear <retention>` | Delete this project's old tasks and artifacts by latest activity, protecting active tasks |
 | `normal` | Return to ordinary host work without deleting documents |
@@ -530,16 +646,17 @@ Use concise worker decision messages for questions raised by planners or other
 workers. Present the established background, exact missing choice, alternatives
 and consequences in the user's language as ordinary chat text. Accept arbitrary
 user wording and apply the direct answer without a second confirmation. Do not read
-a full report to formulate the question; request the specific missing explanation.
+a full report to formulate the question; use its brief or request the missing explanation.
 Do not use a question UI or invent an MCP question operation. Governance, planning
 and finishing do not themselves require questions. Never expose private report bodies.
 
 ## Preserve the active route in summaries
 
 Preserve the active Cortex route, native thread/worker handles, selected report references,
-remaining assignments and the strict coordinator read boundary. Retain that only
-report previews and the current pipeline may be read, while workers own all file,
-index and full-report reading. Completion of one change does not end the route.
+remaining assignments and the coordinator read boundary. Preserve selected decision
+brief references, unresolved alternatives, discriminating checks and explicit follow-up
+ownership. Workers own project files, indexes and detailed report reads.
+Completion of one change does not end the route.
 
 ## Recovery after summarization or restart
 
@@ -550,7 +667,8 @@ beginning. This is required even when the summary appears complete and no furthe
 project edits are requested. Do not answer the recap from memory first. Restore
 requirements, constraints, assignments, models/effort and native handles from that
 current state; reconcile worker status before overlapping work. Do not recreate the
-task, fetch original-request/report bodies or inspect project documentation.
+task, fetch original-request bodies or inspect project documentation. Restore selected
+opening decision briefs only when needed to recover a consequential decision.
 
 Workers restore their assigned worker skill, load skill `cortex:context-compaction`
 through Codex, then reread the current pipeline, selected reports
