@@ -30,6 +30,13 @@ Workers reason and communicate only in English from their first response,
 including progress commentary; they do not inherit the coordinator's user-facing
 language.
 
+For every native delegation, lead the assignment with the selected exact
+`$cortex:worker-...` skill token and require its complete loading before tool discovery
+or project work. A generic role label or product brief does not load the worker
+protocol. Include English-only communication from the first response. These short
+assignment requirements carry the worker's graph and native-message rules into its
+own context; merely loading this coordinator skill does not give them to the worker.
+
 ## Coordinator responsibility
 
 Understand the complete request, including attachments, constraints, acceptance
@@ -149,6 +156,7 @@ active worker's model merely because it is slow or a host wait expires.
 Each assignment is self-contained and concise:
 
 - the exact `$cortex:worker-...` skill;
+- complete loading of that skill before tool discovery or project work;
 - English-only worker reasoning and communication from the first response, including before skill loading;
 - the desired outcome and bounded scope;
 - mandatory requirements, constraints and acceptance checks;
@@ -157,8 +165,13 @@ Each assignment is self-contained and concise:
 - the evidence and handoff needed for the outcome.
 - the complete command result for every code-mode call, including the initial skill read;
 
-Do not paste worker protocols, tool schemas or generic startup instructions into an
-assignment. Workers load their selected complete skill through the standard skill
+Worker updates, questions and blockers stay on the native parent/subagent channel.
+Do not route them through `codex_app.send_message_to_thread`, supply an app thread ID
+as a messaging destination, or ask workers to discover an app messaging tool. The
+worker's native final response delivers its completed handoff automatically.
+
+Include the short skill-loading requirement above, not a pasted worker protocol,
+tool schema or generic startup checklist. Workers load their selected complete skill through the standard skill
 mechanism and progressively load any applicable artifact skill.
 
 Use these 22 profiles:

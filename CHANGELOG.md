@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.15.7
+
+Restore explicit Codebase Memory discovery in all 22 worker profiles. Structural
+code questions use the graph before filesystem symbol searches, with exact-workspace
+index selection, relevant coverage checks and concrete source-fallback reasons.
+Cortex-only tool discovery no longer implies that Codebase Memory is unavailable.
+Delegations carry the exact worker-skill token and require complete skill loading
+before tool discovery or project work. Discovery emits names before selected schemas.
+
+Keep every worker progress update, question, blocker and verification message on
+the native parent/subagent channel. Workers do not call app task-messaging tools
+such as `codex_app.send_message_to_thread`; completed handoffs return natively.
+The seven MCP operations and storage format remain unchanged.
+
 ## 1.15.6
 
 Replaced the orchestration protocol with six storage operations. The coordinator

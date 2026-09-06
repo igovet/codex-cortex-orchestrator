@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.15.6+codex.sha256.879d600bfb9e3966",
+  "version": "1.15.7+codex.sha256.03279e8f757a5b4d",
   "description": "Durable tasks, advisory governance and immutable Markdown reports for model-owned coordination.",
   "author": {
     "name": "igovet"
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate durable multi-agent work",
-    "longDescription": "Cortex 1.15.6 provides seven storage tools and 22 specialist profiles. The server creates typed, thread-bound Markdown drafts; the coordinator manages one pipeline with newest editions first and native subagents. Reports are real project files and SQLite indexes brief metadata. The model interprets evidence and handles steering.",
+    "longDescription": "Cortex 1.15.7 provides seven storage tools and 22 specialist profiles. The server creates typed, thread-bound Markdown drafts; the coordinator manages one pipeline with newest editions first and native subagents. Reports are real project files and SQLite indexes brief metadata. The model interprets evidence and handles steering.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [

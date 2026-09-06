@@ -13,7 +13,7 @@
         evidence assessment, user steering, and completion.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-1.15.6-7c3aed" alt="Cortex 1.15.6" />
+        <img src="https://img.shields.io/badge/Cortex-1.15.7-7c3aed" alt="Cortex 1.15.7" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -187,7 +187,7 @@ Python versions and launch environments. Bundled lifecycle hooks use the host’
 ### Required Codex configuration
 
 > [!IMPORTANT]
-> Configure Codex before the first Cortex 1.15.6 orchestration, then start a **new task**.
+> Configure Codex before the first Cortex 1.15.7 orchestration, then start a **new task**.
 > Cortex requires available native subagents. It does not require Luna or a
 > change to the user's global default subagent model.
 
@@ -377,7 +377,7 @@ CLI, use `$cortex:orchestrator` or `/skills`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.15.6 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
+| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.15.7 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
 | `$cortex:orchestrator help` | Show read-only help without changing the project or task storage | `$cortex:orchestrator help` |
 | `$cortex:orchestrator harvest` | Update missing or stale source-backed project knowledge | `$cortex:orchestrator harvest` |
 | `$cortex:orchestrator harvest-refresh` | Re-audit and rebuild project knowledge documentation | `$cortex:orchestrator harvest-refresh` |
@@ -403,7 +403,7 @@ $cortex:orchestrator harvest-refresh
 > ### Knowledge maintenance is an explicit route, not a lifecycle prerequisite
 >
 > Run `$cortex:orchestrator harvest` when an existing repository needs a
-> source-backed knowledge baseline. Cortex 1.15.6 never blocks ordinary coordination
+> source-backed knowledge baseline. Cortex 1.15.7 never blocks ordinary coordination
 > because harvest has not run or project documentation is incomplete.
 
 Start the knowledge update with:
@@ -452,11 +452,22 @@ report; useful links to the same worker's earlier reports are allowed. Coordinat
 record acceptance in the pipeline and answer the user directly; a worker-authored
 synthesis artifact is optional, not an extra completion requirement.
 
+Workers send progress, questions, blockers and verification updates only through
+the host's native parent/subagent channel. They never use
+`codex_app.send_message_to_thread` or other app task-messaging tools, including for
+messages addressed to their coordinator. Completed work returns through the automatic
+native final handoff; no app-message approval is needed for worker updates.
+
 ## Preferred worker route: Codebase Memory MCP
 
 A known filename or symbol does not establish its implementation: workers resolve
 unknown code through Codebase Memory first, including in small repositories. Retained
 current source and purely non-code text edits do not need redundant graph discovery.
+The shared protocol names `codebase_memory` explicitly. Workers discover its needed
+operations separately from Cortex report tools; a Cortex-only catalogue lookup does
+not establish whether the graph tools are available.
+Every delegation starts with the exact worker-skill token and requires complete
+skill loading before tool discovery or project work, so these rules reach the worker.
 
 Workers use available graph tools before filesystem searches for definitions,
 callers, dependencies and impact. They match `list_projects` to the exact workspace,
@@ -467,8 +478,11 @@ searches can use `search_code` or ordinary text search directly.
 
 Workers check relevant index coverage, handle pagination and confirm consequential
 facts in current source. Duplicate project names, stale/partial indexes and empty
-results are not proof that code is absent. Missing indexes may be built for the
-authorized workspace; watched indexes are not rebuilt for every task. A missing or
+results are not proof that code is absent. When several indexes share the same root,
+workers compare health and relevant coverage: a ready index may exclude the assigned
+subsystem.
+Missing indexes may be built for the authorized workspace; watched indexes are not
+rebuilt for every task. A missing or
 insufficient MCP produces a concrete limitation and scoped source fallback. See
 [knowledge routing](docs/features/knowledge-routing/index.md).
 
@@ -808,8 +822,8 @@ SQLite and task directories together while storage access is stopped.
 
 ### Versioning
 
-This replacement preserves semantic version **1.15.6** as requested. The manifest
-and MCP server advertise `1.15.6+codex.sha256.<digest-prefix>`, computed from the
+This release uses semantic version **1.15.7** as requested. The manifest
+and MCP server advertise `1.15.7+codex.sha256.<digest-prefix>`, computed from the
 complete installable payload. Regenerate the suffix whenever that payload changes.
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.

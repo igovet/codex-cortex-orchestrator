@@ -15,7 +15,7 @@ from generate_agent_profiles import (
 
 
 def test_stamped_package_and_profiles():
-    assert validate().startswith('1.15.6+codex.sha256.')
+    assert validate().startswith('1.15.7+codex.sha256.')
     assert len(list((PLUGIN/'agents').glob('*.toml')))==22
     payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     assert all((PLUGIN/path).is_file() for path in payload)
