@@ -137,6 +137,58 @@ def test_draft_is_bound_to_creator_thread_and_many_coordinator_drafts_are_distin
     assert accepted['report_id']
 
 
+def test_followup_drafts_get_fresh_server_keys_and_preserve_published_report(tmp_path):
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
+    root,worker=tid(),tid()
+    create(server,tmp_path,root)
+    # The reused worker previously published planning under a descriptive v1 key.
+    legacy=dict(template='planning',request_key='architecture-report-v1')
+    old=ok(call(server,'create_draft',legacy,worker,root))
+    path=Path(old['draft_path'])
+    path.write_text(old['required_first_line']+'\n\nAccepted original architecture.\n')
+    published=ok(call(server,'write_report',dict(draft_id=old['draft_id'],
+        title='Architecture',summary='Original evidence.',author='architect',
+        request_key='architecture-publish-v1'),worker,root))
+    before=ok(call(server,'read_report',dict(report_id=published['report_id']),root))
+    # Restart and follow-up: no caller-maintained version counter is necessary.
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
+    args=dict(template='investigation')
+    new=ok(call(server,'create_draft',args,worker,root))
+    another=ok(call(server,'create_draft',args,worker,root))
+    assert args==dict(template='investigation')
+    assert len({old['draft_id'],new['draft_id'],another['draft_id']})==3
+    assert not new['replayed'] and not another['replayed']
+    own=ok(call(server,'list_reports',{},worker,root))['own_drafts']
+    assert {row['draft_id'] for row in own}=={new['draft_id'],another['draft_id']}
+    after=ok(call(server,'read_report',dict(report_id=published['report_id']),root))
+    assert after['markdown']==before['markdown']
+    assert after['sha256']==published['sha256']
+    # Deliberate reuse with changed arguments must still reject, never overwrite.
+    error(call(server,'create_draft',legacy|dict(template='investigation'),worker,root),
+          'delivery_conflict')
+    replay=ok(call(server,'create_draft',legacy,worker,root))
+    assert replay['replayed'] and replay['draft_id']==old['draft_id']
+    assert not path.exists()
+
+
+def test_unkeyed_drafts_are_distinct_for_concurrent_native_workers(tmp_path):
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
+    root=tid()
+    create(server,tmp_path,root)
+    workers=[tid() for _ in range(6)]
+    def allocate(worker):
+        local=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
+        return ok(call(local,'create_draft',dict(template='investigation'),worker,root))
+    with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+        drafts=list(pool.map(allocate,workers))
+    assert len({draft['draft_id'] for draft in drafts})==len(workers)
+    for worker,draft in zip(workers,drafts):
+        own=ok(call(server,'list_reports',{},worker,root))['own_drafts']
+        assert [row['draft_id'] for row in own]==[draft['draft_id']]
+    error(call(server,'read_draft',dict(draft_id=drafts[0]['draft_id']),workers[1],root),
+          'draft_not_owned')
+
+
 def test_internal_task_identifier_is_redacted_from_tool_errors(tmp_path):
     import os
 

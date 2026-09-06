@@ -1,5 +1,30 @@
 # Verification
 
+## 1.15.7 fresh draft delivery identities
+
+Candidate `1.15.7+codex.sha256.b5503c36f31d590b` makes draft creation keys optional.
+Unkeyed creation generates a fresh UUID; explicit retries still reject changed
+arguments and preserve accepted evidence. The seven operations, storage format
+and 22 profiles are retained. The creation annotation no longer claims unconditional
+idempotence, and its schema explains recovery through the own-draft catalogue.
+
+All 21 focused host-context/schema tests passed, followed sequentially by package
+validation, source-only sync and all **243 tests in 11.11 seconds**. Regressions
+cover a reused worker after publication and restart, changed report templates,
+concurrent worker isolation, unfinished-draft discovery and explicit-key conflicts.
+
+One real CLI session completed an ordinary documentation request and a follow-up
+using the same native worker. All six creations omitted explicit keys and received
+distinct UUIDs; two worker reports and four newest-first pipeline editions were
+published without MCP errors or replays. Original evidence, stored hashes, the
+product result, two source messages and absence of unfinished drafts were checked.
+The session exited zero and was stopped after complete calls/events capture and
+audit. The audit exited one: a coordinator project-discovery flag and a recovered
+worker command failure plus two recovered draft-patch failures remain recorded.
+This establishes focused delivery behavior, not clean protocol qualification.
+Desktop, forced compaction and CLI/Desktop parity were not run on this candidate.
+See [release readiness](../release-readiness.md).
+
 ## 1.15.7 graph discovery and native worker updates
 
 The shared worker protocol explicitly discovers `codebase_memory` independently

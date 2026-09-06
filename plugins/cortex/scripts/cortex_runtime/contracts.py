@@ -41,7 +41,7 @@ def tool(name, description, properties, required, read=False):
                 inputSchema=dict(type="object", properties=properties, required=required,
                                  additionalProperties=False),
                 annotations=dict(readOnlyHint=False, destructiveHint=False,
-                                 idempotentHint=True, openWorldHint=False))
+                                 idempotentHint=name != "create_draft", openWorldHint=False))
 
 
 TOOLS = [
@@ -81,12 +81,20 @@ TOOLS = [
          "Use that file tool and never delete, rename, replace, recreate, or rewrite "
          "the entire draft file. Create a separate draft for every report or pipeline "
          "edition; one coordinator thread may own several drafts. Never pass a path, task ID, "
-         "thread ID, or Markdown body.", {
+         "thread ID, or Markdown body. For a new report or edition, omit request_key: "
+         "the server allocates a fresh delivery identity. Each unkeyed call creates a new draft, "
+         "including on later assignments in the same worker thread. After an uncertain unkeyed "
+         "response, recover the existing draft from list_reports own_drafts before creating another.", {
              "template": string(
                  "Select the document headings. Coordinators select pipeline for their current pipeline edition. Workers select their assigned report class. Every other value creates an ordinary report; synthesis is a worker-authored artifact, not an additional coordinator completion step.",
                  14, enum=["general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis", "pipeline"]),
-             "request_key": KEY,
-         }, ["template", "request_key"]),
+             "request_key": dict(KEY, description=
+                 "Optional explicit idempotency key. Omit for new drafts; the server generates a fresh identity. "
+                 "Supply a fresh UUID only when a caller needs exact retry after an uncertain response, "
+                 "and retain that UUID with the original arguments. Never reuse a prior report, date, "
+                 "profile or assignment label for new work, even after the old draft was published. "
+                 "An explicit key with changed arguments still conflicts and preserves the accepted draft."),
+         }, ["template"]),
     tool("read_draft",
          "Read the current Markdown in one server-created draft owned by this exact native "
          "thread. create_draft already returns the complete initial Markdown, so do not call "

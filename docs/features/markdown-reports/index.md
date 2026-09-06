@@ -23,6 +23,11 @@ recovery; assignments state this before skill loading. Workers deliver a publish
 compact handoff once through their native final response, without a duplicate
 cross-task message.
 
+Draft creation defaults to a fresh server-generated delivery identity, including
+on a reused worker's later assignment. Uncertain creation is recoverable through
+the caller's unfinished drafts; explicit keys still enforce exact retries and
+reject conflicting arguments. Published evidence remains immutable.
+
 Reports record the source revision and checked artifact versions on which their
 findings depend. A later message or observed file change signals possible stale
 evidence. The coordinator decides what needs reconciliation or another check;

@@ -317,6 +317,8 @@ class Store:
 
     def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None):
         validate(operation,args)
+        if operation=="create_draft" and "request_key" not in args:
+            args=dict(args,request_key=str(uuid.uuid4()))
         if operation=="create_task" and parent_thread_id is not None:raise StoreError("child_creation")
         return self._transaction(operation,args,(thread_id,parent_thread_id),original_request,steering_source)
 

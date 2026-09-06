@@ -601,6 +601,10 @@ that project's store while unrelated projects use independent stores.
 
 The server streams full UTF-8 drafts, verifies original file identity, atomically
 publishes files and commits metadata. Exact retries return the accepted receipt.
+New drafts default to server-generated delivery identities, so a worker's later
+assignment does not depend on remembering earlier report keys. An uncertain
+unkeyed creation is recovered through the caller's unfinished-draft catalogue;
+repeating it creates another draft. Explicit keys retain exact-retry protection.
 Pipeline recovery and retention stay inside the affected task, so a corrupted
 neighbour does not block another archive. Validated file identities and page offsets
 avoid repeated full reads of unchanged reports; changed files are revalidated.
