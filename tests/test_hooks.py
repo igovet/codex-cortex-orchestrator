@@ -15,7 +15,7 @@ from cortex_runtime.store import Store
 
 @pytest.fixture
 def active(tmp_path):
-    store = Store(tmp_path / "private")
+    store = Store(tmp_path / ".codex/cortex",project_root=tmp_path)
     store.call("create_task", {"project_root": str(tmp_path), "request_key": "first"},
                "parent", original_request="Original requirements")
     storage = HookStorage(store)
@@ -430,7 +430,7 @@ def test_cli_failure_is_visible_nonblocking_and_private(tmp_path, monkeypatch):
 def test_record_failure_returns_nonblocking_error_and_private_failure_receipt(active, monkeypatch):
     store, storage, handler, root = active
     observation = root / "hook-observation"
-    monkeypatch.setenv("CORTEX_DATA_DIR", str(store.directory))
+    monkeypatch.setattr("cortex_runtime.project_storage.native_project", lambda *_args, **_kwargs: str(root))
     monkeypatch.setenv("CORTEX_OBSERVATION_DIR", str(observation))
     def fail_record(*args, **kwargs):
         raise OSError("private host failure details")

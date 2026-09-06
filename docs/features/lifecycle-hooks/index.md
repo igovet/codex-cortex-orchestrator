@@ -7,6 +7,11 @@ and trust flow. The [official event and coverage reference](https://learn.chatgp
 is the source of host payload contracts; source tests do not establish installed
 CLI/Desktop support.
 
+Hook storage follows the current native project binding and writes to that project's
+`.codex/cortex/cortex.sqlite3`. It does not use a home-wide database or
+`CORTEX_DATA_DIR`; concurrent hooks for one project share the store's serialization,
+while hooks for different projects remain isolated.
+
 | Event | Local effect | Limit |
 | --- | --- | --- |
 | UserPromptSubmit | Marks new active-task input as pending for native source capture | The documented event has no unique native message ID; publication is deferred to an authoritative typed receipt, preserving optional redactions |

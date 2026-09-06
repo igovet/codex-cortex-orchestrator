@@ -4,7 +4,10 @@ Use Python 3.11+ and `python3`, with no runtime third-party dependencies. Keep
 installable behavior under `plugins/cortex/`. All tool arguments, retry contracts
 and size limits belong in advertised schemas and descriptions, not prompt prose.
 
-Use one Markdown pipeline per task with newest editions first. Ordinary reports
+Use one project-local SQLite store at `<project>/.codex/cortex/cortex.sqlite3`.
+The native host index locates and validates the canonical project but never supplies
+a home-wide Cortex store. Same-project access is serialized; different projects
+have independent stores. Use one Markdown pipeline per task with newest editions first. Ordinary reports
 are immutable. Workers receive obligations directly and select only necessary
 optional reports. The model owns coordination, evidence interpretation and final
 judgment. No mandatory specialist sequence or protocol compatibility is allowed.

@@ -6,13 +6,16 @@ fallback or model-supplied task selector. Binding receipts expose the selected
 Cortex/normal state. Receipts establish local routing, not authentication against
 a malicious same-user process.
 
-SQLite lives under `$CODEX_HOME/cortex/cortex.sqlite3` by default. It stores metadata,
-relationships, delivery receipts, source revisions and recovery information. Body
-text remains in real Markdown:
+Each canonical project has one private SQLite store at
+`<project>/.codex/cortex/cortex.sqlite3`. It stores metadata, relationships,
+delivery receipts, source revisions and recovery information. Projects do not share
+this store. Writes within one project are serialized by SQLite transactions; stores
+for different projects are independent. Body text remains in real Markdown:
 
 ```text
 <project>/.cortex/draft-reports/<draft>.md
 <project>/.cortex/pipeline-drafts/<draft>.md
+<project>/.codex/cortex/cortex.sqlite3
 <project>/.codex/cortex/<task>/pipeline.md
 <project>/.codex/cortex/<task>/<report>.md
 ```
@@ -20,6 +23,15 @@ text remains in real Markdown:
 Codex protects ordinary agent writes to project `.codex`, so editable drafts use
 `.cortex`. Only storage publication writes final task documents. Keep these private
 files out of repository documents and diagnostics.
+
+The native Codex `state_5.sqlite` index locates source records and validates the
+current thread, parent and canonical project. It is not a Cortex metadata store, and the
+runtime does not search a home-wide or environment-selected Cortex directory.
+A fresh MCP process needs the validated native index to locate an archive. An
+already accepted binding can retain its verified project if that index later
+becomes unavailable; conflicting parent or project evidence is rejected. Missing
+rollout content alone does not prevent archive reads. Each process retains at most
+256 accepted thread routes and 16 project store instances.
 
 ## Publication and recovery
 
@@ -54,7 +66,7 @@ page, with cursors allowing access to the remaining document. Pipeline updates e
 its older document cursors; restart from the newest beginning. Ordinary immutable
 report cursors survive process restart.
 
-Each MCP process caches at most 128 validated file identities and at most 1,024 sparse
+Each cached project store keeps at most 128 validated file identities and at most 1,024 sparse
 byte offsets per document. Unchanged files avoid complete digest rereads and repeated
 prefix decoding. Identity changes trigger full integrity validation. The reader
 checks identity around page access and does not retain whole report bodies in cache.
@@ -92,7 +104,8 @@ metadata (known status, exit/session receipts, truncation, actor scope and chang
 paths), and the caller's unfinished
 drafts, each with its own continuation mechanism.
 
-Host-source errors do not deny archived report reads. Operation receipts expose
+Once the project route is established, host-source errors do not deny archived
+report reads. Operation receipts expose
 complete, partial, unavailable or unattempted capture as applicable. Native source
 capture and metadata commit atomically with the operation; exact retries do not
 collapse distinct native events. `normal` suspends capture and later reactivation
@@ -102,6 +115,32 @@ Ambiguous boundaries remain explicit gaps.
 Hooks share the same services. A documented `UserPromptSubmit` without a unique
 native message receipt records deferred capture, never a guessed identity or raw
 publication that bypasses a later credential redaction. See [hook coverage](../features/lifecycle-hooks/index.md).
+
+## Offline project split
+
+The replacement does not automatically migrate a legacy shared store. With all
+CLI, Desktop, MCP and hook access stopped, split one canonical project at a time:
+
+```bash
+python3 -B plugins/cortex/scripts/cortex_split.py \
+  --source-storage-dir /absolute/private/legacy-store \
+  --project-root /absolute/existing/project \
+  --backup /absolute/private/cortex-global-v11-backup.sqlite3 \
+  --access-stopped
+```
+
+The source directory must contain the legacy `cortex.sqlite3`; the destination is
+created at `<project>/.codex/cortex/cortex.sqlite3`. `--backup` must name a new
+owner-private file. The command exports only rows belonging to the selected
+canonical project, validates relationships and delivery ownership, and leaves the
+legacy SQLite file and every Markdown file unchanged. It does not remove the source
+store or select a project automatically. The source must have no WAL, shared-memory
+or rollback-journal sidecars, and the existing project report directory must be
+owner-private. Source and destination access locks and a SQLite exclusive transaction
+remain held through publication. A verified backup survives a later export failure;
+an incomplete backup or destination temporary file is removed. Repeat with a new backup for
+each remaining project, then retire the legacy store only after all projects have
+been checked.
 
 ## Offline format 10→11 migration
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import cortex_clear
 from cortex_runtime.cleanup import clear_tasks
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.store import Store
@@ -47,3 +48,36 @@ def test_committed_deletion_recovers_after_restart(tmp_path):
     restarted=Store(store.directory)
     with pytest.raises(StoreError,match='task_not_bound'):call_store(restarted,'list_reports',dict(task_id=task))
     assert not (tmp_path/'.codex/cortex'/task).exists()
+
+
+def test_retention_command_uses_only_selected_project_store(tmp_path, monkeypatch, capsys):
+    import json
+    project=tmp_path/'project';project.mkdir()
+    foreign=tmp_path/'foreign';foreign.mkdir()
+    local=Store(project/'.codex/cortex',project_root=str(project))
+    global_store=Store(tmp_path/'legacy-global')
+    old=(datetime.now(timezone.utc)-timedelta(days=10)).isoformat(timespec='microseconds')
+    with patch.object(Store,'_now',return_value=old):
+        local_task=call_store(local,'create_task',dict(project_root=str(project),request='Local',request_key='local'))['task_id']
+        foreign_task=call_store(global_store,'create_task',dict(project_root=str(foreign),request='Foreign',request_key='foreign'))['task_id']
+    before=global_store.path.read_bytes()
+    monkeypatch.setenv('CORTEX_DATA_DIR',str(global_store.directory))
+    monkeypatch.setenv('CODEX_HOME',str(tmp_path/'missing-host-index'))
+    monkeypatch.setattr('sys.argv',['cortex_clear.py','--project-root',str(project),'--days','7'])
+    cortex_clear.main()
+    assert json.loads(capsys.readouterr().out)['deleted_tasks']==1
+    assert not (project/'.codex/cortex'/local_task).exists()
+    assert (foreign/'.codex/cortex'/foreign_task).exists()
+    assert global_store.path.read_bytes()==before
+
+
+def test_retention_command_inactive_project_has_no_storage_side_effects(tmp_path, monkeypatch, capsys):
+    import json
+    monkeypatch.setattr('sys.argv',['cortex_clear.py','--project-root',str(tmp_path),'--days','7'])
+    cortex_clear.main()
+    assert json.loads(capsys.readouterr().out)['deleted_tasks']==0
+    assert not (tmp_path/'.codex').exists()
+    monkeypatch.setattr('sys.argv',['cortex_clear.py','--project-root',str(tmp_path),'--days','-1'])
+    with pytest.raises(SystemExit,match='retention cleanup failed'):
+        cortex_clear.main()
+    assert not (tmp_path/'.codex').exists()

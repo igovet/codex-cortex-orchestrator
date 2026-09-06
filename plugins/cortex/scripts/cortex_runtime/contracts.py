@@ -50,11 +50,11 @@ TOOLS = [
          "The server stores the canonical project root, creates and makes owner-writable "
          "<project_root>/.cortex/draft-reports and <project_root>/.cortex/pipeline-drafts directories, and saves the original request as an "
          "immutable Markdown report in <project_root>/.codex/cortex/<task>. SQLite metadata "
-         "lives under $CODEX_HOME/cortex; CODEX_HOME is already the .codex directory. "
+         "lives only in <project_root>/.codex/cortex/cortex.sqlite3, selected from the validated native thread/parent project. No global database or environment path fallback is used. "
          "Reads the current native turn\'s typed UserMessage receipt from the current CODEX_HOME host state, scoped to the exact host thread and canonical project. The model does not copy or supply the original task text. Fails closed if that source is unavailable; never substitute a summary. Returns its immutable report reference and source digest. Child threads inherit their registered "
          "parent task and cannot create tasks. Never pass task or thread IDs.", {
              "state": string("Explicitly selected operating state; default cortex when creating an explicitly requested Cortex task. normal suspends automatic capture and hints.",6,enum=["cortex","normal"]),
-             "project_root": string("Absolute existing canonical project directory supplied by the host.", 4096),
+             "project_root": string("Absolute existing canonical project directory supplied by the host; must exactly match the native thread/parent project and cannot select a different database.", 4096),
              "request_key": KEY,
              "redact_values": dict(type="array",maxItems=32,uniqueItems=True,
                  items=string("One exact credential value to replace with [REDACTED]; never task prose, commands, requirements or restrictions.",16_000),
@@ -219,6 +219,9 @@ BY_NAME = {item["name"]: item for item in TOOLS}
 
 
 ERROR_HELP = {
+    "project_context_unavailable": "The supported native Codex index cannot establish this thread's project. Restore that host index and retry; do not supply a database path or fall back to another project or a global archive.",
+    "project_context_conflict": "Native thread, parent or requested project locations disagree with the verified project binding. Continue in the original project or explicitly relocate its archive offline; changing the working directory cannot switch an existing task's database.",
+    "project_storage_mismatch": "This project-local database contains a different project's metadata or is outside the canonical project storage path. Use the explicit stopped-access archive split into the correct project; no global database fallback is supported.",
     "invalid_arguments": "Input does not match the advertised schema. Correct the named field using expected and correction, then retry once.",
     "request_too_large": "The encoded MCP request exceeds 2,000,000 bytes. Markdown bodies belong in the file returned by create_draft, not the request. Shorten metadata and publish the server-issued draft_id.",
     "invalid_project": "Use the absolute existing canonical project directory supplied by the host.",

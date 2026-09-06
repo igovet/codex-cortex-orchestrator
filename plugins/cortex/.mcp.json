@@ -9,7 +9,6 @@
       "cwd": ".",
       "required": true,
       "env_vars": [
-        "CORTEX_DATA_DIR",
         "CORTEX_OBSERVATION_DIR"
       ]
     }

@@ -1,6 +1,24 @@
 # Verification
 
-## Current v9 source evidence
+## Project-local storage source evidence
+
+Candidate `1.15.6+codex.sha256.4b26dcd06eb65e14` passed stamp, package validation,
+source-only sync and 128 focused tests sequentially. The complete suite passed
+**241 tests in 10.76 seconds**. The new coverage verifies cross-process lock
+isolation between projects, same-project concurrent writes and foreign keys,
+report/draft boundaries, native parent routing, restart and missing-index behavior,
+project-only retention, rejected-file preservation and offline archive splitting.
+The isolated observer additionally accepts an exact single-quoted Python `-c`
+skill read after validating its syntax tree; shell expansion and extra operations
+remain rejected. All 29 observer tests pass. Fresh ordinary CLI and actual Desktop
+qualification passed consecutively on the same unchanged payload. CLI reviewed
+66 host calls, 11 MCP events and 31 hook actions; Desktop reviewed 59 calls, 14 MCP
+events and 27 hook actions. Both Cortex audits exited zero. Independent product,
+archive and retained-store checks passed. The initial CLI attempt and its resume
+remain disclosed as protocol rejections, despite successful routing/recovery checks.
+See [release readiness](../release-readiness.md) for exact scope and measurements.
+
+## Historical v9 source evidence
 
 Candidate `1.15.6+codex.sha256.0066c0266f853fd5` preserves version 1.15.6, the
 unchanged seven-operation catalogue and 22 specialist profiles. Stamp, package
@@ -59,6 +77,11 @@ disk failure, short reference collision recovery,
 complete native profile payloads, host-metadata task binding, nested parent
 inheritance, automatic pipeline selection and package identity.
 
+The project storage tests hold project A’s SQLite writer lock in another process
+and verify project B completes before that lock is released. Same-project writes
+remain serialized; concurrent tasks retain their bindings and foreign-key consistency.
+These source checks do not replace real CLI/Desktop qualification.
+
 For real execution, use a separate existing test project and start
 `./scripts/cortex-live-smoke start --workdir PATH`. The helper creates only the
 exact `cortex-markdown-smoke` session on the default tmux server and attaches an
@@ -86,25 +109,23 @@ coordinator and child metadata on both CLI and Desktop first. Verify exact paren
 linkage; never infer support from upstream code alone.
 
 After exiting ordinary Codex, capture `Cortex live-dev exit=0`, then `stop` the
-exact session. New CLI smoke runs create a fresh owner-private data store by default;
-`--data-dir PATH` or `CORTEX_DATA_DIR=PATH` selects an explicit store. Resume with
-the same workdir and `--resume-last`; it reuses the exact saved store and rejects a
-missing or mismatched store. If saved state has no store, supply an explicit existing
-one. `stop` preserves the store for resume and removes only the session and
-observation streams. Confirm the existing task, selective report recovery and no
-replacement task creation.
+exact session. CLI smoke runs derive the store from the canonical workdir at
+`PATH/.codex/cortex/cortex.sqlite3`. Resume with the same workdir and
+`--resume-last`; it reuses that exact project-local store and rejects a missing or
+mismatched store. `stop` preserves the store for resume and removes only the
+session and observation streams. Confirm the existing task, selective report
+recovery and no replacement task creation.
 Finish by stopping the exact session; after failure use `stop --interrupt`.
 Never kill the tmux server or use `codex exec` as native evidence.
 
 Actual Desktop uses
-`scripts/cortex-desktop-dev start --workdir PATH --prompt-file TASK_PROMPT.txt --data-dir FRESH_PRIVATE_DIR`
+`scripts/cortex-desktop-dev start --workdir PATH --prompt-file TASK_PROMPT.txt`
 with `CORTEX_DESKTOP_BINARY` pointing to the real executable. The helper prepares
 the same candidate, uses a disposable Electron profile, and opens exactly one new
-Desktop task with the literal prompt from the regular UTF-8 file. The explicit
-owner-private data directory keeps a run inspectable and prevents an obsolete
-isolated schema from contaminating fresh qualification; without it the helper
-creates and later removes a fresh private directory automatically. Omit
-`--prompt-file` only for manual UI entry. Source checks are not Desktop evidence;
+Desktop task with the literal prompt from the regular UTF-8 file. The project-local
+store keeps a run tied to its canonical workdir; the helper uses a disposable
+Desktop profile separately. Omit `--prompt-file` only for manual UI entry. Source
+checks are not Desktop evidence;
 disclose missing credentials, display access or unrun host checks. See the
 recorded [release evidence](../release-readiness.md).
 
@@ -301,12 +322,16 @@ migration, patch-content false positives, unknown subagent identity and hook fai
 Existing fault tests cover competing publications and process exit before commit.
 Report correctness, recovery and protocol independently; retain failed attempts.
 
-The root-verified stamped main source suite passed **203 tests in 8.92 seconds**
-against payload `1.15.6+codex.sha256.5fc56d97e836cdb4`. The mandatory scenarios
+The current stamped source suite passed **241 tests in 10.76 seconds** against
+payload `1.15.6+codex.sha256.4b26dcd06eb65e14`. The mandatory scenarios
 map to these unit regressions:
 
 | Scenario | Source-backed unit coverage |
 |---|---|
+| Independent projects and same-project concurrency | [`test_project_database_locks_are_independent_across_processes`](../../tests/test_project_storage.py) proves independent writes while another project is locked; `test_multiple_tasks_in_one_project_remain_consistent` verifies same-project task bindings and foreign keys. |
+| Native project routing and recovery | [`test_child_requires_indexed_parent_and_rejects_cross_project_or_edge_conflicts`](../../tests/test_project_storage.py), `test_restart_routes_from_index_without_rollout_and_preserves_archive` and `test_missing_or_corrupt_native_index_has_no_global_or_cwd_fallback` cover routing limits. |
+| Safe rejection and retention | [`test_rejected_database_keeps_bytes_and_journal_mode`](../../tests/test_project_storage.py) preserves incompatible files; [`test_retention_command_uses_only_selected_project_store`](../../tests/test_retention.py) leaves a legacy global store unchanged. |
+| Explicit archive split | [`test_split_preserves_all_selected_metadata_and_never_copies_markdown`](../../tests/test_project_split.py) checks selected rows and backups; `test_split_holds_source_sqlite_and_destination_access_locks_through_publication` verifies full lock lifetime. |
 | Neighbor corruption | [`test_corrupt_neighbor_never_blocks_restart_or_other_task`](../../tests/test_storage_v11.py) isolates recovery to the selected task; [`test_hook_load_does_not_recover_corrupt_neighbor`](../../tests/test_hooks.py) keeps hook loading from touching the damaged neighbor. |
 | Unavailable or long host journal | [`test_archive_reads_survive_capture_failure`](../../tests/test_storage_v11.py) and [`test_unavailable_new_source_does_not_hide_saved_reports`](../../tests/test_host_source.py) preserve archive access; [`test_current_turn_boundary_can_precede_more_than_eight_megabytes`](../../tests/test_host_source.py) exercises a single oversized irrelevant host record without a tail-window fallback. |
 | Concurrent publication and crash before commit | [`test_concurrent_delivery_once_and_distinct_writes`](../../tests/test_markdown_store.py) covers competing deliveries; [`test_crash_before_pipeline_commit_restores_backup`](../../tests/test_source_reports.py) covers process exit and task-scoped recovery. |
@@ -320,10 +345,10 @@ map to these unit regressions:
 | Normal/resume pending-source retirement | [`test_normal_interval_is_not_archived_and_current_reactivation_is_preserved`](../../tests/test_storage_v11.py), [`test_unavailable_resume_boundary_remains_pending_until_authoritative_source`](../../tests/test_storage_v11.py) and [`test_normal_transition_retires_only_accepted_skipped_pending_signals`](../../tests/test_storage_v11.py) cover pause, authoritative resume and task-scoped retirement. |
 | Exact replay with redaction | [`test_accepted_write_replay_does_not_apply_old_redactions_to_new_source`](../../tests/test_storage_v11.py) proves replay skips unrelated pending source and its historical redactions; [`test_steering_redaction_and_delivery_replay`](../../tests/test_host_source.py) proves the next fresh call captures that source exactly once. |
 
-This table is unit-test evidence for storage, source and hook behavior. Real CLI and
-Desktop evidence for this exact unchanged payload remains pending; do not treat the
-source-suite result as host event coverage, transport fidelity, performance evidence
-or CLI/Desktop parity.
+This table is unit-test evidence for storage, source and hook behavior. The
+separate [release evidence](../release-readiness.md) records the consecutive real
+CLI/Desktop pair, retained earlier rejections and source-only hook timing. Unit
+results alone do not establish host coverage, transport fidelity or performance.
 
 Hook streams are distinct from model/MCP calls. A parent session ID alone does not
 prove the actor of a tool hook. Verify explicit lifecycle agent IDs against the task

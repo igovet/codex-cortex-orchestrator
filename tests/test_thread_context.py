@@ -6,6 +6,7 @@ from pathlib import Path
 import uuid
 
 from cortex_runtime.server import Server
+from cortex_runtime.project_storage import ProjectResolver
 from cortex_runtime.store import Store
 from cortex_runtime.cleanup import clear_tasks
 
@@ -46,7 +47,7 @@ def write(server,project,thread,parent=None,**extra):
 
 
 def test_report_reference_typos_never_resolve_to_another_report(tmp_path):
-    server=Server(tmp_path/'store');root,child=tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));root,child=tid(),tid()
     create(server,tmp_path,root)
     published=write(server,tmp_path,child,root)
     reference=published['report_id']
@@ -58,40 +59,40 @@ def test_report_reference_typos_never_resolve_to_another_report(tmp_path):
 
 
 def test_root_child_nested_restart_and_automatic_pipeline(tmp_path):
-    server=Server(tmp_path/'store');root,child,nested=tid(),tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));root,child,nested=tid(),tid(),tid()
     create(server,tmp_path,root)
     error(call(server,'read_report',{},root),'pipeline_missing')
     pipeline=write(server,tmp_path,root,kind='pipeline')
     assert ok(call(server,'list_reports',{},child,root))['reports'][0]['report_id']==pipeline['report_id']
     assert '# Newest' in ok(call(server,'read_report',{},child,root))['markdown']
     worker=write(server,tmp_path,nested,child)
-    restarted=Server(tmp_path/'store')
+    restarted=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
     assert ok(call(restarted,'read_report',{'report_id':worker['report_id']},nested,child))['markdown'].endswith('Complete evidence.')
     assert ok(call(restarted,'read_report',{},root))['report_id']==pipeline['report_id']
-    with Store(tmp_path/'store').connection() as db:
+    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
         assert db.execute('SELECT COUNT(DISTINCT task_id) FROM thread_bindings').fetchone()[0]==1
         assert db.execute('SELECT COUNT(*) FROM thread_bindings').fetchone()[0]==3
 
 
 def test_same_worker_new_assignment_preserves_report_and_pipeline_after_restart(tmp_path):
-    server=Server(tmp_path/'store');root,child=tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));root,child=tid(),tid()
     create(server,tmp_path,root)
     pipeline=write(server,tmp_path,root,kind='pipeline')
     first=write(server,tmp_path,child,root)
     before=ok(call(server,'read_report',{'report_id':first['report_id']},root))
-    restarted=Server(tmp_path/'store')
+    restarted=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
     second=write(restarted,tmp_path,child,root,title='Bounded follow-up')
     assert second['report_id']!=first['report_id']
     assert ok(call(restarted,'read_report',{'report_id':first['report_id']},root))==before
     assert ok(call(restarted,'read_report',{},root))['report_id']==pipeline['report_id']
     assert ok(call(restarted,'read_report',{'report_id':second['report_id']},root))['sha256']==second['sha256']
     # Storage retains ownership; it does not implement an assignment approval gate.
-    with Store(tmp_path/'store').connection() as db:
+    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
         assert db.execute('SELECT COUNT(*) FROM thread_bindings').fetchone()[0]==2
 
 
 def test_missing_invalid_unknown_and_conflicting_context_cannot_select_latest(tmp_path):
-    server=Server(tmp_path/'store');root,child,other=tid(),tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));root,child,other=tid(),tid(),tid()
     create(server,tmp_path,root)
     for transport,code in [(None,'thread_metadata_missing'),({},'thread_metadata_missing'),
             ({'threadId':root,'x-codex-turn-metadata':'{}'},'thread_metadata_missing'),
@@ -107,7 +108,7 @@ def test_missing_invalid_unknown_and_conflicting_context_cannot_select_latest(tm
 
 
 def test_no_task_or_thread_selectors_and_no_cross_task_report_reads(tmp_path):
-    server=Server(tmp_path/'store');one,two=tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));one,two=tid(),tid()
     original=create(server,tmp_path,one);create(server,tmp_path,two)
     for tool in server.dispatch('tools/list',{})['tools']:
         for schema in ('inputSchema','outputSchema'):
@@ -120,7 +121,7 @@ def test_no_task_or_thread_selectors_and_no_cross_task_report_reads(tmp_path):
 
 
 def test_draft_is_bound_to_creator_thread_and_many_coordinator_drafts_are_distinct(tmp_path):
-    server=Server(tmp_path/'store');root,first,second=tid(),tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));root,first,second=tid(),tid(),tid()
     create(server,tmp_path,root)
     one=ok(call(server,'create_draft',dict(template='planning',request_key='one'),root))
     two=ok(call(server,'create_draft',dict(template='pipeline',request_key='two'),root))
@@ -139,7 +140,7 @@ def test_draft_is_bound_to_creator_thread_and_many_coordinator_drafts_are_distin
 def test_internal_task_identifier_is_redacted_from_tool_errors(tmp_path):
     import os
 
-    server=Server(tmp_path/'store'); thread=tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path))); thread=tid()
     original=create(server,tmp_path,thread)
     with server.store.connection() as db:
         task=db.execute('SELECT task_id FROM thread_bindings WHERE thread_id=?',(thread,)).fetchone()[0]
@@ -152,7 +153,7 @@ def test_internal_task_identifier_is_redacted_from_tool_errors(tmp_path):
 
 
 def test_creation_receipts_are_thread_scoped_and_atomic(tmp_path):
-    server=Server(tmp_path/'store');one,two=tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));one,two=tid(),tid()
     args=dict(project_root=str(tmp_path),request='First',request_key='same')
     first=ok(call(server,'create_task',args,one))
     assert ok(call(server,'create_task',args,one))==first|dict(replayed=True)
@@ -160,17 +161,17 @@ def test_creation_receipts_are_thread_scoped_and_atomic(tmp_path):
     error(call(server,'create_task',args|dict(request_key='second'),one),'task_already_bound')
     assert ok(call(server,'create_task',args,two))['original_report_id']!=first['original_report_id']
     three=tid()
-    def attempt(key):return call(Server(tmp_path/'store'),'create_task',args|dict(request_key=key),three)
+    def attempt(key):return call(Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path))),'create_task',args|dict(request_key=key),three)
     with ThreadPoolExecutor(2) as pool:results=list(pool.map(attempt,['a','b']))
     assert sum(not r['isError'] for r in results)==1
     error(next(r for r in results if r['isError']),'task_already_bound')
 
 
 def test_clear_removes_all_bindings_receipts_and_protects_native_threads(tmp_path):
-    server=Server(tmp_path/'store');one,two,child=tid(),tid(),tid()
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));one,two,child=tid(),tid(),tid()
     create(server,tmp_path,one);create(server,tmp_path,two)
     ok(call(server,'list_reports',{},child,one))
-    store=Store(tmp_path/'store')
+    store=Store(tmp_path/'.codex/cortex',project_root=tmp_path)
     with store.connection() as db:
         tasks={row['thread_id']:row['task_id'] for row in db.execute('SELECT * FROM thread_bindings')}
     result=clear_tasks(store,str(tmp_path),0,[child],datetime.now(timezone.utc)+timedelta(days=1))

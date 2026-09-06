@@ -12,9 +12,11 @@ linkage must agree with retained binding evidence. Missing or conflicting bindin
 cannot broaden access. Author labels and artifact versions remain reported
 metadata, not independently authenticated evidence.
 
-SQLite stores metadata, relationships, digests and receipts. Report bodies and
-original messages are private Markdown files under `.codex/cortex/<task>/`.
-Drafts use project `.cortex/`. Reports, source files, attachment references and
+Each canonical project owns one SQLite store at
+`.codex/cortex/cortex.sqlite3`; separate projects do not share this metadata
+boundary. SQLite stores metadata, relationships, digests and receipts. Report
+bodies and original messages are private Markdown files under
+`.codex/cortex/<task>/`. Drafts use project `.cortex/`. Reports, source files, attachment references and
 metadata may contain private information: do not commit, export or log them without
 user authorization. Literal credential redaction preserves surrounding constraints;
 translation or summarization is not redaction. The runtime does not claim automatic
@@ -37,11 +39,13 @@ These checks do not establish protection against a malicious local filesystem ra
 
 Storage format 11 has no automatic compatibility reader. The separate offline
 10→11 conversion requires stopped access and a backup; it changes metadata without
-rewriting Markdown. Back up the SQLite index and all project task directories as
-one stopped-access set. Retention is irreversible without that backup. It deletes
-only the selected project's eligible tasks and known owned drafts, preserving
-unrelated files and shared directories. The coordinator supplies active-task
-exclusions; storage cannot infer whether an agent is still working.
+rewriting Markdown. A legacy shared v11 store can be split into one fresh
+project-local store with `cortex_split.py`; the split requires stopped access and a
+new verified backup and never copies or rewrites Markdown. Back up each project's
+SQLite file and task directories together. Retention is irreversible without that
+backup. It deletes only the selected project's eligible tasks and known owned
+drafts, preserving unrelated files and shared directories. The coordinator supplies
+active-task exclusions; storage cannot infer whether an agent is still working.
 
 ## Source capture and hooks
 
@@ -53,8 +57,10 @@ even when text matches. Attachment metadata records recovery routes and explicit
 it does not imply that an attachment was copied or verified.
 
 Follow-up capture runs only for an already active Cortex task. `normal` suspends
-capture without deleting the archive. A host-source failure leaves saved reports
-accessible with explicit capture completeness; unavailable sources never become
+capture without deleting the archive. With an established project route, a
+host-source failure leaves saved reports accessible with explicit capture
+completeness. A fresh process still requires the validated native index to locate
+the archive; it never scans or guesses a global store. Unavailable sources never become
 invented requirements. Source and report provenance help the coordinator decide
 whether earlier evidence is still usable.
 

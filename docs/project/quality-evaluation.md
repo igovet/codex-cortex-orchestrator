@@ -34,7 +34,7 @@ to claim a speed improvement over the baseline's two completed phases.
 ```bash
 python3 -B scripts/cortex_eval.py pilot-list
 python3 -B scripts/cortex_eval.py pilot-prepare stable-unique /tmp/cortex-trial --configuration baseline
-./scripts/cortex-live-smoke start --workdir /tmp/cortex-trial/project --data-dir /tmp/cortex-trial/store --model gpt-5.6-luna --effort high
+./scripts/cortex-live-smoke start --workdir /tmp/cortex-trial/project --model gpt-5.6-luna --effort high
 ```
 
 Confirm trust, composer and matching initialization receipt before sending the saved
@@ -166,7 +166,7 @@ Example fixture preparation (use a fresh private output directory):
 ```bash
 python3 -B scripts/cortex_eval.py list
 python3 -B scripts/cortex_eval.py prepare retry-dedup /tmp/cortex-trial-01 --configuration baseline --attempt 1
-./scripts/cortex-live-smoke start --workdir /tmp/cortex-trial-01/project --data-dir /tmp/cortex-trial-01/store
+./scripts/cortex-live-smoke start --workdir /tmp/cortex-trial-01/project
 # Observe capture/status, confirm a visible trust screen with enter, then confirm composer/events.
 ./scripts/cortex-live-smoke send --prompt-file /tmp/cortex-trial-01/prompt.txt
 python3 -B scripts/cortex_eval.py grade /tmp/cortex-trial-01

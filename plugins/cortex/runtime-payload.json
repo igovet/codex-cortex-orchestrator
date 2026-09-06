@@ -11,8 +11,11 @@
     "scripts/cortex_runtime/hooks.py",
     "scripts/cortex_runtime/host_source.py",
     "scripts/cortex_runtime/migrate.py",
+    "scripts/cortex_runtime/project_storage.py",
     "scripts/cortex_runtime/server.py",
+    "scripts/cortex_runtime/split.py",
     "scripts/cortex_runtime/store.py",
-    "scripts/cortex_setup.py"
+    "scripts/cortex_setup.py",
+    "scripts/cortex_split.py"
   ]
 }

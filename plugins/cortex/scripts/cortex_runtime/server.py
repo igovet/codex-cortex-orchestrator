@@ -9,10 +9,12 @@ import re
 import sys
 import time
 import uuid
+from collections import OrderedDict
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
 from .host_source import original_request, pending_requests
 from .store import Store, private_directory
+from .project_storage import ProjectResolver, project_store_directory
 
 PLUGIN = Path(__file__).resolve().parents[2]
 VERSION = json.loads((PLUGIN / '.codex-plugin/plugin.json').read_text())['version']
@@ -98,8 +100,9 @@ class ProtocolError(Exception):
 
 
 class Server:
-    def __init__(self, directory=None):
-        self.directory = directory or os.environ.get('CORTEX_DATA_DIR') or str(Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex'))) / 'cortex')
+    def __init__(self, *, project_resolver=None):
+        self.projects = project_resolver or ProjectResolver()
+        self.stores = OrderedDict()
         self.store = None
         self.request_source = original_request
         self.steering_source = pending_requests
@@ -126,15 +129,27 @@ class Server:
         try:
             validate(name,params.get('arguments',{}))
             thread,parent=thread_context(params.get('_meta'))
-            if self.store is None:
-                self.store = Store(self.directory)
+            if name=='create_task' and parent is not None:raise StoreError('child_creation')
+            project=self.projects.resolve(thread,parent)
+            if name=='create_task' and params['arguments']['project_root']!=project:
+                raise StoreError('project_context_conflict')
+            store=self.stores.get(project)
+            if store is None:
+                directory=project_store_directory(project)
+                if name!='create_task' and not (directory/'cortex.sqlite3').exists():
+                    raise StoreError('parent_not_bound' if parent else 'task_not_bound')
+                store=Store(directory,initialize=name=='create_task',project_root=project)
+                self.stores[project]=store
+            self.stores.move_to_end(project)
+            while len(self.stores)>16:self.stores.popitem(last=False)
+            self.store=store
             source=None
             if name=='create_task':
-                if parent is not None:raise StoreError('child_creation')
                 source=lambda:self.request_source(thread,params['arguments']['project_root'])
             steering=lambda project,cursor:self.steering_source(thread,project,cursor)
-            data = self.store.call(name, params.get('arguments',{}),thread,parent,
+            data = store.call(name, params.get('arguments',{}),thread,parent,
                                    original_request=source,steering_source=steering if parent is None else None)
+            self.projects.remember(thread,parent,project)
             observe(name,'success',data.get('replayed',False),params.get('_meta'),params.get('arguments'),data)
             return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
         except StoreError as exc:

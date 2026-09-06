@@ -126,11 +126,13 @@ Use a specific existing repository or worktree, for example `/workspace/my-servi
 The host supplies its absolute canonical directory. Each task stores that exact
 project boundary; do not use a broad system or home directory as the project.
 
-Task documents are real files under `.codex/cortex/<task>/` in that project.
-The active Codex home's `cortex/cortex.sqlite3` contains the private SQLite
-metadata index. Task/report association is checked on every read. Keep both locations
-together for offline backups. The installed MCP configuration invokes `python3`
-directly, so its launch environment must resolve Python 3.11 or newer.
+Task documents and the private SQLite metadata index are both project-local:
+`.codex/cortex/<task>/` and `.codex/cortex/cortex.sqlite3`. The active Codex
+home's `state_5.sqlite` locates native source records and validates the thread's
+canonical project; it is not the Cortex store. Task/report association is checked on every
+read. Keep the project's SQLite file and task directories together for offline
+backups. The installed MCP configuration invokes `python3` directly, so its launch
+environment must resolve Python 3.11 or newer.
 
 ### macOS-specific installation notes
 
@@ -569,9 +571,12 @@ The seven MCP operations remain `create_task`, `set_governance`, `create_draft`,
 `read_draft`, `write_report`, `list_reports` and `read_report`. Their advertised
 schemas contain argument, provenance, binding, change-query and retry contracts.
 Host thread metadata resolves the task; the model never guesses task identifiers.
-SQLite holds metadata and relationships, while report bodies live under project
+Each canonical project has its own SQLite store at
+`.codex/cortex/cortex.sqlite3`; projects never share a Cortex database. SQLite
+holds metadata and relationships, while report bodies live under project
 `.codex/cortex/<task>/`. Editable drafts live under `.cortex/` because Codex protects
-ordinary writes to project `.codex/`.
+ordinary writes to project `.codex/`. Requests for one project serialize through
+that project's store while unrelated projects use independent stores.
 
 The server streams full UTF-8 drafts, verifies original file identity, atomically
 publishes files and commits metadata. Exact retries return the accepted receipt.
@@ -581,7 +586,10 @@ avoid repeated full reads of unchanged reports; changed files are revalidated.
 
 Storage format 11 requires the separate offline 10→11 migration and a backup with
 access stopped. Migration changes metadata only and leaves Markdown bytes intact.
-See [storage and migration](docs/project/storage.md).
+A legacy shared v11 store can be split into a fresh project-local store with
+`plugins/cortex/scripts/cortex_split.py`; the split also requires stopped access,
+a new backup, and leaves the source and Markdown unchanged. See
+[storage and migration](docs/project/storage.md).
 
 ### Lifecycle hooks
 
@@ -696,8 +704,10 @@ The complete installable product lives under `plugins/cortex/`. Root-level
 | `plugins/cortex/scripts/cortex_runtime/contracts.py` | Advertised schemas and limits |
 | `plugins/cortex/scripts/cortex_runtime/host_source.py` | Read the current host thread’s typed user input within its project boundary |
 | `plugins/cortex/scripts/cortex_runtime/store.py` | SQLite metadata and real Markdown storage |
+| `plugins/cortex/scripts/cortex_runtime/project_storage.py` | Native project binding and project-local store routing |
 | `plugins/cortex/scripts/cortex_runtime/server.py` | Bounded stdio transport and private errors |
 | `plugins/cortex/scripts/cortex_clear.py` | Explicit host-side retention command |
+| `plugins/cortex/scripts/cortex_split.py` | Stopped-access split from a legacy shared store |
 | `plugins/cortex/profiles.json` | 22 advisory specialist descriptions |
 | `plugins/cortex/skills/orchestrator/SKILL.md` | Coordination and model selection |
 | `plugins/cortex/skills/cortex-control/SKILL.md` | Shared worker reporting protocol |
@@ -730,7 +740,7 @@ Actual Desktop uses the same prepared candidate and a disposable Electron profil
 
 ```bash
 ./scripts/cortex-desktop-dev start --workdir /absolute/existing/test-project \
-  --prompt-file /absolute/TASK_PROMPT.txt --data-dir /absolute/fresh-private-data
+  --prompt-file /absolute/TASK_PROMPT.txt
 ./scripts/cortex-desktop-dev status
 ./scripts/cortex-desktop-dev send
 ./scripts/cortex-desktop-dev events
@@ -851,11 +861,10 @@ and seven-tool catalogue. Workloads begin with `$cortex:orchestrator` followed b
 ordinary product work. `send --prompt-file FILE` pastes once, waits five real
 seconds and sends one named Enter; it requires a native input receipt.
 
-Each new CLI smoke run creates a fresh owner-private data store by default. Use
-`--data-dir PATH` or `CORTEX_DATA_DIR=PATH` to select an explicit store. A
-`--resume-last` run reuses the exact saved store and rejects a missing or mismatched
-store; if saved state has no store, provide an explicit existing one. `stop` keeps
-the store for resume and removes only the session and observation streams.
+Each new CLI smoke run uses the exact project-local store at
+`PATH/.codex/cortex/cortex.sqlite3`. A `--resume-last` run reuses that same
+canonical project store and rejects a missing or mismatched store. `stop` keeps the
+project store for resume and removes only the session and observation streams.
 
 Inspect complete `calls` and `events`, including after a discovered fault, and run
 `audit` before stopping. A command wrapper must expose its exit status or running

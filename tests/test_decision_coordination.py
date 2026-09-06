@@ -153,6 +153,48 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
         'exec_command',json.dumps({'cmd':negatives[1]}),'general','/fixture')
 
 
+def test_python_inline_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch):
+    check=OBSERVER['call_policy_flags']
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    skill=(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
+           /'1.15.6+codex.sha256.fixture/skills/orchestrator/SKILL.md')
+    skill.parent.mkdir(parents=True);skill.write_text('instructions')
+
+    def command(path,flag=''):
+        program=f'from pathlib import Path; print(Path("{path}").read_text())'
+        return f"python3{flag} -c '{program}'"
+
+    for value in (command(skill),command(skill,' -B')):
+        arguments=json.dumps({'cmd':value})
+        assert OBSERVER['python_skill_read_paths'](value)==[skill]
+        assert OBSERVER['skill_instruction_read']('exec_command',arguments)
+        flags=check('exec_command',arguments,'coordinator','/fixture')
+        assert 'forbidden_plugin_or_cache_access' not in flags
+        assert 'coordinator_forbidden_tool' not in flags
+
+    valid=command(skill)
+    raw_wrapper=('const result = await tools.exec_command({cmd:'+json.dumps(valid)
+                 +',workdir:"/fixture",yield_time_ms:10000}); text(result);')
+    assert OBSERVER['shell_command_text'](raw_wrapper)==valid
+    assert OBSERVER['skill_instruction_read']('exec_command',raw_wrapper)
+    assert check('exec_command',raw_wrapper,'coordinator','/fixture')==[]
+    negatives=(
+        valid.replace("-c '", '-c "').removesuffix("'")+'"',
+        valid.replace(".read_text())'", ".read_text()); Path(\"/tmp/changed\").touch()'"),
+        valid.replace('Path("'+str(skill)+'")', 'Path(__import__("os").environ["SKILL"])'),
+        valid.replace('.read_text()', '.write_text("changed")'),
+        valid+'; touch /tmp/changed',
+        valid.replace('print(Path(', 'print(open("/tmp/other").read() + Path('),
+        valid.replace('print(Path(', 'p=Path(').replace(').read_text())', '); print(p.read_text())'),
+    )
+    for value in negatives:
+        arguments=json.dumps({'cmd':value})
+        assert OBSERVER['python_skill_read_paths'](value)==[]
+        assert not OBSERVER['skill_instruction_read']('exec_command',arguments)
+        assert 'coordinator_forbidden_tool' in check(
+            'exec_command',arguments,'coordinator','/fixture')
+
+
 def test_native_archived_request_digest_preserves_verified_editor_bytes():
     digest=OBSERVER['original_request_digest']
     allowed=OBSERVER['delivered_request_digests']

@@ -434,13 +434,23 @@ def main(stdin=None, stdout=None, stderr=None):
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("hook input must be an object")
-        directory = Path(os.environ.get("CORTEX_DATA_DIR") or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "cortex")
+        from .project_storage import canonical_project, native_project, project_store_directory
+        session, cwd = payload.get('session_id'), payload.get('cwd')
+        if not _identifier(session):
+            raise ValueError('invalid hook session identity')
+        project = canonical_project(cwd)
+        directory = project_store_directory(project)
         if not (directory / "cortex.sqlite3").exists():
             output = {}
             row = {"event_kind": "hook", "hook_event": payload.get("hook_event_name") if payload.get("hook_event_name") in EVENTS else "unknown", "outcome": "inactive"}
         else:
+            if native_project(session, check_parent=False) != project:
+                raise StoreError('project_context_conflict')
+            if payload.get('hook_event_name')=='SubagentStart' and _identifier(payload.get('agent_id')):
+                if native_project(payload['agent_id'], session) != project:
+                    raise StoreError('project_context_conflict')
             from .store import Store
-            handler = HookHandler(HookStorage(Store(directory, initialize=False)))
+            handler = HookHandler(HookStorage(Store(directory, initialize=False, project_root=project)))
             output = handler.handle(payload)
             row = handler.observation
         stdout.write(json.dumps(output, sort_keys=True) + "\n")

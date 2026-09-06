@@ -1,4 +1,68 @@
-# Format 11 v9 improvement candidate — bounded CLI/Desktop qualification passed
+# Project-local SQLite candidate — CLI/Desktop qualification passed
+
+Candidate `1.15.6+codex.sha256.4b26dcd06eb65e14` preserves semantic version 1.15.6,
+seven MCP operations and all 22 specialist profiles. The full payload SHA-256 is
+`4b26dcd06eb65e14f7c074e343c3fda9b7da94997ad7e1d0bb20b11669f9b375`; the catalogue digest is
+`f84b501e716b3990ba8308c428608061534b2dbc7a68d9dff177bf12b866be66`.
+
+Cortex metadata now lives only in `<project>/.codex/cortex/cortex.sqlite3`, selected
+from validated native thread and parent identity. Different projects use independent
+SQLite files; tasks in one project still share SQLite serialization. No global-store
+or environment override fallback is available. The explicit offline splitter keeps
+legacy SQLite and Markdown unchanged and verifies a private backup before publishing
+only the selected project’s metadata. Stable user data has not been migrated.
+
+Stamp, package validation and source-only sync passed sequentially, followed by
+**128 focused tests** and **241 total tests in 10.76 seconds**. Rejected unsupported
+and foreign-project databases retain their bytes and journal mode. Independent
+process tests prove project B can write while project A is locked. Same-project
+concurrent writes, native routing, missing source/index behavior, retention and
+archive export are covered. `git diff --check` and local documentation link checks
+passed. The same unchanged payload completed consecutive ordinary CLI and actual
+Desktop runs on 2026-09-06, with Luna/high coordinators and Luna/medium technical
+writers. Both Cortex audits exited zero. Complete host-call reviews found no MCP
+or hook failures, Cortex protocol violations, truncation or open command sessions.
+
+| Host | Host calls | MCP events | Hook actions | Total tokens | Cached input | Native task seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CLI | 66 | 11 | 31 | 922,977 | 826,880 | 196.026 |
+| Desktop | 59 | 14 | 27 | 1,114,046 | 1,000,704 | 192.145 |
+
+The CLI trace retains a project example import error and the successful corrected
+invocation; it is not an error-free product run. Desktop had no host-tool errors.
+Its X11 focus command emitted a desktop-property warning but returned success, and
+the exact-window submission produced one new task receipt. Independent examples,
+contract checks, protected-file hashes, SQLite integrity and foreign keys passed
+on both hosts. Each retained database contains one task and only its own project’s
+coordinator/child bindings. All declared artifact hashes and final report hashes
+match, all drafts are published, and each archive has one newest-first pipeline.
+CLI exited normally with its zero marker; Desktop and CLI observation sessions
+were stopped and temporary streams removed while project stores were preserved.
+The stable plugin, configuration and legacy shared database were not changed.
+This qualifies the tested routing, documentation, report and hook path; it does
+not claim universal task success or eliminate contention within one project.
+
+A source-only hook benchmark ran 100 fresh `python3 -B` subprocesses per path.
+All 300 exited zero with exact empty JSON responses, empty stderr and one private
+observation each. P95 including startup was 45.716 ms inactive, 51.370 ms for active
+tool receipts and 53.023 ms for deferred prompt capture. Active paths used a
+synthetic native index and a project-local task; the inactive path created no store.
+Whole-task percentage overhead remains unverified.
+
+The first CLI run and its same-task resume passed all independent product and
+archive checks, with no MCP or hook failures. Resume retained the task, parent/child
+bindings and pipeline, archived the next request as source revision 2, and preserved
+prior README and pipeline content. Their strict protocol audits were rejected:
+the first run used a wrong draft path before correcting it, and both turns
+shell-read fresh pipeline drafts. The resume also retained two recovered README
+patch failures. Complete calls/events and audits were captured before both normal
+exit-zero shutdowns. An additional false skill-read flag was corrected in the
+isolated observer using a narrow static Python `-c` grammar; all 29 observer tests
+pass, and replay preserves the genuine violations. The plugin payload was unchanged.
+
+---
+
+# Historical Format 11 v9 improvement candidate — bounded CLI/Desktop qualification passed
 
 The source replacement preserves semantic version 1.15.6, seven MCP operations and
 22 specialist profiles. It introduces compact instructions, task-isolated storage,

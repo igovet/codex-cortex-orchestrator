@@ -48,6 +48,8 @@ flushes and atomically renames it, commits metadata, and removes the draft. An
 exact retry returns its existing delivery receipt. An error before commit retains
 the draft; recovery is scoped to the affected task. Report bodies remain real
 Markdown under `.codex/cortex/<task>/`, with no application-wide body-size cap.
+Their metadata is in the same project's `.codex/cortex/cortex.sqlite3`; a different
+project has a separate store and does not contend for this database.
 
 Native source capture uses the explicitly validated current Codex thread and
 project. Identical text in distinct native messages remains distinct. Attachment

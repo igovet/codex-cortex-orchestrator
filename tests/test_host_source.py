@@ -53,7 +53,7 @@ def test_native_source_preserves_conditions_without_model_copy(tmp_path,monkeypa
     with path.open('a') as f:
         f.write(json.dumps(dict(type='response_item',payload=dict(type='message',role='user',content=[dict(type='input_text',text='<skill>Not user source</skill>')])) )+'\n')
     assert original_request(thread,str(project))==text
-    server=Server(tmp_path/'store');result=call(server,thread,project)
+    server=Server();result=call(server,thread,project)
     assert not result['isError']
     data=result['structuredContent'];assert data['original_request_sha256']==hashlib.sha256(text.encode()).hexdigest()
     report=server.store.call('read_report',dict(report_id=data['original_report_id']),thread)
@@ -67,7 +67,7 @@ def test_native_source_preserves_conditions_without_model_copy(tmp_path,monkeypa
 def test_original_preserves_outer_whitespace_after_one_route_separator(tmp_path,monkeypatch):
     text='\n  command --flag  value\nKeep the trailing blank.\n'
     _,project,thread,_=host(tmp_path,monkeypatch,'$cortex:orchestrator '+text)
-    server=Server(tmp_path/'store');result=call(server,thread,project)
+    server=Server();result=call(server,thread,project)
     assert not result['isError']
     report=server.store.call('read_report',dict(
         report_id=result['structuredContent']['original_report_id']),thread)
@@ -82,7 +82,7 @@ def test_multiple_initial_receipts_get_separate_reports_even_with_same_text(tmp_
              native_turn(thread,repeated,'current','initial-one')[-1],
              native_turn(thread,repeated,'current','initial-two')[-1]]
     path.write_text('\n'.join(json.dumps(value) for value in entries)+'\n')
-    server=Server(tmp_path/'store');result=call(server,thread,project)
+    server=Server();result=call(server,thread,project)
     assert not result['isError']
     assert source_bodies(server,thread)==[repeated,repeated]
 
@@ -93,7 +93,7 @@ def test_attachment_only_original_is_archived_as_an_explicit_gap(tmp_path,monkey
     entries=[session_meta(thread,project),*native_turn(
         thread,'','current','attachment-only',attachments)]
     path.write_text('\n'.join(json.dumps(value) for value in entries)+'\n')
-    server=Server(tmp_path/'store');result=call(server,thread,project)
+    server=Server();result=call(server,thread,project)
     assert not result['isError']
     assert result['structuredContent']['source_capture']['status']=='partial'
     assert source_bodies(server,thread)==['']
@@ -120,7 +120,7 @@ def test_host_source_rejects_symlink_and_outside_rollout(tmp_path,monkeypatch):
     with pytest.raises(StoreError,match='host_request_unavailable'):original_request(thread,str(project))
     with sqlite3.connect(home/'state_5.sqlite') as db:db.execute('UPDATE threads SET rollout_path=?',(str(outside),))
     with pytest.raises(StoreError,match='host_request_unavailable'):original_request(thread,str(project))
-    server=Server(tmp_path/'store');result=call(server,thread,project)
+    server=Server();result=call(server,thread,project)
     assert result['isError'] and 'Private task' not in json.dumps(result) and str(outside) not in json.dumps(result)
     with server.store.connection() as db:assert db.execute('SELECT count(*) FROM tasks').fetchone()[0]==0
 
@@ -179,7 +179,7 @@ def test_current_turn_boundary_can_precede_more_than_eight_megabytes(tmp_path,mo
 def test_literal_credential_redaction_preserves_surrounding_requirements(tmp_path,monkeypatch):
     source='Token=PRIVATE_CREDENTIAL_VALUE\nНе изменяй INPUT.\nKeep  two spaces.'
     _,project,thread,_=host(tmp_path,monkeypatch,source)
-    server=Server(tmp_path/'store')
+    server=Server()
     bad=call(server,thread,project,redact_values=['absent credential'])
     assert bad['isError'] and 'PRIVATE_CREDENTIAL_VALUE' not in json.dumps(bad)
     result=call(server,thread,project,redact_values=['PRIVATE_CREDENTIAL_VALUE'])
@@ -211,7 +211,7 @@ def source_bodies(server,thread):
 
 def test_every_steering_is_exact_ordered_and_survives_restart(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original scope')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     first='  Не изменяй INPUT.\n\nВызов: command  --flag\nКлюч invoice_id.\n'
     second='Отмени только --flag. Остальные ограничения сохраняются.\nНе отправляй ничего.'
     append_turn(path,thread,first,'one');append_turn(path,thread,second,'two')
@@ -221,7 +221,7 @@ def test_every_steering_is_exact_ordered_and_survives_restart(tmp_path,monkeypat
     # Repeated native receipt and repeated tool call do not duplicate a report.
     append_turn(path,thread,second,'two')
     assert not operation(server,thread)['isError']
-    restarted=Server(tmp_path/'store')
+    restarted=Server()
     assert not operation(restarted,thread)['isError']
     append_turn(path,thread,'После перезапуска: dry-run не создаёт каталог.','three')
     assert not operation(restarted,thread)['isError']
@@ -230,7 +230,7 @@ def test_every_steering_is_exact_ordered_and_survives_restart(tmp_path,monkeypat
 
 def test_identical_text_with_distinct_native_identities_stays_separate(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original scope')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     repeated='Keep the same exact condition.'
     append_turn(path,thread,repeated,'one','native-one')
     append_turn(path,thread,repeated,'two','native-two')
@@ -245,7 +245,7 @@ def test_identical_text_with_distinct_native_identities_stays_separate(tmp_path,
 def test_attachments_retain_recovery_locations_and_explicit_gaps(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original scope')
     available=tmp_path/'brief.pdf';available.write_bytes(b'fixture')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     attachments=(
         dict(type='file',name='brief.pdf',path=str(available)),
         dict(type='resource',name='requirements',uri='gdrive://document/123'),
@@ -266,7 +266,7 @@ def test_attachments_retain_recovery_locations_and_explicit_gaps(tmp_path,monkey
 
 def test_unavailable_new_source_does_not_hide_saved_reports(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original scope')
-    server=Server(tmp_path/'store');created=call(server,thread,project)['structuredContent']
+    server=Server();created=call(server,thread,project)['structuredContent']
     path.unlink()
     result=operation(server,thread,'read_report',report_id=created['original_report_id'])
     assert not result['isError']
@@ -278,7 +278,7 @@ def test_unavailable_new_source_does_not_hide_saved_reports(tmp_path,monkeypatch
 
 def test_failed_operation_rolls_back_source_and_cursor(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     append_turn(path,thread,'Preserve all validation before filtering.','one')
     # Automatic pipeline lookup fails: no partial source publication is committed.
     assert operation(server,thread,'read_report')['isError']
@@ -293,7 +293,7 @@ def test_failed_operation_rolls_back_source_and_cursor(tmp_path,monkeypatch):
 
 def test_steering_redaction_and_delivery_replay(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     args=dict(template='general',request_key='draft')
     first=operation(server,thread,'create_draft',**args)
     append_turn(path,thread,'Token=PRIVATE_VALUE\nKeep every other condition.','one')
@@ -317,7 +317,7 @@ def test_steering_redaction_and_delivery_replay(tmp_path,monkeypatch):
 
 def test_pending_source_conflict_is_explicit_without_hiding_archive(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     append_turn(path,thread,'Changed content under accepted identity','current')
     result=operation(server,thread)
     assert not result['isError']
@@ -332,7 +332,7 @@ def test_pending_source_conflict_is_explicit_without_hiding_archive(tmp_path,mon
 
 def test_partial_record_and_foreign_inputs_are_not_archived(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     append_turn(path,'foreign-thread','Worker assignment, not user steering','foreign')
     text='Precise new condition'
     raw=json.dumps(native_turn(thread,text,'one')[-1])+'\n'
@@ -346,7 +346,7 @@ def test_partial_record_and_foreign_inputs_are_not_archived(tmp_path,monkeypatch
 
 def test_workers_never_read_coordinator_source(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     append_turn(path,thread,'Pending user restriction','one')
     server.steering_source=lambda *_:pytest.fail('Worker attempted user capture')
     result=server.dispatch('tools/call',dict(name='list_reports',arguments={},
@@ -357,7 +357,7 @@ def test_workers_never_read_coordinator_source(tmp_path,monkeypatch):
 
 def test_steering_publication_failure_retries_without_loss(tmp_path,monkeypatch):
     _,project,thread,path=host(tmp_path,monkeypatch,'Original')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     append_turn(path,thread,'First condition','one');append_turn(path,thread,'Second condition','two')
     publish=server.store._publish_text;count=0
     def fail_second(*args,**kwargs):
@@ -377,7 +377,7 @@ def test_steering_limits_fail_without_truncation_and_retention_cleans_metadata(t
     from datetime import datetime,timedelta,timezone
     from cortex_runtime.cleanup import clear_tasks
     _,project,thread,path=host(tmp_path,monkeypatch,'Original')
-    server=Server(tmp_path/'store');assert not call(server,thread,project)['isError']
+    server=Server();assert not call(server,thread,project)['isError']
     append_turn(path,thread,'A complete requirement that exceeds a test bound','one')
     monkeypatch.setattr('cortex_runtime.host_source.MAX_CAPTURE_CHARACTERS',10)
     refused=operation(server,thread)

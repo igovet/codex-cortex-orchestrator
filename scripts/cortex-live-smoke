@@ -47,49 +47,31 @@ def state():
     private();return json.loads((STATE/'session.json').read_text())
 
 
-def safe_data_directory(requested):
-    if requested is None:return None
-    requested.mkdir(mode=0o700,parents=True,exist_ok=True)
-    if requested.is_symlink():
-        raise RuntimeError('data directory must be an owner-private non-symlink directory')
-    path=requested.resolve(strict=True)
-    stat=path.stat()
-    if path.is_symlink() or not path.is_dir() or stat.st_uid!=os.getuid() or stat.st_mode&0o077:
-        raise RuntimeError('data directory must be an owner-private non-symlink directory')
-    return path
+def project_store(workdir):
+    """Return the one SQLite location owned by an exact canonical project."""
+    project=Path(workdir)
+    if not project.is_absolute() or not project.is_dir() or project.resolve(strict=True)!=project:
+        raise RuntimeError('workdir must be an absolute existing canonical project directory')
+    return project/'.codex/cortex/cortex.sqlite3'
 
 
-def existing_data_directory(requested):
-    """Validate a retained store without creating or migrating it."""
-    if not isinstance(requested,Path) or not requested.exists() or requested.is_symlink():
-        raise RuntimeError('saved data directory is unavailable or untrusted')
-    path=requested.resolve(strict=True)
-    stat=path.stat()
-    if path.is_symlink() or not path.is_dir() or stat.st_uid!=os.getuid() or stat.st_mode&0o077:
-        raise RuntimeError('saved data directory is unavailable or untrusted')
-    return path
-
-
-def select_data_directory(requested,resume_last,previous=None):
-    """Choose one private store, creating a fresh default only for new runs."""
-    previous=previous if isinstance(previous,dict) else {}
-    environment=os.environ.get('CORTEX_DATA_DIR')
-    override=requested if requested is not None else (Path(environment) if environment else None)
-    if resume_last:
-        saved=previous.get('data')
-        if isinstance(saved,str) and saved:
-            retained=existing_data_directory(Path(saved))
-            if override is not None and existing_data_directory(override)!=retained:
-                raise RuntimeError('resume data directory differs from saved store')
-            return retained
-        if override is None:
-            raise RuntimeError('resume requires an explicit data directory when saved state has no store')
-        return existing_data_directory(override)
-    if override is not None:
-        return safe_data_directory(override)
-    fresh=Path(tempfile.mkdtemp(prefix='data-',dir=STATE))
-    os.chmod(fresh,0o700)
-    return existing_data_directory(fresh)
+def resumed_project_store(workdir,previous):
+    """Verify retained state without guessing at or moving an obsolete store."""
+    expected=project_store(workdir)
+    if not isinstance(previous,dict) or 'data' in previous:
+        raise RuntimeError('saved smoke state uses the removed external data-directory format')
+    if previous.get('workdir')!=str(workdir):
+        raise RuntimeError('resume workdir differs from saved canonical project')
+    if previous.get('store')!=str(expected):
+        raise RuntimeError('resume store differs from the canonical project store')
+    if not expected.is_file() or expected.is_symlink():
+        raise RuntimeError('saved canonical project store is unavailable or untrusted')
+    try:resolved=expected.resolve(strict=True)
+    except OSError:raise RuntimeError('saved canonical project store is unavailable or untrusted') from None
+    stat=expected.stat()
+    if resolved!=expected or stat.st_uid!=os.getuid() or stat.st_mode&0o077:
+        raise RuntimeError('saved canonical project store is unavailable or untrusted')
+    return expected
 
 
 def user_prompt_receipts(data,prompt):
@@ -126,9 +108,9 @@ def start(args):
         try:previous=json.loads((STATE/'last.json').read_text())
         except (OSError,ValueError):raise RuntimeError('saved smoke state is unavailable or invalid') from None
         if not isinstance(previous,dict):raise RuntimeError('saved smoke state is unavailable or invalid')
-        if previous.get('workdir')!=str(workdir):raise RuntimeError('Resume workdir differs')
+        store=resumed_project_store(workdir,previous)
+    else:store=project_store(workdir)
     capture=STATE/'capture.txt';capture.write_text('');os.chmod(capture,0o600)
-    data_dir=select_data_directory(args.data_dir,args.resume_last,previous if args.resume_last else None)
     events=STATE/'events';events.mkdir(mode=0o700,exist_ok=True)
     for path in events.glob('*.jsonl'):path.unlink()
     started_at=time.time()
@@ -144,17 +126,14 @@ def start(args):
               resumed=args.resume_last,events=str(events),
               original_request_sha256=previous.get('original_request_sha256') if args.resume_last else None,
               first_submission_at=previous.get('first_submission_at') if args.resume_last else None,
-              data=str(data_dir) if data_dir else None,codebase_memory=graph_enabled,
+              store=str(store),codebase_memory=graph_enabled,
               model=model,effort=effort))
     tmux('new-session','-d','-s',SESSION,'-c',str(workdir),'bash')
     tmux('set-option','-t',SESSION,'remain-on-exit','on')
     sink=' '.join(map(shlex.quote,['python3','-B',str(ROOT/'scripts/cortex-live-capture-sink'),'--path',str(capture)]))
     tmux('pipe-pane','-t',TARGET,sink)
-    scrub=['CODEX_APP_TOOLS_PIPE_PATH','CODEX_INTERNAL_ORIGINATOR_OVERRIDE','CODEX_MCP_NODE_PATH','CODEX_CI','CODEX_SHELL','CODEX_PERMISSION_PROFILE','CODEX_SESSION_ID','CODEX_THREAD_ID']
+    scrub=['CODEX_APP_TOOLS_PIPE_PATH','CODEX_INTERNAL_ORIGINATOR_OVERRIDE','CODEX_MCP_NODE_PATH','CODEX_CI','CODEX_SHELL','CODEX_PERMISSION_PROFILE','CODEX_SESSION_ID','CODEX_THREAD_ID','CORTEX_DATA_DIR']
     command=['env',*[part for key in scrub for part in ['-u',key]],'CORTEX_OBSERVATION_DIR='+str(events),str(ROOT/'scripts/cortex-dev')]
-    selected_data=str(data_dir)
-    if selected_data:
-        command.insert(command.index(str(ROOT/'scripts/cortex-dev')), 'CORTEX_DATA_DIR='+selected_data)
     if args.resume_last:command+=['resume','--last']
     if model:command+=['--model',model]
     if effort:command+=['-c','model_reasoning_effort='+effort]
@@ -172,7 +151,7 @@ def start(args):
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
-    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--data-dir',type=Path);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'))
+    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'))
     s=sub.add_parser('send');s.add_argument('--prompt-file',type=Path,required=True)
     sub.add_parser('enter');sub.add_parser('status');sub.add_parser('audit')
     for name in ['capture','events','hooks']:

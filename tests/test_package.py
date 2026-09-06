@@ -69,11 +69,13 @@ def test_source_check_is_read_only():
 def test_desktop_helper_can_submit_one_literal_prompt_file():
     source=(ROOT/'scripts/cortex-desktop-dev').read_text()
     assert "add_argument('--prompt-file',type=Path)" in source
-    assert "add_argument('--data-dir',type=Path)" in source
+    assert "add_argument('--data-dir',type=Path)" not in source
     assert "codex://threads/new?" in source
     assert "urllib.parse.urlencode({'path':str(workdir),'prompt':prompt})" in source
     assert "prompt_supplied=prompt is not None" in source
-    assert "CORTEX_DATA_DIR=str(data)" in source
+    assert "store=str(store)" in source
+    assert "CORTEX_DATA_DIR=str(" not in source
+    assert "for key in ['profile','events']:" in source
     assert 'def configure_workspace_network():' in source
     assert "network_access = true" in source
     assert 'restore_workspace_network' in source
@@ -136,7 +138,9 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
 
 def test_cli_helper_audits_all_thread_calls_with_shared_observer():
     source=(ROOT/'scripts/cortex-live-smoke').read_text()
-    assert "s.add_argument('--data-dir',type=Path)" in source
+    assert "add_argument('--data-dir',type=Path)" not in source
+    assert "store=str(store)" in source
+    assert "CORTEX_DATA_DIR='+" not in source
     assert 'def user_prompt_receipts(data,prompt):' in source
     assert 'prompt submission produced no exact user-turn receipt' in source
     assert "sub.add_parser('audit')" in source
@@ -152,60 +156,94 @@ def test_cli_helper_audits_all_thread_calls_with_shared_observer():
     assert "sandbox_workspace_write.network_access=true" in source
 
 
-def test_cli_smoke_uses_fresh_private_default_store_and_retains_it(monkeypatch,tmp_path):
+def test_live_helpers_derive_only_the_canonical_project_store(tmp_path):
     import runpy
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
-    monkeypatch.setitem(cli['select_data_directory'].__globals__,'STATE',tmp_path/'observation')
-    cli['private']()
-    monkeypatch.delenv('CORTEX_DATA_DIR',raising=False)
-    first=cli['select_data_directory'](None,False)
-    second=cli['select_data_directory'](None,False)
-    assert first!=second and first.parent==cli['select_data_directory'].__globals__['STATE'] and second.parent==cli['select_data_directory'].__globals__['STATE']
-    assert first.stat().st_uid==second.stat().st_uid==__import__('os').getuid()
-    assert first.stat().st_mode & 0o077 == second.stat().st_mode & 0o077 == 0
+    desktop=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    project=tmp_path.resolve(strict=True)
+    expected=project/'.codex/cortex/cortex.sqlite3'
+    assert cli['project_store'](project)==expected
+    assert desktop['project_store'](project)==expected
+    assert not expected.exists()
+    with pytest.raises(RuntimeError,match='canonical project'):
+        cli['project_store'](Path('relative-project'))
 
 
-def test_cli_smoke_honors_explicit_and_environment_store_paths(monkeypatch,tmp_path):
+def test_live_helpers_remove_external_store_override_from_child_environments(monkeypatch,tmp_path):
+    import runpy
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    monkeypatch.setenv('CORTEX_DATA_DIR',str(tmp_path/'external'))
+    env=helper['environment'](tmp_path/'profile',tmp_path/'events')
+    assert 'CORTEX_DATA_DIR' not in env
+    cli=(ROOT/'scripts/cortex-live-smoke').read_text()
+    assert "'CODEX_THREAD_ID','CORTEX_DATA_DIR']" in cli
+    assert "CORTEX_DATA_DIR='+" not in cli
+
+
+def test_cli_smoke_resume_requires_same_existing_project_store_and_rejects_legacy_state(tmp_path):
     import runpy
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
-    monkeypatch.setitem(cli['select_data_directory'].__globals__,'STATE',tmp_path/'observation')
-    cli['private']()
-    explicit=tmp_path/'explicit'
-    assert cli['select_data_directory'](explicit,False)==explicit.resolve()
-    environment=tmp_path/'environment'
-    monkeypatch.setenv('CORTEX_DATA_DIR',str(environment))
-    assert cli['select_data_directory'](None,False)==environment.resolve()
+    project=tmp_path.resolve(strict=True)
+    store=project/'.codex/cortex/cortex.sqlite3'
+    store.parent.mkdir(parents=True,mode=0o700)
+    store.write_bytes(b'SQLite format 3\0');store.chmod(0o600)
+    retained={'workdir':str(project),'store':str(store)}
+    assert cli['resumed_project_store'](project,retained)==store
 
-
-def test_cli_smoke_resume_requires_same_retained_store_or_explicit_unknown_store(monkeypatch,tmp_path):
-    import runpy
-    cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
-    monkeypatch.setitem(cli['select_data_directory'].__globals__,'STATE',tmp_path/'observation')
-    cli['private']()
-    monkeypatch.delenv('CORTEX_DATA_DIR',raising=False)
-    retained=cli['select_data_directory'](None,False)
-    assert cli['select_data_directory'](None,True,{'data':str(retained)})==retained
-    nonexistent=tmp_path/'other'
-    with pytest.raises(RuntimeError):
-        cli['select_data_directory'](nonexistent,True,{'data':str(retained)})
-    assert not nonexistent.exists()
-    environment_other=tmp_path/'environment-other'
-    monkeypatch.setenv('CORTEX_DATA_DIR',str(environment_other))
-    with pytest.raises(RuntimeError):
-        cli['select_data_directory'](None,True,{'data':str(retained)})
-    assert not environment_other.exists()
-    monkeypatch.delenv('CORTEX_DATA_DIR',raising=False)
-    with pytest.raises(RuntimeError,match='requires an explicit'):
-        cli['select_data_directory'](None,True,{})
-    explicit=tmp_path/'legacy-store'
+    other=tmp_path/'other';other.mkdir()
+    with pytest.raises(RuntimeError,match='workdir differs'):
+        cli['resumed_project_store'](other,retained)
+    external=tmp_path/'external.sqlite3';external.write_bytes(b'old');external.chmod(0o600)
+    with pytest.raises(RuntimeError,match='store differs'):
+        cli['resumed_project_store'](project,retained|{'store':str(external)})
+    assert external.read_bytes()==b'old'
+    with pytest.raises(RuntimeError,match='removed external data-directory'):
+        cli['resumed_project_store'](project,{'workdir':str(project),'data':str(tmp_path/'old-data')})
+    store.unlink()
     with pytest.raises(RuntimeError,match='unavailable'):
-        cli['select_data_directory'](explicit,True,{})
-    assert not explicit.exists()
-    explicit.mkdir(mode=0o700)
-    assert cli['select_data_directory'](explicit,True,{})==explicit.resolve()
-    missing=tmp_path/'missing-retained'
-    with pytest.raises(RuntimeError,match='unavailable'):
-        cli['select_data_directory'](None,True,{'data':str(missing)})
+        cli['resumed_project_store'](project,retained)
+
+
+def test_live_helper_stops_preserve_the_project_store(monkeypatch,tmp_path):
+    import runpy
+    project=tmp_path/'project';project.mkdir()
+    store=project/'.codex/cortex/cortex.sqlite3'
+    store.parent.mkdir(parents=True,mode=0o700)
+    store.write_bytes(b'project database');store.chmod(0o600)
+
+    cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
+    cli_globals=cli['main'].__globals__;cli_state=tmp_path/'cli-state'
+    monkeypatch.setitem(cli_globals,'STATE',cli_state)
+    cli_globals['private']()
+    events=cli_state/'events';events.mkdir();(events/'event.jsonl').write_text('{}\n')
+    (cli_state/'capture.txt').write_text('capture')
+    (cli_state/'session.json').write_text(json.dumps({'workdir':str(project),'store':str(store)}))
+    monkeypatch.setitem(cli_globals,'tmux',lambda *args,**kwargs: None)
+    monkeypatch.setattr(sys,'argv',['cortex-live-smoke','stop'])
+    cli['main']()
+    assert store.read_bytes()==b'project database'
+    assert json.loads((cli_state/'last.json').read_text())['store']==str(store)
+    assert not (cli_state/'session.json').exists() and not events.exists()
+
+    desktop=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    desktop_globals=desktop['main'].__globals__;desktop_state=tmp_path/'desktop-state'
+    desktop_state.mkdir(mode=0o700)
+    config=tmp_path/'config.toml';config.write_text('modified')
+    backup=desktop_state/'config.toml.before-live-test';backup.write_text('original');backup.chmod(0o600)
+    profile=desktop_state/'profile';events=desktop_state/'events';profile.mkdir();events.mkdir()
+    session={
+        'pid':999999999,'start':'missing','profile':str(profile),'events':str(events),
+        'store':str(store),'workdir':str(project),'isolated_config':str(config),
+    }
+    (desktop_state/'session.json').write_text(json.dumps(session))
+    monkeypatch.setitem(desktop_globals,'STATE',desktop_state)
+    monkeypatch.setitem(desktop_globals,'CONFIG_BACKUP',backup)
+    monkeypatch.setitem(desktop_globals,'identity',lambda _: None)
+    monkeypatch.setattr(sys,'argv',['cortex-desktop-dev','stop'])
+    desktop['main']()
+    assert store.read_bytes()==b'project database'
+    assert config.read_text()=='original'
+    assert not (desktop_state/'session.json').exists()
 
 
 def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():

@@ -24,6 +24,7 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS tasks (
  id TEXT PRIMARY KEY, project_root TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS tasks_by_project ON tasks(project_root);
 CREATE TABLE IF NOT EXISTS thread_bindings (
  thread_id TEXT PRIMARY KEY, parent_thread_id TEXT,
  task_id TEXT NOT NULL REFERENCES tasks(id)
@@ -252,8 +253,12 @@ def sync_directory(path):
 
 
 class Store:
-    def __init__(self,directory,initialize=True):
+    def __init__(self,directory,initialize=True,*,project_root=None):
         from .hook_storage import HOOK_SCHEMA
+        from .project_storage import canonical_project, project_store_directory
+        self.project_root=canonical_project(project_root) if project_root is not None else None
+        if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
+            raise StoreError('project_storage_mismatch')
         self._file_cache=OrderedDict()
         self._cache_lock=threading.RLock()
         self.directory=private_directory(directory)
@@ -262,17 +267,31 @@ class Store:
             fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600); os.close(fd)
         regular(self.path)
         with self.connection() as db:
-            if initialize:
-                db.execute("PRAGMA journal_mode=WAL")
-                db.execute("BEGIN IMMEDIATE")
+            # A rejected archive must retain its original bytes and journal
+            # mode. Validate under the write lock before any persistent pragma.
+            if initialize:db.execute("BEGIN IMMEDIATE")
             app=db.execute("PRAGMA application_id").fetchone()[0]
             version=db.execute("PRAGMA user_version").fetchone()[0]
             tables=db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             if app!=APPLICATION_ID and (app!=0 or tables or version!=0): raise StoreError("unsupported_storage")
             if app==APPLICATION_ID and version!=11: raise StoreError("unsupported_storage")
             if not initialize and (app!=APPLICATION_ID or version!=11):raise StoreError("unsupported_storage")
+            if app==APPLICATION_ID:self._check_project(db)
             db.commit()
-            if initialize: db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+            if initialize:
+                db.execute("PRAGMA journal_mode=WAL")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+
+    def _check_project(self,db,task=None):
+        if self.project_root is None:return
+        if task is not None:
+            rows=db.execute('SELECT project_root FROM tasks WHERE id=?',(task,)).fetchall()
+        else:
+            # Indexed endpoints establish a single project without scanning all
+            # task bodies or walking every metadata row on each hook process.
+            rows=db.execute('SELECT project_root FROM tasks ORDER BY project_root LIMIT 1').fetchall()
+            rows+=db.execute('SELECT project_root FROM tasks ORDER BY project_root DESC LIMIT 1').fetchall()
+        if any(row[0]!=self.project_root for row in rows):raise StoreError('project_storage_mismatch')
 
     @contextmanager
     def connection(self):
@@ -310,6 +329,9 @@ class Store:
                     bound=dict(args); thread,parent=context
                     capture=dict(status="not_attempted",reason=None)
                     if operation=="create_task":
+                        if self.project_root is not None and args['project_root']!=self.project_root:
+                            raise StoreError('project_storage_mismatch')
+                        self._check_project(db)
                         if parent is not None: raise StoreError("child_creation")
                         existing=db.execute("SELECT * FROM thread_bindings WHERE thread_id=?",(thread,)).fetchone()
                         if existing is not None:
@@ -318,6 +340,7 @@ class Store:
                             if receipt is None: raise StoreError("task_already_bound")
                     else:
                         bound["task_id"]=self._resolve_thread(db,thread,parent)
+                        self._check_project(db,bound['task_id'])
                         self._recover(db,bound["task_id"])
                         delivery=db.execute("SELECT 1 FROM deliveries WHERE scope=? AND operation=? AND delivery_key=?",(bound["task_id"],operation,args.get("request_key"))).fetchone()
                         current_state=self._binding(db,thread)["state"]

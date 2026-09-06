@@ -31,7 +31,7 @@ def exchange(tmp_path,messages):
     db.commit();db.close()
     for m in messages:
         if m.get('method')=='tools/call':m['params'].setdefault('_meta',META)
-    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=os.environ|{'CORTEX_DATA_DIR':str(tmp_path/'store'),'CODEX_HOME':str(home)},timeout=30)
+    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=os.environ|{'CODEX_HOME':str(home)},timeout=30)
     assert result.returncode==0 and result.stderr==''
     return [json.loads(line) for line in result.stdout.splitlines()]
 
@@ -83,7 +83,7 @@ def test_raw_invalid_and_oversize_frames(tmp_path):
 
 def test_actionable_schema_errors_never_echo_private_values(tmp_path):
     from cortex_runtime.server import Server
-    server=Server(tmp_path/'private')
+    server=Server()
     cases=[
         ({},'required field(s)'),
         ({'task_id':'PRIVATE_SENTINEL','mode':'light','rationale':'PRIVATE_SENTINEL','request_key':'k'},'Remove unadvertised fields'),
@@ -102,7 +102,7 @@ def test_preview_budget_has_headroom_and_exact_length_correction(tmp_path):
     from cortex_runtime.contracts import BY_NAME
     schema=BY_NAME['write_report']['inputSchema']['properties']['summary']
     assert schema['maxLength']==320 and '100' in schema['description']
-    server=Server(tmp_path/'private')
+    server=Server()
     args=dict(title='Review',summary='x'*321,
               author='reviewer',draft_id='d_000000000000',request_key='preview-check')
     result=server.dispatch('tools/call',dict(name='write_report',arguments=args))
@@ -120,7 +120,7 @@ def test_draft_routes_are_schema_visible_and_errors_explain_the_exact_repair(tmp
     base=dict(title='Evidence',summary='One useful sentence.',author='worker',draft_id='d_000000000000',request_key='route')
     validator.validate(base)
     with pytest.raises(ValidationError):validator.validate({key:value for key,value in base.items() if key!='draft_id'})
-    server=Server(tmp_path/'private')
+    server=Server()
     for arguments,field,repair in [
         (base|dict(markdown='report body'),'markdown','Remove unadvertised fields'),
         (base|dict(draft_id=''),'draft_id','server-issued identifier'),
@@ -155,9 +155,10 @@ def test_passive_context_observation_never_logs_other_metadata(tmp_path,monkeypa
 
 
 def test_wire_schemas_match_every_success(tmp_path):
+    from cortex_runtime.project_storage import ProjectResolver
     from jsonschema import Draft202012Validator
     from cortex_runtime.server import Server
-    server=Server(tmp_path/'private')
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
     catalogue=server.dispatch('tools/list',{})['tools']
     by_name={t['name']:t for t in catalogue}
     for item in catalogue:
