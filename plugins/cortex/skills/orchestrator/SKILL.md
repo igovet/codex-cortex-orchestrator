@@ -140,24 +140,52 @@ user-visible outcome unless it exercises the relevant boundary.
 Retain the user's selected coordinator model and effort. Do not propagate that cost
 to every worker.
 
-Use the least expensive worker configuration with evidence of adequate quality for
-the bounded work. Luna is eligible only for task classes where observed evaluations
-show that it reliably meets the required outcome. Omission of an override does not
-mean Luna. Prefer a stronger model or more reasoning for coupled changes,
-consequential ambiguity, unfamiliar cross-system decisions or an observed reasoning
-failure. Missing data, permissions or tools call for obtaining the missing input or
-reporting the limitation; a stronger model cannot repair absence.
+Apply this mandatory worker-model policy to every subagent assignment. Put model
+and effort in the native request and repeat them in the assignment/pipeline; do
+not rely on an inherited host default.
 
-State the selected model and effort in the assignment and pipeline. Do not switch an
-active worker's model merely because it is slow or a host wait expires.
+- Ordinary work defaults to `gpt-5.6-luna` at `medium`, `high`, `xhigh` or `max`.
+  Luna is the priority route for bounded planning, implementation and
+  documentation when no narrower rule applies. Research, exploration and analysis
+  assignments are always Luna, regardless of whether the surrounding task is
+  security-related.
+- Complex work may use `gpt-5.6-terra` at `medium`, `high`, `xhigh` or `max`.
+  State the coupled or consequential evidence warranting Terra; it is not a
+  general-purpose fallback.
+- Only a narrow security-analysis microtask may use `gpt-5.6-sol` at `medium`,
+  `high` or `xhigh`; this is the sole exception to the Luna-only analysis rule.
+  Sol is never an implementation route merely because the surrounding task
+  concerns security.
+- Security-related implementation uses Luna or Terra according to the ordinary or
+  complex rule, never Sol; an audit and a fix are separate classifications.
+- Reviews and verifications must be stronger than the implementation they inspect:
+  use Terra when the implementation used Luna; when the implementation used Terra,
+  keep Terra and raise effort strictly when a higher permitted effort exists (for
+  example, Terra `high` to Terra `xhigh`). Record the implementation model and
+  effort as evidence for this comparison. A review without that evidence is not
+  policy-compliant.
+- Other models or efforts are forbidden for coordinator-selected work.
+  Preserve an explicit user-requested model/effort verbatim; do not reinterpret it
+  as a Cortex recommendation. If a host cannot honor it, report an evidence gap.
+
+Do not switch an active worker's model merely because it is slow or a host wait
+expires.
 
 ## Assignments
 
 Each assignment is self-contained and concise:
 
 - the exact `$cortex:worker-...` skill;
-- complete loading of that skill before tool discovery or project work;
-- English-only worker reasoning and communication from the first response, including before skill loading;
+- load that skill completely before tool discovery or project work;
+- English-only worker reasoning and communication from the first response;
+- selected model/effort, policy class (`research`, `exploration`, `analysis`,
+  `ordinary`, `complex`, `security-analysis-microtask` or `review`) and evidence;
+  reviews include inspected implementation model/effort, overrides the exact
+  user request;
+- include these bounded labels in the assignment message so the host audit can
+  verify the supported native request: `Policy class: <value>`, `Review
+  implementation model: <model>` and `Review implementation effort: <effort>`
+  when reviewing; include `User-requested override: yes|no`;
 - the desired outcome and bounded scope;
 - mandatory requirements, constraints and acceptance checks;
 - owned files or resources and coordination dependencies;

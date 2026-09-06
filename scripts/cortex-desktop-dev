@@ -25,6 +25,25 @@ CONFIG_BACKUP=STATE/'config.toml.before-live-test'
 LIVE_MODEL='gpt-5.6-luna'
 LIVE_COORDINATOR_EFFORT='high'
 LIVE_WORKER_EFFORTS={'medium','high'}
+WORKER_MODELS={
+    'ordinary': 'gpt-5.6-luna',
+    'complex': 'gpt-5.6-terra',
+    'security-analysis-microtask': 'gpt-5.6-sol',
+}
+WORKER_MODEL_CHOICES={
+    **{key:{value} for key,value in WORKER_MODELS.items()},
+    'research': {'gpt-5.6-luna'},
+    'exploration': {'gpt-5.6-luna'},
+    'analysis': {'gpt-5.6-luna'},
+    'review': {'gpt-5.6-terra'},
+    'security-implementation': {'gpt-5.6-luna','gpt-5.6-terra'},
+}
+WORKER_EFFORTS={
+    'gpt-5.6-luna': {'medium','high','xhigh','max'},
+    'gpt-5.6-terra': {'medium','high','xhigh','max'},
+    'gpt-5.6-sol': {'medium','high','xhigh'},
+}
+EFFORT_ORDER=('medium','high','xhigh','max')
 ADVISORY_POLICY_FLAGS={
     'unsafe_cortex_draft_template_literal','insufficient_diagnostic_output_budget',
     'worker_project_tool_before_cortex_bootstrap','worker_report_catalogue_in_fresh_thread',
@@ -48,6 +67,64 @@ def private():
     STATE.mkdir(mode=0o700,exist_ok=True)
     if STATE.is_symlink() or STATE.stat().st_uid!=os.getuid() or STATE.stat().st_mode&0o077:
         raise RuntimeError('Unsafe Desktop observation directory')
+
+
+def worker_model_policy(model,effort,task_class='ordinary',explicit_user_override=False,
+                        require_explicit=False,implementation_model=None,
+                        implementation_effort=None):
+    """Return violations for the product worker route matrix.
+
+    This is an audit helper, not a model selector. The coordinator remains the
+    owner of routing; an explicit user override is preserved and therefore not
+    rewritten as a Cortex policy violation.
+    """
+    if explicit_user_override:
+        return []
+    task_class=str(task_class or 'ordinary').strip().lower().replace('_','-')
+    aliases={
+        'default':'ordinary', 'normal':'ordinary', 'implementation':'ordinary',
+        'discovery':'research', 'investigate':'exploration',
+        'verification':'review', 'code-review':'review',
+        'security-fix':'security-implementation',
+        'security-analysis':'security-analysis-microtask',
+        'security-analysis-microtask':'security-analysis-microtask',
+        'microtask':'security-analysis-microtask',
+    }
+    task_class=aliases.get(task_class,task_class)
+    choices=WORKER_MODEL_CHOICES.get(task_class)
+    errors=[]
+    if choices is None:
+        errors.append('worker_model_policy_violation')
+        return errors
+    if require_explicit and (not isinstance(model,str) or not model or
+                             not isinstance(effort,str) or not effort):
+        return ['worker_model_policy_violation']
+    if model is None and effort is None:
+        return []
+    if model not in choices:
+        errors.append('worker_model_policy_violation')
+    if model in WORKER_EFFORTS and effort not in WORKER_EFFORTS[model]:
+        errors.append('worker_model_policy_violation')
+    elif model not in WORKER_EFFORTS and effort is not None:
+        errors.append('worker_model_policy_violation')
+    if task_class=='review' and not errors:
+        if (implementation_model not in {'gpt-5.6-luna','gpt-5.6-terra'}
+                or implementation_effort not in WORKER_EFFORTS.get(implementation_model,set())):
+            errors.append('worker_model_policy_violation')
+        elif implementation_model=='gpt-5.6-luna':
+            if model!='gpt-5.6-terra':
+                errors.append('worker_model_policy_violation')
+        elif implementation_model=='gpt-5.6-terra':
+            if model!='gpt-5.6-terra':
+                errors.append('worker_model_policy_violation')
+            elif implementation_effort not in EFFORT_ORDER or effort not in EFFORT_ORDER:
+                errors.append('worker_model_policy_violation')
+            elif (EFFORT_ORDER.index(implementation_effort)<len(EFFORT_ORDER)-1
+                  and EFFORT_ORDER.index(effort)<=EFFORT_ORDER.index(implementation_effort)):
+                errors.append('worker_model_policy_violation')
+        else:
+            errors.append('worker_model_policy_violation')
+    return errors
 
 
 def identity(pid):
@@ -427,6 +504,47 @@ def delivered_request_digests(state,text):
     return accepted
 
 
+POLICY_CLASS_VALUES={
+    'research','exploration','analysis','ordinary','complex',
+    'security-analysis-microtask','security-implementation','review',
+}
+
+
+def assignment_policy_metadata(text):
+    """Derive bounded routing evidence from the supported assignment message.
+
+    Native ``spawn_agent`` has no policy-class or review-provenance arguments.
+    The coordinator therefore records a small labeled block in ``message``;
+    this parser retains only those allowlisted values and never asks callers to
+    send undocumented tool fields.
+    """
+    if not isinstance(text,str):return {}
+    source=text[:20_000]
+    result={}
+    policy=re.search(
+        r'(?im)^\s*policy\s+class\s*[:=]\s*([a-z][a-z0-9-]{0,63})\s*$',source)
+    if policy:
+        value=policy.group(1).lower()
+        if value in POLICY_CLASS_VALUES:
+            result['policy_class']=value
+    for key,label in (
+        ('implementation_model','review implementation model'),
+        ('implementation_effort','review implementation effort'),
+    ):
+        match=re.search(
+            r'(?im)^\s*'+re.escape(label)+r'\s*[:=]\s*([a-z0-9._-]{1,80})\s*$',source)
+        if match:
+            result[key]=match.group(1).lower()
+    override=re.search(
+        r'(?im)^\s*(?:explicit\s+)?user[- ]requested\s+override\s*[:=]\s*'
+        r'(yes|no|true|false)\s*$',source)
+    if override:
+        result['explicit_user_override']=override.group(1).lower() in {'yes','true'}
+    if result:
+        result['policy_evidence']='assignment_message'
+    return result
+
+
 def assigned_worker_profile(text):
     matches=re.findall(r'\$cortex:worker-([a-z-]+)',text)
     profiles={p['name'] for p in json.loads((ROOT/'plugins/cortex/profiles.json').read_text())['profiles']}
@@ -669,11 +787,16 @@ def safe_call_metadata(tool,arguments):
         target=value.get('target')
         return ({'target_agent':target} if isinstance(target,str)
                 and re.fullmatch(r'[A-Za-z0-9_/-]{1,256}',target) else {})
-    allowed=('task_name','agent_type','fork_turns')
+    # Keep this aligned with the native ``spawn_agent`` contract.  Policy
+    # provenance belongs in the bounded assignment message, not invented
+    # top-level arguments.
+    allowed=('task_name','fork_turns')
     result={key:value[key] for key in allowed if isinstance(value.get(key),str)}
     if isinstance(value.get('model'),str):result['requested_model']=value['model']
     if isinstance(value.get('reasoning_effort'),str):result['requested_reasoning_effort']=value['reasoning_effort']
-    profile=assigned_worker_profile(str(value.get('message','')))
+    message=value.get('message','')
+    result.update(assignment_policy_metadata(message))
+    profile=assigned_worker_profile(str(message))
     if profile:result['assigned_profile']=profile
     return result
 
@@ -1389,6 +1512,7 @@ def orchestration_policy_violations(violations):
     exact={'forbidden_plugin_or_cache_access','forbidden_cortex_draft_deletion',
            'command_wrapper_missing_receipt',
            'live_model_policy_violation',
+           'worker_model_policy_violation',
            'worker_tool_after_successful_write_report','worker_draft_created_with_open_command_session',
            'worker_report_published_with_open_command_session'}
     return [row for row in violations
@@ -1419,6 +1543,28 @@ def call_policy_violations(rows):
                 flags.append('live_model_policy_violation')
             if row.get('requested_reasoning_effort') not in {None,*LIVE_WORKER_EFFORTS}:
                 flags.append('live_model_policy_violation')
+        # The fixed live-test route above remains intentionally narrow. This
+        # separate product-policy audit accepts the user-requested override but
+        # rejects coordinator-selected worker routes outside the Luna/Terra/Sol
+        # matrix, including the Sol-for-implementation shortcut.
+        worker_route=(tool=='spawn_agent' or role not in {'coordinator','runtime',None})
+        route_model=row.get('requested_model') if tool=='spawn_agent' else model
+        route_effort=row.get('requested_reasoning_effort') if tool=='spawn_agent' else effort
+        route_class=row.get('task_class') or row.get('policy_class')
+        route_metadata=(
+            (tool=='spawn_agent' and (route_class is not None or route_model is not None or
+                                      route_effort is not None))
+            or row.get('policy_evidence') is not None
+            or row.get('worker_policy_enforced') is True
+        )
+        if worker_route and route_metadata:
+            flags.extend(worker_model_policy(
+                route_model,route_effort,route_class or 'ordinary',
+                explicit_user_override=bool(row.get('explicit_user_override') or
+                                            row.get('user_requested_model')),
+                require_explicit=route_class is not None or row.get('worker_policy_enforced') is True,
+                implementation_model=row.get('implementation_model'),
+                implementation_effort=row.get('implementation_effort')))
         if tool in {'exec_command','write_stdin'} and row.get('wrapper_outcome')=='unverified':
             flags.append('command_wrapper_missing_receipt')
         if tool=='native_assignment_snapshot':

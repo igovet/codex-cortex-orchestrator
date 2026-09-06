@@ -41,5 +41,9 @@ forbidden. See
 [host compatibility](host-compatibility.md).
 
 Current isolated live qualification uses Luna/high for every coordinator and Luna
-at medium/high for native workers. This test policy does not replace the product's
-user-selected coordinator and evidence-based worker routing.
+at medium/high for native workers. Product routing is stricter and explicit: Luna
+is the default/priority worker model for ordinary, research, exploration and
+analysis work; Terra is reserved for complex work and stronger reviews; Sol is
+limited to narrow security-analysis microtasks and never security implementation.
+Explicit user-requested overrides remain intact. The isolated test policy does not
+replace the product's coordinator model selection.
