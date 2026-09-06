@@ -12,7 +12,8 @@
 - Keep knowledge commands, index routing and rereading after summarization as
   bundled model instructions; do not rebuild a workflow engine around them.
 - Keep explicit retention cleanup as a host-side command with project isolation.
-- Preserve semantic version 1.15.6 as directed; update only the payload hash.
+- Preserve semantic version 1.15.7 for this release; update the payload hash after
+  every installable payload edit.
 - Bind tasks to host MCP thread metadata after real CLI/Desktop observation; no model-authored task selector or latest-task fallback.
 
 - Make report-template validation and publication recovery storage guarantees;
@@ -30,8 +31,10 @@
   follow-ups create new immutable reports; independent verification uses fresh context.
 - Keep graph-first discovery concrete in every generated worker profile. Codebase
   Memory availability never becomes a server gate or permission to widen scope.
-- Evaluate outcome quality and resource cost separately from protocol conformance;
-  model routing heuristics remain provisional until comparative measurements support them.
+- Evaluate outcome quality and resource cost separately from protocol conformance.
+  The Luna/Terra/Sol worker route matrix is mandatory now; comparative measurements
+  evaluate outcomes and cost but do not authorize alternate coordinator-selected
+  models or efforts.
 
 Final handoff identity follows publication ownership, not reference count: the latest
 report from the same worker is required, and its own earlier publications may be

@@ -1,5 +1,17 @@
 # Verification
 
+## Current worker-model policy
+
+The coordinator route is now explicit: Luna is the default/priority model for
+ordinary work and all research, exploration and analysis assignments; Terra is
+reserved for complex work and stronger reviews; Sol is limited to narrow
+security-analysis microtasks and never security implementation. Worker effort is
+medium/high/xhigh/max for Luna and Terra, and medium/high/xhigh for Sol. Reviews
+record the inspected implementation model/effort and escalate as required. Other
+models or efforts remain disallowed unless directly requested by the user, whose
+override is preserved. The isolated observer's `worker_model_policy` checks these
+routes from observed assignment/participant metadata.
+
 ## 1.15.7 fresh draft delivery identities
 
 Candidate `1.15.7+codex.sha256.b5503c36f31d590b` makes draft creation keys optional.

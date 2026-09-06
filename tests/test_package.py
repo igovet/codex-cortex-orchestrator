@@ -130,7 +130,8 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert '## Recovery after compaction or restart' in orchestrator
     assert 'A 4,000-character limit is one page, never a total context limit.' in orchestrator
     assert 'Never reassign or\nduplicate work because of a wait timeout' in orchestrator
-    assert 'Luna is eligible only for task classes where observed evaluations' in orchestrator
+    assert 'Ordinary work defaults to `gpt-5.6-luna`' in orchestrator
+    assert 'Sol is never an implementation route' in orchestrator
     assert 'Answer short questions directly' in orchestrator
     assert 'applicable artifact skill' in orchestrator
     assert 'non-code artifacts' in (PLUGIN/'agent-sources/worker-protocol.md').read_text()
@@ -332,10 +333,10 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     assert identifiers('{"session_id":47281}','session_id',numeric=True)==[47281]
     assert identifiers("{cell_id:'cell_12'}",'cell_id')==['cell_12']
     assert helper['safe_call_metadata']('spawn_agent',json.dumps({
-        'task_name':'frontend','agent_type':'frontend_dev','model':'gpt-5.6-terra',
+        'task_name':'frontend','model':'gpt-5.6-terra',
         'reasoning_effort':'high','fork_turns':'none','message':'private assignment',
     }))=={
-        'task_name':'frontend','agent_type':'frontend_dev','requested_model':'gpt-5.6-terra',
+        'task_name':'frontend','requested_model':'gpt-5.6-terra',
         'requested_reasoning_effort':'high','fork_turns':'none',
     }
     assert classify([{'type':'input_text','text':'{"exit_code":130,"output":"^C"}'}],

@@ -695,19 +695,32 @@ calls and unexplained mutation replays. Profiles do not authorize tools or selec
 
 ### Adaptive model policy
 
-Preserve the user's coordinator model and effort. Use a suitable economical worker
-for a clear bounded assignment, with Luna eligible where the task class has evidence
-of adequate quality. An omitted override inherits the actual host setting; it does
-not mean a cheaper model was selected.
+Preserve the user's coordinator model and effort. Worker routing follows an explicit
+policy: Luna (`gpt-5.6-luna`) is the default and priority model for ordinary work,
+including all research, exploration and analysis assignments, at `medium`, `high`,
+`xhigh` or `max`. Terra (`gpt-5.6-terra`) is reserved for work explicitly
+classified as complex, with those same effort levels. Sol (`gpt-5.6-sol`) is
+reserved for narrow security-analysis microtasks at `medium`, `high` or `xhigh`;
+it is never selected for implementation merely because the task concerns security.
+Security-related implementation uses Luna or Terra.
 
-Choose a stronger model or more reasoning for coupled changes, consequential
-uncertainty or an observed reasoning problem. Obtain missing facts and tools directly;
-model escalation does not repair their absence. Never change a worker merely for a
-slow response or one timeout. Compare full task cost, including all participants,
-retries and cached input separately. User requirements remain mandatory.
+Reviews and verifications must be stronger than the implementation they inspect:
+Luna implementations are reviewed with Terra; Terra implementations stay on Terra
+with a strictly higher permitted effort where one exists (for example, `high` to
+`xhigh`). Assignments record the implementation model and effort used for this
+comparison. Every worker request states its model and effort explicitly. Other
+models or efforts are forbidden for coordinator-selected work unless the user
+directly requested that override; the exact request is recorded and preserved.
 
-The server and hooks do not select or enforce models. The [new four-scenario pilot](docs/project/quality-evaluation.md)
-compares baseline, compact protocol without active hooks, and the full candidate;
+Obtain missing facts and tools directly; model escalation does not repair their
+absence. Never change a worker merely for a slow response or one timeout. Compare
+full task cost, including all participants, retries and cached input separately.
+User requirements remain mandatory.
+
+The coordinator owns model selection. The server and hooks do not silently select
+agents or rewrite model requests; the isolated live observer audits actual worker
+model/effort receipts and reports policy violations. The [new four-scenario
+pilot](docs/project/quality-evaluation.md) compares protocol configurations;
 unrun or unavailable measurements are explicit, never treated as zero.
 
 ---

@@ -73,12 +73,18 @@ The compact shared protocol is generated into every profile; rare procedures are
 declared references loaded only when relevant. Conditional recovery and report-example skills load by exact ordinary skill
 names only when needed. No installation paths are put into worker assignments.
 
-The coordinator preserves its selected model and chooses an economical worker with
-sufficient demonstrated quality. Luna is eligible for qualified bounded task classes.
-Coupled changes and an observed reasoning problem can justify stronger reasoning;
-missing facts or tools need their own remedy. Effort follows the actual host support
-and user's preferences, with no permanent model or effort allowlist. A timeout never
-transfers an active worker's resources.
+The coordinator preserves its selected model and applies the worker route matrix.
+Luna (`gpt-5.6-luna`) is the default/priority model for ordinary work and all
+research, exploration and analysis assignments, at medium/high/xhigh/max effort.
+Terra (`gpt-5.6-terra`) is reserved for explicitly complex work at those efforts.
+Sol (`gpt-5.6-sol`) is limited to narrow security-analysis microtasks at
+medium/high/xhigh; security implementation uses Luna or Terra and never Sol merely
+because the subject is security. Reviews and verifications are stronger than their
+implementation: Terra reviews Luna work, while Terra reviews Terra work at a
+strictly higher permitted effort where available. Other models/efforts require an
+explicit user override, which is preserved verbatim. Every assignment records the
+model, effort and policy class. A timeout never transfers an active worker's
+resources.
 
 Current isolated live qualification uses Luna/high for all coordinators and Luna at
 medium/high for native workers. That fixed evaluation setup does not change general
