@@ -24,7 +24,7 @@ After behavior changes update README.md, SECURITY.md and affected documentation;
 check links and commands against source. Keep secrets, private reports and raw
 host logs out of repository documents and diagnostics. Report unrun checks.
 
-For this replacement preserve semantic version 1.15.6. After any plugin payload
+For this release use semantic version 1.15.7. After any plugin payload
 edit, regenerate its complete content hash with
 `python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
 Run package, sync and test checks sequentially in the same checkout. Use the

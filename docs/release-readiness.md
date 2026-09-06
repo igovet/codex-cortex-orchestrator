@@ -1,3 +1,84 @@
+# 1.15.7: explicit graph discovery and native worker updates
+
+Candidate `1.15.7+codex.sha256.03279e8f757a5b4d` restores explicit Codebase Memory
+discovery in every worker and keeps all progress, questions, blockers and verification
+updates on the native parent/subagent channel. The seven MCP operations, storage
+format and 22 specialist profiles remain unchanged. Full payload SHA-256:
+`03279e8f757a5b4d4ebb93d8f39a698a153505e3f6d0042723a0dcba4046441b`.
+
+Stamp, package validation, source-only sync and 56 focused tests passed sequentially;
+the complete suite passed **241 tests in 10.67 seconds**. Generated profiles retain
+the existing size bound. Local documentation links and `git diff --check` passed.
+Earlier source attempts caught an oversized profile and two changed prose assertions;
+the final candidate passes the unchanged structural assertions and size limit.
+
+The CLI helper disables Codebase Memory unless `start --codebase-memory` is used.
+No-call observations from disabled-server or README-only scenarios do not establish
+a graph-routing failure. The first enabled CLI pilot on `fc956615a02d530d` used an unindexed workspace:
+the worker discovered Codebase Memory, paginated the project list, then used the
+permitted source fallback and returned one native result. No app task messages were
+sent. It completed in 340.379 seconds with 96 host calls and 12 successful MCP events,
+but strict audit rejected the coordinator's unsolicited reminder and status probe
+after waiting. Complete calls/events and the audit were retained before exit-zero
+shutdown. This pilot is fallback evidence, not successful graph qualification.
+
+A second CLI pilot on `fc956615a02d530d` used an indexed workspace and exercised
+architecture, symbol lookup, four source snippets, caller tracing and coverage before
+implementation. It completed in 304.75 seconds with 92 calls, 11 successful MCP events
+and one native worker result. Strict audit rejected a combined provider-description
+dump that was truncated and an initial coordinator project read. Complete calls/events
+and audit were retained before exit-zero shutdown. No Desktop run was spent on this
+payload. The final candidate makes discovery explicitly names-only before selected
+contracts and prohibits whole-provider or combined-provider description dumps.
+
+The next CLI pilot on `d58fd5d4ef5d3158` exposed a skill-loading-order gap:
+the worker discovered tools before eventually loading its skill. Spawn message
+arguments are opaque encrypted values in the retained host calls, so omission of
+the exact skill token from the assignment is not established. The worker later
+used the matching graph, but strict audit retained initial catalogue truncation,
+a forbidden cache access, coordinator project work/status probing and a recovered
+pipeline patch error. The run completed in 378.219 seconds with 125 calls and 11
+successful MCP events; all tails and audit were retained before exit-zero cleanup.
+The final candidate now places the exact skill-token and complete-loading requirement
+near the start of coordinator guidance as well as in its assignment checklist.
+
+The final unchanged payload ran consecutively on real CLI and Desktop with
+Luna/high coordinators and Luna/medium native debuggers. Both workers loaded their
+complete skills before catalogue discovery (the final skill marker was observed),
+used the exact matching workspace index before filesystem code discovery, identified
+the defective function and public call paths, and returned exactly one native result.
+Neither run invoked an app task-messaging tool; progress remained native commentary.
+This does not establish a separately dispatched native update/message operation,
+because neither worker used one in these scenarios.
+
+| Host | Host calls | Cortex MCP events | Graph calls | Hook actions | Total tokens | Seconds | Audit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| CLI | 91 | 13 | 8 | 31 | 1,687,946 | 323.320 | Rejected: coordinator project read and two status probes |
+| Desktop | 101 | 13 | 9 | 34 | 1,951,964 | 268.471 | Passed |
+
+Both runs had no MCP errors, hook errors, host-tool errors, truncation or open
+command sessions/cells. Independent verification passed the four existing tests,
+nine entry-point reproductions per workspace, unchanged tracked-file checks,
+SQLite integrity and the single physical pipeline. The generated diagnosis files
+identify the faulty discount formula and all three public entry points. Desktop
+explicitly documents both single-unit and multi-unit oversized discounts; CLI's
+oversized-discount prose omits its chosen quantity and must not be read as proof
+that every oversized discount already clamps to zero.
+
+**Strict consecutive CLI/Desktop qualification remains unverified.** CLI's three
+coordinator policy flags remain. Manual review also retains Desktop's missing
+`check_index_coverage` call: its graph use is proven, but full coverage-protocol
+compliance is not. These limits do not erase the observed skill-loading order,
+graph calls or absence of app messages. Forced compaction, unavailable native
+messaging and an actual blocker requiring an immediate native message were not tested.
+
+Every host call was reviewed; complete calls/events and audits were retained before
+cleanup. CLI exited zero and its exact session was stopped. Desktop submission
+visibly matched the prepared composer and produced one new task receipt; its X11
+desktop-property warning did not prevent delivery. Only the isolated process,
+profile and temporary observation streams were removed. The stable plugin and
+user settings were not changed.
+
 # English-only workers from the first response — focused checks passed
 
 Candidate `1.15.6+codex.sha256.879d600bfb9e3966` preserves semantic version 1.15.6,

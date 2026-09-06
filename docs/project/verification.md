@@ -1,5 +1,32 @@
 # Verification
 
+## 1.15.7 graph discovery and native worker updates
+
+The shared worker protocol explicitly discovers `codebase_memory` independently
+of Cortex report tools and uses graph evidence for structural code questions before
+filesystem symbol searches. The declared reference covers exact workspace matching,
+duplicate indexes, coverage, pagination, initial indexing and source fallback.
+Progress, questions, blockers and verification updates stay on the native parent
+channel, including before the automatic final handoff; app task messaging is forbidden.
+
+The `1.15.7+codex.sha256.03279e8f757a5b4d` candidate passed package validation,
+source-only sync, 56 focused tests and all 241 tests sequentially. Profile generation
+and existing size bounds passed. Real qualification investigates an ordinary discount
+bug with API, invoice and CLI callers; review worker graph calls, exact index selection,
+source evidence, concrete reproductions and every native/app message route. The CLI's
+`--codebase-memory` flag is necessary. Keep missing-index fallback evidence separate
+from indexed graph qualification. See [release readiness](../release-readiness.md)
+for actual host outcomes and retained unsuccessful attempts.
+
+The final CLI and Desktop workers loaded the full skill before tool discovery,
+used the correct index for eight and nine graph calls respectively, and returned
+one native result each without app task messages. Both workspaces passed independent
+reproductions, existing tests and protected-file/store checks. Desktop's audit passed;
+CLI retained coordinator project-read/status-probe flags. Desktop omitted the coverage
+API call, and neither scenario exercised a separate immediate native message.
+Strict full-protocol CLI/Desktop parity remains unverified; focused graph routing and
+the absence of app messaging are the observed results.
+
 ## Worker language from the first response
 
 Candidate `1.15.6+codex.sha256.879d600bfb9e3966` requires English-only worker
@@ -131,6 +158,13 @@ For real execution, use a separate existing test project and start
 exact `cortex-markdown-smoke` session on the default tmux server and attaches an
 owner-private output-only observer before entering `scripts/cortex-dev`.
 That entry point refreshes and installs only `$HOME/.cortex-dev/.codex`.
+
+For Codebase Memory routing qualification, add `--codebase-memory` to `start`:
+the CLI helper deliberately disables that server by default. Verify actual worker
+graph calls before filesystem symbol discovery, exact-workspace index selection,
+source snippets, caller tracing and coverage checks on a structural product task.
+A README-only scenario or a run with the server disabled cannot qualify this route.
+On Desktop verify that the isolated candidate configuration enables the server.
 
 Inspect `capture` and `status`. A visible trust screen permits one explicit
 `enter`; then visibly confirm the composer. Inspect `events` for the passive

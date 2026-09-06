@@ -9,6 +9,14 @@ using `index_status`, never a guessed project name. Retain the selection within 
 assignment. Initial missing indexes can be built locally for that workspace; watched
 indexes normally update automatically.
 
+The complete shared worker skill names `codebase_memory` and its discovery route.
+Cortex report-tool discovery and Codebase Memory discovery are separate: filtering
+the catalogue to Cortex names cannot establish that the graph provider is missing.
+Detailed selection rules live in the declared code-and-evidence reference. A ready
+matching index still needs relevant coverage when duplicate roots exist; status alone
+does not reveal whether the assigned subsystem is excluded. Reports identify the
+selected index/workspace or the concrete reason for source fallback.
+
 Use `search_graph` for definitions, `trace_path` for relationships and `get_code_snippet`
 for selected current source. Use scoped architecture or schema-grounded queries for
 questions those operations cannot answer. Literal text and documentation may use
@@ -52,7 +60,9 @@ reports and indexed documentation. The native thread binding and current pipelin
 The orchestrator skill contains a routing table for all 22 specialists. Each has
 an exact `cortex:worker-*` skill token. The coordinator supplies that token and a
 self-contained assignment through ordinary native subagent tools. The worker loads
-its complete advertised skill before applying it to project work. Already attached
+its complete advertised skill before tool discovery or project work. Each assignment
+leads with the exact worker-skill token and this short loading requirement; a generic
+role or product brief does not transfer the shared protocol. Already attached
 live schemas can be used directly, without a separate MCP catalogue bootstrap or a
 prescribed first-call batch. This does not require custom native profile selection or
 personal agent TOML registration.
@@ -82,7 +92,11 @@ with explicit error handling and no unexplained acknowledged mutation replays.
 
 The coordinator preserves the language selected from the user’s own prose across
 progress messages and recovery. Workers publish findings as ordinary reports;
-pipeline and governance remain coordinator responsibilities. Code-mode calls
+pipeline and governance remain coordinator responsibilities. Worker progress,
+questions, blockers and verification updates use only the native parent/subagent
+channel; app task messaging such as `codex_app.send_message_to_thread` is forbidden
+even when its destination is the coordinator. Final handoffs return automatically
+through the native worker result. Code-mode calls
 require preserving the intended argument through dispatch and checking the observed
 result. Inert JavaScript literals, including `String.raw`, may carry a patch unchanged;
 executable interpolation or substitution may not construct it.

@@ -13,7 +13,7 @@ from generate_agent_profiles import check as check_agent_profiles
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT/'plugins/cortex'
-BASE = '1.15.6'
+BASE = '1.15.7'
 def payload_digest(plugin):
     digest=hashlib.sha256()
     for path in sorted(plugin.rglob('*')):
