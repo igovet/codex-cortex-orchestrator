@@ -1,9 +1,12 @@
 """SQLite metadata with project-local, atomic Markdown publication."""
 from __future__ import annotations
 
+import bisect
 import codecs
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -11,6 +14,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
+import threading
 import uuid
 
 from .contracts import StoreError, validate
@@ -20,6 +24,7 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS tasks (
  id TEXT PRIMARY KEY, project_root TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS tasks_by_project ON tasks(project_root);
 CREATE TABLE IF NOT EXISTS thread_bindings (
  thread_id TEXT PRIMARY KEY, parent_thread_id TEXT,
  task_id TEXT NOT NULL REFERENCES tasks(id)
@@ -74,7 +79,31 @@ WHEN NOT EXISTS (
  SELECT 1 FROM pending_deletions d JOIN reports r ON r.task_id=d.task_id
  WHERE r.id=OLD.report_id
 ) BEGIN SELECT RAISE(ABORT, 'immutable'); END;
-PRAGMA user_version=10;
+CREATE TABLE IF NOT EXISTS binding_receipts (
+ thread_id TEXT PRIMARY KEY REFERENCES thread_bindings(thread_id), receipt TEXT NOT NULL UNIQUE,
+ state TEXT NOT NULL DEFAULT 'cortex', updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS source_resets (
+ thread_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), pause_turn TEXT
+);
+CREATE TABLE IF NOT EXISTS source_revisions (
+ task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
+ thread_id TEXT NOT NULL, message_id TEXT NOT NULL, report_id TEXT NOT NULL REFERENCES reports(id),
+ attachments TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(task_id,revision), UNIQUE(thread_id,message_id)
+);
+CREATE TABLE IF NOT EXISTS report_provenance (
+ edition_sequence INTEGER PRIMARY KEY REFERENCES editions(sequence), source_revision INTEGER NOT NULL,
+ artifacts TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS draft_revisions (
+ draft_id TEXT PRIMARY KEY REFERENCES drafts(id), source_revision INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_changes (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+ kind TEXT NOT NULL, reference TEXT, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS changes_by_task ON task_changes(task_id,sequence);
+PRAGMA user_version=11;
 '''
 
 PIPELINE_PLACEHOLDERS = (
@@ -224,22 +253,45 @@ def sync_directory(path):
 
 
 class Store:
-    def __init__(self,directory):
+    def __init__(self,directory,initialize=True,*,project_root=None):
+        from .hook_storage import HOOK_SCHEMA
+        from .project_storage import canonical_project, project_store_directory
+        self.project_root=canonical_project(project_root) if project_root is not None else None
+        if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
+            raise StoreError('project_storage_mismatch')
+        self._file_cache=OrderedDict()
+        self._cache_lock=threading.RLock()
         self.directory=private_directory(directory)
         self.path=self.directory/"cortex.sqlite3"
-        fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600); os.close(fd)
+        if initialize:
+            fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600); os.close(fd)
         regular(self.path)
         with self.connection() as db:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("BEGIN IMMEDIATE")
+            # A rejected archive must retain its original bytes and journal
+            # mode. Validate under the write lock before any persistent pragma.
+            if initialize:db.execute("BEGIN IMMEDIATE")
             app=db.execute("PRAGMA application_id").fetchone()[0]
             version=db.execute("PRAGMA user_version").fetchone()[0]
             tables=db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             if app!=APPLICATION_ID and (app!=0 or tables or version!=0): raise StoreError("unsupported_storage")
-            if app==APPLICATION_ID and version!=10: raise StoreError("unsupported_storage")
+            if app==APPLICATION_ID and version!=11: raise StoreError("unsupported_storage")
+            if not initialize and (app!=APPLICATION_ID or version!=11):raise StoreError("unsupported_storage")
+            if app==APPLICATION_ID:self._check_project(db)
             db.commit()
-            db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
-            db.execute("BEGIN IMMEDIATE"); self._recover(db); db.commit()
+            if initialize:
+                db.execute("PRAGMA journal_mode=WAL")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+
+    def _check_project(self,db,task=None):
+        if self.project_root is None:return
+        if task is not None:
+            rows=db.execute('SELECT project_root FROM tasks WHERE id=?',(task,)).fetchall()
+        else:
+            # Indexed endpoints establish a single project without scanning all
+            # task bodies or walking every metadata row on each hook process.
+            rows=db.execute('SELECT project_root FROM tasks ORDER BY project_root LIMIT 1').fetchall()
+            rows+=db.execute('SELECT project_root FROM tasks ORDER BY project_root DESC LIMIT 1').fetchall()
+        if any(row[0]!=self.project_root for row in rows):raise StoreError('project_storage_mismatch')
 
     @contextmanager
     def connection(self):
@@ -247,11 +299,21 @@ class Store:
             try: regular(Path(str(self.path)+suffix))
             except FileNotFoundError:
                 if not suffix: raise
-        db=sqlite3.connect(self.path,timeout=15,isolation_level=None)
-        db.row_factory=sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON"); db.execute("PRAGMA synchronous=FULL")
-        try: yield db
-        finally: db.close()
+        lock_path=self.directory/".access.lock"
+        lock_fd=os.open(lock_path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        try:
+            regular(lock_path); fcntl.flock(lock_fd,fcntl.LOCK_SH|fcntl.LOCK_NB)
+        except BaseException:
+            os.close(lock_fd); raise StoreError("storage_busy") from None
+        db=None
+        try:
+            db=sqlite3.connect(self.path,timeout=15,isolation_level=None)
+            db.row_factory=sqlite3.Row
+            db.execute("PRAGMA foreign_keys=ON"); db.execute("PRAGMA synchronous=FULL")
+            yield db
+        finally:
+            if db is not None:db.close()
+            fcntl.flock(lock_fd,fcntl.LOCK_UN); os.close(lock_fd)
 
     def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None):
         validate(operation,args)
@@ -262,11 +324,14 @@ class Store:
         rollbacks=[]; staged=[]
         try:
             with self.connection() as db:
-                db.execute("BEGIN IMMEDIATE"); self._recover(db); db.commit()
                 db.execute("BEGIN IMMEDIATE")
                 try:
                     bound=dict(args); thread,parent=context
+                    capture=dict(status="not_attempted",reason=None)
                     if operation=="create_task":
+                        if self.project_root is not None and args['project_root']!=self.project_root:
+                            raise StoreError('project_storage_mismatch')
+                        self._check_project(db)
                         if parent is not None: raise StoreError("child_creation")
                         existing=db.execute("SELECT * FROM thread_bindings WHERE thread_id=?",(thread,)).fetchone()
                         if existing is not None:
@@ -275,9 +340,23 @@ class Store:
                             if receipt is None: raise StoreError("task_already_bound")
                     else:
                         bound["task_id"]=self._resolve_thread(db,thread,parent)
-                        if parent is None and steering_source is not None:
-                            self._capture_steering(db,bound["task_id"],thread,steering_source,
-                                                   args.get("redact_values",[]),rollbacks,staged)
+                        self._check_project(db,bound['task_id'])
+                        self._recover(db,bound["task_id"])
+                        delivery=db.execute("SELECT 1 FROM deliveries WHERE scope=? AND operation=? AND delivery_key=?",(bound["task_id"],operation,args.get("request_key"))).fetchone()
+                        current_state=self._binding(db,thread)["state"]
+                        capture_state=args.get("state",current_state)
+                        # An accepted delivery recovers its receipt only. Its
+                        # historical redactions/state cannot govern later input.
+                        if parent is None and steering_source is not None and not delivery and capture_state=="cortex":
+                            db.execute("SAVEPOINT source_capture")
+                            try:
+                                capture=self._capture_steering(db,bound["task_id"],thread,steering_source,
+                                                               args.get("redact_values",[]),rollbacks,staged)
+                            except StoreError as error:
+                                if str(error)!="host_request_unavailable":raise
+                                db.execute("ROLLBACK TO source_capture")
+                                capture=dict(status="unavailable",reason="host_request_unavailable")
+                            db.execute("RELEASE source_capture")
                     if operation=="read_report" and "report_id" not in bound:
                         if "cursor" in bound:
                             decoded=self._decode(bound["cursor"])
@@ -292,35 +371,89 @@ class Store:
                     if operation=="create_task":
                         task=result.pop("task_id")
                         db.execute("INSERT OR IGNORE INTO thread_bindings VALUES (?,NULL,?)",(thread,task))
+                        self._binding(db,thread)
+                        capture=dict(status=result.pop("_capture_status","complete"),reason=None)
+                    else: task=bound["task_id"]
+                    if "state" in args and not result.get("replayed",False):
+                        if parent is not None: raise StoreError("coordinator_only")
+                        if args["state"]=="normal":
+                            pause_turn=None
+                            if steering_source is not None:
+                                project=db.execute("SELECT project_root FROM tasks WHERE id=?",(task,)).fetchone()[0]
+                                try:
+                                    boundary=steering_source(project,None)
+                                    if getattr(boundary,"messages",[]):pause_turn=boundary.messages[-1].get("turn")
+                                except StoreError as error:
+                                    if str(error)!="host_request_unavailable":raise
+                            db.execute("INSERT OR REPLACE INTO source_resets VALUES (?,?,?)",(thread,task,pause_turn))
+                            skipped=db.execute("SELECT 1 FROM hook_pending_sources WHERE task_id=? AND thread_id=? LIMIT 1",(task,thread)).fetchone()
+                            if skipped:
+                                # These signals precede the accepted pause and
+                                # belong to the cursor backlog deliberately
+                                # abandoned by reset. Retire them now, not on a
+                                # later resume that may have newer active signals.
+                                reason="inactive_interval_started_pending_sources_retired"
+                                self._change(db,task,"source_gap",reason)
+                                db.execute("DELETE FROM hook_pending_sources WHERE task_id=? AND thread_id=?",(task,thread))
+                                capture=dict(status="partial",reason=reason)
+                        db.execute("UPDATE binding_receipts SET state=?,updated_at=? WHERE thread_id IN (SELECT thread_id FROM thread_bindings WHERE task_id=?)",(args["state"],self._now(),task))
+                    pending_thread=parent or thread
+                    pending_turns=db.execute("SELECT count(*) FROM hook_pending_sources WHERE thread_id=?",(pending_thread,)).fetchone()[0]
+                    result.update(binding=self._binding(db,thread),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=pending_turns))
+                    if operation=="list_reports":
+                        result.update(self._discovery(db,task,thread,args))
                     db.commit()
                 except BaseException:
                     db.rollback(); self._rollback_files(rollbacks)
                     for path in staged: path.unlink(missing_ok=True)
                     raise
                 self._finalize_files(rollbacks)
-                db.execute("BEGIN IMMEDIATE"); self._finish_source_deletions(db); db.commit()
+                db.execute("BEGIN IMMEDIATE"); self._finish_source_deletions(db,task); db.commit()
             return result
         except StoreError: raise
         except (sqlite3.Error,OSError,ValueError,UnicodeError):
             raise StoreError("storage_error") from None
 
-    @staticmethod
-    def _source_receipt(db,task,thread,source,report):
-        if not hasattr(source,"cursor"):return
+    def _source_receipt(self,db,task,thread,source,report):
+        if not hasattr(source,"cursor"):
+            self._record_source(db,task,thread,"original:"+report,report,[])
+            return
         for message in source.messages:
             db.execute("INSERT INTO source_messages VALUES (?,?,?,?,?)",
                        (thread,message["id"],task,report,digest(message["text"].encode())))
+            self._record_source(db,task,thread,message["id"],report,message.get("attachments",[]))
+            if message.get("turn"):
+                db.execute("INSERT OR IGNORE INTO source_turns VALUES (?,?,?,?,?)",(task,thread,message["turn"],report,digest(message["text"].encode())))
         db.execute("INSERT OR REPLACE INTO source_cursors VALUES (?,?,?)",(thread,task,encode(source.cursor)))
 
     def _capture_steering(self,db,task,thread,reader,redactions,rollbacks,staged):
         row=db.execute("SELECT cursor FROM source_cursors WHERE thread_id=?",(thread,)).fetchone()
         project=db.execute("SELECT project_root FROM tasks WHERE id=?",(task,)).fetchone()[0]
-        source=reader(project,json.loads(row[0]) if row else None)
+        reset=db.execute("SELECT pause_turn FROM source_resets WHERE thread_id=?",(thread,)).fetchone()
+        try: source=reader(project,None if reset else json.loads(row[0]) if row else None)
+        except StoreError as error:
+            if str(error)!="host_request_unavailable": raise
+            return dict(status="unavailable",reason="resume_boundary_unavailable" if reset else "host_request_unavailable")
+        completeness=getattr(source,"completeness","complete")
+        if completeness=="unavailable": return dict(status="unavailable",reason="host_request_unavailable")
+        messages=source.messages
+        resume_reason=None
+        if reset:
+            # The last native message is the only unambiguous current triggering
+            # source. Never consume the backlog from before an inactive interval.
+            if not messages or reset["pause_turn"] is None or messages[-1].get("turn")==reset["pause_turn"]:
+                db.execute("INSERT OR REPLACE INTO source_cursors VALUES (?,?,?)",(thread,task,encode(source.cursor)))
+                db.execute("DELETE FROM source_resets WHERE thread_id=?",(thread,))
+                return dict(status="partial",reason="inactive_interval_skipped_current_source_unconfirmed")
+            messages=messages[-1:]
+            resume_reason="inactive_interval_skipped_current_message_only"
         pending=[];seen={}
-        for message in source.messages:
+        for message in messages:
             fingerprint=digest(message["text"].encode())
             prior=db.execute("SELECT digest FROM source_messages WHERE thread_id=? AND message_id=?",
                              (thread,message["id"])).fetchone()
+            if message.get("turn"):
+                db.execute("DELETE FROM hook_pending_sources WHERE thread_id=? AND turn_id=?",(thread,message["turn"]))
             accepted=prior[0] if prior else seen.get(message["id"])
             if accepted is not None:
                 if accepted!=fingerprint:raise StoreError("host_request_unavailable")
@@ -336,7 +469,12 @@ class Store:
                                           "user request",text,"report",rollbacks,staged)
             db.execute("INSERT INTO source_messages VALUES (?,?,?,?,?)",
                        (thread,message["id"],task,report,seen[message["id"]]))
+            self._record_source(db,task,thread,message["id"],report,message.get("attachments",[]))
+            if message.get("turn"):
+                db.execute("INSERT OR IGNORE INTO source_turns VALUES (?,?,?,?,?)",(task,thread,message["turn"],report,digest(message["text"].encode())))
         db.execute("INSERT OR REPLACE INTO source_cursors VALUES (?,?,?)",(thread,task,encode(source.cursor)))
+        if reset:db.execute("DELETE FROM source_resets WHERE thread_id=?",(thread,))
+        return dict(status="partial" if reset else completeness,reason=resume_reason)
 
     @staticmethod
     def _resolve_thread(db,thread,parent):
@@ -347,6 +485,8 @@ class Store:
         if parent is None: raise StoreError("task_not_bound")
         ancestor=db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?",(parent,)).fetchone()
         if ancestor is None: raise StoreError("parent_not_bound")
+        lifecycle=db.execute("SELECT parent_thread_id,task_id FROM hook_agent_bindings WHERE agent_id=?",(thread,)).fetchone()
+        if lifecycle is not None and (lifecycle["parent_thread_id"]!=parent or lifecycle["task_id"]!=ancestor["task_id"]):raise StoreError("thread_conflict")
         db.execute("INSERT INTO thread_bindings VALUES (?,?,?)",(thread,parent,ancestor["task_id"]))
         return ancestor["task_id"]
 
@@ -408,14 +548,19 @@ class Store:
             )
         return draft,source
 
-    def _recover(self,db):
-        self._recover_task_files(db)
-        self._finish_source_deletions(db)
+    def _recover(self,db,task):
         from .cleanup import finish_deletions
-        finish_deletions(self,db)
+        if db.execute("SELECT 1 FROM pending_deletions WHERE task_id=?",(task,)).fetchone():
+            finish_deletions(self,db,task)
+            # The committed tombstone owns this recovery independently of the
+            # rejected operation; do not roll its metadata deletion back.
+            db.commit()
+            raise StoreError("task_not_bound")
+        self._recover_task_files(db,task)
+        self._finish_source_deletions(db,task)
 
-    def _recover_task_files(self,db):
-        for row in db.execute("SELECT id FROM tasks").fetchall():
+    def _recover_task_files(self,db,task):
+        for row in db.execute("SELECT id FROM tasks WHERE id=?",(task,)).fetchall():
             task=row["id"]; task_dir=self._task_directory(db,task)
             indexed={r["filename"] for r in db.execute("SELECT filename FROM reports WHERE task_id=? AND kind='report'",(task,))}
             for path in task_dir.iterdir():
@@ -427,17 +572,23 @@ class Store:
             if pipeline:
                 latest=db.execute("SELECT digest FROM editions WHERE report_id=? ORDER BY sequence DESC LIMIT 1",(pipeline["id"],)).fetchone()[0]
                 target=task_dir/pipeline["filename"]
-                if not target.exists() or file_digest(target)!=latest:
+                try: matches=target.exists() and self._checked_file(target)["digest"]==latest
+                except StoreError as error:
+                    if str(error)!="invalid_utf8":raise
+                    matches=False
+                if not matches:
                     match=next((p for p in backups if file_digest(p)==latest),None)
                     if match is None: raise StoreError("file_conflict","pipeline",str(target),"bytes matching committed SHA-256")
                     os.replace(match,target); sync_directory(task_dir)
                 for backup in backups: backup.unlink(missing_ok=True)
             else:
+                orphan=task_dir/"pipeline.md"
+                if orphan.exists():regular(orphan);orphan.unlink();sync_directory(task_dir)
                 for backup in backups: regular(backup); backup.unlink()
             for temp in task_dir.glob(".pending_*"): regular(temp); temp.unlink()
 
-    def _finish_source_deletions(self,db):
-        for row in db.execute("SELECT * FROM pending_source_deletions").fetchall():
+    def _finish_source_deletions(self,db,task):
+        for row in db.execute("SELECT * FROM pending_source_deletions WHERE task_id=?",(task,)).fetchall():
             source=self._source(db,row["task_id"],row["path"],must_exist=False,error_field="draft_id",error_value=row["draft_id"])
             if source is not None:
                 if file_digest(source,private=False,validate_utf8=True)!=row["digest"]:
@@ -481,7 +632,7 @@ class Store:
         if operation=="create_task":
             source=original_request() if callable(original_request) else original_request
             provenance=source
-            if not isinstance(source,str) or not source or len(source)>250_000:
+            if not isinstance(source,str) or (not source and not getattr(source,"messages",[])):
                 raise StoreError("host_request_unavailable")
             for value in args.get("redact_values",[]):
                 if value not in source:raise StoreError("invalid_redaction")
@@ -492,9 +643,22 @@ class Store:
                 raise StoreError("invalid_project","project_root",args["project_root"],"absolute existing canonical directory")
             project_draft_directory(project,"report"); project_draft_directory(project,"pipeline")
             task=unique_identifier(db,"t_"); db.execute("INSERT INTO tasks VALUES (?,?,?)",(task,str(project),self._now()))
-            rid,content_hash,size=self._publish_text(db,task,"Original user request","Original task context.","user request",source,"report",rollbacks,staged)
-            self._source_receipt(db,task,creation_thread,provenance,rid)
-            result=dict(task_id=task,original_report_id=rid,original_request_sha256=content_hash)
+            if getattr(provenance,"messages",[]):
+                first=None
+                for message in provenance.messages:
+                    body=message.get("archive_text",message["text"])
+                    for value in sorted(args.get("redact_values",[]),key=len,reverse=True):body=body.replace(value,"[REDACTED]")
+                    ref,hashed,size=self._publish_text(db,task,"Original user request" if first is None else "Initial user message","Exact initial native source.","user request",body,"report",rollbacks,staged)
+                    db.execute("INSERT INTO source_messages VALUES (?,?,?,?,?)",(creation_thread,message["id"],task,ref,digest(message["text"].encode())))
+                    self._record_source(db,task,creation_thread,message["id"],ref,message.get("attachments",[]))
+                    if message.get("turn"):db.execute("INSERT OR IGNORE INTO source_turns VALUES (?,?,?,?,?)",(task,creation_thread,message["turn"],ref,digest(message["text"].encode())))
+                    if first is None:first=(ref,hashed)
+                rid,content_hash=first
+                db.execute("INSERT OR REPLACE INTO source_cursors VALUES (?,?,?)",(creation_thread,task,encode(provenance.cursor)))
+            else:
+                rid,content_hash,size=self._publish_text(db,task,"Original user request","Original task context.","user request",source,"report",rollbacks,staged)
+                self._source_receipt(db,task,creation_thread,provenance,rid)
+            result=dict(task_id=task,original_report_id=rid,original_request_sha256=content_hash,_capture_status=getattr(provenance,"completeness","complete"))
         elif operation=="set_governance":
             gid=identifier("g_")
             rid,content_hash,size=self._publish_text(db,task,"Governance: "+args["mode"],"Advisory choice and rationale.","coordinator",args["mode"]+"\n\n"+args["rationale"],"report",rollbacks,staged)
@@ -518,10 +682,11 @@ class Store:
                                      or line.encode("utf-8") in PIPELINE_PLACEHOLDERS)]
             db.execute("INSERT INTO drafts(id,task_id,owner_thread_id,kind,template,path,created_at,device,inode) VALUES (?,?,?,?,?,?,?,?,?)",
                        (draft_id,task,creation_thread,kind,args["template"],str(path),self._now(),identity.st_dev,identity.st_ino))
+            db.execute("INSERT INTO draft_revisions VALUES (?,?)",(draft_id,self._revision(db,task)))
             result=dict(draft_id=draft_id,draft_path=str(path),kind=kind,
                         template=args["template"],
                         required_first_line=f"Cortex draft ID: `{draft_id}`",
-                        edit_instruction="Edit the existing file in place through the built-in apply_patch file tool. Use one call and one independent hunk per marker. Pass the patch as that file tool's exact string input; never use a JavaScript template literal or String.raw. The exact old marker line starts with the patch removal prefix '-' and its replacement with '+'.",
+                        edit_instruction="Edit the registered file in place. Preserve its identity and first-line marker, replace every listed placeholder, and retain complete UTF-8 Markdown. Use the native file tool safely and inspect its actual result.",
                         replaceable_markers=replaceable_markers,
                         required_replacement_count=len(replaceable_markers),
                         markdown=markdown,total_characters=len(markdown),
@@ -530,7 +695,12 @@ class Store:
         else:
             draft,source=self._draft_source(db,task,creation_thread,args["draft_id"])
             rid,stored_hash,size,content_hash=self._publish_source(db,task,args,draft,source,rollbacks,staged)
-            result=dict(report_id=rid,summary=args["summary"],size_bytes=size,sha256=stored_hash)
+            revision=args.get("source_revision",db.execute("SELECT source_revision FROM draft_revisions WHERE draft_id=?",(draft["id"],)).fetchone()[0])
+            if revision>self._revision(db,task): raise StoreError("invalid_source_revision")
+            sequence=db.execute("SELECT MAX(sequence) FROM editions WHERE report_id=?",(rid,)).fetchone()[0]
+            db.execute("INSERT INTO report_provenance VALUES (?,?,?)",(sequence,revision,encode(args.get("artifacts",[]))))
+            self._change(db,task,"report",rid)
+            result=dict(report_id=rid,summary=args["summary"],size_bytes=size,sha256=stored_hash,source_revision=revision,artifacts=args.get("artifacts",[]))
         db.execute("INSERT INTO deliveries VALUES (?,?,?,?,?,?)",(scope,operation,args["request_key"],arg_hash,content_hash,encode(result)))
         return dict(result,replayed=False)
 
@@ -647,8 +817,129 @@ class Store:
         return rid,hashed.hexdigest(),size
 
     @staticmethod
+    def _signature(info):
+        return (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+    def _checked_file(self,path,private=True):
+        """Cache only metadata and sparse UTF-8 byte offsets, never document bodies."""
+        key=str(path); signature=self._signature(regular(path,private))
+        with self._cache_lock:
+            cached=self._file_cache.get(key)
+            if cached is not None and cached["identity"]==signature:
+                self._file_cache.move_to_end(key); return cached
+        hashed=hashlib.sha256(); decoder=codecs.getincrementaldecoder("utf-8")()
+        characters=0; offset=0; points=[(0,0)]; stride=65536
+        try:
+            for block in file_blocks(path,private):
+                hashed.update(block); characters+=len(decoder.decode(block)); offset+=len(block)
+                if offset-points[-1][1]>=stride:
+                    points.append((characters,offset-len(decoder.getstate()[0])))
+                    if len(points)>1024:
+                        points=points[::2];stride*=2
+            characters+=len(decoder.decode(b"",final=True))
+        except UnicodeDecodeError:
+            raise StoreError("invalid_utf8","path",str(path),"complete valid UTF-8 Markdown") from None
+        if self._signature(regular(path,private))!=signature: raise StoreError("file_conflict")
+        checked=dict(identity=signature,digest=hashed.hexdigest(),characters=characters,points=points)
+        with self._cache_lock:
+            self._file_cache[key]=checked
+            while len(self._file_cache)>128:self._file_cache.popitem(last=False)
+        return checked
+
+    def _file_page(self,path,checked,start,limit,private=True):
+        if start>checked["characters"]: raise StoreError("invalid_cursor")
+        point=checked["points"][bisect.bisect_right(checked["points"],(start,float("inf")))-1]
+        if self._signature(regular(path,private))!=checked["identity"]: raise StoreError("file_conflict")
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        with os.fdopen(fd,"rb") as stream:
+            if self._signature(os.fstat(stream.fileno()))!=checked["identity"]: raise StoreError("file_conflict")
+            stream.seek(point[1]); decoder=codecs.getincrementaldecoder("utf-8")(); pieces=[]; count=0
+            skip=start-point[0];needed=skip+limit
+            while count<needed:
+                block=stream.read(min(65536,4*(needed-count)))
+                if not block: break
+                text=decoder.decode(block)
+                left=max(0,skip-count);right=min(len(text),needed-count)
+                if right>left:pieces.append(text[left:right])
+                count+=len(text)
+            if self._signature(os.fstat(stream.fileno()))!=checked["identity"]: raise StoreError("file_conflict")
+        if self._signature(regular(path,private))!=checked["identity"]: raise StoreError("file_conflict")
+        return "".join(pieces)
+
+    @staticmethod
+    def _revision(db,task):
+        return db.execute("SELECT COALESCE(MAX(revision),0) FROM source_revisions WHERE task_id=?",(task,)).fetchone()[0]
+
+    def _binding(self,db,thread):
+        row=db.execute("SELECT * FROM thread_bindings WHERE thread_id=?",(thread,)).fetchone()
+        if row is None:raise StoreError("task_not_bound")
+        prior=db.execute("SELECT receipt,state FROM binding_receipts WHERE thread_id=?",(thread,)).fetchone()
+        if prior is None:
+            state="cortex"
+            if row["parent_thread_id"]:
+                parent=db.execute("SELECT state FROM binding_receipts WHERE thread_id=?",(row["parent_thread_id"],)).fetchone()
+                if parent:state=parent[0]
+            db.execute("INSERT INTO binding_receipts VALUES (?,?,?,?)",(thread,"b_"+uuid.uuid4().hex,state,self._now()))
+            prior=db.execute("SELECT receipt,state FROM binding_receipts WHERE thread_id=?",(thread,)).fetchone()
+        return dict(receipt=prior["receipt"],thread_id=thread,parent_thread_id=row["parent_thread_id"],state=prior["state"])
+
+    def _change(self,db,task,kind,reference=None):
+        db.execute("INSERT INTO task_changes(task_id,kind,reference,created_at) VALUES (?,?,?,?)",(task,kind,reference,self._now()))
+
+    def _record_source(self,db,task,thread,message_id,report,attachments,turn=None):
+        revision=self._revision(db,task)+1
+        db.execute("INSERT INTO source_revisions VALUES (?,?,?,?,?,?)",(task,revision,thread,message_id,report,encode(attachments)))
+        self._change(db,task,"source",report)
+        sequence=db.execute("SELECT MAX(sequence) FROM editions WHERE report_id=?",(report,)).fetchone()[0]
+        db.execute("INSERT OR REPLACE INTO report_provenance VALUES (?,?,?)",(sequence,revision,"[]"))
+        return revision
+
+    def _discovery(self,db,task,thread,args):
+        limit=args.get("limit",25)
+        after=args.get("changes_after",0)
+        changes=db.execute("SELECT c.sequence,c.kind,c.reference,c.created_at,h.event_name,h.thread_id AS hook_thread_id,h.metadata AS hook_metadata FROM task_changes c LEFT JOIN hook_events h ON c.task_id=h.task_id AND c.reference=h.event_key AND c.kind IN ('hook','artifact') WHERE c.task_id=? AND c.sequence>? ORDER BY c.sequence LIMIT ?",(task,after,limit+1)).fetchall()
+        page=changes[:limit]
+        drafts=db.execute("SELECT id AS draft_id,path AS draft_path,kind,template,created_at FROM drafts WHERE task_id=? AND owner_thread_id=? AND published_report_id IS NULL AND id>? ORDER BY id LIMIT ?",(task,thread,args.get("drafts_after",""),limit+1)).fetchall()
+        own=drafts[:limit]
+        return dict(changes=[self._change_metadata(row) for row in page],changes_next=page[-1]["sequence"] if len(changes)>limit else None,
+                    own_drafts=[dict(row) for row in own],drafts_next=own[-1]["draft_id"] if len(drafts)>limit else None)
+
+    @staticmethod
+    def _change_metadata(row):
+        result={key:row[key] for key in ("sequence","kind","reference","created_at")}
+        result["observation"]=None
+        if row["hook_metadata"] is None:return result
+        metadata=json.loads(row["hook_metadata"])
+        if not isinstance(metadata,dict):return result
+        def bounded(name,maximum=256):
+            value=metadata.get(name)
+            return value if isinstance(value,str) and len(value)<=maximum else None
+        paths=metadata.get("changed_paths",[])
+        if not isinstance(paths,list):paths=[]
+        selected=[];characters=0
+        for path in paths:
+            if not isinstance(path,str) or not path or len(path)>4096:continue
+            if len(selected)>=16 or characters+len(path)>4096:break
+            selected.append(path);characters+=len(path)
+        actor=bounded("actor_thread_id")
+        if actor!=row["hook_thread_id"]:actor=None
+        scope="actor" if metadata.get("actor_scope")=="actor" and actor else "session"
+        exit_code=metadata.get("exit_code")
+        status=metadata.get("status")
+        if status not in {"failed","exited","running","unverified","completed"}:status="unverified"
+        result["observation"]=dict(source="hook",event_name=row["event_name"],actor_scope=scope,
+            actor_thread_id=actor,parent_session_id=bounded("parent_session_id"),
+            binding_origin=bounded("binding_origin",32),tool_name=bounded("tool_name",128),
+            exit_code=exit_code if type(exit_code) is int else None,
+            command_session_id=bounded("command_session_id"),status=status,
+            truncated=metadata.get("truncated") if type(metadata.get("truncated")) is bool else None,
+            error=metadata.get("error") if type(metadata.get("error")) is bool else None,
+            changed_paths=selected,changed_paths_total=len(paths),changed_paths_complete=len(selected)==len(paths))
+        return result
+
+    @staticmethod
     def _metadata(row):
-        return dict(report_id=row["id"],title=row["title"],summary=row["summary"],author=row["author"],created_at=row["created_at"],updated_at=row["updated_at"],kind=row["kind"],size_bytes=row["size_bytes"],sha256=row["digest"])
+        return dict(report_id=row["id"],title=row["title"],summary=row["summary"],author=row["author"],created_at=row["created_at"],updated_at=row["updated_at"],kind=row["kind"],size_bytes=row["size_bytes"],sha256=row["digest"],source_revision=row["source_revision"],artifacts=json.loads(row["artifacts"]),source_attachments=json.loads(row["source_attachments"]))
 
     @staticmethod
     def _cursor(value):
@@ -687,7 +978,7 @@ class Store:
             tag,bound,before,high=decoded
             if tag!="list" or bound!=binding or type(before) is not int or type(high) is not int or not 0<before<=high+1<=ceiling+1: raise StoreError("invalid_cursor","cursor",args["cursor"],"catalogue cursor for this task")
             ceiling=high
-        rows=db.execute('''SELECT r.*,e.* FROM reports r JOIN editions e ON e.report_id=r.id
+        rows=db.execute('''SELECT r.*,e.*,COALESCE(p.source_revision,0) AS source_revision,COALESCE(p.artifacts,'[]') AS artifacts,COALESCE((SELECT attachments FROM source_revisions s WHERE s.report_id=r.id ORDER BY revision DESC LIMIT 1),'[]') AS source_attachments FROM reports r JOIN editions e ON e.report_id=r.id LEFT JOIN report_provenance p ON p.edition_sequence=e.sequence
             WHERE r.task_id=? AND e.sequence=(SELECT MAX(v.sequence) FROM editions v WHERE v.report_id=r.id AND v.sequence<=?)
             AND e.sequence<? ORDER BY e.sequence DESC LIMIT ?''',(task,ceiling,before,args.get("limit",25)+1)).fetchall()
         page=rows[:args.get("limit",25)]
@@ -704,30 +995,18 @@ class Store:
             tag,task,draft_id,expected,start=decoded
             if tag!="draft" or task!=self._cursor_binding(args["task_id"]) or draft_id!=draft["id"] or type(start) is not int or start<0:
                 raise StoreError("invalid_cursor","cursor",args["cursor"],"cursor for this draft")
-        decoder=codecs.getincrementaldecoder("utf-8")(); hashed=hashlib.sha256(); total=0; pieces=[]; end=start+args.get("limit",4000)
-        try:
-            for block in file_blocks(source,private=False):
-                hashed.update(block); text=decoder.decode(block)
-                left=max(0,start-total); right=min(len(text),end-total)
-                if right>left:pieces.append(text[left:right])
-                total+=len(text)
-            tail=decoder.decode(b"",final=True)
-        except UnicodeDecodeError:
-            raise StoreError("invalid_utf8","draft_id",draft["id"],"complete valid UTF-8 Markdown file") from None
-        if tail:
-            left=max(0,start-total); right=min(len(tail),end-total)
-            if right>left:pieces.append(tail[left:right])
-            total+=len(tail)
-        current=hashed.hexdigest()
+        checked=self._checked_file(source,private=False)
+        total=checked["characters"]; current=checked["digest"]; end=start+args.get("limit",4000)
         if expected is not None and expected!=current[:12]:
             raise StoreError("draft_cursor_stale","cursor",args["cursor"],"cursor for the current draft digest")
         if start>total:raise StoreError("invalid_cursor","cursor",args.get("cursor"),"position within the draft")
+        markdown=self._file_page(source,checked,start,args.get("limit",4000),private=False)
         cursor=self._cursor(["draft",self._cursor_binding(args["task_id"]),draft["id"],current,end]) if end<total else None
         return dict(draft_id=draft["id"],draft_path=str(source),kind=draft["kind"],template=draft["template"],
-                    markdown="".join(pieces),total_characters=total,sha256=current,next_cursor=cursor)
+                    markdown=markdown,total_characters=total,sha256=current,next_cursor=cursor)
 
     def _read(self,db,args):
-        row=db.execute("SELECT r.*,e.* FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=? AND r.id=? ORDER BY e.sequence DESC LIMIT 1",(args["task_id"],args["report_id"])).fetchone()
+        row=db.execute("SELECT r.*,e.*,COALESCE(p.source_revision,0) AS source_revision,COALESCE(p.artifacts,'[]') AS artifacts,COALESCE((SELECT attachments FROM source_revisions s WHERE s.report_id=r.id ORDER BY revision DESC LIMIT 1),'[]') AS source_attachments FROM reports r JOIN editions e ON e.report_id=r.id LEFT JOIN report_provenance p ON p.edition_sequence=e.sequence WHERE r.task_id=? AND r.id=? ORDER BY e.sequence DESC LIMIT 1",(args["task_id"],args["report_id"])).fetchone()
         if row is None: raise StoreError("not_found","report_id",args["report_id"],"report in the current task")
         start=0
         if "cursor" in args:
@@ -739,20 +1018,14 @@ class Store:
                 if row["kind"]=="pipeline":
                     raise StoreError("cursor_stale","cursor",args["cursor"],"cursor for current pipeline digest")
                 raise StoreError("invalid_cursor","cursor",args["cursor"],"exact cursor for this immutable report")
-        decoder=codecs.getincrementaldecoder("utf-8")(); hashed=hashlib.sha256(); total=0; pieces=[]; end=start+args.get("limit",4000)
-        try:
-            for block in file_blocks(self._location(db,row["id"])):
-                hashed.update(block); text=decoder.decode(block)
-                left=max(0,start-total); right=min(len(text),end-total)
-                if right>left: pieces.append(text[left:right])
-                total+=len(text)
-            tail=decoder.decode(b"",final=True)
-        except UnicodeDecodeError: raise StoreError("file_conflict","report_id",row["id"],"valid UTF-8 matching committed digest") from None
-        if tail:
-            left=max(0,start-total); right=min(len(tail),end-total)
-            if right>left: pieces.append(tail[left:right])
-            total+=len(tail)
-        if hashed.hexdigest()!=row["digest"]: raise StoreError("file_conflict","report_id",row["id"],"committed SHA-256 "+row["digest"])
+        path=self._location(db,row["id"])
+        try: checked=self._checked_file(path)
+        except StoreError as error:
+            if str(error)!="invalid_utf8": raise
+            raise StoreError("file_conflict","report_id",row["id"],"valid UTF-8 matching committed digest") from None
+        if checked["digest"]!=row["digest"]: raise StoreError("file_conflict","report_id",row["id"],"committed SHA-256 "+row["digest"])
+        total=checked["characters"]; end=start+args.get("limit",4000)
+        markdown=self._file_page(path,checked,start,args.get("limit",4000))
         if start>total: raise StoreError("invalid_cursor","cursor",args.get("cursor"),"position within the document")
         cursor=self._cursor(["read",self._cursor_binding(args["task_id"]),row["id"],row["digest"],end]) if end<total else None
-        return dict(self._metadata(row),markdown="".join(pieces),total_characters=total,next_cursor=cursor)
+        return dict(self._metadata(row),markdown=markdown,total_characters=total,next_cursor=cursor)

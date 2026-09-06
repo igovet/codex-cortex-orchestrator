@@ -8,9 +8,9 @@ from .contracts import StoreError
 from .store import file_digest, private_directory, sync_directory
 
 
-def finish_deletions(store,db):
+def finish_deletions(store,db,task):
     """Replay committed deletion intents without deleting unrelated project drafts."""
-    rows=db.execute("SELECT d.task_id,t.project_root FROM pending_deletions d JOIN tasks t ON t.id=d.task_id").fetchall()
+    rows=db.execute("SELECT d.task_id,t.project_root FROM pending_deletions d JOIN tasks t ON t.id=d.task_id WHERE d.task_id=?",(task,)).fetchall()
     for row in rows:
         task=row["task_id"]
         for source in db.execute("SELECT path,published_digest FROM drafts WHERE task_id=?",(task,)).fetchall():
@@ -30,7 +30,14 @@ def finish_deletions(store,db):
                 raise StoreError("unsafe_storage","task_directory",str(directory),"owned project task directory")
             if not shutil.rmtree.avoids_symlink_attacks: raise StoreError("unsafe_storage")
             shutil.rmtree(directory); sync_directory(task_root)
+        db.execute("DELETE FROM report_provenance WHERE edition_sequence IN (SELECT e.sequence FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.task_id=?)",(task,))
+        for table in ("source_turns","source_resets","hook_events","hook_hints","hook_agent_bindings","hook_pending_sources"):
+            db.execute(f"DELETE FROM {table} WHERE task_id=?",(task,))
+        db.execute("DELETE FROM source_revisions WHERE task_id=?",(task,))
+        db.execute("DELETE FROM task_changes WHERE task_id=?",(task,))
+        db.execute("DELETE FROM binding_receipts WHERE thread_id IN (SELECT thread_id FROM thread_bindings WHERE task_id=?)",(task,))
         db.execute("DELETE FROM pending_source_deletions WHERE task_id=?",(task,))
+        db.execute("DELETE FROM draft_revisions WHERE draft_id IN (SELECT id FROM drafts WHERE task_id=?)",(task,))
         db.execute("DELETE FROM drafts WHERE task_id=?",(task,))
         db.execute("DELETE FROM governance WHERE task_id=?",(task,))
         db.execute("DELETE FROM source_messages WHERE task_id=?",(task,))
@@ -51,14 +58,17 @@ def clear_tasks(store,project_root,days,keep_threads=(),now=None):
         raise StoreError("invalid_project","project_root",str(project_root),"absolute existing canonical directory")
     cutoff=((now or datetime.now(timezone.utc))-timedelta(days=days)).isoformat(timespec="microseconds")
     with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE"); store._recover(db)
+        db.execute("BEGIN IMMEDIATE")
         rows=db.execute('''SELECT id,activity FROM (
             SELECT t.id,t.project_root,MAX(t.created_at,
                 COALESCE((SELECT MAX(e.updated_at) FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=t.id),t.created_at)) AS activity
             FROM tasks t) WHERE project_root=? AND activity<?''',(str(project),cutoff)).fetchall()
         keep={entry["task_id"] for thread in keep_threads for entry in db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?",(thread,))}
         selected=[row["id"] for row in rows if row["id"] not in keep]
-        for task in selected: db.execute("INSERT INTO pending_deletions VALUES (?)",(task,))
-        db.commit(); db.execute("BEGIN IMMEDIATE"); finish_deletions(store,db); db.commit()
+        for task in selected: db.execute("INSERT OR IGNORE INTO pending_deletions VALUES (?)",(task,))
+        db.commit()
+        pending=[row[0] for row in db.execute("SELECT d.task_id FROM pending_deletions d JOIN tasks t ON t.id=d.task_id WHERE t.project_root=?",(str(project),))]
+        for task in pending:
+            db.execute("BEGIN IMMEDIATE"); finish_deletions(store,db,task); db.commit()
     return dict(deleted_tasks=len(selected),retention_days=days,
                 skipped_protected=sum(row["id"] in keep for row in rows))

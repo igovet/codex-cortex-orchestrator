@@ -1,3 +1,621 @@
+# English-only workers from the first response — focused checks passed
+
+Candidate `1.15.6+codex.sha256.879d600bfb9e3966` preserves semantic version 1.15.6,
+seven MCP operations and all 22 specialist profiles. Its full payload SHA-256 is
+`879d600bfb9e3966385113b754b8f27400e4a3f13603fc8b0c4e5b119355bbe2`; the catalogue
+digest remains `f84b501e716b3990ba8308c428608061534b2dbc7a68d9dff177bf12b866be66`.
+
+The shared worker guidance now requires English for reasoning and every
+communication phase, including initial skill-loading commentary, progress,
+questions, handoffs and recovery. Assignments state the rule before skill loading.
+Only the coordinator follows the user's response language. Exact quoted source
+text and required product language remain intact. Runtime code, tool schemas and
+specialist routing are unchanged.
+
+Stamp, package validation, source-only sync, 27 package tests and the complete
+**241-test suite (10.82 seconds)** passed sequentially. All 24 changed skills passed
+validation; generated profiles match their shared source. Documentation links and
+`git diff --check` passed.
+
+Two ordinary real-host scenarios used Russian requests for short English README
+documentation on this unchanged payload. All nine worker messages were English,
+including the first commentary before any tool call in each run. All seven
+coordinator messages were Russian. Each worker published one report and delivered
+one native result, with no cross-task message. The README examples printed `12`
+and `7`; protected-file hashes, report hashes, SQLite integrity and the single
+physical pipeline passed independent checks. Coordinators used Luna/high; the CLI
+worker used Luna/high and the Desktop worker used Luna/medium.
+
+| Host | Host calls | MCP events | Hook actions | Worker messages | Coordinator messages | Total tokens | Native task seconds | Audit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| CLI | 65 | 13 | 30 | 6 English | 4 Russian | 1,005,464 | 254.836 | Report-reference flag retained |
+| Desktop | 66 | 13 | 31 | 3 English | 3 Russian | 1,055,264 | 214.416 | Passed |
+
+**Strict consecutive CLI/Desktop qualification remains unverified.** The CLI audit
+reported `worker_final_with_unobserved_report` because the handoff cited both its
+published worker report and the coordinator's predecessor pipeline. The retained
+publication receipts confirm both references; the audit requires every extracted
+report reference to belong to the worker. The flag was preserved rather than
+treated as a clean audit. Manual review also retained an unnecessary CLI catalogue
+lookup and no-op Git comparison. These observer and call-economy issues are outside
+this language change. Desktop's audit had no errors, policy flags, truncation or
+open sessions.
+
+Complete current calls, events and audits were retained before shutdown. The CLI
+exit-zero marker was captured; only the owned CLI/Desktop sessions and temporary
+observation streams were removed. Desktop used a disposable profile and an exact
+submission receipt; its X11 desktop-property warning did not prevent submission.
+The stable plugin, user configuration and referenced user task were not changed.
+The live checks establish observable message language; forced compaction and
+unexposed internal reasoning were not verified.
+
+## Previous response language and native handoff — focused checks passed
+
+Candidate `1.15.6+codex.sha256.cc594f16f07f34cf` preserves semantic version 1.15.6,
+seven MCP operations and all 22 specialist profiles. Its full payload SHA-256 is
+`cc594f16f07f34cf537fb0b30854569c6b54c0e4568d88895aab52822f94cb88`; the unchanged catalogue
+digest is `f84b501e716b3990ba8308c428608061534b2dbc7a68d9dff177bf12b866be66`.
+
+The guidance separates the user's response language from English internal reports,
+forwarded agent messages and requested product language. It carries that choice
+through progress, final answers and context recovery. The shared worker protocol
+explicitly returns results through the native final response without a duplicate
+cross-task message. Runtime storage and tool contracts are unchanged.
+
+Stamp, package validation, source-only sync, 27 package tests and the complete
+**241-test suite (10.79 seconds)** passed sequentially. All 25 changed skills passed
+skill validation; generated profiles match their shared source. Documentation links
+and `git diff --check` passed.
+
+Four ordinary real-host runs on the same unchanged payload used Russian requests
+for English README documentation. All 15 coordinator messages, including four final
+answers, remained Russian. Every worker returned one English native final response;
+no run called cross-task messaging tools. Each executable example and protected-file
+hash check passed. Report hashes, SQLite integrity and the single pipeline were
+checked independently. Coordinators used Luna/high; workers used Luna/medium except
+the second CLI worker, which used Luna/high.
+
+**Strict consecutive CLI/Desktop qualification remains unverified.** Two individual
+audits passed, but the execution order below did not produce a consecutive successful
+pair. The failed runs remain part of the evidence; this focused change does not claim
+to fix unrelated waiting or patch-construction behavior.
+
+| Run order | Host calls | Recorded MCP events | Recorded hook actions | Total tokens | Native task seconds | Strict audit |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| CLI 1 | 72 | 12 | 32 | 965,895 | 211.468 | Passed; recovered missing-README read retained |
+| Desktop 1 | 86 | 13 | 34 | 1,619,133 | 261.287 | Rejected: wrapper syntax, draft patch and status probe |
+| Desktop 2 | 63 | 13 | 28 | 1,088,293 | 205.291 | Passed |
+| CLI 2 | 75 | 13 | 32 | 1,181,720 | 236.629 | Rejected: status probe after wait |
+
+The first Desktop run also produced overbroad wording about missing value fields;
+its successful example does not establish complete documentation accuracy. Its final
+usage was read after completion; event counts describe the retained audit snapshot.
+The second Desktop audit had no tool errors, policy flags, truncation or open
+sessions. The second CLI audit had no tool errors but retained its coordinator's
+unnecessary status probe; manual review also found an unnecessary catalogue lookup
+after the worker had supplied a report reference.
+
+Complete current call/event tails and audits were retained before session shutdown.
+CLI exit-zero markers were captured, and only the owned CLI/Desktop sessions and
+temporary observation streams were removed. Real Desktop used disposable profiles
+and exact-window submission receipts. Its X11 desktop-property warning did not
+prevent submission. The stable plugin, configuration and user task were not changed.
+Forced compaction, explicit response-language switching and exhaustive multilingual
+coverage were not exercised by these focused scenarios.
+
+## Previous project-local SQLite candidate — CLI/Desktop qualification passed
+
+Candidate `1.15.6+codex.sha256.4b26dcd06eb65e14` preserves semantic version 1.15.6,
+seven MCP operations and all 22 specialist profiles. The full payload SHA-256 is
+`4b26dcd06eb65e14f7c074e343c3fda9b7da94997ad7e1d0bb20b11669f9b375`; the catalogue digest is
+`f84b501e716b3990ba8308c428608061534b2dbc7a68d9dff177bf12b866be66`.
+
+Cortex metadata now lives only in `<project>/.codex/cortex/cortex.sqlite3`, selected
+from validated native thread and parent identity. Different projects use independent
+SQLite files; tasks in one project still share SQLite serialization. No global-store
+or environment override fallback is available. The explicit offline splitter keeps
+legacy SQLite and Markdown unchanged and verifies a private backup before publishing
+only the selected project’s metadata. Stable user data has not been migrated.
+
+Stamp, package validation and source-only sync passed sequentially, followed by
+**128 focused tests** and **241 total tests in 10.76 seconds**. Rejected unsupported
+and foreign-project databases retain their bytes and journal mode. Independent
+process tests prove project B can write while project A is locked. Same-project
+concurrent writes, native routing, missing source/index behavior, retention and
+archive export are covered. `git diff --check` and local documentation link checks
+passed. The same unchanged payload completed consecutive ordinary CLI and actual
+Desktop runs on 2026-09-06, with Luna/high coordinators and Luna/medium technical
+writers. Both Cortex audits exited zero. Complete host-call reviews found no MCP
+or hook failures, Cortex protocol violations, truncation or open command sessions.
+
+| Host | Host calls | MCP events | Hook actions | Total tokens | Cached input | Native task seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CLI | 66 | 11 | 31 | 922,977 | 826,880 | 196.026 |
+| Desktop | 59 | 14 | 27 | 1,114,046 | 1,000,704 | 192.145 |
+
+The CLI trace retains a project example import error and the successful corrected
+invocation; it is not an error-free product run. Desktop had no host-tool errors.
+Its X11 focus command emitted a desktop-property warning but returned success, and
+the exact-window submission produced one new task receipt. Independent examples,
+contract checks, protected-file hashes, SQLite integrity and foreign keys passed
+on both hosts. Each retained database contains one task and only its own project’s
+coordinator/child bindings. All declared artifact hashes and final report hashes
+match, all drafts are published, and each archive has one newest-first pipeline.
+CLI exited normally with its zero marker; Desktop and CLI observation sessions
+were stopped and temporary streams removed while project stores were preserved.
+The stable plugin, configuration and legacy shared database were not changed.
+This qualifies the tested routing, documentation, report and hook path; it does
+not claim universal task success or eliminate contention within one project.
+
+A source-only hook benchmark ran 100 fresh `python3 -B` subprocesses per path.
+All 300 exited zero with exact empty JSON responses, empty stderr and one private
+observation each. P95 including startup was 45.716 ms inactive, 51.370 ms for active
+tool receipts and 53.023 ms for deferred prompt capture. Active paths used a
+synthetic native index and a project-local task; the inactive path created no store.
+Whole-task percentage overhead remains unverified.
+
+The first CLI run and its same-task resume passed all independent product and
+archive checks, with no MCP or hook failures. Resume retained the task, parent/child
+bindings and pipeline, archived the next request as source revision 2, and preserved
+prior README and pipeline content. Their strict protocol audits were rejected:
+the first run used a wrong draft path before correcting it, and both turns
+shell-read fresh pipeline drafts. The resume also retained two recovered README
+patch failures. Complete calls/events and audits were captured before both normal
+exit-zero shutdowns. An additional false skill-read flag was corrected in the
+isolated observer using a narrow static Python `-c` grammar; all 29 observer tests
+pass, and replay preserves the genuine violations. The plugin payload was unchanged.
+
+---
+
+# Historical Format 11 v9 improvement candidate — bounded CLI/Desktop qualification passed
+
+The source replacement preserves semantic version 1.15.6, seven MCP operations and
+22 specialist profiles. It introduces compact instructions, task-isolated storage,
+source/provenance metadata, an offline migration and local lifecycle hooks.
+
+Candidate: `1.15.6+codex.sha256.0066c0266f853fd5`, full SHA-256
+`0066c0266f853fd53a82e6b911d49eec83cd92c89d3f8cfcf1ae479e1a619d9a`.
+Seven-tool catalogue digest:
+`eb2aea4c29706e269f611d4565dfec3b8a9a881c716e90cf13eb4e2f7f07557e`.
+
+The same five coordinator skills (orchestrator, content safety, context compaction,
+communication and tool discipline) total 20,694 characters versus 68,825 in baseline:
+a 69.93% reduction. The orchestrator file alone is 13,694 versus 49,860 (72.54%); the
+representative complete backend worker skill is 10,211 versus 36,610 (72.11%), and the
+shared worker protocol is 8,132 versus 34,282 (76.28%). These
+counts include front matter and use identical decoded-Unicode/newline treatment;
+conditional documentation, harvest, maintenance and rare references are excluded
+from the coordinator comparison in both variants. Size reduction is not a task-quality claim.
+
+Stamp, package validation and source-only sync passed sequentially. The focused suite
+passed **69 tests**; the complete suite passed **208 tests in 8.90 seconds**. All 30
+skills, profile generation and `git diff --check` passed.
+The [verification map](project/verification.md)
+links mandatory failure and recovery scenarios to their actual unit tests.
+
+The unchanged candidate completed consecutive ordinary CLI and actual Desktop
+documentation scenarios on 2026-09-06. Both coordinators used `gpt-5.6-luna` at
+high effort; both native technical writers used Luna at medium effort. Full skill
+loads, command receipts, bounded discovery, worker publication and coordinator
+acceptance passed the complete host-call review. Both audits exited zero, with no
+MCP or hook failures, Cortex protocol violations, truncated results or open command
+sessions. Independent README examples and contract checks passed, and all protected
+files retained their hashes.
+
+Independent read-only audits of both final archives verified Format 11 SQLite
+integrity and foreign keys, exact coordinator/child bindings, source revision 1,
+all declared artifact hashes, owner-private report files and their indexed hashes.
+Each archive has one physical pipeline with its newest section first and older
+content below it; all three drafts are published, with no pending deletion or
+unindexed report. All 107 local documentation links resolve.
+
+| Host | Host calls | MCP events | Hook actions | Total tokens | Cached input | Native task seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CLI | 86 | 12 | 37 | 1,309,671 | 1,216,512 | 207.747 |
+| Desktop | 70 | 14 | 30 | 1,314,999 | 1,208,320 | 155.101 |
+
+The CLI trace retains two failed project README patch attempts and their subsequent
+exact successful retry; these are recovered product errors, not an error-free run.
+Desktop had no tool errors. CLI emitted its normal exit-zero marker, and both exact
+isolated sessions were stopped after complete evidence capture. This qualifies the
+tested instruction-loading, documentation, report and hook path; it does not prove
+every task, recovery path or a general quality improvement. The 12-run comparison
+below remains a separate earlier payload, not a repeated benchmark of v9.
+
+On this exact candidate, 100 fresh Python subprocesses for each of three hook paths
+all exited zero with checked output and private observation receipts. The measured
+p95 including startup was 39.017 ms inactive, 47.452 ms for active tool receipts and
+50.982 ms for active deferred prompt capture. This meets the 100 ms local-handler
+target. Whole-task hook overhead at or below 5% is still unverified; internal handler
+durations omit startup and cannot establish that result. Each active benchmark used
+a fresh synthetic task and 100 distinct tool or turn identities; the inactive path
+had no store. These are local subprocess measurements, separate from model-run time.
+
+The earlier v5 qualification was rejected for incomplete initial command receipts and
+truncated catalogue discovery; product checks passed, while recovery later stalled
+after draft creation and was cancelled before lifecycle state was known. V6 completed
+and stopped normally with product checks 7/7 and no MCP or hook failures, but protocol
+qualification failed on the initial coordinator receipt and a recovered worker's
+draft-report hash correction patch, which initially failed context verification before
+repair. V7's CLI product checks passed 8/8 with complete receipts and no truncation,
+but post-publication handoff lookup was rejected. Its exploratory Desktop run passed
+product checks 8/8 and completed normally in 170.432 seconds using 1,686,903 tokens;
+The trace contains 74 host calls, 13 successful MCP events and 30 successful hook
+receipts; two catalogue searches were truncated across four wrapper/nested records and a status probe was
+rejected. V8 was source-only and never live. V9 adds the concrete names-only
+discovery example. The first v9 CLI smoke attempt omitted an explicit data store and
+selected an incompatible pre-existing isolated store, so setup was invalid; its
+product checks were 8/8 in 100.473 seconds using 582,992 tokens, but it recorded two
+unsupported-storage MCP errors and 14 hook storage errors, followed by model
+protocol errors. It is neither qualification nor a Format 11 runtime regression.
+The helper's fresh-store and exact-resume changes passed the source checks above.
+The successful final pair above used explicit fresh stores. The separate
+three-configuration/four-scenario Luna pilot remains the frozen v4 comparison with
+12/12 runs; all functional checks passed, with one baseline protocol pass and no
+candidate protocol passes. The [comparison and retained measurements](project/quality-evaluation.md)
+separate outcomes from protocol defects and exclude disclosed tuning/intervention
+attempts. Its full-hooks payload is
+`fd022bfc005647faab9ddde3ec5c493ea00773ce28b9389cf2ed355039796375`; its compact
+counterpart differs only in the active-hook manifest and generated package version.
+Three observer false flags were corrected in MAIN: two for safe literal quoted-Python
+full-skill reads and one for exact Desktop escaped-underscore plus terminal-newline
+source fidelity. Storage retains exact native bytes, and the observer guard verifies
+delivery before accepting an exact archive hash. Quoted-heredoc AST validation rejects
+shell expansion, with regression coverage added. V4 efficiency measurements and
+historical host passes below do not qualify v9.
+Immediate UserPromptSubmit publication
+without a native message identity is deliberately deferred, and reused-worker
+assignment-level stop coverage remains incomplete when the host omits that boundary.
+No stable plugin installation or configuration has been changed.
+
+---
+
+# Historical candidate: complete skill loading — 2026-09-06
+
+Candidate: `1.15.6+codex.sha256.fd0b4e63ad8eea97`, full SHA-256
+`fd0b4e63ad8eea97cd5bd39ce893675db5e2b0cc6fbcdc2c91fff4a35bf99345`.
+Seven-tool catalogue digest:
+`999c3a0324d5b34e4c124542269fccdb2ea86267de9e0d46ff78bf26efb6739f`.
+
+Actual workers repeatedly treated a successful 240-line range as the end of a
+longer skill. Every generated worker skill now declares its exact line count and
+ends with one standalone completion marker. The full shared profile remains intact;
+there is no custom loader, new operation, profile or storage migration. The
+coordinator's assignment prefix requires reading through that boundary before
+catalogue discovery or project work.
+
+Generation, stamp, package validation and source-only sync passed in sequence.
+Official plugin validation and 23 skill validations passed. Focused checks passed
+48/48. After the final observer correction, all 26 decision/audit checks passed;
+the concluding full suite passed **138 tests in 72.33 seconds**. Documentation links
+and `git diff --check` passed.
+
+The same unchanged candidate completed consecutive ordinary code-reading/documentation
+scenarios on actual CLI and Desktop. Both orchestration audits passed. All **64 CLI
+calls / 11 MCP events** and **72 Desktop calls / 14 MCP events** were reviewed. The
+CLI worker read the whole skill in one command; the Desktop worker continued from
+lines 1–240 through 241–528. Both exposed the final marker before tool discovery,
+used exact-workspace Codebase Memory evidence, wrote the correct requested example
+and duplicate-ID explanation, and preserved both protected files by SHA-256.
+No truncated discovery, TOML access or invalid report reference was observed.
+
+Each worker transparently recorded a recovered JavaScript `store(undefined)` failure
+after a successful MCP project listing. Native MCP receipts prove that those calls
+succeeded; the failed consumer processing remains visible in the audit. The observer
+now distinguishes these outcomes instead of labeling the MCP itself as failed.
+Independent product checks and manual README review passed. The CLI exited zero;
+both isolated sessions were stopped after evidence capture.
+
+This qualifies the bounded marketplace-loading, retrieval, report and documentation
+path, not every project or a general intelligence improvement. Same-role continuation
+and fresh verification were observed on both hosts in the preceding candidate;
+its exact Desktop steering failure remains disclosed below. Recovery of stranded
+native `pending_init` slots is **not verified or fixed by this plugin**. The completed
+comparison remains **12/12 trials**, with no proven significant gain. Stable user
+installation and configuration were not changed.
+
+---
+
+# Historical marketplace candidate — 2026-09-06
+
+Candidate: `1.15.6+codex.sha256.569e08207d9e2012`, full SHA-256
+`569e08207d9e201270d93b446de5784c99ed0a8bd82fd049578d18079dd9eb65`.
+Seven-tool catalogue digest:
+`999c3a0324d5b34e4c124542269fccdb2ea86267de9e0d46ff78bf26efb6739f`.
+
+Complete skill loading now precedes all catalogue discovery; dependent operations
+cannot share the initial read call. The observer recognizes one reply to the exact
+active worker that messaged its coordinator. Previous evidence, routing, report-ID
+and lifecycle changes remain; no operations, profiles or storage migrations were added.
+
+Generation, stamp, package validation and source-only sync passed in sequence.
+Official plugin validation and validation of the 23 latest changed skills passed.
+Focused checks: 45 passed. Full suite: **134 passed in 72.13 seconds**.
+After observer-only corrections, 24 decision/audit checks also passed. Plugin
+access is determined from patch targets rather than mentions in report prose;
+concurrent report reads are correlated by retained literal references when available.
+These corrections did not change the candidate payload.
+
+Actual CLI completed the initial product task and generator follow-up: independent
+initial checks passed 2/2, final original checks 2/2 and one-shot/stop-on-conflict
+checks 2/2. The implementation context received an explicit new assignment, wrote
+a new report, and a fresh verifier checked it. All five previously saved non-pipeline
+Markdown documents retained their hashes. All 206 call records and 30 MCP events
+were reviewed; no policy violation remained after correcting observer attribution.
+Clean protocol qualification still failed: initial workers read only 240 skill lines
+and used broad, truncated catalogue lookups; the follow-up verifier corrected one
+wrapper syntax error. No invalid report dispatch, TOML access or wrong graph index
+was observed. CLI exited zero and stopped. Stranded-slot recovery was not exercised.
+Actual Desktop also passed initial and final product checks (2/2 each), plus the
+generator checks (2/2), and preserved all four prior non-pipeline documents.
+Same-role continuation and fresh verification were observed. All 222 calls and
+38 MCP events were reviewed. Nine policy flags and 14 unsuccessful call records
+remain, including partial skill loading, broad truncated searches and unnecessary
+worker catalogue access; recorded diff exit 1 results are expected differences,
+not product failures. The literal steering helper correctly rejected a changed
+first character (ASCII A became U+0424), although the remaining requirements arrived
+and the task completed; the message was not replayed. That transport attempt is not
+a successful exact-delivery qualification. The isolated Desktop process was stopped.
+Neither host qualifies this candidate as a clean protocol pass.
+Stable user installation and configuration are unchanged.
+
+---
+
+# Historical capability-routing candidate — 2026-09-06
+
+Candidate: `1.15.6+codex.sha256.40391f7f43ad3efa`, full SHA-256
+`40391f7f43ad3efa0ec969f4020ece752094f09873d701f847af0d4cd0b5d7fb`.
+Seven-tool catalogue digest:
+`999c3a0324d5b34e4c124542269fccdb2ea86267de9e0d46ff78bf26efb6739f`.
+Version 1.15.6, seven operations, 22 profiles and metadata-only SQLite are preserved.
+
+This candidate requires deterministic comparison of the complete graph workspace
+root before retrieval, retains evidence scope in the decision brief, and removes
+the assumption that an omitted override means Luna. Model choice now starts with
+an appropriate capable baseline and qualifies cheaper choices against quality.
+Normal advertised skill loading and all previously approved decision improvements
+remain. The observer also correlates actual server events with execution intervals
+and detects stdout-only command wrappers.
+
+Profile generation, stamp, package validation and source-only sync passed in
+sequence. Focused package/decision checks passed (44 tests), followed by the full
+suite: **133 tests in 72.31 seconds**. Actual CLI passed independent product checks (2/2), preserved the protected file
+and exited zero. Review of all 133 calls and 17 MCP events rejected clean protocol
+qualification: both workers batched incomplete skill loading with broad discovery,
+truncating the catalogue. Exact subsequent lookups recovered needed schemas. One
+missing-file search exited 1. No invalid report dispatch, TOML read or wrong graph
+index was observed. A coordinator reply was incorrectly flagged as unsolicited;
+the next observer revision fixes this with an exact-worker regression. No Desktop
+run was spent on this rejected payload. Stable user installation
+and configuration remain unchanged.
+
+---
+
+# Historical standard-loading candidate — 2026-09-06
+
+Candidate: `1.15.6+codex.sha256.da559702a1acb07a`, full SHA-256
+`da559702a1acb07a6e5d8867ca1d613c0036ac317bde451bf2d0f927f941b139`.
+Seven-tool catalogue digest:
+`999c3a0324d5b34e4c124542269fccdb2ea86267de9e0d46ff78bf26efb6739f`.
+Semantic version remains 1.15.6, with 22 profiles and no storage migration.
+
+Official documentation confirmed that reading an advertised SKILL.md and relevant
+references is normal progressive loading. The user withdrew the absolute read ban.
+The candidate supports this standard marketplace route without personal registration,
+while keeping TOML and server-internal exploration forbidden. Every delegated role
+receives the same short loading, complete-command-receipt and graph-first prefix,
+including verification. Documentation may stay with the implementation owner; extra
+specialists require a concrete evidence need. Acceptance must reach the user's
+observable behavior. See the [source-backed review](project/orchestration-review.md).
+
+Profile generation, stamp, marketplace validation and source-only sync passed in
+sequence. The complete suite passed: **131 tests in 72.41 seconds**. After a separate observer
+fix, all 20 decision/audit regressions passed, including the new missing-command-receipt
+case; this observer-only edit did not change the installed payload. Stable installation
+and configuration were not changed. Actual CLI passed the independent product grader and protected-file check, but
+qualification was rejected: the implementer queried a previous fixture index. All
+135 call records and 16 MCP events were retained and reviewed. A skipped invalid
+regex guard was also incorrectly matched to the later successful report read by
+the observer; interval-based matching now has a regression test. The CLI exited
+zero and stopped. No Desktop run was spent on this rejected payload.
+
+## Intermediate standard-loading candidate
+
+`1.15.6+codex.sha256.b95024d903502e34` passed the product grader and protected-file
+check on actual CLI. Full review of 118 call records and 16 MCP events still rejected
+qualification: the verifier omitted graph-first discovery and two skill-read wrappers
+exposed stdout without their command receipts. Four exploratory checks failed before
+corrected checks passed; their records remain visible. A Git warning was a guarded,
+unexecuted branch. The metadata orchestration audit passed, demonstrating why manual
+review remains necessary. The CLI exited zero and was stopped before preparing the
+corrected candidate. No Desktop run was spent on this already-rejected payload.
+
+---
+
+# Historical absolute-read-ban candidate — 2026-09-06
+
+**Rejected historical candidate; requirement superseded.** The user later authorized
+normal documented skill loading. The shortened comparison had 12 attempts; all completed.
+All final products passed independent checks, but five runs had protocol violations.
+The combined bundle showed no proven significant gain. See the
+[decision and measurements](project/quality-evaluation.md#shortened-series-decision-2026-09-06).
+
+Subsequent changes forbid every installed plugin/cache file read, including skills
+and TOML, strengthen exact reference handoffs, and audit ineffective capacity retry
+loops. All skills remain standard marketplace components. They do not fix missing
+native skill attachment or stranded V2 residents inside Codex itself. The inspected
+0.153.0 and 0.153.4 source confirms the [host limitation](project/host-compatibility.md).
+Historical successful runs below used a now-forbidden filesystem instruction read
+and do not qualify this stricter candidate. Stable installation remains unchanged.
+
+Candidate: `1.15.6+codex.sha256.2f30e6d45800de64`, full SHA-256
+`2f30e6d45800de64ce11fb48b0d35a3331568aec943cbcd62a1909d05f9bd782`.
+Seven-tool catalogue digest:
+`999c3a0324d5b34e4c124542269fccdb2ea86267de9e0d46ff78bf26efb6739f`.
+Profile generation, stamp, marketplace validation and source-only sync passed in
+sequence. The full suite passed: **131 tests in 72.15 seconds**. Local documentation
+links and `git diff --check` passed. Required feature-census guidance is generated
+inside its own marketplace skill; agents need no external reference-file read.
+
+The actual CLI initialized this exact marketplace cache and catalogue, then failed
+the ordinary product scenario: two specialist roles reported missing native skill
+attachment and made no product changes. All 34 call records and eight MCP events
+were reviewed. No plugin-file read or MCP error occurred. One truncated discovery
+result appeared as two audit records (wrapper and nested call), and three worker
+terminal results lacked reports. A follow-up and a fresh role retry did not change
+the missing host capability. The coordinator accurately reported blocked work;
+the original product files remained byte-identical. The audit failed, as required;
+the CLI exited with code zero and its exact session was stopped. This is failure
+evidence, not a successful functional qualification or capacity-recovery test.
+
+Actual Desktop used the identical candidate: 73 call records and 14 MCP events.
+The product implementation passed four independent post-run checks, but the run was
+rejected: the implementer started project work without loading its full skill and
+used Codebase Memory only afterwards. Fresh verification workers reported missing
+skill attachment. Six host-failure records included a real Git invocation outside
+Git, truncated discovery and a failed attempt to use the app messaging interface
+for native coordination. The audit recorded 13 flags, including over-attribution of
+the batched Git command to unrelated commands. No installed-plugin read occurred.
+The coordinator disclosed the missing independent verification. Complete evidence
+was saved before the isolated Desktop process and temporary artifacts were stopped.
+Neither strict-host run proves capacity recovery or correct standard skill loading.
+
+Earlier check counts and hashes below apply only to their named candidates.
+
+---
+
+# Continuation ownership and coordinator boundary correction — 2026-09-05
+
+Candidate: `1.15.6+codex.sha256.6a789c1d6d2eb0ef`, full SHA-256
+`6a789c1d6d2eb0ef4a33532c7b9df1fc08be43997cc3b9024d60505fc4abf219`.
+The seven-tool catalogue digest is
+`593ab64e820266404c2ad88a674b51390b5e2fd3c531e6b0de91fb33aaa429c9`.
+Stable installation and configuration remain unchanged.
+
+The language table no longer incorrectly suggests coordinator-authored synthesis.
+Coordinator completion records acceptance in the pipeline and answers the user;
+an additional saved synthesis is an optional worker artifact. Read descriptions
+and instructions consistently limit coordinator evidence to opening report briefs.
+Assignments now carry command-receipt requirements before the first worker skill read.
+
+The continuation audit requires the latest successful publication from the exact
+worker. Its earlier published report references may accompany that result; unknown,
+foreign or old-only references fail. This replaces an unnecessarily strict reference
+count rule. Restart snapshots preserve publication ownership without replaying old
+calls, and invalid final handoffs cannot restore completed ownership. The historical
+failed runs below retain their actual, then-current audit results.
+
+Source checks: **127 tests passed** in 71.41 seconds; package validation, source-only
+sync and skill validation passed. No storage migration or public operation was added.
+The comparative outcome series is underway; completed attempts are recorded in
+[the trial aggregates](project/quality-evaluation-results.json). The full comparison
+and replication remain incomplete. Source checks do not establish a percentage
+quality or efficiency gain.
+
+Real CLI passed both initial investigation and same-task continuation after restart
+on this unchanged payload. Initial phase: 71 call records and 12 MCP events; resumed
+phase: 34 records (including the retained-assignment snapshot) and 9 MCP events.
+Both audits had zero host failures, Cortex errors, role violations, open sessions
+or open cells. Every call was reviewed. Codebase Memory provided initial graph
+search, snippets, tracing and coverage. The resumed explorer reused retained context,
+checked current source and boundary cases, then published a new immutable report.
+All original sources and three initial immutable documents remained byte-identical;
+there was one canonical pipeline. Both CLI exits carried the explicit zero marker.
+
+Actual Desktop then passed the initial investigation and explicit same-worker
+clarification on the identical candidate: 122 call records and 22 MCP events across
+two completed turns. Every call was reviewed; host failures, Cortex errors, role
+violations, open sessions and open cells were all zero. The worker used the existing
+Codebase Memory graph before source checks, retained context for the clarification,
+and published a second report without changing earlier documents or source files.
+The coordinator read opening briefs and authored only the pipeline. Exact parent
+follow-up ownership was observed on both real hosts, including CLI after restart.
+
+Desktop's prepared composer and the retained task's empty composer were inspected.
+One initial submission and one clarification produced their exact native receipts;
+only the observed editor-added paragraph newline is allowed for the latter. A short
+focus-settling delay and slower synthetic typing preceded the successful repeat of
+the earlier failed ASCII fixture. This does not qualify arbitrary keyboard layouts
+or non-ASCII follow-up input. Desktop resume was not exercised.
+
+These consecutive CLI/Desktop scenarios qualify the bounded graph-investigation,
+report-read boundary and continuation behavior, not general task intelligence.
+Both fixture databases passed integrity and foreign-key checks. Report files were
+private, no unpublished drafts remained, and both helpers stopped their exact test
+processes. Raw logs, reports and screenshots remain private outside the repository.
+
+# Decision quality and Codebase Memory candidate — 2026-09-05
+
+Candidate: `1.15.6+codex.sha256.3d45a654e1b78c8a`, full SHA-256
+`3d45a654e1b78c8a14b025c11e8819e2144b95694195a465ed0b556953da22e0`.
+This is a development candidate, not a newly qualified release. The stable plugin
+and user configuration were not updated. Earlier qualifications below describe
+only their recorded hashes, not this candidate.
+
+The candidate adds selected opening decision briefs, uncertainty-driven assignments,
+explicit same-role continuation with new immutable reports, fresh verification
+contexts, observed-bottleneck model routing, and graph-first Codebase Memory guidance
+in all 22 profiles. The seven-operation storage contract and semantic version remain
+unchanged. No storage migration or public workflow operation was added.
+
+Source validation: **126 tests passed** in 71.25 seconds; package validation,
+source-only sync and diff whitespace checks passed. A separate collection command
+created Python bytecode; package validation correctly rejected that generated cache.
+After removing only the bytecode, package and sync checks passed on the same hash.
+Tests cover continuation authorization and ownership, per-assignment report identity,
+resume metadata, coordinator read boundaries, Desktop steering receipts and evaluation
+record integrity. These tests do not establish native-host compliance or quality gain.
+
+A baseline CLI pilot solved the retry-dedup fixture and preserved the protected file,
+but its protocol audit failed. Earlier changed CLI pilots exercised graph discovery,
+snippets and coverage, then implementation-context reuse on a user correction.
+The latter also reused a verifier and emitted two report identifiers in a worker
+final; it was rejected. The instructions and observer now explicitly reject these
+cases. Another pilot bypassed graph discovery for a named source file and failed
+bootstrap/command-receipt checks; it was also rejected. Complete calls, events and
+audits were retained privately and each run was followed to completion before cleanup.
+
+On the final candidate, real CLI completed the threshold caller investigation and
+an optional-inclusive design follow-up with two fresh roles. The architect used
+`list_projects`, missing-project indexing, graph search, exact snippets, inbound
+tracing and coverage before a bounded source check. The coordinator consumed
+opening decision evidence, but also read an ordinary continuation page and authored
+synthesis reports outside its allowed role. One report patch initially failed;
+command wrappers omitted terminal receipts. The audit rejected the run (142 call
+records, 29 MCP events). All original fixture files remained byte-identical, no
+sessions or execution cells remained open, and the exact CLI exited with code zero.
+This confirms graph-route use, not a clean orchestration qualification. CLI resume
+on this final payload has not been exercised. The Desktop fixture was indexed
+separately before launch to exercise the existing-index route; this is not an
+identical-initial-state comparative trial.
+
+Actual Desktop on the same payload completed the initial graph investigation and
+one clarification in the same explorer context (102 call records, 23 MCP events).
+The observer resolved the successful parent follow-up to the exact completed child;
+the child published a second immutable report and preserved all fixture source files.
+The coordinator used opening briefs. The initial Cortex audit had no role violations,
+but the full clarification audit rejected a worker final containing multiple report
+identifiers. Four initial host failures included stdout-only wrappers and an explained
+source command error; a clean Cortex-only audit is not a clean all-call qualification.
+Both native task-complete receipts were observed, with no open sessions or cells.
+The disposable Desktop process was stopped through its helper.
+
+Desktop steering transport refused an exact-delivery acknowledgment: native keyboard
+input changed the initial Latin character to a Cyrillic lookalike. The message had
+already arrived in the correct task, so it was not replayed. The observer now accepts
+only the separately observed single editor-added paragraph newline; it still rejects
+changed characters. The 15 focused decision/transport tests passed after this narrow
+developer-tool correction. Automated Desktop steering remains unqualified; the
+failure is not an authorization to accept approximate text. Desktop resume was not run.
+Consecutive clean CLI/Desktop parity on this candidate has therefore **not** been
+established. Raw logs, reports and screenshots remain outside the repository.
+
+The [comparative evaluation procedure](project/quality-evaluation.md) and executable
+12-task fixtures are implemented. The full 216-trial baseline/ablation/combined
+comparison and replication have **not** been run. Neither the proposed 20% benefit
+nor a general increase in reasoning quality is demonstrated by these development
+checks. Model preferences remain provisional.
+
 # Native steering qualification — 2026-09-05
 
 Qualified payload: `1.15.6+codex.sha256.cc786ae2fbd04cf1`, full SHA-256

@@ -15,11 +15,15 @@ ROOT=Path(__file__).resolve().parents[1]
 def exchange(tmp_path,messages):
     messages=copy.deepcopy(messages)
     home=tmp_path/'host';(home/'sessions').mkdir(parents=True,exist_ok=True)
-    db=sqlite3.connect(home/'state_5.sqlite');db.execute('CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,cwd TEXT,rollout_path TEXT)')
+    db=sqlite3.connect(home/'state_5.sqlite')
+    db.execute('CREATE TABLE IF NOT EXISTS _sqlx_migrations(version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL, success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)')
+    db.execute("INSERT OR IGNORE INTO _sqlx_migrations VALUES (1,'fixture','now',1,X'00',1)")
+    db.execute('CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,cwd TEXT NOT NULL,rollout_path TEXT NOT NULL)')
     for m in messages:
         if m.get('method')=='tools/call' and m['params'].get('name')=='create_task' and 'request' in m['params'].get('arguments',{}):
             args=m['params']['arguments'];source=args.pop('request');thread=m['params'].get('_meta',META)['threadId'];path=home/'sessions'/(thread+'.jsonl')
             path.write_text('\n'.join(json.dumps(x) for x in [
+                dict(type='session_meta',payload=dict(id=thread,cwd=args['project_root'])),
                 dict(type='event_msg',payload=dict(type='task_started',turn_id='turn')),
                 dict(type='event_msg',payload=dict(type='item_completed',thread_id=thread,turn_id='turn',item=dict(type='UserMessage',id='original-message',content=[dict(type='text',text=source)]))),
             ])+'\n')
@@ -27,7 +31,7 @@ def exchange(tmp_path,messages):
     db.commit();db.close()
     for m in messages:
         if m.get('method')=='tools/call':m['params'].setdefault('_meta',META)
-    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=os.environ|{'CORTEX_DATA_DIR':str(tmp_path/'store'),'CODEX_HOME':str(home)},timeout=30)
+    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=os.environ|{'CODEX_HOME':str(home)},timeout=30)
     assert result.returncode==0 and result.stderr==''
     return [json.loads(line) for line in result.stdout.splitlines()]
 
@@ -79,7 +83,7 @@ def test_raw_invalid_and_oversize_frames(tmp_path):
 
 def test_actionable_schema_errors_never_echo_private_values(tmp_path):
     from cortex_runtime.server import Server
-    server=Server(tmp_path/'private')
+    server=Server()
     cases=[
         ({},'required field(s)'),
         ({'task_id':'PRIVATE_SENTINEL','mode':'light','rationale':'PRIVATE_SENTINEL','request_key':'k'},'Remove unadvertised fields'),
@@ -98,7 +102,7 @@ def test_preview_budget_has_headroom_and_exact_length_correction(tmp_path):
     from cortex_runtime.contracts import BY_NAME
     schema=BY_NAME['write_report']['inputSchema']['properties']['summary']
     assert schema['maxLength']==320 and '100' in schema['description']
-    server=Server(tmp_path/'private')
+    server=Server()
     args=dict(title='Review',summary='x'*321,
               author='reviewer',draft_id='d_000000000000',request_key='preview-check')
     result=server.dispatch('tools/call',dict(name='write_report',arguments=args))
@@ -116,7 +120,7 @@ def test_draft_routes_are_schema_visible_and_errors_explain_the_exact_repair(tmp
     base=dict(title='Evidence',summary='One useful sentence.',author='worker',draft_id='d_000000000000',request_key='route')
     validator.validate(base)
     with pytest.raises(ValidationError):validator.validate({key:value for key,value in base.items() if key!='draft_id'})
-    server=Server(tmp_path/'private')
+    server=Server()
     for arguments,field,repair in [
         (base|dict(markdown='report body'),'markdown','Remove unadvertised fields'),
         (base|dict(draft_id=''),'draft_id','server-issued identifier'),
@@ -151,9 +155,10 @@ def test_passive_context_observation_never_logs_other_metadata(tmp_path,monkeypa
 
 
 def test_wire_schemas_match_every_success(tmp_path):
+    from cortex_runtime.project_storage import ProjectResolver
     from jsonschema import Draft202012Validator
     from cortex_runtime.server import Server
-    server=Server(tmp_path/'private')
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
     catalogue=server.dispatch('tools/list',{})['tools']
     by_name={t['name']:t for t in catalogue}
     for item in catalogue:

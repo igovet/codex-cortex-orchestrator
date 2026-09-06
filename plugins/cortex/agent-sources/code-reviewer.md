@@ -14,7 +14,9 @@ rewrite the change summary, or raise style preferences without observable impact
 
 ## Specialist workflow
 
-1. Establish intended behavior, review boundary, ownership, and claimed checks.
+1. Establish intended behavior and review boundary from requirements and current
+   behavior before reading the implementer's conclusion. Record expected properties,
+   then compare claimed checks; do not inherit their assumptions as evidence.
 2. Trace consequential changes through callers, state transitions, persistence,
    errors, concurrency, authorization, security, performance, deployment, and tests.
 3. Construct concrete failure scenarios involving partial input, retries, stale

@@ -1,0 +1,915 @@
+{
+  "schema": "cortex-hooks-pilot-results-v1",
+  "suite": "hooks-pilot-v1",
+  "date": "2026-09-06",
+  "host": "ordinary CLI",
+  "coordinator_model": "gpt-5.6-luna",
+  "coordinator_effort": "high",
+  "worker_model": "gpt-5.6-luna",
+  "worker_efforts": [
+    "medium",
+    "high"
+  ],
+  "source_configurations": {
+    "baseline": {
+      "payload_sha256": "fd0b4e63ad8eea97cd5bd39ce893675db5e2b0cc6fbcdc2c91fff4a35bf99345"
+    },
+    "compact_no_hooks": {
+      "active_hooks": false,
+      "catalogue_sha256": "eb2aea4c29706e269f611d4565dfec3b8a9a881c716e90cf13eb4e2f7f07557e",
+      "configuration": "compact_no_hooks",
+      "coordinator_effort": "high",
+      "coordinator_model": "gpt-5.6-luna",
+      "host": "cli",
+      "payload_sha256": "badf86046265b0360bc814593527d228f3feaff80fd72c036c5075985ff4101e",
+      "worker_efforts": [
+        "medium",
+        "high"
+      ],
+      "worker_models": [
+        "gpt-5.6-luna"
+      ]
+    },
+    "full_hooks": {
+      "active_hooks": true,
+      "catalogue_sha256": "eb2aea4c29706e269f611d4565dfec3b8a9a881c716e90cf13eb4e2f7f07557e",
+      "configuration": "full_hooks",
+      "coordinator_effort": "high",
+      "coordinator_model": "gpt-5.6-luna",
+      "host": "cli",
+      "payload_sha256": "fd022bfc005647faab9ddde3ec5c493ea00773ce28b9389cf2ed355039796375",
+      "worker_efforts": [
+        "medium",
+        "high"
+      ],
+      "worker_models": [
+        "gpt-5.6-luna"
+      ]
+    }
+  },
+  "ablation_evidence": {
+    "compact_file_count": 236,
+    "comparable_compact_aggregate_sha256": "28bd31b326c303cc124c6cb9d3c6cd2989185a6b6ea029f3cef09c1b70338050",
+    "comparable_file_count": 235,
+    "comparable_full_aggregate_sha256": "28bd31b326c303cc124c6cb9d3c6cd2989185a6b6ea029f3cef09c1b70338050",
+    "differing_file_count": 0,
+    "errors": [],
+    "excluded_active_hooks_manifest": {
+      "compact_present": false,
+      "compact_sha256": null,
+      "full_present": true,
+      "full_sha256": "daf3ebb3bab557741ddb607990d61ecc6e84cf749afae38dd1640fd60df30385"
+    },
+    "excluded_generated_version_manifest": {
+      "compact_present": true,
+      "compact_sha256": "d84c0b32e45a80612a96553424350c00d6dabb48dc577e4f4a97e619453551dd",
+      "full_present": true,
+      "full_sha256": "52a3036e7f521fd1fafe44dc8d63ca3f72824792d7fbfb4f26f34bd3f8ab7e75",
+      "version_only_equal": true,
+      "versions_differ": true
+    },
+    "full_file_count": 237,
+    "identical_file_count": 235,
+    "only_compact_excluded_file_count": 0,
+    "only_compact_nonexcluded_file_count": 0,
+    "only_full_excluded_file_count": 1,
+    "only_full_nonexcluded_file_count": 0,
+    "status": "verified"
+  },
+  "measurement_policy": {
+    "cached_input_tokens_are_separate": true,
+    "handler_body_time_used": false,
+    "missing_runs_are_unrun_with_null_measurements": true,
+    "native_wall_field": "pilot-result.wall_seconds",
+    "participants_are_model_checked_for_luna": true,
+    "recovery_scope": "Only resume-pagination tests native compaction/restart. Recovery fields for cancel-sort concern steering or error recovery and do not establish a native restart."
+  },
+  "summaries": {
+    "baseline": {
+      "configuration": "baseline",
+      "correctness": 4,
+      "false_completions": 0,
+      "lost_requirements": 0,
+      "median_cached_input_tokens": 2827392.0,
+      "median_native_wall_seconds": 489.384,
+      "median_total_tokens": 3032297.0,
+      "participants_actual_luna": true,
+      "protocol_passes": 1,
+      "recovery_success": true,
+      "runs_present": 4,
+      "runs_required": 4,
+      "status": "complete"
+    },
+    "compact_no_hooks": {
+      "configuration": "compact_no_hooks",
+      "correctness": 4,
+      "false_completions": 0,
+      "lost_requirements": 0,
+      "median_cached_input_tokens": 1436160.0,
+      "median_native_wall_seconds": 247.92650000000003,
+      "median_total_tokens": 1582209.0,
+      "participants_actual_luna": true,
+      "protocol_passes": 0,
+      "recovery_success": true,
+      "runs_present": 4,
+      "runs_required": 4,
+      "status": "complete"
+    },
+    "full_hooks": {
+      "configuration": "full_hooks",
+      "correctness": 4,
+      "false_completions": 0,
+      "lost_requirements": 0,
+      "median_cached_input_tokens": 1513728.0,
+      "median_native_wall_seconds": 267.526,
+      "median_total_tokens": 1662731.5,
+      "participants_actual_luna": true,
+      "protocol_passes": 0,
+      "recovery_success": true,
+      "runs_present": 4,
+      "runs_required": 4,
+      "status": "complete"
+    }
+  },
+  "runs": [
+    {
+      "configuration": "baseline",
+      "case": "stable-unique",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": true,
+      "recovery_success": null,
+      "native_wall_seconds": 320.667,
+      "tokens": {
+        "input_tokens": 1700533,
+        "cached_input_tokens": 1577728,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 13075,
+        "reasoning_output_tokens": 5490,
+        "total_tokens": 1713608
+      },
+      "steering_observed": null,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 22,
+          "tokens": {
+            "input_tokens": 879125,
+            "cached_input_tokens": 825856,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3670,
+            "reasoning_output_tokens": 1018,
+            "total_tokens": 882795
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 13,
+          "tokens": {
+            "input_tokens": 388707,
+            "cached_input_tokens": 355072,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5779,
+            "reasoning_output_tokens": 3152,
+            "total_tokens": 394486
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 14,
+          "tokens": {
+            "input_tokens": 432701,
+            "cached_input_tokens": 396800,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3626,
+            "reasoning_output_tokens": 1320,
+            "total_tokens": 436327
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "baseline",
+      "case": "retry-dedup",
+      "attempt": 2,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": null,
+      "native_wall_seconds": 385.718,
+      "tokens": {
+        "input_tokens": 2513334,
+        "cached_input_tokens": 2367744,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 17537,
+        "reasoning_output_tokens": 7041,
+        "total_tokens": 2530871
+      },
+      "steering_observed": null,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 28,
+          "tokens": {
+            "input_tokens": 1167512,
+            "cached_input_tokens": 1111040,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 4910,
+            "reasoning_output_tokens": 1316,
+            "total_tokens": 1172422
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 11,
+          "tokens": {
+            "input_tokens": 336737,
+            "cached_input_tokens": 310528,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 6067,
+            "reasoning_output_tokens": 3562,
+            "total_tokens": 342804
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 19,
+          "tokens": {
+            "input_tokens": 592719,
+            "cached_input_tokens": 560384,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3299,
+            "reasoning_output_tokens": 1034,
+            "total_tokens": 596018
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 13,
+          "tokens": {
+            "input_tokens": 416366,
+            "cached_input_tokens": 385792,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3261,
+            "reasoning_output_tokens": 1129,
+            "total_tokens": 419627
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "baseline",
+      "case": "cancel-sort",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": null,
+      "native_wall_seconds": 593.05,
+      "tokens": {
+        "input_tokens": 3511600,
+        "cached_input_tokens": 3287040,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 22123,
+        "reasoning_output_tokens": 7593,
+        "total_tokens": 3533723
+      },
+      "steering_observed": true,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 41,
+          "tokens": {
+            "input_tokens": 1858960,
+            "cached_input_tokens": 1781504,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5938,
+            "reasoning_output_tokens": 1326,
+            "total_tokens": 1864898
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 21,
+          "tokens": {
+            "input_tokens": 699246,
+            "cached_input_tokens": 620288,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 7949,
+            "reasoning_output_tokens": 3417,
+            "total_tokens": 707195
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 15,
+          "tokens": {
+            "input_tokens": 471817,
+            "cached_input_tokens": 435456,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3649,
+            "reasoning_output_tokens": 1375,
+            "total_tokens": 475466
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 15,
+          "tokens": {
+            "input_tokens": 481577,
+            "cached_input_tokens": 449792,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 4587,
+            "reasoning_output_tokens": 1475,
+            "total_tokens": 486164
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "baseline",
+      "case": "resume-pagination",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": true,
+      "native_wall_seconds": 624.304,
+      "tokens": {
+        "input_tokens": 3851036,
+        "cached_input_tokens": 3583488,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 28051,
+        "reasoning_output_tokens": 9144,
+        "total_tokens": 3879087
+      },
+      "steering_observed": true,
+      "resume_observed": true,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 47,
+          "tokens": {
+            "input_tokens": 1797935,
+            "cached_input_tokens": 1691904,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 9414,
+            "reasoning_output_tokens": 2177,
+            "total_tokens": 1807349
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 16,
+          "tokens": {
+            "input_tokens": 479345,
+            "cached_input_tokens": 425984,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5543,
+            "reasoning_output_tokens": 2589,
+            "total_tokens": 484888
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 16,
+          "tokens": {
+            "input_tokens": 503925,
+            "cached_input_tokens": 467968,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3233,
+            "reasoning_output_tokens": 895,
+            "total_tokens": 507158
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 16,
+          "tokens": {
+            "input_tokens": 550449,
+            "cached_input_tokens": 513024,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 5585,
+            "reasoning_output_tokens": 2278,
+            "total_tokens": 556034
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 15,
+          "tokens": {
+            "input_tokens": 519382,
+            "cached_input_tokens": 484608,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 4276,
+            "reasoning_output_tokens": 1205,
+            "total_tokens": 523658
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "full_hooks",
+      "case": "stable-unique",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": null,
+      "native_wall_seconds": 187.144,
+      "tokens": {
+        "input_tokens": 1388578,
+        "cached_input_tokens": 1259776,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8347,
+        "reasoning_output_tokens": 2276,
+        "total_tokens": 1396925
+      },
+      "steering_observed": null,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 24,
+          "tokens": {
+            "input_tokens": 952038,
+            "cached_input_tokens": 860160,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 4507,
+            "reasoning_output_tokens": 1642,
+            "total_tokens": 956545
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 15,
+          "tokens": {
+            "input_tokens": 436540,
+            "cached_input_tokens": 399616,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3840,
+            "reasoning_output_tokens": 634,
+            "total_tokens": 440380
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "full_hooks",
+      "case": "retry-dedup",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": null,
+      "native_wall_seconds": 175.389,
+      "tokens": {
+        "input_tokens": 1017203,
+        "cached_input_tokens": 940288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 7748,
+        "reasoning_output_tokens": 1746,
+        "total_tokens": 1024951
+      },
+      "steering_observed": null,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 19,
+          "tokens": {
+            "input_tokens": 679385,
+            "cached_input_tokens": 639232,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3372,
+            "reasoning_output_tokens": 903,
+            "total_tokens": 682757
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 12,
+          "tokens": {
+            "input_tokens": 337818,
+            "cached_input_tokens": 301056,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 4376,
+            "reasoning_output_tokens": 843,
+            "total_tokens": 342194
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "full_hooks",
+      "case": "cancel-sort",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": true,
+      "native_wall_seconds": 347.908,
+      "tokens": {
+        "input_tokens": 2948657,
+        "cached_input_tokens": 2769408,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 14982,
+        "reasoning_output_tokens": 2990,
+        "total_tokens": 2963639
+      },
+      "steering_observed": true,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 36,
+          "tokens": {
+            "input_tokens": 1836990,
+            "cached_input_tokens": 1746944,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 6912,
+            "reasoning_output_tokens": 1862,
+            "total_tokens": 1843902
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 30,
+          "tokens": {
+            "input_tokens": 1111667,
+            "cached_input_tokens": 1022464,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 8070,
+            "reasoning_output_tokens": 1128,
+            "total_tokens": 1119737
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "full_hooks",
+      "case": "resume-pagination",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": true,
+      "native_wall_seconds": 366.15,
+      "tokens": {
+        "input_tokens": 1912032,
+        "cached_input_tokens": 1767680,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 16506,
+        "reasoning_output_tokens": 2620,
+        "total_tokens": 1928538
+      },
+      "steering_observed": true,
+      "resume_observed": true,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 36,
+          "tokens": {
+            "input_tokens": 1275331,
+            "cached_input_tokens": 1188864,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 9189,
+            "reasoning_output_tokens": 1976,
+            "total_tokens": 1284520
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 10,
+          "tokens": {
+            "input_tokens": 287735,
+            "cached_input_tokens": 256512,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3738,
+            "reasoning_output_tokens": 365,
+            "total_tokens": 291473
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 13,
+          "tokens": {
+            "input_tokens": 348966,
+            "cached_input_tokens": 322304,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3579,
+            "reasoning_output_tokens": 279,
+            "total_tokens": 352545
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "compact_no_hooks",
+      "case": "stable-unique",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": null,
+      "native_wall_seconds": 187.076,
+      "tokens": {
+        "input_tokens": 1082963,
+        "cached_input_tokens": 1000192,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8580,
+        "reasoning_output_tokens": 1442,
+        "total_tokens": 1091543
+      },
+      "steering_observed": null,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 18,
+          "tokens": {
+            "input_tokens": 630733,
+            "cached_input_tokens": 586240,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3860,
+            "reasoning_output_tokens": 944,
+            "total_tokens": 634593
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 15,
+          "tokens": {
+            "input_tokens": 452230,
+            "cached_input_tokens": 413952,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 4720,
+            "reasoning_output_tokens": 498,
+            "total_tokens": 456950
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "compact_no_hooks",
+      "case": "retry-dedup",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": null,
+      "native_wall_seconds": 223.316,
+      "tokens": {
+        "input_tokens": 1470405,
+        "cached_input_tokens": 1330944,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 10096,
+        "reasoning_output_tokens": 2686,
+        "total_tokens": 1480501
+      },
+      "steering_observed": null,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 24,
+          "tokens": {
+            "input_tokens": 895105,
+            "cached_input_tokens": 803840,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 3610,
+            "reasoning_output_tokens": 982,
+            "total_tokens": 898715
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 21,
+          "tokens": {
+            "input_tokens": 575300,
+            "cached_input_tokens": 527104,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 6486,
+            "reasoning_output_tokens": 1704,
+            "total_tokens": 581786
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "compact_no_hooks",
+      "case": "cancel-sort",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": true,
+      "native_wall_seconds": 272.53700000000003,
+      "tokens": {
+        "input_tokens": 1998707,
+        "cached_input_tokens": 1864448,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 12279,
+        "reasoning_output_tokens": 1707,
+        "total_tokens": 2010986
+      },
+      "steering_observed": true,
+      "resume_observed": null,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 32,
+          "tokens": {
+            "input_tokens": 1317618,
+            "cached_input_tokens": 1252352,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 6143,
+            "reasoning_output_tokens": 1028,
+            "total_tokens": 1323761
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 21,
+          "tokens": {
+            "input_tokens": 681089,
+            "cached_input_tokens": 612096,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 6136,
+            "reasoning_output_tokens": 679,
+            "total_tokens": 687225
+          }
+        }
+      ]
+    },
+    {
+      "configuration": "compact_no_hooks",
+      "case": "resume-pagination",
+      "attempt": 1,
+      "correctness": true,
+      "lost_requirements": 0,
+      "false_completion": false,
+      "protocol_pass": false,
+      "recovery_success": true,
+      "native_wall_seconds": 362.031,
+      "tokens": {
+        "input_tokens": 1667845,
+        "cached_input_tokens": 1541376,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 16072,
+        "reasoning_output_tokens": 4201,
+        "total_tokens": 1683917
+      },
+      "steering_observed": true,
+      "resume_observed": true,
+      "participants": [
+        {
+          "role": "coordinator",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "high",
+          "model_responses": 37,
+          "tokens": {
+            "input_tokens": 1292090,
+            "cached_input_tokens": 1199872,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 12072,
+            "reasoning_output_tokens": 3760,
+            "total_tokens": 1304162
+          }
+        },
+        {
+          "role": "worker",
+          "model": "gpt-5.6-luna",
+          "reasoning_effort": "medium",
+          "model_responses": 14,
+          "tokens": {
+            "input_tokens": 375755,
+            "cached_input_tokens": 341504,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 4000,
+            "reasoning_output_tokens": 441,
+            "total_tokens": 379755
+          }
+        }
+      ]
+    }
+  ],
+  "excluded_attempts": {
+    "baseline-retry-dedup-original": {
+      "host_failures": 4,
+      "policy_findings": 0,
+      "reason": "operator intervention; replaced by fair native-wall retry2"
+    },
+    "full-hooks-stable-unique-original": {
+      "host_failures": 25,
+      "policy_findings": 29,
+      "reason": "older tuning attempt; excluded from final roster"
+    },
+    "full-hooks-stable-unique-v2": {
+      "host_failures": 16,
+      "policy_findings": 18,
+      "reason": "older tuning attempt; excluded from final roster"
+    },
+    "full-hooks-stable-unique-v3": {
+      "host_failures": 12,
+      "policy_findings": 10,
+      "reason": "older tuning attempt; excluded from final roster"
+    },
+    "full-hooks-v4-cancel-sort-early": {
+      "functional_success": true,
+      "host_failures": 5,
+      "native_wall_seconds": 197.929,
+      "policy_findings": 7,
+      "preserved_result_data": true,
+      "reason": "cancellation was sent during initial work; no initial complete grade preceded steering, and one lifecycle spans both turns. Retained as an additional early-steering functional test, excluded from fair comparison."
+    }
+  },
+  "limitations": {
+    "configuration_ablation_boundary": "After excluding one generated version manifest and one full-only active-hooks manifest, the frozen full-hooks and compact-no-hooks v4 trees are compared file by file. This demonstrates the source-level hooks ablation boundary; payload hashes differ because the generated manifest differs.",
+    "four_case_pilot": "One run per case and configuration is descriptive evidence; it does not establish replication or statistical significance.",
+    "scope": "Only the exact four baseline entries and eight fresh v4 entries are eligible; no cherry-picking or hidden-failure suppression is applied.",
+    "steering_comparator_gate": "Every cancel-sort and resume-pagination comparator entry requires evidence of an initial complete grade before steering; entries without that evidence are invalid and excluded from comparison.",
+    "timing_confounding": "Native timing still includes stochastic model behavior and has n=1 per case/configuration; no timing claim is inferred from the file equality.",
+    "baseline_confounding": "Baseline versus compact compares the combined instruction, source-capture and storage replacement; it does not isolate prompt shortening alone.",
+    "later_candidate": "The v5 prompt-only candidate requires separate real-host qualification; these efficiency measurements apply to the frozen v4 pair.",
+    "hook_overhead": "Handler timing and model task duration are separate measurements. Whole-task hook overhead at or below 5% remains unverified.",
+    "earlier_models": "Earlier Astra runs were excluded when the user selected Luna-only live tests. They are outside this fixed comparison."
+  }
+}

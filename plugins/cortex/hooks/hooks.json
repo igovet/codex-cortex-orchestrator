@@ -1,0 +1,131 @@
+{
+  "description": "Local Cortex source capture, recovery hints, compact receipts and exact registered-file integrity checks. Requires ordinary Codex hook trust.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3,
+            "additionalContextLimit": 1000
+          }
+        ],
+        "matcher": "^(resume|compact)$"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3,
+            "additionalContextLimit": 1000
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ],
+        "matcher": "^(Bash|apply_patch|spawn_agent|Agent|mcp__cortex__.*|mcp__cortex_.*)$"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ],
+        "matcher": "^apply_patch$"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

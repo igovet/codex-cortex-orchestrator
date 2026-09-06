@@ -13,9 +13,10 @@ description: Update affected project knowledge after verified changes while pres
 | Technical writer | Confirm source-backed facts and update only affected documentation |
 | Independent reviewer when warranted | Check material documentation changes against source, commands and links |
 
-The coordinator does not read indexes, files or report bodies, inspect diffs or
-edit documents itself. Delegate
-missing evidence. A stale or absent index does not automatically require harvest.
+The coordinator may read the bounded report evidence needed for a decision, while
+workers own project indexes, files, diffs and document edits. Delegate project
+inspection or specialist interpretation when needed. A stale or absent index does
+not automatically require harvest.
 
 ## Inputs for the writer
 
@@ -30,8 +31,10 @@ missing evidence. A stale or absent index does not automatically require harvest
 3. Preserve manual material outside generated blocks unless its change is authorized.
 4. Update durable knowledge, public guidance and examples only where affected.
 5. Validate changed links, anchors, commands, terminology and stated behavior.
-6. Publish an ordinary Markdown report using the
-   [documentation example](../cortex-control/references/documentation-example.md).
+6. Publish an ordinary Markdown report using the live draft creator's guidance.
+   Use an optional declared Markdown example only when it resolves a real content
+   question. Standard skill/reference reads do not authorize reading agent TOML or
+   other plugin internals.
 
 ## Verification and completion
 

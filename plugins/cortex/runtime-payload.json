@@ -2,12 +2,20 @@
   "files": [
     "scripts/cortex.py",
     "scripts/cortex_clear.py",
+    "scripts/cortex_hook.py",
+    "scripts/cortex_migrate.py",
     "scripts/cortex_runtime/__init__.py",
     "scripts/cortex_runtime/cleanup.py",
     "scripts/cortex_runtime/contracts.py",
+    "scripts/cortex_runtime/hook_storage.py",
+    "scripts/cortex_runtime/hooks.py",
     "scripts/cortex_runtime/host_source.py",
+    "scripts/cortex_runtime/migrate.py",
+    "scripts/cortex_runtime/project_storage.py",
     "scripts/cortex_runtime/server.py",
+    "scripts/cortex_runtime/split.py",
     "scripts/cortex_runtime/store.py",
-    "scripts/cortex_setup.py"
+    "scripts/cortex_setup.py",
+    "scripts/cortex_split.py"
   ]
 }

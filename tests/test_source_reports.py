@@ -253,6 +253,7 @@ def test_crash_before_pipeline_commit_restores_backup(publication):
     target=project/'.codex/cortex'/task/'pipeline.md'
     assert target.read_bytes().startswith(new)
     restarted=Store(store.directory)
+    call_store(restarted,'list_reports',dict(task_id=task))
     assert target.read_bytes()==old and source.exists()
     assert not list(target.parent.glob('.backup_pipeline_*'))
     result=publish(restarted,base,second,'second')

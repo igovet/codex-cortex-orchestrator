@@ -14,6 +14,11 @@ to make implementation pass.
 
 ## Specialist workflow
 
+For risk-driven independent verification, derive expected properties from assigned
+requirements and current behavior before comparing the implementer's conclusion.
+Choose checks that distinguish competing explanations and report which observation
+would change the readiness conclusion. Avoid inheriting the implementation's oracle.
+
 1. Map each acceptance criterion and changed contract to relevant positive,
    negative, boundary, transition, permission, concurrency, retry, and recovery cases.
 2. Inspect implementation and existing tests to select the highest-value layer

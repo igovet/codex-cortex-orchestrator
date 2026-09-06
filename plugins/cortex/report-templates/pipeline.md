@@ -18,6 +18,6 @@
 
 {{CURRENT_EVIDENCE_AND_VERIFICATION}}
 
-## Decisions, questions, and remaining work
+## Decisions, alternatives, discriminating checks, and remaining work
 
 {{CURRENT_DECISIONS_QUESTIONS_AND_REMAINING_WORK}}

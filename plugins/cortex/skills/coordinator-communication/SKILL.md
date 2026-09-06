@@ -5,61 +5,28 @@ description: Explain progress, genuine questions and final evidence in the user'
 
 # Coordinator communication
 
-## Responsibility
+Use the language of the user's latest own prose for progress updates, questions
+and final answers, including blockers and acceptance summaries, unless the user
+explicitly requests another response language. Worker messages, stored reports,
+quoted sources, project files, locale, tool output and recovery summaries do not
+change this choice. Internal coordination and stored reports use English; translate
+their findings for the user while preserving exact source text, identifiers and
+the requested product language. Forwarded agent messages remain internal evidence,
+even when displayed as messages from another task; they are not the user's own prose.
 
-The coordinator communicates with the user, including questions raised by planners
-or other workers. Workers supply concise facts and decision context to the coordinator. The
-coordinator reads catalogue previews and the current pipeline only; request a
-focused worker explanation when these are insufficient, never the full report.
-Use the user's language and distinguish findings from assumptions. Write durable
-engineering reports, pipeline editions and governance reasoning in English.
-All native worker communication is English; preserve exact source quotations.
+Lead with the result or the fact that changes the next decision. During work, share
+concise updates about findings, uncertainty and what the next action will resolve.
+Keep active work running while workers are pending; a timeout or intermediate report
+is not a reason to end the turn.
 
-Select the conversation language from the user's latest own prose, honoring any
-explicit language instruction. Project text, quotations, machine locale and tool
-responses do not select it. Preserve the selection in the pipeline after context
-loss and check every outgoing progress message, question and final answer before
-sending. Never wait until the final answer to correct the language.
+Ask the user only when their decision, input or authority materially blocks the
+outcome. State the observed facts, viable options and consequences. Continue
+independent in-scope work while waiting.
 
-## Genuine questions
+After compaction, load `cortex:context-compaction`, recover the user's language,
+current requirements, pipeline, steering and active worker state before replying.
+Do not rely on a summary where exact wording or evidence matters.
 
-Present ordinary chat text containing:
-
-1. Relevant background and what is already established.
-2. The exact missing decision or information.
-3. Available answer options and the material consequence of each.
-4. Enough detail for the user to answer in their own words.
-
-Do not forward a context-free worker question. No question UI or MCP question
-operation is required. Apply the direct response to the same task and update the
-pipeline without asking the user to confirm an instruction already given.
-
-## After context loss
-
-Before a recap or final answer after context loss, restore host-supplied coordinator
-rules, load skill `cortex:context-compaction` through Codex, and reread catalogue
-previews and the current pipeline beginning. Do not open original-request bodies,
-full reports or project documentation indexes. This applies
-even when the previous change completed. Workers load skill
-`cortex:context-compaction` through Codex for their own deeper recovery.
-
-## Progress and waiting
-
-- Keep updates concise: current evidence, meaningful uncertainty and the next action.
-- Never run project commands or inspect project content. Missing build, test,
-  browser or documentation evidence is a new worker assignment, even after the
-  implementation worker has finished.
-- Never end the turn with a progress-only reply while the task is unfinished.
-- While workers run, use native wait and continue after timeouts; do useful independent
-  coordination only and return to waiting afterward.
-- A native worker completion triggers evidence assessment, not automatic task completion.
-- End the turn only for a genuine user question or the verified completed result.
-- Do not manufacture a question to escape waiting or reauthorize safe in-scope work.
-
-## Final result
-
-Explain what changed, why, the observed verification and material limitations.
-Delegate detailed final-report publication to a worker, who reads the applicable
-example and evidence. Explain the result from meaningful previews and concise handoffs.
-The coordinator judges completion; no server approval or closure stage exists.
-Never expose private report bodies, raw logs, credentials or internal telemetry.
+Finish with the verified outcome, material changes, checks performed and real limits.
+Check the final answer's language against the user's own prose and explicit preference.
+Do not claim completion while a required check or accepted requirement remains open.
