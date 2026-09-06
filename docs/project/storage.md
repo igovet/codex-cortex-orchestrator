@@ -53,6 +53,14 @@ leaving older editions below. Ordinary reports are immutable. A publication deli
 key replays its original accepted receipt; changed arguments or recreated changed
 bytes conflict. Replay does not repeat later state transitions.
 
+New drafts normally omit the optional delivery key and receive a server-generated
+UUID internally. This prevents reused worker contexts from recycling a descriptive
+key from an earlier assignment. Every unkeyed call creates a distinct draft, even
+with identical headings. After an uncertain response, the caller recovers its
+unfinished draft through the bounded own-draft catalogue before creating another.
+Explicit keyed creation still supports exact retries and rejects changed arguments,
+including after publication. No schema migration or report rewrite is involved.
+
 Recovery runs for the resolved task only. It never traverses every task before a
 normal operation. A corrupt neighboring pipeline does not prevent another catalogue
 or report read. Retention and publication recovery use exact registered relationships

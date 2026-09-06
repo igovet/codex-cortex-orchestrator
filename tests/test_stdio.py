@@ -180,7 +180,8 @@ def test_wire_schemas_match_every_success(tmp_path):
     call('create_task',project_root=str(tmp_path),request_key='new')
     call('set_governance',mode='full',rationale='Risk review.',request_key='gov')
     base=dict(title='Report',summary='Evidence',author='worker')
-    draft=call('create_draft',template='general',request_key='report-draft')
+    assert not by_name['create_draft']['annotations']['idempotentHint']
+    draft=call('create_draft',template='general')
     path=Path(draft['draft_path']);marker=path.read_text().split('\n\n',1)[0]+'\n\n';path.write_text(marker+'Part one\nPart two')
     final=call('write_report',**base,draft_id=draft['draft_id'],request_key='report-1')
     call('list_reports')

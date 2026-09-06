@@ -47,6 +47,12 @@ bytes below the newest edition. Exact delivery retries retain their receipts;
 changed arguments or content conflict. Unfilled template markers are rejected,
 which does not establish semantic completeness.
 
+Draft creation without an explicit key allocates a fresh server delivery identity.
+It does not reinterpret an existing conflicting key as permission to overwrite or
+create replacement evidence. Repeated unkeyed creation creates separate drafts;
+uncertain creation can be recovered from the native owner's unfinished catalogue.
+Explicit keys, publication immutability and task/thread ownership checks remain intact.
+
 Recovery and retention are scoped to the relevant task. A corrupt adjacent pipeline
 does not block unrelated archives. Checked file identity and page-offset caches
 avoid re-reading unchanged files; identity changes trigger integrity validation.

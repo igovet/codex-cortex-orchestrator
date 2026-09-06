@@ -1,3 +1,36 @@
+# 1.15.7: fresh draft delivery identities
+
+Candidate `1.15.7+codex.sha256.b5503c36f31d590b` removes the need for model-managed
+keys when creating new drafts. A missing key allocates a fresh UUID; explicit
+keyed retries keep their strict argument/content protection. This addresses a reused
+specialist context recycling an earlier report label with a different template.
+Full payload SHA-256:
+`b5503c36f31d590bb019b145639e91b1cee5d5a66d1e0c606df5080b163d6e28`.
+
+Stamp, 21 focused tests, package validation, source-only sync and all **243 tests
+in 11.11 seconds** passed sequentially. Documentation links and `git diff --check`
+passed. Seven operations, 22 profiles and storage format 11 remain intact.
+
+The ordinary CLI scenario used a Luna/high coordinator and one Luna/medium native
+writer for an initial README request and a product follow-up in the same task.
+The passive initialization receipt matched the candidate and seven-tool catalogue.
+Both actors omitted creation keys on all six calls. All 20 MCP events succeeded,
+with no replays or delivery conflicts. The worker returned two distinct immutable
+reports; the same pipeline retained four editions in newest-first order. Independent
+checks confirmed the original report's accepted hash, every published file hash,
+two source messages, no unfinished drafts, valid database relationships and the
+requested product result. All 141 host calls and 62 hook actions were audited.
+
+The overall CLI audit exited one and is not a clean qualification: the coordinator
+performed flagged project discovery, and the worker recovered from one command
+failure and two draft-patch failures. These were retained through complete calls
+and events capture before shutdown; there were no MCP/hook failures or open command
+sessions. The interactive process exited zero, then the exact smoke session and
+temporary observation streams were removed. The stable plugin was not updated.
+Desktop, forced compaction and consecutive CLI/Desktop qualification were not run
+for this candidate. These limits do not invalidate the focused delivery regression
+results, but must not be represented as full protocol parity.
+
 # 1.15.7: explicit graph discovery and native worker updates
 
 Candidate `1.15.7+codex.sha256.03279e8f757a5b4d` restores explicit Codebase Memory
