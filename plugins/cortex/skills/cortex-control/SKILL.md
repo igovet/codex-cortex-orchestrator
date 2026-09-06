@@ -8,9 +8,9 @@ description: Cortex retention command and optional report-writing examples. Load
 ## Loading boundary
 
 Load this skill through the standard Codex skill mechanism only for one of the
-declared purposes. Ordinary workers load their complete self-contained worker skill
-and do not load this skill. Use an attached body or read this exact advertised
-SKILL.md path. Needed declared Markdown references may be read on demand. Do not
+declared purposes. Ordinary workers load their complete worker skill and its needed
+declared references; they do not load this skill. Use an attached body or read this
+exact advertised SKILL.md path. Needed declared Markdown references may be read on demand. Do not
 read agent TOML, manifests, databases or server internals, or enumerate the installation.
 
 ## Explicit retention maintenance
@@ -37,6 +37,8 @@ live writer schema, observable evidence, or honest unrun checks.
 All worker reports remain complete English Markdown files first allocated by the
 live draft creator, then filled at its returned project path and published through
 the live writer using the returned short draft identifier. Keep that identifier in
-the filename and Markdown marker. Do not pass a path or report body through MCP, JavaScript, JSON, arrays,
-chunks, heredocs, command substitution, or shell interpolation. Do not delete or move
-the draft yourself and never read the Cortex database or final task files directly.
+the filename and Markdown marker. A safe wrapper may pass the exact patch intact to
+the native patch tool. Never construct draft content through executable interpolation,
+command substitution or shell evaluation, and never put a path or body in a Cortex
+writer request. Do not delete or move the draft yourself and never read the Cortex
+database or final task files directly.

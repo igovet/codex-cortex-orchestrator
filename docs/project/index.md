@@ -28,3 +28,5 @@ See [knowledge routing](../features/knowledge-routing/index.md),
 [decisions](decisions.md) and [gotchas](gotchas.md).
 
 - [Orchestration review](orchestration-review.md): primary guidance, observed faults and bounded corrections.
+
+- [Local lifecycle hooks](../features/lifecycle-hooks/index.md)

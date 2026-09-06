@@ -16,6 +16,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGURATIONS = ('baseline', 'evidence', 'hypotheses', 'reuse', 'routing', 'combined')
 BASELINE = 'cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698'
+PILOT_CONFIGURATIONS = ('baseline', 'compact_no_hooks', 'full_hooks')
+PILOT_CASES = ('stable-unique', 'retry-dedup', 'cancel-sort', 'resume-pagination')
+PILOT_BASELINE_COMMIT = '1a0988bdee5a0fe943e74df1746d2ae8ad1b161b'
+PILOT_BASELINE_PAYLOAD = 'fd0b4e63ad8eea97'
 
 
 def case(name, split, family, brief, checks, source='def solve(*args):\n    raise NotImplementedError\n', steering=None, initial_checks=None):
@@ -232,10 +236,158 @@ def record_trial(directory, observations):
     return result
 
 
+def pilot_prepare(name, directory, configuration):
+    """Prepare one member of the fixed 3-by-4 pilot without changing the old suite."""
+    if name not in PILOT_CASES or configuration not in PILOT_CONFIGURATIONS:
+        raise ValueError('unknown pilot case or configuration')
+    record=prepare(name,directory,configuration,1)
+    record.update(suite='hooks-pilot-v1',baseline_commit=PILOT_BASELINE_COMMIT,
+                  baseline_sha256=PILOT_BASELINE_PAYLOAD)
+    (directory/'trial.json').write_text(json.dumps(record,indent=2)+'\n')
+    return record
+
+
+def pilot_adopt(directory, configuration):
+    """Add a pilot overlay to an identical historical fixture without rewriting it."""
+    if configuration not in PILOT_CONFIGURATIONS:raise ValueError('unknown pilot configuration')
+    record=json.loads((directory/'trial.json').read_text())
+    if record.get('case') not in PILOT_CASES or record.get('attempt')!=1:
+        raise ValueError('historical fixture is not a pilot member')
+    expected=hashlib.sha256(json.dumps(selected(record['case']),sort_keys=True).encode()).hexdigest()
+    if record.get('fixture_sha256')!=expected:raise ValueError('historical fixture differs from pilot case')
+    overlay={**record,'configuration':configuration,'suite':'hooks-pilot-v1',
+             'baseline_commit':PILOT_BASELINE_COMMIT,'baseline_sha256':PILOT_BASELINE_PAYLOAD}
+    with (directory/'pilot-trial.json').open('x') as stream:json.dump(overlay,stream,indent=2)
+    return overlay
+
+
+def _pilot_usage(value):
+    if value is None:return None,None
+    if not isinstance(value,dict) or value.get('status') not in {'complete','unavailable'}:
+        raise ValueError('invalid usage observation')
+    if value['status']=='unavailable':
+        if value.get('totals') is not None:raise ValueError('unavailable usage has totals')
+        return None,None
+    totals=value.get('totals');participants=value.get('participants')
+    fields=('input_tokens','cached_input_tokens','cache_write_input_tokens',
+            'output_tokens','reasoning_output_tokens','total_tokens')
+    if (not isinstance(totals,dict) or set(totals)!=set(fields)
+            or any(type(totals[field]) is not int or totals[field]<0 for field in fields)
+            or not isinstance(participants,list) or not participants):
+        raise ValueError('invalid usage totals')
+    safe=[]
+    for row in participants:
+        if not isinstance(row,dict) or not isinstance(row.get('role'),str):
+            raise ValueError('invalid participant usage')
+        tokens=row.get('tokens')
+        if (not isinstance(tokens,dict) or set(tokens)!=set(fields)
+                or any(type(tokens[field]) is not int or tokens[field]<0 for field in fields)):
+            raise ValueError('invalid participant tokens')
+        safe.append(dict(role=row['role'],model=row.get('model'),reasoning_effort=row.get('reasoning_effort'),
+                         responses=row.get('responses'),tokens=tokens))
+    calculated={field:sum(row['tokens'][field] for row in safe) for field in fields}
+    if calculated!=totals:raise ValueError('participant usage does not match totals')
+    return totals,safe
+
+
+def pilot_record(directory, observations):
+    """Write reviewed pilot outcomes; missing observations remain explicit nulls."""
+    metadata=(directory/'pilot-trial.json')
+    record=json.loads((metadata if metadata.is_file() else directory/'trial.json').read_text())
+    if record.get('suite')!='hooks-pilot-v1':raise ValueError('not a hooks pilot fixture')
+    allowed={'usage','wall_seconds','protocol_pass','claimed_complete','lost_requirements',
+             'recovery_success','payload_sha256','host','coordinator_model','coordinator_effort',
+             'steering_observed','resume_observed'}
+    if set(observations)!=allowed:raise ValueError('pilot observation fields must match the documented contract')
+    for name in ('protocol_pass','claimed_complete','recovery_success','steering_observed','resume_observed'):
+        if observations[name] is not None and type(observations[name]) is not bool:
+            raise ValueError('invalid pilot boolean')
+    wall=observations['wall_seconds']
+    if wall is not None and (type(wall) not in (int,float) or not math.isfinite(wall) or wall<=0):
+        raise ValueError('invalid pilot wall time')
+    lost=observations['lost_requirements']
+    if lost is not None and (type(lost) is not int or lost<0):raise ValueError('invalid lost requirement count')
+    payload=observations['payload_sha256']
+    if (not isinstance(payload,str) or len(payload) not in {16,64}
+            or any(char not in '0123456789abcdef' for char in payload)):
+        raise ValueError('invalid pilot payload digest')
+    if observations['host'] not in {'cli','desktop'}:raise ValueError('invalid pilot host')
+    if not isinstance(observations['coordinator_model'],str) or not observations['coordinator_model']:
+        raise ValueError('actual coordinator model is required')
+    if observations['coordinator_effort'] not in {'low','medium','high','xhigh','max','ultra'}:
+        raise ValueError('actual coordinator effort is required')
+    totals,participants=_pilot_usage(observations['usage'])
+    coordinators=([row for row in participants if row['role']=='coordinator'] if participants else [])
+    if coordinators and not any(row.get('model')==observations['coordinator_model']
+                                and row.get('reasoning_effort')==observations['coordinator_effort']
+                                for row in coordinators):
+        raise ValueError('recorded coordinator settings do not match native usage')
+    c=selected(record['case'])
+    eligible=((not c['steering'] or observations['steering_observed'] is True)
+              and (c['family']!='recovery' or observations['resume_observed'] is True))
+    graded=grade(directory) if eligible else {**grade(directory),'functional_success':None}
+    correctness=graded['functional_success']
+    claimed=observations['claimed_complete']
+    false_completion=(claimed and not correctness if claimed is not None and correctness is not None else None)
+    required=[correctness,observations['lost_requirements'],false_completion,
+              observations['protocol_pass'],wall,totals]
+    if c['family']=='recovery':required.append(observations['recovery_success'])
+    result={**record,**graded,'correctness':correctness,'false_completion':false_completion,
+            'participant_tokens':participants,'tokens':totals,
+            **{key:value for key,value in observations.items() if key!='usage'},
+            'status':'measured' if all(value is not None for value in required) else 'incomplete'}
+    path=directory/'pilot-result.json'
+    with path.open('x') as stream:json.dump(result,stream,indent=2)
+    return result
+
+
+def pilot_compare(records):
+    """Describe the 12-run pilot; absent or unknown observations never become zero."""
+    expected={(configuration,case_name) for configuration in PILOT_CONFIGURATIONS for case_name in PILOT_CASES}
+    indexed={}
+    for row in records:
+        key=(row.get('configuration'),row.get('case'))
+        if row.get('suite')!='hooks-pilot-v1' or key not in expected:raise ValueError('unknown pilot result')
+        if key in indexed:raise ValueError('duplicate pilot result')
+        indexed[key]=row
+    configurations={}
+    for configuration in PILOT_CONFIGURATIONS:
+        rows=[indexed.get((configuration,case_name)) for case_name in PILOT_CASES]
+        complete=all(row is not None and row.get('status')=='measured' for row in rows)
+        measured=[row for row in rows if row is not None]
+        def values(name):return [row.get(name) for row in measured]
+        tokens=[row.get('tokens') for row in measured]
+        configurations[configuration]=dict(
+            status='complete' if complete else 'unverified',runs_present=len(measured),runs_required=4,
+            correctness=(sum(value is True for value in values('correctness')) if complete else None),
+            lost_requirements=(sum(values('lost_requirements')) if complete else None),
+            false_completions=(sum(value is True for value in values('false_completion')) if complete else None),
+            recovery_success=(next((row.get('recovery_success') for row in measured if row.get('case')=='resume-pagination'),None) if complete else None),
+            protocol_passes=(sum(value is True for value in values('protocol_pass')) if complete else None),
+            median_wall_seconds=(statistics.median(values('wall_seconds')) if complete else None),
+            median_total_tokens=(statistics.median(row['total_tokens'] for row in tokens) if complete else None),
+            median_cached_input_tokens=(statistics.median(row['cached_input_tokens'] for row in tokens) if complete else None))
+    matrix=[]
+    for configuration in PILOT_CONFIGURATIONS:
+        for case_name in PILOT_CASES:
+            row=indexed.get((configuration,case_name))
+            matrix.append(dict(configuration=configuration,case=case_name,
+                status=row.get('status') if row else 'unrun',
+                correctness=row.get('correctness') if row else None,
+                lost_requirements=row.get('lost_requirements') if row else None,
+                false_completion=row.get('false_completion') if row else None,
+                recovery_success=row.get('recovery_success') if row else None,
+                protocol_pass=row.get('protocol_pass') if row else None,
+                wall_seconds=row.get('wall_seconds') if row else None,
+                tokens=row.get('tokens') if row else None))
+    return dict(suite='hooks-pilot-v1',configurations=configurations,runs=matrix)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('list')
+    commands.add_parser('pilot-list')
     p = commands.add_parser('prepare')
     p.add_argument('case', choices=[c['name'] for c in CASES]); p.add_argument('directory', type=Path)
     p.add_argument('--configuration', choices=CONFIGURATIONS, required=True)
@@ -244,12 +396,23 @@ def main():
     p.add_argument('--phase', choices=('initial', 'final'), default='final')
     p = commands.add_parser('compare'); p.add_argument('records', type=Path)
     p = commands.add_parser('record'); p.add_argument('directory', type=Path); p.add_argument('observations', type=Path)
+    p=commands.add_parser('pilot-prepare');p.add_argument('case',choices=PILOT_CASES);p.add_argument('directory',type=Path);p.add_argument('--configuration',choices=PILOT_CONFIGURATIONS,required=True)
+    p=commands.add_parser('pilot-adopt');p.add_argument('directory',type=Path);p.add_argument('--configuration',choices=PILOT_CONFIGURATIONS,required=True)
+    p=commands.add_parser('pilot-record');p.add_argument('directory',type=Path);p.add_argument('observations',type=Path)
+    p=commands.add_parser('pilot-compare');p.add_argument('records',type=Path)
     args = parser.parse_args()
     if args.command == 'list':
         result = [dict(name=c['name'], split=c['split'], family=c['family'], resume=c['family']=='recovery') for c in CASES]
+    elif args.command=='pilot-list':
+        result=dict(suite='hooks-pilot-v1',configurations=PILOT_CONFIGURATIONS,
+                    cases=[dict(name=name,family=selected(name)['family'],steering=bool(selected(name)['steering']),resume=selected(name)['family']=='recovery') for name in PILOT_CASES],runs=12)
     elif args.command == 'prepare':result = prepare(args.case, args.directory, args.configuration, args.attempt)
     elif args.command == 'grade':result = grade(args.directory, args.phase)
     elif args.command == 'record':result = record_trial(args.directory, json.loads(args.observations.read_text()))
+    elif args.command=='pilot-prepare':result=pilot_prepare(args.case,args.directory,args.configuration)
+    elif args.command=='pilot-adopt':result=pilot_adopt(args.directory,args.configuration)
+    elif args.command=='pilot-record':result=pilot_record(args.directory,json.loads(args.observations.read_text()))
+    elif args.command=='pilot-compare':result=pilot_compare(json.loads(args.records.read_text()))
     else:result = compare(json.loads(args.records.read_text()))
     print(json.dumps(result, indent=2))
 

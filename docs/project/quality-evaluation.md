@@ -1,4 +1,126 @@
-# Comparative outcome evaluation
+# Format 11 instruction and hook pilot
+
+The current pilot freezes baseline commit
+`1a0988bdee5a0fe943e74df1746d2ae8ad1b161b`, payload
+`fd0b4e63ad8eea97cd5bd39ce893675db5e2b0cc6fbcdc2c91fff4a35bf99345`.
+It compares three source configurations: `baseline`, `compact_no_hooks` (compact
+protocol without an active hooks manifest) and `full_hooks`. Each configuration
+runs `stable-unique`, `retry-dedup`, `cancel-sort` and `resume-pagination` once:
+12 ordinary end-to-end runs in total. The cancellation case changes one requirement
+while preserving the others; the recovery case resumes the same native task.
+
+Keep the same host and explicit Luna/high coordinator setting throughout this
+pilot. By the user’s live-dev policy all native test workers also use Luna, at
+medium or high effort. Heavy models are excluded, including from worker overrides. An isolated helper override
+does not alter the user's saved model configuration. Freeze each actual payload
+before its run, record its complete hash and never infer the ablation from its label.
+All preparation/installations use that checkout's `scripts/cortex-dev` launcher.
+Earlier Astra runs were stopped/excluded when the user changed the live model
+policy; retain their diagnostics separately and restart the 12-run comparison on Luna.
+
+The comparison uses one frozen compact/full pair after preliminary prompt tuning.
+Earlier payload attempts remain separate evidence, including their failures. An
+operator-intervened baseline retry had no complete native lifecycle duration; its
+pre-intervention cutoff is not substituted for that missing measurement. A fresh
+run of the same baseline case supplies the comparison record, while both attempts
+remain retained and the intervention is disclosed.
+
+One full-hooks cancellation attempt delivered the change during active initial
+work, before an initial result had completed and been graded. It remains an
+additional functional steering check. A fresh run with both completed phases
+supplies the fair comparator; its earlier single-lifecycle duration is not used
+to claim a speed improvement over the baseline's two completed phases.
+
+```bash
+python3 -B scripts/cortex_eval.py pilot-list
+python3 -B scripts/cortex_eval.py pilot-prepare stable-unique /tmp/cortex-trial --configuration baseline
+./scripts/cortex-live-smoke start --workdir /tmp/cortex-trial/project --data-dir /tmp/cortex-trial/store --model gpt-5.6-luna --effort high
+```
+
+Confirm trust, composer and matching initialization receipt before sending the saved
+ordinary product prompt. Grade initial results before cancellation/recovery steering.
+Keep controls and complete calls/events/audit receipts outside the worker project.
+Review every call and result; preserve failed runs and resume segments. Follow the
+exact transport procedure in [verification](verification.md).
+
+`usage` reads all coordinator/worker native response receipts, deduplicates response
+identity, and records input, cached input, cache-write input, output, reasoning and
+total tokens separately. Wall time uses coordinator task lifecycle durations where
+available, with a labeled response-span fallback. Missing telemetry remains null.
+It is not valid to treat cached and uncached tokens as equal-priced input.
+
+`pilot-record DIRECTORY OBSERVATIONS.json` combines independent grading with reviewed
+protocol, lost requirements, claimed completion, recovery, steering/resume and usage
+observations. It strips private thread identities from safe aggregates. False
+completion is a claimed completion with failed functional checks; semantic omissions
+not covered by those checks still need the separate lost-requirements review.
+`pilot-adopt` can add a pilot overlay to an identical historical prepared fixture
+without rewriting its original control file. `pilot-compare` reports all 12 cells,
+including explicit nulls for missing runs, and refuses inconsistent trial identities.
+
+Evaluate correctness, recovery and protocol separately. Measure handler subprocess
+p95 against 100 ms and total hook overhead against 5% of task time. Compare compact
+protocol with full hooks to isolate their additional effect. The compact configuration
+also includes the storage and source-capture repairs, so its comparison with baseline
+measures the combined replacement and cannot isolate prompt shortening alone. This small pilot can
+find defects or nominate a larger comparison, not prove a general quality gain.
+Current measured results and unrun checks belong in [release readiness](../release-readiness.md).
+
+## Completed format 11 pilot (2026-09-06)
+
+The fixed comparison is complete: four scenarios per configuration, 12 runs and
+33 native participants. Every coordinator used Luna/high; every worker used
+Luna/medium or Luna/high. Initial phases were completed and graded before cancellation
+or recovery steering. All three recovery cases included visible manual compaction,
+normal exit, same-task resume and the final product change.
+
+| Configuration | Correct results | Protocol passes | Median total tokens | Median cached input | Median seconds |
+| --- | --- | --- | --- | --- | --- |
+| baseline | 4/4 | 1/4 | 3,032,297 | 2,827,392 | 489.384 |
+| compact without hooks | 4/4 | 0/4 | 1,582,209 | 1,436,160 | 247.927 |
+| full hooks | 4/4 | 0/4 | 1,662,731.5 | 1,513,728 | 267.526 |
+
+Total tokens include cached input and all participants; they are not a monetary
+cost estimate. [Per-run and per-participant measurements](hooks-pilot-results.json)
+retain input, cached input, cache writes, output and reasoning output separately.
+The full-hooks median used 45.2% fewer total tokens and 45.3% less time than baseline.
+Against compact without hooks, its medians were 5.1% more tokens and 7.9% more time.
+Those differences include model decisions and recovery work; they do not measure
+Python hook overhead or establish causality from four unreplicated pairs.
+
+No requirement loss or false completion was detected by the independent checks and
+review. Protocol defects remain: missing model-facing command receipts, invalid
+Cortex calls, and coordinator project work that belonged to a worker. In the compact
+recovery run, the coordinator directly implemented the follow-up; in the full-hooks
+recovery run, it delegated implementation but still repeated project verification.
+Recovered project command failures remain visible separately. These outcomes do not
+qualify the v4 protocol for release or demonstrate a general quality gain.
+
+The frozen full-hooks payload is
+`fd022bfc005647faab9ddde3ec5c493ea00773ce28b9389cf2ed355039796375`; compact is
+`badf86046265b0360bc814593527d228f3feaff80fd72c036c5075985ff4101e`.
+All 235 comparable source files match. The only differences are the active hooks
+manifest and the generated `version` property, verified by comparing the remaining
+plugin manifest fields. Thus this pair isolates source configuration, while baseline
+comparison includes the storage/source repairs as well as instruction changes.
+
+The operator-intervened baseline retry, earlier full-hooks tuning candidates and the
+early-cancellation functional check remain excluded, with their failures and reasons
+retained in the aggregate. The fair baseline retry and two-phase full-hooks cancellation
+replace them in the fixed roster. Prompt-only candidates v5 through v9 are qualified
+separately; their efficiency and host protocol status are not inferred from these v4
+measurements. V9 subsequently passed consecutive bounded CLI/Desktop qualification
+on one unchanged payload, with Luna/high coordinators and Luna/medium workers.
+CLI used 1,309,671 total tokens (1,216,512 cached input) in 207.747 seconds; Desktop
+used 1,314,999 (1,208,320 cached input) in 155.101 seconds. Both product checks and
+Cortex audits passed. Two recovered project patch errors remain in the CLI trace;
+Desktop had no tool errors. These two documentation scenarios do not replace the
+12-run roster or establish a v9 efficiency gain. See
+[exact qualification evidence and limits](../release-readiness.md).
+
+---
+
+## Historical comparative outcome evaluation
 
 The baseline is commit `17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9`, payload
 `cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698`.

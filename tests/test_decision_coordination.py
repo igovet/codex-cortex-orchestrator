@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import runpy
@@ -56,10 +57,10 @@ def test_handoff_allows_owned_predecessor_but_requires_latest_and_rejects_foreig
     assert 'worker_final_without_report_id' in flags(history+[{**final,'report_ids':[]}])
 
 
-def test_prior_verifier_context_is_not_independent_for_new_assignment():
+def test_prior_verifier_context_can_extend_its_own_findings():
     history=[{**r,'role':'build_verification'} for r in published()]
     history.append(row('followup_task','parent','coordinator',target_thread_id='worker',timestamp='3'))
-    assert 'coordinator_reused_verification_worker' in flags(history)
+    assert 'coordinator_reused_verification_worker' not in flags(history)
 
 
 def test_worker_message_allows_one_reply_to_that_worker_after_wait():
@@ -74,12 +75,13 @@ def test_worker_message_allows_one_reply_to_that_worker_after_wait():
     assert violation in flags([wait,{**inbound,'target_agent':'/root/other'},reply])
 
 
-def test_brief_start_allowed_continuation_and_oversized_reads_rejected():
+def test_coordinator_can_read_needed_evidence_pages_and_user_sources():
     read = row('mcp__cortex__read_report', 'parent', 'coordinator', document_kind='report', page='start', requested_limit=4000)
     assert not flags([read])
-    assert 'coordinator_report_continuation_read' in flags([{**read, 'page': 'continuation'}])
+    assert 'coordinator_report_continuation_read' not in flags([{**read, 'page': 'continuation'}])
     assert 'oversized_report_page' in flags([{**read, 'requested_limit': 4001}])
-    assert 'coordinator_forbidden_tool' in OBSERVER['call_policy_flags']('exec_command', '{"cmd":"cat source.py"}', 'coordinator', '/tmp/project')
+    assert 'coordinator_forbidden_tool' not in OBSERVER['call_policy_flags']('exec_command', '{"cmd":"sed -n 1,80p user-source.txt"}', 'coordinator', '/tmp/project')
+    assert 'coordinator_forbidden_tool' in OBSERVER['call_policy_flags']('exec_command', '{"cmd":"python3 change.py"}', 'coordinator', '/tmp/project')
 
 
 def test_routing_does_not_force_model_from_profile():
@@ -105,6 +107,67 @@ def test_standard_skill_loading_does_not_allow_plugin_exploration(tmp_path,monke
         assert 'forbidden_plugin_or_cache_access' in check('exec_command',json.dumps({'cmd':'cat '+path}),'general',str(tmp_path))
     assert 'forbidden_plugin_or_cache_access' in check('exec_command','{"cmd":"cat SKILL.md"}','general','/home/test/.codex/plugins/cache/cortex/cortex/build/skills/worker-general')
     assert 'forbidden_plugin_or_cache_access' not in check('exec_command','{"cmd":"cat solution.py"}','general',str(tmp_path))
+
+
+def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch):
+    check=OBSERVER['call_policy_flags']
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    cache=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/v7'
+    skill=cache/'skills/orchestrator/SKILL.md'
+    worker_skill=cache/'skills/worker-general/SKILL.md'
+    for path in (skill,worker_skill):
+        path.parent.mkdir(parents=True,exist_ok=True);path.write_text('instructions')
+
+    def command(path, binding='p', tag='PY'):
+        return (f"python3 - <<'{tag}'\nfrom pathlib import Path\n"
+                f"{binding}=Path({str(path)!r})\nprint({binding}.read_text())\n{tag}")
+
+    arguments=json.dumps({'cmd':command(skill)})
+    assert OBSERVER['skill_instruction_read']('exec_command',arguments)
+    assert 'forbidden_plugin_or_cache_access' not in check('exec_command',arguments,'coordinator','/fixture')
+    assert 'coordinator_forbidden_tool' not in check('exec_command',arguments,'coordinator','/fixture')
+    commented=command(skill).replace('from pathlib import Path\n', '# $(touch /tmp/example)\nfrom pathlib import Path\n')
+    assert OBSERVER['skill_instruction_read']('exec_command',json.dumps({'cmd':commented}))
+    unquoted=commented.replace("<<'PY'", '<<PY')
+    unquoted_args=json.dumps({'cmd':unquoted})
+    assert not OBSERVER['skill_instruction_read']('exec_command',unquoted_args)
+    assert 'forbidden_plugin_or_cache_access' in check('exec_command',unquoted_args,'general','/fixture')
+    assert OBSERVER['skill_instruction_read']('exec_command',json.dumps({'cmd':command(skill).replace('python3 - ', 'python3 -B - ')}))
+    worker_arguments=json.dumps({'cmd':command(worker_skill,'skill_path','END')})
+    assert OBSERVER['worker_skill_read']('exec_command',worker_arguments)
+
+    negatives=(
+        command(skill).replace('from pathlib import Path', 'import pathlib').replace('Path(', 'pathlib.Path('),
+        command(skill).replace("Path(", "Path(__import__('os').environ['SKILL'])"),
+        command(skill).replace("print(p.read_text())", "p.write_text('changed')"),
+        command(tmp_path/'project.txt'),
+        command(cache/'skills/worker-general/../agents/general.toml'),
+        command(skill).replace("print(p.read_text())", "print(p.read_text()); __import__('os').system('true')"),
+    )
+    for value in negatives:
+        args=json.dumps({'cmd':value})
+        assert not OBSERVER['skill_instruction_read']('exec_command',args)
+    assert 'coordinator_forbidden_tool' in check(
+        'exec_command',json.dumps({'cmd':command(tmp_path/'project.txt')}),'coordinator','/fixture')
+    assert 'forbidden_plugin_or_cache_access' in check(
+        'exec_command',json.dumps({'cmd':negatives[1]}),'general','/fixture')
+
+
+def test_native_archived_request_digest_preserves_verified_editor_bytes():
+    digest=OBSERVER['original_request_digest']
+    allowed=OBSERVER['delivered_request_digests']
+    source='Total events: 2\n1. Keep total_events exactly.\n'
+    delivered='$cortex:orchestrator '+source.replace('_',r'\_')
+    state=dict(original_request_sha256=digest(source),
+               desktop_editor_source_sha256=digest(OBSERVER['desktop_editor_source'](source)))
+    raw_hash=hashlib.sha256(source.replace('_',r'\_').encode()).hexdigest()
+    accepted=allowed(state,delivered)
+    assert raw_hash in accepted
+    assert OBSERVER['native_archived_request_digest'](delivered)==raw_hash
+    changed=delivered.replace('exactly','differently')
+    assert allowed(state,changed)=={digest(source)}
+    assert hashlib.sha256(b'arbitrary').hexdigest() not in accepted
+    assert raw_hash not in allowed(dict(original_request_sha256=digest(source)),delivered)
 
 
 def test_report_patch_mentions_are_not_plugin_access_but_patch_targets_are(tmp_path):
@@ -278,22 +341,40 @@ def test_missing_steering_receipt_cannot_count_as_success(tmp_path):
     with pytest.raises(FileExistsError): EVAL['record_trial'](trial,observations)
 
 
-def test_profiles_share_concrete_graph_first_route():
+def test_profiles_route_graph_details_to_generated_reference():
+    canonical=(ROOT/'plugins/cortex/agent-sources/references/code-and-evidence.md').read_bytes()
     for path in (ROOT / 'plugins/cortex/skills').glob('worker-*/SKILL.md'):
         text = path.read_text()
-        assert '## Codebase Memory: graph first, source grounded' in text
-        for operation in ('list_projects', 'search_graph', 'trace_path', 'get_code_snippet', 'check_index_coverage'):
-            assert operation in text
-        assert 'not a similar name or another worktree' in text
-        assert 'a first page is not an exhaustive result' in text
-        assert 'Do not repeatedly rebuild a watched index' in text
+        assert '[code and evidence discovery](references/code-and-evidence.md)' in text
+        assert (path.parent/'references/code-and-evidence.md').read_bytes()==canonical
+        assert 'Match a code index to the canonical assignment workspace' in canonical.decode()
+        assert 'Confirm consequential graph findings against current source' in canonical.decode()
+        assert '4,000 characters' in canonical.decode()
+        assert '## Codebase Memory: graph first, source grounded' not in text
 
 
 def test_generated_skill_loading_boundary_matches_actual_file_end():
-    import re
+    sources=ROOT/'plugins/cortex/agent-sources/references'
     for path in (ROOT/'plugins/cortex/skills').glob('worker-*/SKILL.md'):
-        lines=path.read_text().splitlines()
-        match=re.search(r'This complete skill has (\d+) lines\.',lines[5])
-        assert match and int(match.group(1))==len(lines)
+        text=path.read_text()
+        lines=text.splitlines()
         assert lines[-1]=='<!-- END OF COMPLETE CORTEX WORKER SKILL -->'
         assert lines.count(lines[-1])==1
+        assert not any(line.startswith('This complete skill has ') for line in lines)
+        assert {p.name for p in (path.parent/'references').glob('*.md')}=={
+            'code-and-evidence.md',
+            'interactive-resources.md',
+            'report-publication.md',
+        }
+        for reference in (path.parent/'references').glob('*.md'):
+            assert reference.read_bytes()==(sources/reference.name).read_bytes()
+        assert '## Report class selection' in text
+        assert 'Changing report class does not require a new worker.' in text
+        assert 'fresh correctly matched worker' not in text
+    publication=(sources/'report-publication.md').read_text()
+    interaction=(sources/'interactive-resources.md').read_text()
+    assert 'An inert JavaScript string or `String.raw` template' in publication
+    assert 'executable interpolation, command\nsubstitution or shell evaluation' in publication
+    assert 'Call grouping and tab count follow the tool\'s guarantees' in interaction
+    assert 'Create one fresh tab' not in interaction
+    assert 'Perform state changes separately' not in interaction

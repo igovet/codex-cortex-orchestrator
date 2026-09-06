@@ -13,9 +13,10 @@ description: Update affected project knowledge after verified changes while pres
 | Technical writer | Confirm source-backed facts and update only affected documentation |
 | Independent reviewer when warranted | Check material documentation changes against source, commands and links |
 
-The coordinator may read selected opening decision briefs through Cortex, but does
-not read project indexes, files, detailed report evidence or diffs, or edit documents. Delegate
-missing evidence. A stale or absent index does not automatically require harvest.
+The coordinator may read the bounded report evidence needed for a decision, while
+workers own project indexes, files, diffs and document edits. Delegate project
+inspection or specialist interpretation when needed. A stale or absent index does
+not automatically require harvest.
 
 ## Inputs for the writer
 

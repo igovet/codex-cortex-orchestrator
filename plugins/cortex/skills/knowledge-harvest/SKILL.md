@@ -23,7 +23,8 @@ it does not open project indexes.
 
 Every repository read, project analysis, documentation change, command and
 completeness check is worker-owned. The coordinator reads previews, the current
-pipeline and selected opening decision briefs, then chooses bounded assignments.
+pipeline and the bounded evidence pages needed for its decision, then chooses
+bounded assignments.
 Graph/search, index routing and repository enumeration below are worker instructions.
 
 Use the orchestrator's index-driven documentation routing instructions for every
@@ -101,10 +102,10 @@ documentation delegations serve as the dedicated documentation-sync worker or
 workers for `docs/project/`, `docs/features/`, and any affected public
 documentation. After the final writing or corrective delegation, a separate
 worker verifies documentation through the completeness-review and verification
-evidence above. The coordinator decides readiness from the meaningful previews of those worker
-checks and the current pipeline. It may read selected opening decision briefs, but never detailed report evidence, documentation
-indexes or project files. Missing evidence requires another worker check, not
-coordinator inspection.
+evidence above. The coordinator decides readiness from meaningful worker evidence
+and the current pipeline. It may follow bounded report cursors for facts needed by
+that decision, while documentation indexes and project files remain worker-owned.
+Missing specialist interpretation requires another worker check.
 
 Do not use a task-level `documentation not required` outcome for a completed
 harvest, because documentation is the requested artifact. Public documents

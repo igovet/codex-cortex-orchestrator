@@ -1,118 +1,125 @@
 # Markdown storage
 
-Each task has a server-generated short internal identifier and one canonical
-project root. SQLite is an index and recovery journal. It stores task bindings,
-report metadata, digests, governance choices and delivery receipts, never report
-bodies. Its default location is `$CODEX_HOME/cortex/cortex.sqlite3`; `CODEX_HOME`
-already names the `.codex` directory.
+Each task has one canonical project and native coordinator binding. Children inherit
+that task only through verified native parent metadata. There is no latest-task
+fallback or model-supplied task selector. Binding receipts expose the selected
+Cortex/normal state. Receipts establish local routing, not authentication against
+a malicious same-user process.
 
-Editable drafts and published task documents use separate private project roots:
+SQLite lives under `$CODEX_HOME/cortex/cortex.sqlite3` by default. It stores metadata,
+relationships, delivery receipts, source revisions and recovery information. Body
+text remains in real Markdown:
 
 ```text
-<project_root>/.cortex/
-├── draft-reports/
-│   └── <short-draft-id>.md
-└── pipeline-drafts/
-    └── <short-draft-id>.md
-
-<project_root>/.codex/cortex/
-└── <short-task-id>/
-    ├── pipeline.md
-    └── <short-report-id>.md
+<project>/.cortex/draft-reports/<draft>.md
+<project>/.cortex/pipeline-drafts/<draft>.md
+<project>/.codex/cortex/<task>/pipeline.md
+<project>/.codex/cortex/<task>/<report>.md
 ```
 
-Codex reserves the project `.codex` directory against ordinary agent writes.
-Drafts therefore live under `.cortex`, where native file tools can edit them. Only
-the MCP server writes published documents below `.codex/cortex`.
+Codex protects ordinary agent writes to project `.codex`, so editable drafts use
+`.cortex`. Only storage publication writes final task documents. Keep these private
+files out of repository documents and diagnostics.
 
-The original request and governance choices are ordinary immutable reports.
-Task creation obtains the original source from the current native turn's typed
-user-message receipt through `host_source.py`. The active host index is queried
-read-only by the trusted thread identity and matched canonical project. Only that
-owned session file below the active home's sessions tree is read, with an 8 MiB
-tail bound; missing current-turn evidence fails closed. No source body is supplied
-by the model. Explicit literal credential redactions preserve surrounding text.
-The accepted source digest is returned with its report reference. Delivery keys
-cover public arguments; replay returns the accepted source without consulting a
-later turn or requiring the old session file to remain available. Before
-authored publication, `create_draft` allocates a short identifier, writes a matching
-identifier marker and selected heading template, and stores its task, calling thread,
-kind and exact path in SQLite. Report drafts go under `draft-reports`; pipeline
-editions go under `pipeline-drafts`. One native thread may hold multiple drafts.
-The row also stores the file's original device and inode. `create_draft` returns the
-complete initial Markdown, so the actor updates only the returned file in place without
-an immediate duplicate read. The bounded, same-thread `read_draft` operation is reserved
-for recovery or a genuinely needed later read; deletion, replacement, renaming or recreation is rejected
-with an actionable `draft_replaced` error. The writer accepts the short identifier,
-requires the same task and native thread, canonicalizes the stored path, rejects
-directories, links and special files, validates UTF-8 while reading fixed-size
-blocks, and computes byte size and SHA-256.
+## Publication and recovery
 
-Publication writes a private temporary file in the destination task directory,
-flushes and fsyncs it, atomically renames it to the short report filename, commits
-only metadata and relationships in SQLite, and then removes the project draft.
-An error before commit leaves the draft. A database failure rolls back the newly
-published destination. A partially written temporary file never becomes a report.
-Content remains byte-for-byte unchanged; there is no newline normalization,
-truncation, summarization, or application-level report-size limit.
+The draft creator allocates a short identifier, canonical path and required marker,
+and records its task, native owner, device and inode. Actors edit that exact file
+in place. Replacement, deletion, renaming, recreation, symlinks, special files and
+unsafe ownership are rejected. Unfilled packaged guidance markers also prevent
+publication; this is template validation, not a semantic acceptance test.
 
-Each logical draft creation and publication has a caller delivery key. An exact
-publication retry returns its original receipt even after the source draft was removed. If the same path is recreated,
-its SHA-256 must equal the accepted report before the receipt is replayed and the
-duplicate draft is removed. Changed arguments or bytes under the same key produce
-an explicit conflict. Changed content uses a newly allocated draft and key.
+Publication streams complete UTF-8 in fixed blocks, computes size and SHA-256,
+flushes and fsyncs a private temporary file, atomically renames it, commits metadata,
+and removes the draft. Bytes are not normalized, summarized or truncated. There is
+no total report-size cap beyond the filesystem and available space. Failures before
+commit preserve the draft and roll back uncommitted publications. Pipeline backups
+retain the committed version until restoration or digest confirmation.
 
-The task has exactly one `pipeline.md`. Pipeline text does not pass through MCP or
-`draft-reports`; the coordinator creates a pipeline draft, replaces every exact
-`{{CURRENT_...}}` placeholder in its returned file,
-and publishes the short identifier. The writer prepends those bytes to the same file with a Markdown separator and keeps
-older editions below. The pipeline report identifier stays stable.
+There is one pipeline per task. A new complete edition is prepended with a separator,
+leaving older editions below. Ordinary reports are immutable. A publication delivery
+key replays its original accepted receipt; changed arguments or recreated changed
+bytes conflict. Replay does not repeat later state transitions.
 
-The catalogue returns one compact metadata entry per report, newest activity first,
-using a stable high-water snapshot across cursor pages. Document reads return
-bounded Unicode slices. Cursor tokens are compact and contain a short non-reversible
-task binding, document reference, digest prefix and position so agents can copy them
-without carrying task identifiers. Ordinary report cursors survive restart. A pipeline update
-invalidates its old cursor, so recovery restarts from the newest beginning.
+Recovery runs for the resolved task only. It never traverses every task before a
+normal operation. A corrupt neighboring pipeline does not prevent another catalogue
+or report read. Retention and publication recovery use exact registered relationships
+and preserve unknown files and shared directories.
 
-`clear N days` is a host-side retention command rather than an MCP tool. It
-selects this project's tasks by latest recorded activity, protects tasks linked to
-supplied active native threads, and removes their SQLite rows and exact task
-directories. It removes only server-created drafts whose database row makes their
-task relationship unambiguous; published drafts also require their recorded digest.
-It never deletes shared draft directories or unknown files.
+## Bounded reads and checked identities
 
-Short task, report and draft identifiers use a type prefix plus 12 hexadecimal characters,
-with collision checks inside serialized transactions. They never appear as task
-selectors in MCP arguments or results. Cursor bindings use a non-reversible task
-fingerprint rather than embedding that identifier. Host-supplied thread and parent metadata
-resolves the task. Missing, unregistered or conflicting ancestry fails explicitly;
-there is no latest-task fallback.
+The newest-first catalogue uses a stable high-water snapshot across bounded cursor
+pages. Report and draft reads use Unicode slices of at most 4,000 characters per
+page, with cursors allowing access to the remaining document. Pipeline updates expire
+its older document cursors; restart from the newest beginning. Ordinary immutable
+report cursors survive process restart.
 
-Storage format 10 accepts no earlier layout and provides no compatibility reader or
-automatic migration. Back up the SQLite index and project task directories together
-while access is stopped.
+Each MCP process caches at most 128 validated file identities and at most 1,024 sparse
+byte offsets per document. Unchanged files avoid complete digest rereads and repeated
+prefix decoding. Identity changes trigger full integrity validation. The reader
+checks identity around page access and does not retain whole report bodies in cache.
+These checks are integrity detection, not a filesystem sandbox.
 
-Publication recovery preserves pipeline backups until the committed digest has
-been restored or confirmed. A destination rename is registered for rollback before
-its directory sync, so a sync failure cannot strand an uncommitted edition.
-All packaged template markers, including ordinary report guidance, must be filled
-before publication; rejection preserves the editable draft and accepts no receipt.
+## Sources and provenance
 
+Task creation obtains exact typed user messages from the current native Codex turn.
+The reader uses the active home's explicitly validated `state_5.sqlite` format,
+matched canonical project and owned regular session file. The first session metadata
+must match the native thread and project. It never guesses a different index or a
+foreign session. Blockwise boundary search and forward streaming replace the fixed
+8 MiB tail; oversized records proven irrelevant to source selection can be skipped.
+Unknown or oversized source records remain explicit gaps.
 
-Native steering is archived on the next successful coordinator Cortex operation,
-including catalogue reads. Each typed native user message becomes a separate
-immutable report in its original order; the pipeline remains a model-authored
-working summary. Capture is not an idle background service and cannot prove that
-the model correctly applied every requirement. Text is preserved without trimming,
-translation or summarization, except explicitly requested literal credential
-redactions. Attachments are not copied by this text-source reader.
+Relevant event/session JSONL records are limited to 4 MiB; one capture batch is
+limited to 1,000,000 text characters and 1,024 native messages to protect memory. These are source-capture limits, not report pagination limits; a capture
+failure leaves existing reports available with explicit completeness. Distinct native
+message IDs produce distinct source reports even for identical text. The original
+text retains its whitespace and language, except explicitly requested literal
+credential redactions.
 
-The private host-file cursor and native message identities commit atomically with
-report metadata and the requested operation. Retries, restart and repeated native
-receipts do not duplicate messages. Failed operations retain the previous cursor;
-changed files, conflicting message identities or unavailable source fail closed.
-Workers never read or capture another thread's native input. Source cursor and
-identity metadata are removed with task retention. Existing tasks without a source
-cursor begin with the current native turn; earlier unarchived steering is not
-retroactively guaranteed.
+Attachments retain an available file/resource and a recovery method, or an explicit
+unavailable entry. A reference is not proof that content was copied or inspected.
+The pipeline separately records the model's interpretation, cancelled conditions,
+assignments, owners and unfinished actions.
+
+Every authored report records the source revision and checked artifact versions
+underlying it. The default source revision is the draft's creation revision, rather
+than silently adopting newer requirements at publication. Artifact versions are
+reported evidence, not automatically executed checks. New sources and observed file
+changes signal reconciliation; the coordinator decides whether prior checks remain
+valid. Bounded catalogue discovery also exposes changes with allowlisted hook-observation
+metadata (known status, exit/session receipts, truncation, actor scope and changed
+paths), and the caller's unfinished
+drafts, each with its own continuation mechanism.
+
+Host-source errors do not deny archived report reads. Operation receipts expose
+complete, partial, unavailable or unattempted capture as applicable. Native source
+capture and metadata commit atomically with the operation; exact retries do not
+collapse distinct native events. `normal` suspends capture and later reactivation
+must skip the inactive interval rather than backfill ordinary conversations.
+Ambiguous boundaries remain explicit gaps.
+
+Hooks share the same services. A documented `UserPromptSubmit` without a unique
+native message receipt records deferred capture, never a guessed identity or raw
+publication that bypasses a later credential redaction. See [hook coverage](../features/lifecycle-hooks/index.md).
+
+## Offline format 10→11 migration
+
+Runtime accepts format 11 only. There is no automatic migration or compatibility
+reader. Stop all CLI, Desktop, MCP and hook access, and back up every affected
+project's task/draft directories. Then run the explicit metadata conversion:
+
+```bash
+python3 -B plugins/cortex/scripts/cortex_migrate.py --storage-dir /absolute/private/store --backup /absolute/private/cortex-v10.sqlite3 --access-stopped
+```
+
+The backup path must be new. The migrator takes an exclusive cooperative access lock
+and database lock, creates and verifies the SQLite backup, adds metadata, initializes
+known source order and marks unknown historical provenance explicitly. It never
+opens or rewrites Markdown. Runtime connections hold shared access locks. Older
+clients must still be stopped; an advisory lock cannot stop an uncooperative process.
+
+Keep SQLite and project directories together for restoration. Failed migration must
+not be treated as permission to start normal access without checking the receipt.
+Retention removes source and hook metadata with the selected task. See
+[security](../../SECURITY.md) and [verification](verification.md).

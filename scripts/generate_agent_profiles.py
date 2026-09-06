@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render self-contained Agent v2 TOML profiles from one shared worker protocol."""
+"""Render compact Agent v2 profiles and references from one shared source."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins/cortex"
 SOURCES = PLUGIN / "agent-sources"
 AGENTS = PLUGIN / "agents"
+WORKER_REFERENCES = (
+    "code-and-evidence.md",
+    "interactive-resources.md",
+    "report-publication.md",
+)
 SPECIALIZED = (
     "Profile title",
     "Role and responsibility",
@@ -70,14 +75,29 @@ def expected_skills(plugin: Path = PLUGIN) -> dict[Path, bytes]:
         name = 'worker-' + path.stem
         description = 'Cortex delegated specialist only: ' + profile['description']
         frontmatter = '---\nname: ' + name + '\ndescription: ' + json.dumps(description) + '\n---\n\n'
-        boundary = ('This complete skill has {count} lines. A successful range read that stops earlier is incomplete. '
-                    'Before discovery or project work, read through the final standalone completion marker; '
-                    'use a full-file read or continue the remaining ranges.\n\n')
         footer = '\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n'
-        text = frontmatter + boundary.format(count=0) + profile['developer_instructions'].rstrip() + '\n' + footer
-        text = text.replace(boundary.format(count=0), boundary.format(count=len(text.splitlines())), 1)
+        text = frontmatter + profile['developer_instructions'].rstrip() + '\n' + footer
         rendered[plugin / 'skills' / name / 'SKILL.md'] = text.encode()
     return rendered
+
+
+def expected_worker_references(plugin: Path = PLUGIN) -> dict[Path, bytes]:
+    source_root = plugin / "agent-sources" / "references"
+    rendered = {}
+    for skill_path in expected_skills(plugin):
+        reference_root = skill_path.parent / "references"
+        for filename in WORKER_REFERENCES:
+            rendered[reference_root / filename] = (source_root / filename).read_bytes()
+    return rendered
+
+
+def expected_agent_references(plugin: Path = PLUGIN) -> dict[Path, bytes]:
+    source_root = plugin / "agent-sources" / "references"
+    return {
+        plugin / "agents" / "references" / filename:
+        (source_root / filename).read_bytes()
+        for filename in WORKER_REFERENCES
+    }
 
 
 def expected_embedded_guidance(plugin: Path = PLUGIN) -> dict[Path, bytes]:
@@ -100,6 +120,14 @@ def check(plugin: Path = PLUGIN) -> None:
     if set((plugin / "skills").glob("worker-*/SKILL.md")) != set(skills):
         raise ValueError("generated worker skill set differs from source catalogue")
     expected.update(skills)
+    references = expected_worker_references(plugin)
+    if set((plugin / "skills").glob("worker-*/references/*.md")) != set(references):
+        raise ValueError("generated worker reference set differs from source catalogue")
+    expected.update(references)
+    agent_references = expected_agent_references(plugin)
+    if set((plugin / "agents" / "references").glob("*.md")) != set(agent_references):
+        raise ValueError("generated agent reference set differs from source catalogue")
+    expected.update(agent_references)
     expected.update(expected_embedded_guidance(plugin))
     for path, body in expected.items():
         if path.read_bytes() != body:
@@ -107,7 +135,14 @@ def check(plugin: Path = PLUGIN) -> None:
 
 
 def write(plugin: Path = PLUGIN) -> None:
-    for path, body in (expected_profiles(plugin) | expected_skills(plugin) | expected_embedded_guidance(plugin)).items():
+    generated = (
+        expected_profiles(plugin)
+        | expected_skills(plugin)
+        | expected_worker_references(plugin)
+        | expected_agent_references(plugin)
+        | expected_embedded_guidance(plugin)
+    )
+    for path, body in generated.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
 
@@ -120,4 +155,4 @@ if __name__ == "__main__":
         check() if args.action == "check" else write()
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Agent profile generation failed: {exc}") from None
-    print(f"Agent v2 profiles {args.action}: 22 self-contained prompts")
+    print(f"Agent v2 profiles {args.action}: 22 compact prompts with shared references")

@@ -24,13 +24,11 @@ search or reindex merely for reassurance. Current source and checks outrank grap
 This route was checked against the live MCP descriptions and the
 [upstream documentation](https://github.com/DeusData/codebase-memory-mcp) on 2026-09-05.
 
-The coordinator reads catalogue previews, the current pipeline beginning and selected
-authored report opening decision briefs when architecture, dependencies or acceptance
-need evidence. Detailed report and project reads remain worker-owned.
-Each native worker loads its complete assigned packaged worker skill. Workers read relevant indexes
-and linked pages, select needed report bodies and inspect source. They return
-concise routing, result and verification findings for coordinator decisions.
-Current source, tests and executable configuration outrank generated docs.
+The coordinator reads necessary user sources, pipeline state and as many selected
+evidence pages as a decision requires. Previews guide selection, rather than imposing
+a first-page-only rule. Workers load their assigned complete skills, inspect relevant
+indexes and source, and return findings with verification and limits. Current source,
+tests and executable configuration outrank generated docs.
 
 Harvest preserves the canonical five project knowledge files and feature index.
 Features use a directory with `index.md` as entry point; large features can split
@@ -53,23 +51,28 @@ reports and indexed documentation. The native thread binding and current pipelin
 
 The orchestrator skill contains a routing table for all 22 specialists. Each has
 an exact `cortex:worker-*` skill token. The coordinator supplies that token and a
-self-contained assignment through ordinary native subagent tools. The worker reads
-its advertised skill instructions before MCP bootstrap and project work. This does
-not require custom native profile selection or personal agent TOML registration.
-The coordinator never reads the worker's full instructions or project evidence.
+self-contained assignment through ordinary native subagent tools. The worker loads
+its complete advertised skill before applying it to project work. Already attached
+live schemas can be used directly, without a separate MCP catalogue bootstrap or a
+prescribed first-call batch. This does not require custom native profile selection or
+personal agent TOML registration.
+The coordinator avoids loading a worker's full protocol without a concrete need.
 
 Each structured profile names responsibility, inputs, workflow, checks and recovery.
-The complete shared protocol and tool discipline are generated directly into every
-profile. Conditional recovery and report-example skills load by exact ordinary skill
+The compact shared protocol is generated into every profile; rare procedures are
+declared references loaded only when relevant. Conditional recovery and report-example skills load by exact ordinary skill
 names only when needed. No installation paths are put into worker assignments.
 
-The coordinator adapts ordering, ownership, models and checks from evidence.
-Luna is the economical initial default. Terra and Sol are supported alternatives
-selected from the actual reasoning bottleneck and comparative task evidence, not
-mandated by profile names. Missing facts and environment failures need targeted
-remedies rather than automatic model escalation. Effort is selected from host support up to
-max; ultra is excluded. The coordinator remains active through native wait until
-a genuine user question or completion, rather than ending with a progress update.
+The coordinator preserves its selected model and chooses an economical worker with
+sufficient demonstrated quality. Luna is eligible for qualified bounded task classes.
+Coupled changes and an observed reasoning problem can justify stronger reasoning;
+missing facts or tools need their own remedy. Effort follows the actual host support
+and user's preferences, with no permanent model or effort allowlist. A timeout never
+transfers an active worker's resources.
+
+Current isolated live qualification uses Luna/high for all coordinators and Luna at
+medium/high for native workers. That fixed evaluation setup does not change general
+product routing.
 
 Report examples for plans, investigations, implementations, verification,
 documentation and final results are optional content guides. They do not impose
@@ -80,12 +83,16 @@ with explicit error handling and no unexplained acknowledged mutation replays.
 The coordinator preserves the language selected from the user’s own prose across
 progress messages and recovery. Workers publish findings as ordinary reports;
 pipeline and governance remain coordinator responsibilities. Code-mode calls
-require checking wrapper syntax before dispatch, independently of MCP validation.
+require preserving the intended argument through dispatch and checking the observed
+result. Inert JavaScript literals, including `String.raw`, may carry a patch unchanged;
+executable interpolation or substitution may not construct it.
 
 Bounded changes may combine inspection, implementation, tests, and related docs in
 one specialist assignment. Separate discovery and planning serve concrete unresolved
 decisions; neither file counts nor acceptance-category counts impose fixed stages.
-Dependencies still prevent implementation from racing governing investigations.
+Bounded independent discovery may precede the first pipeline edition. Useful durable
+state must be recorded before dependency, shared-resource or acceptance decisions;
+dependencies still prevent implementation from racing governing investigations.
 
 Ordinary marketplace installation and isolated dev preparation use the same
 packaged skills without writing a personal agent registry. Missing custom profile

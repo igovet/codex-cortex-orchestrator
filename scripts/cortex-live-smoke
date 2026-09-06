@@ -17,6 +17,16 @@ ROOT=Path(__file__).resolve().parents[1]
 SESSION='cortex-markdown-smoke'
 TARGET=SESSION+':0.0'
 STATE=Path(tempfile.gettempdir())/f'cortex-markdown-smoke-{os.getuid()}'
+LIVE_MODEL='gpt-5.6-luna'
+LIVE_COORDINATOR_EFFORT='high'
+LIVE_DEVELOPER_INSTRUCTIONS=(
+    'This is an isolated Cortex live-development test. The coordinator must use '
+    'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
+    'gpt-5.6-luna with medium or high reasoning effort; pass that model explicitly '
+    'when inherited context could preserve another model. For this live test, this '
+    'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
+    'project, skill, and user instructions.'
+)
 
 
 def tmux(*args,check=True):
@@ -40,11 +50,46 @@ def state():
 def safe_data_directory(requested):
     if requested is None:return None
     requested.mkdir(mode=0o700,parents=True,exist_ok=True)
+    if requested.is_symlink():
+        raise RuntimeError('data directory must be an owner-private non-symlink directory')
     path=requested.resolve(strict=True)
     stat=path.stat()
     if path.is_symlink() or not path.is_dir() or stat.st_uid!=os.getuid() or stat.st_mode&0o077:
         raise RuntimeError('data directory must be an owner-private non-symlink directory')
     return path
+
+
+def existing_data_directory(requested):
+    """Validate a retained store without creating or migrating it."""
+    if not isinstance(requested,Path) or not requested.exists() or requested.is_symlink():
+        raise RuntimeError('saved data directory is unavailable or untrusted')
+    path=requested.resolve(strict=True)
+    stat=path.stat()
+    if path.is_symlink() or not path.is_dir() or stat.st_uid!=os.getuid() or stat.st_mode&0o077:
+        raise RuntimeError('saved data directory is unavailable or untrusted')
+    return path
+
+
+def select_data_directory(requested,resume_last,previous=None):
+    """Choose one private store, creating a fresh default only for new runs."""
+    previous=previous if isinstance(previous,dict) else {}
+    environment=os.environ.get('CORTEX_DATA_DIR')
+    override=requested if requested is not None else (Path(environment) if environment else None)
+    if resume_last:
+        saved=previous.get('data')
+        if isinstance(saved,str) and saved:
+            retained=existing_data_directory(Path(saved))
+            if override is not None and existing_data_directory(override)!=retained:
+                raise RuntimeError('resume data directory differs from saved store')
+            return retained
+        if override is None:
+            raise RuntimeError('resume requires an explicit data directory when saved state has no store')
+        return existing_data_directory(override)
+    if override is not None:
+        return safe_data_directory(override)
+    fresh=Path(tempfile.mkdtemp(prefix='data-',dir=STATE))
+    os.chmod(fresh,0o700)
+    return existing_data_directory(fresh)
 
 
 def user_prompt_receipts(data,prompt):
@@ -78,31 +123,43 @@ def start(args):
     workdir=args.workdir.resolve(strict=True)
     if not workdir.is_dir():raise RuntimeError('Workdir must be a directory')
     if args.resume_last:
-        previous=json.loads((STATE/'last.json').read_text())
-        if previous['workdir']!=str(workdir):raise RuntimeError('Resume workdir differs')
+        try:previous=json.loads((STATE/'last.json').read_text())
+        except (OSError,ValueError):raise RuntimeError('saved smoke state is unavailable or invalid') from None
+        if not isinstance(previous,dict):raise RuntimeError('saved smoke state is unavailable or invalid')
+        if previous.get('workdir')!=str(workdir):raise RuntimeError('Resume workdir differs')
     capture=STATE/'capture.txt';capture.write_text('');os.chmod(capture,0o600)
-    data_dir=safe_data_directory(args.data_dir)
+    data_dir=select_data_directory(args.data_dir,args.resume_last,previous if args.resume_last else None)
     events=STATE/'events';events.mkdir(mode=0o700,exist_ok=True)
     for path in events.glob('*.jsonl'):path.unlink()
     started_at=time.time()
     created_since=(previous.get('thread_created_since',previous['started_at'])
                    if args.resume_last else started_at)
+    if args.model not in {None,LIVE_MODEL}:raise RuntimeError('live tests require gpt-5.6-luna')
+    if args.effort not in {None,LIVE_COORDINATOR_EFFORT}:raise RuntimeError('live coordinator reasoning effort must be high')
+    model=LIVE_MODEL;effort=LIVE_COORDINATOR_EFFORT
     graph_enabled=(getattr(args,'codebase_memory',False)
                    or (args.resume_last and previous.get('codebase_memory',False)))
     save(dict(workdir=str(workdir),started_at=started_at,thread_created_since=created_since,
+              trial_started_at=(previous.get('trial_started_at',previous['started_at']) if args.resume_last else started_at),
               resumed=args.resume_last,events=str(events),
               original_request_sha256=previous.get('original_request_sha256') if args.resume_last else None,
-              data=str(data_dir) if data_dir else None,codebase_memory=graph_enabled))
+              first_submission_at=previous.get('first_submission_at') if args.resume_last else None,
+              data=str(data_dir) if data_dir else None,codebase_memory=graph_enabled,
+              model=model,effort=effort))
     tmux('new-session','-d','-s',SESSION,'-c',str(workdir),'bash')
     tmux('set-option','-t',SESSION,'remain-on-exit','on')
     sink=' '.join(map(shlex.quote,['python3','-B',str(ROOT/'scripts/cortex-live-capture-sink'),'--path',str(capture)]))
     tmux('pipe-pane','-t',TARGET,sink)
     scrub=['CODEX_APP_TOOLS_PIPE_PATH','CODEX_INTERNAL_ORIGINATOR_OVERRIDE','CODEX_MCP_NODE_PATH','CODEX_CI','CODEX_SHELL','CODEX_PERMISSION_PROFILE','CODEX_SESSION_ID','CODEX_THREAD_ID']
     command=['env',*[part for key in scrub for part in ['-u',key]],'CORTEX_OBSERVATION_DIR='+str(events),str(ROOT/'scripts/cortex-dev')]
-    selected_data=str(data_dir) if data_dir else os.environ.get('CORTEX_DATA_DIR')
+    selected_data=str(data_dir)
     if selected_data:
         command.insert(command.index(str(ROOT/'scripts/cortex-dev')), 'CORTEX_DATA_DIR='+selected_data)
     if args.resume_last:command+=['resume','--last']
+    if model:command+=['--model',model]
+    if effort:command+=['-c','model_reasoning_effort='+effort]
+    command+=['-c','agents.default_subagent_model='+json.dumps(LIVE_MODEL),
+              '-c','developer_instructions='+json.dumps(LIVE_DEVELOPER_INSTRUCTIONS)]
     command+=['-c','features.multi_agent_v2=true','-c','features.apps=false',
               '-c','mcp_servers.codebase_memory.enabled='+('true' if graph_enabled else 'false'),
               '-c','mcp_servers.node_repl.enabled=false',
@@ -115,12 +172,13 @@ def start(args):
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
-    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--data-dir',type=Path);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification')
+    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--data-dir',type=Path);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'))
     s=sub.add_parser('send');s.add_argument('--prompt-file',type=Path,required=True)
     sub.add_parser('enter');sub.add_parser('status');sub.add_parser('audit')
-    for name in ['capture','events']:
+    for name in ['capture','events','hooks']:
         s=sub.add_parser(name);s.add_argument('--lines',type=int,default=120)
     s=sub.add_parser('calls');s.add_argument('--limit',type=int)
+    sub.add_parser('usage')
     s=sub.add_parser('stop');s.add_argument('--interrupt',action='store_true')
     args=p.parse_args()
     if args.command=='start':return start(args)
@@ -139,12 +197,13 @@ def main():
         except BaseException:
             tmux('delete-buffer','-b',buffer,check=False)
             raise
-        time.sleep(5);tmux('send-keys','-t',TARGET,'Enter')
+        time.sleep(5);submitted_at=time.time();tmux('send-keys','-t',TARGET,'Enter')
         for _ in range(40):
             if user_prompt_receipts(data,prompt)>before:break
             time.sleep(.25)
         else:
             raise RuntimeError('prompt submission produced no exact user-turn receipt; inspect the composer before any explicit further input')
+        data.setdefault('first_submission_at',submitted_at);save(data)
         print('Submitted the exact literal prompt and observed its user-turn receipt.')
     elif args.command=='enter':tmux('send-keys','-t',TARGET,'Enter');print('Sent one Enter.')
     elif args.command=='status':
@@ -154,13 +213,14 @@ def main():
         raw=re.sub(r'\x1b\][^\x07]*(?:\x07|\x1b\\)','',raw)
         raw=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',raw)
         print('\n'.join(raw.splitlines()[-min(args.lines,500):]))
-    elif args.command=='events':
-        rows=[]
-        for path in (STATE/'events').glob('*.jsonl'):
-            for line in path.read_bytes()[:256000].splitlines():
-                try:rows.append(json.loads(line))
-                except ValueError:continue
-        for row in sorted(rows,key=lambda x:x['time_ns'])[-min(args.lines,500):]:print(json.dumps(row))
+    elif args.command in {'events','hooks'}:
+        observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='cortex_live_observer')
+        rows=(observer['observed_events'](data['events']) if args.command=='events'
+              else observer['observed_hook_events'](data['events']))
+        for row in rows[-min(args.lines,500):]:print(json.dumps(row))
+    elif args.command=='usage':
+        observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='cortex_live_observer')
+        print(json.dumps(observer['participant_token_usage'](data)))
     elif args.command in {'calls','audit'}:
         observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='cortex_live_observer')
         host_rows=observer['observed_tool_calls'](data)
@@ -171,6 +231,8 @@ def main():
         else:
             mcp_rows=observer['observed_events'](data['events'])
             failures=[row for row in mcp_rows if row.get('operation')!='initialize' and row.get('outcome')!='success']
+            hook_rows=observer['observed_hook_events'](data['events'])
+            hook_failures=[row for row in hook_rows if row.get('outcome')!='success']
             host_failures,resolved_host_failures=observer['classify_host_failures'](host_rows)
             error_history=observer['tool_error_history'](host_rows)
             orchestration_errors=observer['orchestration_error_history'](host_rows)
@@ -179,8 +241,8 @@ def main():
             orchestration_host_failures=[row for row in host_failures if observer['is_orchestration_call'](row)]
             open_sessions=observer['open_command_sessions'](host_rows)
             open_cells=observer['open_exec_cells'](host_rows)
-            print(json.dumps(dict(mcp_events=len(mcp_rows),host_calls=len(host_rows),
-                                  failures=failures,host_failures=host_failures,
+            print(json.dumps(dict(mcp_events=len(mcp_rows),hook_actions=len(hook_rows),host_calls=len(host_rows),
+                                  failures=failures,hook_failures=hook_failures,host_failures=host_failures,
                                   tool_error_history=error_history,
                                   orchestration_error_history=orchestration_errors,
                                   orchestration_host_failures=orchestration_host_failures,
@@ -189,7 +251,7 @@ def main():
                                   orchestration_policy_violations=orchestration_policies,
                                   open_sessions=open_sessions,
                                   open_cells=open_cells)))
-            if failures or orchestration_errors or orchestration_host_failures or orchestration_policies or open_sessions or open_cells:
+            if failures or hook_failures or orchestration_errors or orchestration_host_failures or orchestration_policies or open_sessions or open_cells:
                 raise RuntimeError('CLI orchestration audit found unsuccessful, forbidden, or non-terminal orchestration outcomes')
     else:
         if args.interrupt:tmux('send-keys','-t',TARGET,'C-c',check=False)

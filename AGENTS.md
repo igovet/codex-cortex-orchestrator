@@ -9,7 +9,9 @@ owns the pipeline, native subagents, steering, evidence interpretation and
 completion. Keep tool argument contracts in the advertised schemas and property
 descriptions only, never in skills or profile instructions. Preserve all 22
 specialist profiles and their shared report protocol. Do not introduce
-compatibility routes, workflow hooks, mandatory stages or approval machines.
+compatibility routes, mandatory stages or approval machines. Lifecycle hooks may
+perform short local source-memory, observation and exact registered-file integrity
+work; they never choose agents or decide task acceptance.
 
 Use one real `pipeline.md` per task, newest edition first with older editions
 below. Other reports are immutable real Markdown files. Store report bodies in
@@ -32,6 +34,11 @@ Never install or update the stable user's Cortex plugin. Live preparation must
 use `./scripts/cortex-dev` (or the root forwarding wrapper), which alone prepares
 and installs the exact isolated `$HOME/.cortex-dev/.codex` candidate. No direct
 normal sync, ad hoc cachebuster or stable configuration changes are allowed.
+
+All live-dev tests use `gpt-5.6-luna` with `high` effort for the coordinator.
+Native test workers also use Luna, at medium or high effort; heavy models are
+prohibited in live CLI/Desktop tests. Keep this test policy in isolated launcher
+configuration, without changing stable user settings or general plugin routing.
 
 After a completed change run a focused ordinary interactive Codex live scenario.
 Use `./scripts/cortex-live-smoke start --workdir PATH` for the exact

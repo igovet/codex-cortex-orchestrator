@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the actual Desktop in the same isolated candidate and a disposable profile."""
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import tomllib
 import urllib.parse
 from collections import Counter
 from datetime import datetime
@@ -20,6 +22,26 @@ import shutil
 ROOT=Path(__file__).resolve().parents[1]
 STATE=Path(tempfile.gettempdir())/f'cortex-markdown-desktop-{os.getuid()}'
 CONFIG_BACKUP=STATE/'config.toml.before-live-test'
+LIVE_MODEL='gpt-5.6-luna'
+LIVE_COORDINATOR_EFFORT='high'
+LIVE_WORKER_EFFORTS={'medium','high'}
+ADVISORY_POLICY_FLAGS={
+    'unsafe_cortex_draft_template_literal','insufficient_diagnostic_output_budget',
+    'worker_project_tool_before_cortex_bootstrap','worker_report_catalogue_in_fresh_thread',
+    'worker_pipeline_read_in_fresh_thread','summary_exceeds_operating_target',
+    'draft_template_profile_mismatch','coordinator_delegation_before_pipeline_publication',
+    'browser_before_local_url_ready','batched_browser_mutations',
+    'forbidden_browser_tab_attachment','repeated_browser_tab_creation',
+    'browser_origin_switch','browser_origin_not_http_verified',
+}
+LIVE_DEVELOPER_INSTRUCTIONS=(
+    'This is an isolated Cortex live-development test. The coordinator must use '
+    'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
+    'gpt-5.6-luna with medium or high reasoning effort; pass that model explicitly '
+    'when inherited context could preserve another model. For this live test, this '
+    'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
+    'project, skill, and user instructions.'
+)
 
 
 def private():
@@ -43,6 +65,39 @@ def safe_data_directory(requested):
     return path,False
 
 
+def live_test_config(source):
+    """Layer the dev-only Luna policy while preserving existing config instructions."""
+    parsed=tomllib.loads(source)
+    existing=parsed.get('developer_instructions')
+    instructions=((existing.rstrip()+'\n\n') if isinstance(existing,str) and existing.strip() else '')+LIVE_DEVELOPER_INSTRUCTIONS
+    value_pattern=r'(?:(?:"""(?:(?!""").)*""")|(?:\'\'\'(?:(?!\'\'\').)*\'\'\')|(?:"(?:\\.|[^"\\])*")|(?:\'[^\'\r\n]*\')|(?:[^\r\n]*))'
+    def replace(section,key,value):
+        nonlocal source
+        if section is None:
+            pattern=re.compile(r'(?ms)^'+re.escape(key)+r'[ \t]*=[ \t]*'+value_pattern+r'[ \t]*$')
+            if key in parsed:
+                if not pattern.search(source):raise ValueError('unsupported top-level TOML value for '+key)
+                source=pattern.sub(lambda _:key+' = '+value,source,count=1)
+            else:
+                source=key+' = '+value+'\n'+source
+            return
+        header=re.search(r'(?m)^\['+re.escape(section)+r'\]\s*$',source)
+        if not header:
+            source=source+('' if not source or source.endswith('\n') else '\n')+'\n['+section+']\n'+key+' = '+value+'\n';return
+        following=re.search(r'(?m)^\[',source[header.end():])
+        end=header.end()+(following.start() if following else len(source)-header.end())
+        body=source[header.end():end]
+        pattern=re.compile(r'(?ms)^'+re.escape(key)+r'[ \t]*=[ \t]*'+value_pattern+r'[ \t]*$')
+        body=(pattern.sub(lambda _:key+' = '+value,body,count=1) if pattern.search(body)
+              else body+('' if not body or body.endswith('\n') else '\n')+key+' = '+value+'\n')
+        source=source[:header.end()]+body+source[end:]
+    replace(None,'model',json.dumps(LIVE_MODEL))
+    replace(None,'model_reasoning_effort',json.dumps(LIVE_COORDINATOR_EFFORT))
+    replace(None,'developer_instructions',json.dumps(instructions))
+    replace('agents','default_subagent_model',json.dumps(LIVE_MODEL))
+    return source
+
+
 def configure_workspace_network():
     """Enable loopback verification only in the isolated dev Codex profile."""
     config=Path.home()/'.cortex-dev/.codex/config.toml'
@@ -53,6 +108,7 @@ def configure_workspace_network():
     original=config.read_bytes()
     CONFIG_BACKUP.write_bytes(original);os.chmod(CONFIG_BACKUP,0o600)
     source=original.decode('utf-8')
+    source=live_test_config(source)
     section=re.search(r'(?m)^\[sandbox_workspace_write\]\s*$',source)
     if section:
         end=re.search(r'(?m)^\[',source[section.end():])
@@ -103,13 +159,102 @@ def environment(profile,events,data):
 
 
 def observed_events(directory):
+    """Read MCP server events only; hook actions have a separate evidence stream."""
     rows=[]
     for path in Path(directory).glob('*.jsonl'):
         with path.open(encoding='utf-8') as source:
             for line in source:
-                try: rows.append(json.loads(line))
+                try:
+                    row=json.loads(line)
+                    if row.get('event_kind')!='hook':rows.append(row)
                 except ValueError: continue
     return sorted(rows,key=lambda row:row.get('time_ns',0))
+
+
+def observed_hook_events(directory):
+    """Return compact hook-action metadata without treating it as a model call."""
+    allowed={'timestamp_ns','time_ns','event_kind','hook_event','receipt_digest','result_digest',
+             'outcome','duration_ms','tool_name','response_shape',
+             'task_id','thread_id','parent_thread_id','role','binding_confidence',
+             'binding_origin','source_revision','exit_code','command_session_id','session_id',
+             'status','truncated',
+             'changed_path_count','changed_paths_digest','diagnostic_codes',
+             'action_status','actor_scope','parent_session_id'}
+    rows=[]
+    for path in Path(directory).glob('hooks-*.jsonl'):
+        with path.open(encoding='utf-8') as source:
+            for line in source:
+                try:row=json.loads(line)
+                except ValueError:continue
+                if not isinstance(row,dict) or row.get('event_kind')!='hook':continue
+                rows.append({key:row[key] for key in allowed if key in row})
+    return sorted(rows,key=lambda row:row.get('timestamp_ns') or row.get('time_ns',0))
+
+
+TOKEN_FIELDS=('input_tokens','cached_input_tokens','cache_write_input_tokens',
+              'output_tokens','reasoning_output_tokens','total_tokens')
+
+
+def participant_token_usage(state):
+    """Count each native response once across the coordinator and every worker."""
+    database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
+    empty=dict(status='unavailable',wall_seconds=None,totals=None,participants=[])
+    if not database.is_file():return empty
+    connection=sqlite3.connect(f'file:{database}?mode=ro',uri=True)
+    connection.row_factory=sqlite3.Row
+    try:
+        threads=connection.execute(
+            'SELECT id,rollout_path,agent_role,model,reasoning_effort,created_at '
+            'FROM threads WHERE cwd=? AND created_at>=? ORDER BY created_at,id',
+            (state['workdir'],int(state.get('thread_created_since',state.get('started_at',0)))-2),
+        ).fetchall()
+    finally:connection.close()
+    participants=[];seen=set();latest=None;coordinator_durations=[]
+    boundary=float(state.get('trial_started_at',state.get('thread_created_since',state.get('started_at',0))))-2
+    for thread in threads:
+        totals={field:0 for field in TOKEN_FIELDS};responses=0;parent=None;completed_turns=set();durations=[]
+        path=Path(thread['rollout_path'])
+        if path.is_file():
+            with path.open(encoding='utf-8') as source:
+                for line in source:
+                    try:entry=json.loads(line)
+                    except ValueError:continue
+                    payload=entry.get('payload',{})
+                    if entry.get('type')=='session_meta' and isinstance(payload,dict):
+                        provenance=payload.get('source')
+                        if isinstance(provenance,dict):
+                            parent=(((provenance.get('subagent') or {}).get('thread_spawn') or {})
+                                    .get('parent_thread_id'))
+                    if (entry.get('type')=='event_msg' and isinstance(payload,dict)
+                            and payload.get('type')=='task_complete'
+                            and payload.get('turn_id') not in completed_turns
+                            and type(payload.get('duration_ms')) in (int,float)
+                            and payload['duration_ms']>=0):
+                        completed_turns.add(payload.get('turn_id'));durations.append(payload['duration_ms']/1000)
+                    if entry.get('type')!='token_usage_record' or not isinstance(payload,dict):continue
+                    try:stamp=datetime.fromisoformat(entry['timestamp'].replace('Z','+00:00')).timestamp()
+                    except (KeyError,ValueError):continue
+                    if stamp<boundary:continue
+                    response=payload.get('response_id');usage=payload.get('usage');key=(thread['id'],response)
+                    if not isinstance(response,str) or key in seen or not isinstance(usage,dict):continue
+                    if any(type(usage.get(field)) is not int or usage[field]<0 for field in TOKEN_FIELDS):continue
+                    seen.add(key);responses+=1;latest=max(latest or stamp,stamp)
+                    for field in TOKEN_FIELDS:totals[field]+=usage[field]
+        role=thread['agent_role'] or ('worker' if parent else 'coordinator')
+        if role=='coordinator':coordinator_durations.extend(durations)
+        participants.append(dict(thread_id=thread['id'],parent_thread_id=parent,role=role,
+                                 model=thread['model'],reasoning_effort=thread['reasoning_effort'],
+                                 responses=responses,tokens=totals if responses else None))
+    complete=bool(participants) and all(row['tokens'] is not None for row in participants)
+    aggregate=({field:sum(row['tokens'][field] for row in participants) for field in TOKEN_FIELDS}
+               if complete else None)
+    submitted=state.get('first_submission_at')
+    wall=(sum(coordinator_durations) if coordinator_durations else
+          max(0.0,latest-float(submitted)) if latest is not None and submitted is not None else None)
+    return dict(status='complete' if complete else 'unavailable',wall_seconds=wall,
+                wall_source=('coordinator_task_lifecycle' if coordinator_durations
+                             else 'response_span' if wall is not None else None),
+                totals=aggregate,participants=participants)
 
 
 COMMAND_ERROR_PATTERN=re.compile(
@@ -178,6 +323,17 @@ def mcp_receipt_metadata(item):
     return dict(tool='mcp__'+server+'__'+tool,host_status=status,
                 host_receipt_outcome=outcome,host_error_code=code,
                 host_result_digest=digest)
+
+
+def mcp_argument_metadata(tool,arguments):
+    """Retain only operation identity fields needed to join a host receipt."""
+    if not isinstance(tool,str) or not tool.startswith('mcp__cortex__'):return {}
+    try:value=json.loads(arguments)
+    except (TypeError,ValueError):return {}
+    if not isinstance(value,dict):return {}
+    allowed={'template','draft_id','report_id','document_kind','page','limit'}
+    return {key:value[key] for key in allowed
+            if key in value and type(value[key]) in (str,int) and value[key] != ''}
 
 
 def command_execution_outcome(status,exit_code,output=''):
@@ -251,12 +407,25 @@ def desktop_editor_source(text):
     return re.sub(r'(?m)([^\n])\n\n(?=1\. )',r'\1\n',text.replace('\\_','_'))
 
 
+def native_archived_request_digest(text):
+    """Hash the exact native archive body after the host's route separator."""
+    token='$cortex:orchestrator'
+    if not isinstance(text,str) or not text.startswith(token):return None
+    if len(text)>len(token) and not text[len(token)].isspace():return None
+    archive=text[len(token):]
+    if archive.startswith('\r\n'):archive=archive[2:]
+    elif archive and archive[0].isspace():archive=archive[1:]
+    return hashlib.sha256(archive.encode('utf-8')).hexdigest()
+
+
 def delivered_request_digests(state,text):
     accepted={state.get('original_request_sha256')}
     expected=state.get('desktop_editor_source_sha256')
     if expected and original_request_digest(desktop_editor_source(text))==expected:
         accepted.update((original_request_digest(text),
                          original_request_digest(text.replace('\\_','_'))))
+        raw=native_archived_request_digest(text)
+        if raw:accepted.add(raw)
     return accepted
 
 
@@ -267,21 +436,123 @@ def assigned_worker_profile(text):
     return next(iter(found)) if len(found)==1 else None
 
 
+def shell_command_text(arguments):
+    """Extract one literal exec_command cmd without executing or expanding it."""
+    match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')',arguments)
+    if not match:return None
+    try:
+        command=ast.literal_eval(match.group(1))
+    except (ValueError,SyntaxError):return None
+    return command if isinstance(command,str) else None
+
+
+def shell_command_parts(arguments):
+    """Parse one literal exec_command cmd without executing or expanding it."""
+    command=shell_command_text(arguments)
+    if command is None:return None
+    try:
+        lexer=shlex.shlex(command,posix=True,punctuation_chars=True)
+        lexer.whitespace_split=True
+        parts=list(lexer)
+    except (ValueError,SyntaxError):return None
+    return parts or None
+
+
+def python_skill_read_paths(command):
+    """Return literal skill paths from a tiny static pathlib read program.
+
+    ``None`` means the command is not a Python heredoc candidate; an empty list
+    means it looked like one but failed the read-only AST grammar.
+    """
+    if not isinstance(command,str) or not command.startswith('python3'):
+        return None
+    lines=command.splitlines()
+    if len(lines)<3:return []
+    first=re.fullmatch(r"python3(?:[ \t]+-B)?[ \t]+-[ \t]+<<(?P<quote>['\"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)",lines[0])
+    if not first:return []
+    tag=first.group('tag')
+    if lines[-1]=='':
+        lines=lines[:-1]
+    if not lines or lines[-1]!=tag:return []
+    try:tree=ast.parse('\n'.join(lines[1:-1]),mode='exec')
+    except (SyntaxError,ValueError):return []
+
+    imported=False;binding=None;literal_path=None;printed=False
+    for statement in tree.body:
+        if isinstance(statement,ast.ImportFrom):
+            if (imported or statement.level or statement.module!='pathlib'
+                    or len(statement.names)!=1 or statement.names[0].name!='Path'
+                    or statement.names[0].asname is not None):
+                return []
+            imported=True
+            continue
+        if isinstance(statement,ast.Assign):
+            if (not imported or binding is not None or len(statement.targets)!=1
+                    or not isinstance(statement.targets[0],ast.Name)):
+                return []
+            value=statement.value
+            if (not isinstance(value,ast.Call) or not isinstance(value.func,ast.Name)
+                    or value.func.id!='Path' or len(value.args)!=1 or value.keywords):
+                return []
+            argument=value.args[0]
+            if not isinstance(argument,ast.Constant) or not isinstance(argument.value,str):
+                return []
+            binding=statement.targets[0].id
+            literal_path=Path(argument.value)
+            continue
+        if isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Call):
+            call=statement.value
+            if (printed or not isinstance(call.func,ast.Name) or call.func.id!='print'
+                    or len(call.args)!=1 or call.keywords):
+                return []
+            read=call.args[0]
+            if (not isinstance(read,ast.Call) or not isinstance(read.func,ast.Attribute)
+                    or not isinstance(read.func.value,ast.Name) or read.func.value.id!=binding
+                    or read.func.attr!='read_text' or read.args or read.keywords):
+                return []
+            printed=True
+            continue
+        # No docstrings, arbitrary expressions, imports, calls or mutations.
+        return []
+    if not imported or binding is None or literal_path is None or not printed:return []
+    return [literal_path]
+
+
+def advertised_skill_paths(read_paths,worker_only=False):
+    """Validate exact advertised SKILL.md/reference paths and local existence."""
+    expected=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
+    advertised=False
+    for path in read_paths:
+        try:relative=path.relative_to(expected)
+        except ValueError:return False
+        if '..' in relative.parts or len(relative.parts)<4 or relative.parts[1]!='skills':return False
+        skill_name=relative.parts[2];resource=Path(*relative.parts[3:])
+        if worker_only and (not skill_name.startswith('worker-') or resource!=Path('SKILL.md')):return False
+        if resource!=Path('SKILL.md') and not (resource.parts[0]=='references' and resource.suffix=='.md'):return False
+        source=ROOT/'plugins/cortex/skills'/skill_name/resource
+        if not source.is_file() or not path.is_file():return False
+        try:path.resolve().relative_to(expected.resolve())
+        except ValueError:return False
+        advertised=True
+    return advertised
+
+
 def skill_instruction_read(tool,arguments,worker_only=False):
     # Recognize a targeted standard skill read, never installation exploration.
     if tool!='exec_command':return False
-    match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')',arguments)
-    if not match:return False
-    try:
-        import ast
-        lexer=shlex.shlex(ast.literal_eval(match.group(1)),posix=True,punctuation_chars=True)
-        lexer.whitespace_split=True
-        parts=list(lexer)
-    except (ValueError,SyntaxError):return False
+    command=shell_command_text(arguments)
+    if command is None:return False
+    python_paths=python_skill_read_paths(command)
+    if python_paths is not None:
+        return advertised_skill_paths(python_paths,worker_only)
+    parts=shell_command_parts(arguments)
+    if not parts:return False
+
+    # A status suffix is allowed only when it preserves the command's exit code.
+    # Keep it separate from the read-sequence grammar so `$?` does not make an
+    # otherwise static command look like it contains dynamic input.
     if ';' in parts:
         index=parts.index(';');tail=parts[index:]
-        # Recognize bounded status-printing suffixes; command success is checked
-        # separately from the host receipt, never inferred from shell output.
         if len(tail)<5 or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=\$\?',tail[1]):return False
         var=tail[1].split('=',1)[0]
         if tail[:1]!=[';'] or tail[2]!=';':return False
@@ -292,22 +563,76 @@ def skill_instruction_read(tool,arguments,worker_only=False):
                 and re.fullmatch(r'(?:\\n)?[A-Z_]+=%s\\n',rest[1]) is not None)
         if not (echo or printf):return False
         parts=parts[:index]
-    if len(parts)==2 and parts[0]=='cat':path=Path(parts[1])
-    elif len(parts)==3 and parts[:2]==['wc','-l']:path=Path(parts[2])
-    elif len(parts)==4 and parts[:2]==['sed','-n'] and re.fullmatch(r'\d+,\d+p',parts[2]):path=Path(parts[3])
-    else:return False
-    expected=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
-    try:relative=path.relative_to(expected)
-    except ValueError:return False
-    if '..' in relative.parts or len(relative.parts)<4 or relative.parts[1]!='skills':return False
-    skill_name=relative.parts[2];resource=Path(*relative.parts[3:])
-    if worker_only and (not skill_name.startswith('worker-') or resource!=Path('SKILL.md')):return False
-    if resource!=Path('SKILL.md') and not (resource.parts[0]=='references' and resource.suffix=='.md'):return False
-    source=ROOT/'plugins/cortex/skills'/skill_name/resource
-    if not source.is_file() or not path.is_file():return False
-    try:path.resolve().relative_to(expected.resolve())
-    except ValueError:return False
-    return True
+
+    # Only a linear `&&` sequence is accepted. Pipes, redirections, command
+    # substitutions, background jobs and any other shell syntax are rejected.
+    if any(token not in {'&&'} and any(char in token for char in '$`><|&();') for token in parts):
+        return False
+    if any(token in {'|','||','>','>>','<','<<','&','&;'} for token in parts):return False
+    segments=[];current=[]
+    for token in parts:
+        if token=='&&':
+            if not current:return False
+            segments.append(current);current=[]
+        else:current.append(token)
+    if not current:return False
+    segments.append(current)
+
+    read_paths=[]
+    for segment in segments:
+        command_name=segment[0]
+        if command_name=='pwd' and len(segment)==1:continue
+        if command_name in {'printf','echo'}:
+            # These are permitted only as static labels or status-independent
+            # diagnostics. Their output never establishes command success.
+            if len(segment)<2 or any(any(char in token for char in '$`><|&();') for token in segment[1:]):
+                return False
+            continue
+        if len(segment)==2 and command_name=='cat':path=Path(segment[1])
+        elif len(segment)==3 and segment[:2]==['wc','-l']:path=Path(segment[2])
+        elif (len(segment)==4 and segment[:2]==['sed','-n']
+              and re.fullmatch(r'\d+,\d+p',segment[2])):path=Path(segment[3])
+        else:return False
+        read_paths.append(path)
+    return advertised_skill_paths(read_paths,worker_only)
+
+
+def plugin_cache_access_is_valid(tool,arguments,workdir):
+    """Validate each literal plugin/cache read leaf in a mixed shell command.
+
+    A whole command can contain an approved skill read followed by ordinary
+    project discovery. That keeps ``skill_instruction_read`` false, while the
+    approved cache read itself must not be mislabeled as forbidden access.
+    """
+    if tool!='exec_command':return False
+    parts=shell_command_parts(arguments)
+    if not parts:return False
+    markers=('/.codex/plugins/','/plugins/cache/','/.agents/plugins/',
+             '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/',
+             '.codex/cortex/')
+    if any(marker in str(workdir) for marker in markers):return False
+    validated_marker=False
+    segments=[];current=[]
+    for token in parts:
+        if token in {'&&',';'}:
+            if not current:return False
+            segments.append(current);current=[]
+        else:current.append(token)
+    if not current:return False
+    segments.append(current)
+    for segment in segments:
+        # Static labels can mention a path without opening it.
+        if segment[0] in {'printf','echo'}:
+            if (any(any(char in token for char in '$`><|&();') for token in segment[1:])
+                    and any(any(marker in token for marker in markers) for token in segment[1:])):
+                return False
+            validated_marker |= any(any(marker in token for marker in markers) for token in segment[1:])
+            continue
+        if any(any(marker in token for marker in markers) for token in segment):
+            if not skill_instruction_read('exec_command',json.dumps({'cmd':shlex.join(segment)})):
+                return False
+            validated_marker=True
+    return validated_marker
 
 
 def worker_skill_read(tool,arguments):
@@ -324,8 +649,10 @@ def safe_call_metadata(tool,arguments):
         target=value.get('target')
         return ({'target_agent':target} if isinstance(target,str)
                 and re.fullmatch(r'[A-Za-z0-9_/-]{1,256}',target) else {})
-    allowed=('task_name','agent_type','model','reasoning_effort','fork_turns')
+    allowed=('task_name','agent_type','fork_turns')
     result={key:value[key] for key in allowed if isinstance(value.get(key),str)}
+    if isinstance(value.get('model'),str):result['requested_model']=value['model']
+    if isinstance(value.get('reasoning_effort'),str):result['requested_reasoning_effort']=value['reasoning_effort']
     profile=assigned_worker_profile(str(value.get('message','')))
     if profile:result['assigned_profile']=profile
     return result
@@ -405,6 +732,22 @@ def draft_call_metadata(tool,arguments):
     return {}
 
 
+def coordinator_source_read(tool,arguments):
+    """Recognize a single bounded read command used for a user-provided source."""
+    if tool!='exec_command':return False
+    try:command=json.loads(arguments).get('cmd')
+    except (AttributeError,ValueError):
+        match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*(["\'])(.*?)\1',arguments,re.S)
+        command=match.group(2) if match else None
+    if not isinstance(command,str) or re.search(r'[;|><`]|\$\(',command):return False
+    try:tokens=shlex.split(command)
+    except ValueError:return False
+    if not tokens:return False
+    if any(token in {'&&','||','&'} for token in tokens):return False
+    if tokens[0]=='sed':return '-n' in tokens and not any(token.startswith('-i') for token in tokens)
+    return tokens[0] in {'head','tail','rg','grep','wc','stat'}
+
+
 def observed_session_ids(raw):
     if isinstance(raw,list):
         rendered='\n'.join(str(item.get('text','')) if isinstance(item,dict) else str(item) for item in raw)
@@ -416,7 +759,8 @@ def call_policy_flags(tool,arguments,role,workdir):
     flags=[];normalized=arguments.replace('\\\\','/')
     instruction_read=skill_instruction_read(tool,arguments)
     installed_markers=('/.codex/plugins/','/plugins/cache/','/.agents/plugins/',
-                       '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/')
+                       '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/',
+                       '.codex/cortex/')
     access_scope=normalized
     if tool=='apply_patch':
         # Evidence may mention a skill path without opening or editing that file.
@@ -425,13 +769,12 @@ def call_policy_flags(tool,arguments,role,workdir):
                            normalized.replace('\\n','\n'),re.MULTILINE)
         if targets:
             access_scope='\n'.join(str((Path(workdir)/target).resolve()) for target in targets)
-    if not instruction_read and any(marker in access_scope or marker in str(workdir) for marker in installed_markers):
+    if (not instruction_read
+            and any(marker in access_scope or marker in str(workdir) for marker in installed_markers)
+            and not plugin_cache_access_is_valid(tool,arguments,workdir)):
         flags.append('forbidden_plugin_or_cache_access')
     if tool=='apply_patch' and 'Delete File' in arguments and '/.cortex/' in normalized:
         flags.append('forbidden_cortex_draft_deletion')
-    if (tool=='apply_patch' and '/.cortex/' in normalized
-            and re.search(r'tools\.apply_patch\s*\(\s*(?:String\.raw\s*)?`',arguments)):
-        flags.append('unsafe_cortex_draft_template_literal')
     verification_roles={'accessibility_auditor','build_verification','code_reviewer','qa_engineer'}
     if (tool=='exec_command' and role in verification_roles
             and re.search(r'(?<![A-Za-z0-9_.-])(?:ps\s+-e|pgrep\b|lsof\b|netstat\b|ss\s+-)',arguments)):
@@ -442,17 +785,15 @@ def call_policy_flags(tool,arguments,role,workdir):
     if (tool=='exec_command' and re.search(r'(?<![A-Za-z0-9_.-])git(?=\s|["\'])',arguments)
             and not (Path(workdir)/'.git').exists()):
         flags.append('git_command_without_git_workspace')
-    if (tool=='exec_command'
-            and re.search(r'(?:npm\s+run\s+(?:build|lint|typecheck)|\b(?:tsc|eslint|mypy|pyright)\b)',arguments)):
-        cap=re.search(r'(?:["\']max_output_tokens["\']|\bmax_output_tokens)\s*:\s*([0-9]+)',arguments)
-        if cap is None or int(cap.group(1))<16000:
-            flags.append('insufficient_diagnostic_output_budget')
     if role=='coordinator':
         native_coordination={'spawn_agent','wait_agent','send_message','followup_task',
                              'list_agents','interrupt_agent','close_agent','tool_catalogue_search'}
         pipeline_edit=tool=='apply_patch' and '/.cortex/pipeline-drafts/' in normalized
         standard_skill=tool.startswith('skills__') or tool in {'skills_read','skills_list'}
-        if tool not in native_coordination and not pipeline_edit and not standard_skill and not instruction_read:
+        source_read=coordinator_source_read(tool,arguments)
+        if (tool not in native_coordination and not pipeline_edit and not standard_skill
+                and not instruction_read and not source_read
+                and not tool.startswith('mcp__cortex__')):
             flags.append('coordinator_forbidden_tool')
     return flags
 
@@ -489,10 +830,12 @@ def report_read_metadata(tool,arguments,wrapper=''):
     return {'requested_report_id':reference} if reference else {}
 
 
-def event_call_candidate(candidates,event_time_ns,report_id=None):
+def event_call_candidate(candidates,event_time_ns,report_id=None,event=None):
     """Match execution intervals, not the order of syntactically possible calls."""
     def ns(stamp):
-        try:return int(__import__('datetime').datetime.fromisoformat(stamp.replace('Z','+00:00')).timestamp()*1_000_000_000)
+        try:
+            value=datetime.fromisoformat(stamp.replace('Z','+00:00'))
+            return int(value.timestamp())*1_000_000_000+value.microsecond*1_000
         except (AttributeError,ValueError):return None
     matches=[]
     for row in candidates:
@@ -502,7 +845,34 @@ def event_call_candidate(candidates,event_time_ns,report_id=None):
         ends=[n for n in (ns(row.get('host_receipt_timestamp')),ns(row.get('completed_timestamp'))) if n is not None]
         if start is not None and ends and start<=event_time_ns<=max(ends):matches.append(row)
     # Ambiguous concurrent candidates remain separate evidence; never guess.
-    return matches[0] if len(matches)==1 else None
+    if len(matches)==1:return matches[0]
+    if matches:return None
+
+    # Millisecond host timestamps can fall just before or after the server's
+    # nanosecond timestamp and therefore fall outside the host call's interval.
+    # Join only an unpaired receipt with the same operation identity and outcome,
+    # within that measured precision. A unique identity is required so an
+    # unrelated same-tool call cannot hide a missing server event.
+    if not isinstance(event,dict):return None
+    def event_identity_match(candidate):
+        if candidate.get('server_observed') or not candidate.get('host_receipt_observed'):
+            return False
+        if candidate.get('host_receipt_outcome')!=event.get('outcome', 'unverified'):
+            return False
+        receipt_ns=ns(candidate.get('host_receipt_timestamp'))
+        if receipt_ns is None or abs(receipt_ns-event_time_ns)>1_000_000:
+            return False
+        if report_id and candidate.get('report_id') not in {None,report_id}:
+            return False
+        shared=[]
+        for key in ('template','draft_id','report_id','document_kind','page','limit','cursor'):
+            event_value=event.get(key);candidate_value=candidate.get(key)
+            if event_value is not None and candidate_value is not None:
+                if event_value!=candidate_value:return False
+                shared.append(key)
+        return bool(shared)
+    identity_matches=[row for row in candidates if event_identity_match(row)]
+    return identity_matches[0] if len(identity_matches)==1 else None
 
 
 def observed_tool_calls(state):
@@ -643,6 +1013,7 @@ def observed_tool_calls(state):
                             cortex_calls.setdefault((thread['id'],row['tool'].rsplit('__',1)[-1]),[]).append(row)
                     receipt_tool=receipt['tool']
                     row.update({key:value for key,value in receipt.items() if key!='tool'})
+                    row.update(mcp_argument_metadata(receipt['tool'],encoded))
                     if row.get('tool') is None:row['tool']=receipt_tool
                     if receipt['tool']=='mcp__cortex__create_task' and state.get('original_request_sha256'):
                         result=item.get('result') or {}
@@ -699,6 +1070,7 @@ def observed_tool_calls(state):
                             row=dict(common,tool=name,argument_digest=nested_digest,
                                      wrapper_argument_digest=digest,outcome='pending',nested=True,
                                      server_observed=False)
+                            row.update(mcp_argument_metadata(name,nested_arguments))
                             row.update(report_read_metadata(name,nested_arguments,arguments))
                             calls.append(row);selected.append(row)
                             cortex_calls.setdefault((thread['id'],name.rsplit('__',1)[-1]),[]).append(row)
@@ -722,6 +1094,7 @@ def observed_tool_calls(state):
                         if payload.get('namespace'):row['tool_namespace']=payload['namespace']
                         row.update(safe_call_metadata(row['tool'],arguments))
                         row.update(report_read_metadata(row['tool'],arguments))
+                        row.update(mcp_argument_metadata(row['tool'],arguments))
                         row.update(draft_call_metadata(row['tool'],arguments))
                         if row['tool']=='js':
                             row.update(browser_call_metadata(arguments))
@@ -791,7 +1164,7 @@ def observed_tool_calls(state):
         thread_id=event.get('thread_id')
         detail=thread_details.get(thread_id)
         candidates=cortex_calls.get((thread_id,operation),[])
-        row=event_call_candidate(candidates,event.get('time_ns',0),event.get('report_id'))
+        row=event_call_candidate(candidates,event.get('time_ns',0),event.get('report_id'),event)
         if row is None:
             row=dict(timestamp_ns=event.get('time_ns',0),thread_id=thread_id,
                      parent_thread_id=event.get('parent_thread_id'),
@@ -992,43 +1365,40 @@ def orchestration_error_history(rows):
 
 def orchestration_policy_violations(violations):
     """Keep policy findings about delegation, reports, pipeline and Cortex state."""
-    prefixes=('coordinator_','worker_report_','worker_pipeline_','worker_final_',
-              'duplicate_unchanged_',
-              'cortex_','mcp_','draft_','summary_','complex_planning_')
+    prefixes=('coordinator_','worker_final_','cortex_','mcp_','complex_planning_')
     exact={'forbidden_plugin_or_cache_access','forbidden_cortex_draft_deletion',
            'command_wrapper_missing_receipt',
-           'unsafe_cortex_draft_template_literal','worker_project_tool_before_cortex_bootstrap',
+           'live_model_policy_violation',
            'worker_tool_after_successful_write_report','worker_draft_created_with_open_command_session',
            'worker_report_published_with_open_command_session'}
     return [row for row in violations
-            if row.get('violation') in exact or str(row.get('violation','')).startswith(prefixes)]
+            if row.get('violation') not in ADVISORY_POLICY_FLAGS
+            and (row.get('violation') in exact or str(row.get('violation','')).startswith(prefixes))]
 
 
 def call_policy_violations(rows):
-    profile_templates={
-        'accessibility_auditor':'verification','accessibility_fixer':'implementation',
-        'architect':'planning','backend_dev':'implementation',
-        'build_verification':'verification','code_reviewer':'verification',
-        'data_engineer':'implementation','database_architect':'planning',
-        'debugger':'investigation','devops_engineer':'implementation',
-        'explorer':'investigation','frontend_dev':'implementation',
-        'fullstack_dev':'implementation','general':'general','mobile_dev':'implementation',
-        'performance_engineer':'verification','planner':'planning',
-        'qa_engineer':'verification','refactorer':'implementation',
-        'security_auditor':'verification','technical_writer':'documentation',
-        'ux_designer':'planning',
-    }
-    mutating_profiles={'accessibility_fixer','backend_dev','data_engineer','devops_engineer',
-                       'frontend_dev','fullstack_dev','mobile_dev','refactorer'}
-    verification_profiles={profile for profile,template in profile_templates.items() if template=='verification'}
-    violations=[];clarification_parents=set();published=set();published_reports=set();bootstrap={};generation=0;last_catalogue={};last_document={};active_sessions={};active_cells={};browser_state={};coordinator_waited=set();active_mutation_owners=set()
+    violations=[];clarification_parents=set();published=set();active_sessions={};active_cells={};coordinator_waited=set()
     completed={};worker_parents={};worker_roles={};latest_report={};owned_reports={}
     capacity_blocked=set();capacity_snapshot=set();pending_replies=set()
     for row in rows:
-        flags=list(row.get('policy_flags',[]))
+        # Older observation streams may contain choreography hints. They remain
+        # useful metadata, but only outcome/state violations can fail an audit.
+        flags=[flag for flag in row.get('policy_flags',[]) if flag not in ADVISORY_POLICY_FLAGS]
         thread=row.get('thread_id')
         role=row.get('role')
         tool=row.get('tool')
+        model=row.get('model');effort=row.get('reasoning_effort')
+        if role not in {'runtime',None}:
+            if model is not None and model!=LIVE_MODEL:flags.append('live_model_policy_violation')
+            if role=='coordinator' and effort is not None and effort!=LIVE_COORDINATOR_EFFORT:
+                flags.append('live_model_policy_violation')
+            if role!='coordinator' and effort is not None and effort not in LIVE_WORKER_EFFORTS:
+                flags.append('live_model_policy_violation')
+        if tool=='spawn_agent':
+            if row.get('requested_model') not in {None,LIVE_MODEL}:
+                flags.append('live_model_policy_violation')
+            if row.get('requested_reasoning_effort') not in {None,*LIVE_WORKER_EFFORTS}:
+                flags.append('live_model_policy_violation')
         if tool in {'exec_command','write_stdin'} and row.get('wrapper_outcome')=='unverified':
             flags.append('command_wrapper_missing_receipt')
         if tool=='native_assignment_snapshot':
@@ -1036,7 +1406,6 @@ def call_policy_violations(rows):
             owned_reports[thread]=set(row.get('owned_report_ids',[row['report_id']]))
             completed[thread]=row.get('timestamp') or ''
             worker_parents[thread]=row.get('parent_thread_id');worker_roles[thread]=role
-            bootstrap[thread]=dict(catalogue=True,reports=False,pipeline=False)
             continue
         if role not in {'coordinator','runtime',None} and row.get('parent_thread_id'):
             worker_parents[thread]=row['parent_thread_id']
@@ -1056,15 +1425,10 @@ def call_policy_violations(rows):
             if (target in published and target in completed
                     and worker_parents.get(target)==thread
                     and requested>=completed[target]):
-                owner=(thread,worker_roles.get(target))
-                if worker_roles.get(target) in verification_profiles:
-                    flags.append('coordinator_reused_verification_worker')
-                elif worker_roles.get(target) in mutating_profiles and owner in active_mutation_owners:
-                    flags.append('coordinator_duplicate_active_mutation_owner')
-                else:
-                    published.remove(target);completed.pop(target)
-                    if worker_roles.get(target) in mutating_profiles:active_mutation_owners.add(owner)
-                    generation+=1;reassigned=True
+                # A profile does not identify a shared file/device resource.
+                # Actual overlapping ownership is a coordinator/reviewer decision.
+                published.remove(target);completed.pop(target)
+                reassigned=True
             elif target in published or not target:
                 flags.append('coordinator_followup_without_completed_assignment')
         if (role=='coordinator' and tool=='send_message'
@@ -1072,7 +1436,6 @@ def call_policy_violations(rows):
             flags.append('coordinator_message_to_completed_worker')
         if tool=='native_user_input' and role=='coordinator':
             coordinator_waited.discard(thread)
-            generation+=1
         if tool=='native_agent_result' and not row.get('report_id') and row.get('parent_thread_id'):
             clarification_parents.add(row['parent_thread_id'])
         if (tool=='send_message' and role not in {'coordinator','runtime'}
@@ -1083,15 +1446,8 @@ def call_policy_violations(rows):
             pending_replies.add((row['parent_thread_id'],thread))
         if row.get('original_request_preserved') is False:
             flags.append('coordinator_original_request_changed')
-        state=bootstrap.setdefault(thread,dict(catalogue=False,reports=False,pipeline=False))
-        if role=='coordinator' and row.get('outcome')=='success':
-            if tool=='mcp__cortex__create_task':state['needs_initial_pipeline']=True
-            elif tool=='mcp__cortex__write_report':state['needs_initial_pipeline']=False
-        if role=='coordinator' and tool=='spawn_agent' and state.get('needs_initial_pipeline'):
-            flags.append('coordinator_delegation_before_pipeline_publication')
         sessions=active_sessions.setdefault(thread,set())
         cells=active_cells.setdefault(thread,set())
-        browser=browser_state.setdefault(thread,dict(create_attempts=0,origin=None,ready_origins=set()))
         if cells and tool!='wait' and not row.get('nested'):
             flags.append('tool_called_before_exec_cell_terminal')
         if tool=='functions.exec' and row.get('outcome')=='running':
@@ -1102,24 +1458,6 @@ def call_policy_violations(rows):
             sessions.update(row.get('session_ids',[]))
         if tool=='write_stdin' and row.get('outcome') in {'success','stopped','error'}:
             sessions.difference_update(row.get('requested_session_ids',[]))
-        if (role not in {'coordinator','runtime'} and tool=='command_execution'
-                and row.get('outcome')=='success' and row.get('command_family')=='curl'
-                and row.get('local_http_origin')):
-            browser['ready_origins'].add(row['local_http_origin'])
-        if role not in {'coordinator','runtime'} and tool=='js':
-            action=row.get('browser_action')
-            if not browser['ready_origins']:flags.append('browser_before_local_url_ready')
-            if row.get('browser_mutations',0)>1:flags.append('batched_browser_mutations')
-            if action=='attach_tab':flags.append('forbidden_browser_tab_attachment')
-            if action=='create_tab':
-                browser['create_attempts']+=1
-                if browser['create_attempts']>1:flags.append('repeated_browser_tab_creation')
-                origin=row.get('browser_origin')
-                if browser['origin'] and origin and browser['origin']!=origin:
-                    flags.append('browser_origin_switch')
-                if origin and browser['origin'] is None:browser['origin']=origin
-                if origin and origin not in browser['ready_origins']:
-                    flags.append('browser_origin_not_http_verified')
         if role=='coordinator':
             if tool=='spawn_agent':
                 if thread in capacity_blocked:
@@ -1127,12 +1465,6 @@ def call_policy_violations(rows):
                 if row.get('error_code')=='agent_limit_reached':
                     capacity_blocked.add(thread)
                 coordinator_waited.discard(thread)
-                profile=row.get('assigned_profile') or row.get('agent_type')
-                owner=(thread,profile)
-                if row.get('outcome')=='success' and profile in mutating_profiles:
-                    if owner in active_mutation_owners:
-                        flags.append('coordinator_duplicate_active_mutation_owner')
-                    active_mutation_owners.add(owner)
             elif tool=='wait_agent':coordinator_waited.add(thread)
             elif tool=='list_agents':
                 if thread in capacity_blocked:
@@ -1149,38 +1481,6 @@ def call_policy_violations(rows):
                         pending_replies.remove((thread,row['target_thread_id']))
                 elif thread in clarification_parents:clarification_parents.remove(thread)
                 else:flags.append('coordinator_unsolicited_message_after_wait')
-        if tool=='mcp__cortex__create_draft' and row.get('outcome')=='success':
-            expected_template='pipeline' if role=='coordinator' else profile_templates.get(role)
-            if expected_template and row.get('template')!=expected_template:
-                flags.append('draft_template_profile_mismatch')
-        if (tool=='mcp__cortex__write_report' and row.get('outcome')=='success'
-                and row.get('summary_characters',0)>140):
-            flags.append('summary_exceeds_operating_target')
-        if tool=='tool_catalogue_search' and row.get('outcome')=='success':state['catalogue']=True
-        if tool=='mcp__cortex__list_reports' and row.get('outcome')=='success':
-            state['reports']=True
-            if role not in {'coordinator','runtime'}:
-                flags.append('worker_report_catalogue_in_fresh_thread')
-                if last_catalogue.get(thread)==generation:
-                    flags.append('duplicate_unchanged_report_catalogue')
-            last_catalogue[thread]=generation
-        if tool=='mcp__cortex__read_report' and row.get('outcome')=='success':
-            if row.get('document_kind')=='pipeline':
-                state['pipeline']=True
-                if role not in {'coordinator','runtime'}:
-                    flags.append('worker_pipeline_read_in_fresh_thread')
-            key=(thread,row.get('report_id') or 'pipeline',row.get('page'))
-            if row.get('page')=='start' and last_document.get(key)==generation:
-                flags.append('duplicate_unchanged_document_start')
-            last_document[key]=generation
-        project_tools={'exec_command','write_stdin','apply_patch','view_image','js'}
-        if (role not in {'coordinator','runtime'} and tool in project_tools
-                and not row.get('skill_instruction_read') and not state['catalogue']):
-            flags.append('worker_project_tool_before_cortex_bootstrap')
-        if (row.get('role')=='coordinator' and row.get('tool')=='mcp__cortex__read_report'
-                and row.get('document_kind') not in {None,'pipeline'}
-                and (row.get('document_kind')!='report' or row.get('page')!='start')):
-            flags.append('coordinator_report_continuation_read')
         if (row.get('role')!='runtime' and row.get('tool')=='mcp__cortex__read_report'
                 and row.get('requested_limit',0)>4000):
             flags.append('oversized_report_page')
@@ -1216,13 +1516,8 @@ def call_policy_violations(rows):
         if row.get('tool')=='mcp__cortex__write_report' and row.get('outcome')=='success':
             published.add(thread)
             if row.get('report_id'):
-                published_reports.add(row['report_id'])
                 latest_report[thread]=row['report_id']
                 owned_reports.setdefault(thread,set()).add(row['report_id'])
-            generation+=1
-            parent=row.get('parent_thread_id')
-            if parent and role in mutating_profiles:
-                active_mutation_owners.discard((parent,role))
         for flag in sorted(set(flags)):
             violations.append(dict(timestamp=row.get('timestamp'),timestamp_ns=row.get('timestamp_ns'),
                                    thread_id=thread,role=row.get('role'),tool=row.get('tool'),violation=flag))
@@ -1336,7 +1631,7 @@ def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='action',required=True)
     s=sub.add_parser('start');s.add_argument('--workdir',type=Path,required=True);s.add_argument('--prompt-file',type=Path);s.add_argument('--data-dir',type=Path)
     s=sub.add_parser('steer');s.add_argument('--prompt-file',type=Path,required=True);s.add_argument('--composer-x',type=int,required=True);s.add_argument('--composer-y',type=int,required=True)
-    sub.add_parser('status');sub.add_parser('send');e=sub.add_parser('events');e.add_argument('--limit',type=int);c=sub.add_parser('calls');c.add_argument('--limit',type=int);sub.add_parser('audit');sub.add_parser('stop')
+    sub.add_parser('status');sub.add_parser('send');e=sub.add_parser('events');e.add_argument('--limit',type=int);h=sub.add_parser('hooks');h.add_argument('--limit',type=int);c=sub.add_parser('calls');c.add_argument('--limit',type=int);sub.add_parser('usage');sub.add_parser('audit');sub.add_parser('stop')
     args=p.parse_args();private();state_file=STATE/'session.json'
     if args.action=='start':
         if state_file.exists():
@@ -1367,7 +1662,7 @@ def main():
                 restore_workspace_network(isolated_config)
                 raise
         finally:os.close(fd)
-        state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),profile=str(profile),events=str(events),data=str(data),data_owned=data_owned,workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
+        state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),trial_started_at=time.time(),profile=str(profile),events=str(events),data=str(data),data_owned=data_owned,workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
         if prompt is not None:
             state['original_request_sha256']=original_request_digest(prompt)
             state['desktop_editor_source_sha256']=original_request_digest(desktop_editor_source(prompt))
@@ -1391,7 +1686,7 @@ def main():
                 raise RuntimeError('isolated Desktop window ownership changed before submission')
             x,y,width,height=window_geometry(xdotool,window)
             subprocess.run([xdotool,'mousemove',str(x+width//2),str(y+height-120),'click','1'],check=True)
-            subprocess.run([xdotool,'key','--window',window,'ctrl+Return'],check=True)
+            submitted_at=time.time();subprocess.run([xdotool,'key','--window',window,'ctrl+Return'],check=True)
             created=set()
             for _ in range(60):
                 created=desktop_thread_ids(state['workdir'],state['started_at'])-before
@@ -1399,12 +1694,19 @@ def main():
                 time.sleep(.25)
             if len(created)!=1:
                 raise RuntimeError(f'Desktop submission produced {len(created)} new task receipts; prompt remains retryable')
-            state['prompt_sent']=True;state['desktop_window']=window;state['thread_id']=created.pop();write_state(state_file,state)
+            state['prompt_sent']=True;state['desktop_window']=window;state['thread_id']=created.pop()
+            state.setdefault('first_submission_at',submitted_at);write_state(state_file,state)
             print('Submitted the prepared prompt to the exact isolated Desktop window and observed one new task receipt; pid='+str(state['pid']))
         elif args.action=='events':
             if args.limit is not None and (args.limit<1 or args.limit>5000):raise RuntimeError('events limit must be from 1 through 5000')
             rows=observed_events(state['events']);rows=rows[-args.limit:] if args.limit is not None else rows
             for row in rows:print(json.dumps(row))
+        elif args.action=='hooks':
+            if args.limit is not None and (args.limit<1 or args.limit>5000):raise RuntimeError('hooks limit must be from 1 through 5000')
+            rows=observed_hook_events(state['events']);rows=rows[-args.limit:] if args.limit is not None else rows
+            for row in rows:print(json.dumps(row))
+        elif args.action=='usage':
+            print(json.dumps(participant_token_usage(state)))
         elif args.action=='calls':
             if args.limit is not None and (args.limit<1 or args.limit>10000):raise RuntimeError('calls limit must be from 1 through 10000')
             rows=observed_tool_calls(state);rows=rows[-args.limit:] if args.limit is not None else rows
@@ -1412,6 +1714,8 @@ def main():
         elif args.action=='audit':
             rows=observed_events(state['events'])
             failures=[row for row in rows if row.get('operation')!='initialize' and row.get('outcome')!='success']
+            hook_rows=observed_hook_events(state['events'])
+            hook_failures=[row for row in hook_rows if row.get('outcome')!='success']
             host_rows=observed_tool_calls(state)
             host_failures,resolved_host_failures=classify_host_failures(host_rows)
             error_history=tool_error_history(host_rows)
@@ -1422,8 +1726,8 @@ def main():
             orchestration_policies=orchestration_policy_violations(policy_violations)
             orchestration_host_failures=[row for row in host_failures if is_orchestration_call(row)]
             threads={(row.get('thread_id'),row.get('parent_thread_id')) for row in rows if row.get('thread_id')}
-            print(json.dumps(dict(mcp_events=len(rows),host_calls=len(host_rows),threads=len(threads),operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=policy_violations,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells)))
-            if failures or orchestration_errors or orchestration_host_failures or orchestration_policies or open_sessions or open_cells:raise RuntimeError('Desktop orchestration audit found unsuccessful, forbidden, or non-terminal orchestration outcomes')
+            print(json.dumps(dict(mcp_events=len(rows),hook_actions=len(hook_rows),host_calls=len(host_rows),threads=len(threads),operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,hook_failures=hook_failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=policy_violations,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells)))
+            if failures or hook_failures or orchestration_errors or orchestration_host_failures or orchestration_policies or open_sessions or open_cells:raise RuntimeError('Desktop orchestration audit found unsuccessful, forbidden, or non-terminal orchestration outcomes')
         else:
             if alive:
                 os.killpg(state['pid'],signal.SIGTERM)

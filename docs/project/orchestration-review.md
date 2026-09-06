@@ -1,7 +1,8 @@
 # Orchestration review against primary guidance — 2026-09-06
 
 This review separates observed Cortex failures, host behavior and design hypotheses.
-The user requested a shorter decision cycle; the 12 completed comparisons remain
+The table records historical failures and the current resolution of each one. The
+user requested a shorter decision cycle; the 12 completed comparisons remain
 historical measurements, not evidence for a newly edited payload.
 
 ## Confirmed problems and changes
@@ -15,8 +16,8 @@ historical measurements, not evidence for a newly edited payload.
 | Native lifecycle mistaken for available capacity | A real V2 incident retained pending-init contexts despite repeated interrupt/spawn calls | Preserve lifecycle state, avoid queue-only messages to completed workers, use advertised release operations when available, and retry only after an observed capacity change. Stranded host residents are not repaired by prompts. |
 | Wrong retrieval workspace | A later real CLI worker selected a similarly named previous fixture index | Compare full normalized roots in code before graph dispatch; retain the matched entry and include evidence scope in the opening brief. |
 | Premature cheap-model default | README required global Luna, and omission of an override was incorrectly equated with Luna | Preserve host preferences, establish a capable quality baseline, and qualify cheaper models against the same scope; remove the stale model-name allowlist. |
-| A successful range mistaken for EOF | Actual workers repeatedly read only 240 lines of longer skills | Generated skills declare their exact line count and a final marker; the complete original profile remains between them. |
-| Discovery before instructions were loaded | Both roles in an actual CLI batched their first skill read with a broad catalogue search, truncating its result | Make complete instruction loading a prerequisite; no discovery in that first call. |
+| A successful range mistaken for EOF | Actual workers repeatedly read only 240 lines of longer skills | Generated skills preserve a final marker and exact generated-byte checks; complete loading is required, while the shared core is now compact. |
+| Discovery before instructions were loaded | Both roles in an actual CLI batched a long skill read with a broad catalogue search, truncating its result | Require the complete applicable skill body before relying on it. Already attached live schemas need no catalogue bootstrap, and no fixed first-call order or batching rule is imposed. |
 | A coordinator reply classified as unsolicited | An active worker sent a question after the coordinator waited, then received its reply | Track one reply opportunity for that exact worker; unrelated or repeated messages remain flagged. |
 | Report prose mistaken for file access | A report recorded the advertised skill path it had loaded | Classify patch access from edit headers, not mentioned paths in report content; actual plugin edit targets remain forbidden. |
 | Successful MCP labeled failed after consumer exception | A successful project listing was followed by store(undefined), which failed in JavaScript | Respect the native MCP receipt when assigning the MCP-error flag; keep the consumer failure visible and require its explanation. |
@@ -63,11 +64,17 @@ matching, coverage checks and current-source confirmation. A missing, stale or u
 index permits a scoped fallback, not a search of unrelated projects. Instruction loading
 and non-code documentation edits do not require graph searches.
 
+Bounded independent discovery may precede the first pipeline edition. Useful durable
+requirements, decisions, assignments and ownership state must exist before dependency,
+shared-resource or acceptance decisions; this is an outcome requirement rather than a
+mandatory initial publication stage.
+
 Real CLI/Desktop qualification must use one unchanged marketplace candidate and inspect
 both outcomes and full call evidence. See [host compatibility](host-compatibility.md),
 [comparison results](quality-evaluation.md) and [release readiness](../release-readiness.md).
 
-The final loading-boundary candidate passed the bounded ordinary CLI/Desktop
+The historical loading-boundary candidate passed the bounded ordinary CLI/Desktop
 scenario on both hosts, with complete instruction receipts and no truncated tool
-discovery. This is evidence for that correction; it does not replace the original
-comparison or prove the requested significant gain. See the current release record.
+discovery. That result supports avoiding truncation; it does not establish mandatory
+bootstrap choreography, replace the original comparison or prove the requested
+significant gain. See the current release record.

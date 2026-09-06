@@ -3,73 +3,61 @@ import json
 import subprocess
 import sys
 import tomllib
+import pytest
 
 from cortex_package import PLUGIN, ROOT, payload_digest, validate
-from generate_agent_profiles import check as check_agent_profiles, expected_profiles
+from generate_agent_profiles import (
+    check as check_agent_profiles,
+    expected_agent_references,
+    expected_profiles,
+    expected_worker_references,
+)
 
 
 def test_stamped_package_and_profiles():
     assert validate().startswith('1.15.6+codex.sha256.')
-    assert not (PLUGIN/'hooks').exists()
     assert len(list((PLUGIN/'agents').glob('*.toml')))==22
-    assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}=={'__init__.py','contracts.py','server.py','store.py','cleanup.py','host_source.py'}
+    payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
+    assert all((PLUGIN/path).is_file() for path in payload)
+    expected_runtime={
+        Path(path).name for path in payload
+        if Path(path).parent==Path('scripts/cortex_runtime') and path.endswith('.py')
+    }
+    assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}==expected_runtime
 
 
 def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     check_agent_profiles()
     assert all(path.read_bytes() == body for path, body in expected_profiles().items())
+    assert len(expected_agent_references())==3
+    assert len(expected_worker_references())==66
     for path in (PLUGIN/'agents').glob('*.toml'):
         profile=tomllib.loads(path.read_text())
         instructions=profile['developer_instructions']
-        assert '## Role and responsibility' in instructions
-        assert '## Specialist workflow' in instructions
-        assert '## Required report template' in instructions
-        assert 'cortex:context-compaction' in instructions
-        assert 'first and only general catalogue query for the exact operation basenames' in instructions
-        assert 'Never discover an unused operation.' in instructions
-        assert 'Never search the general tool catalogue for `skill`' in instructions
-        assert 'exact path in the host\'s available-skills catalogue' in instructions
-        assert 'do not stop at a truncated first page' in instructions
-        assert 'inspect agent TOML' in instructions
-        assert 'A successful `write_report` is the final tool call' in instructions
-        assert 'Never use a Git-specific command until retained project evidence' in instructions
-        assert 'The initial discovery call must not contain a `git` executable' in instructions
-        assert 'A directory entry named `.git` alone is not that' in instructions
-        assert 'Never leave a development server or watcher running.' in instructions
-        assert 'Accessibility element numbers belong only to the snapshot' in instructions
-        assert "use the tab's live Playwright" in instructions
-        assert 'one bounded readiness command that retries the exact loopback URL' in instructions
-        assert 'a `python3 -c`\ncommand may contain only simple statements after semicolons' in instructions
-        assert 'Script running with cell ID ...' in instructions
-        assert 'An empty workspace or a search with no matches is valid discovery evidence' in instructions
-        assert 'For a negative assertion, never issue a bare `rg`' in instructions
-        assert 'Never join fallible commands with `;`' in instructions
-        assert 'Omit `workdir` for root-level command calls' in instructions
-        assert 'Before creating the report draft, close every command session' in instructions
-        assert 'Start every selected document at no more than 4,000 characters.' in instructions
-        assert '**Hard first-action barrier:**' in instructions
-        assert 'final `__`-delimited segment of the advertised full' in instructions
-        assert 'Do not read the original-request or governance report body' in instructions
-        assert 'Do not read the current pipeline during\n   ordinary startup' in instructions
-        assert 'Returning stdout alone' in instructions
-        assert '`text(result.output)`' in instructions
-        assert 'Do not use broad keyword searches, dump the whole' in instructions
-        assert 'Call the live draft creator once' in instructions
-        assert 'only Cortex project file you may write' in instructions
-        assert 'Never inspect the Cortex database or final task files directly.' in instructions
-        assert 'never invoke either operation as a capability probe.' in instructions
-        assert '## Tool-call necessity' in instructions
-        assert 'Do not call a tool when an earlier result is' in instructions
-        assert 'Load skills `cortex:cortex-control`' not in instructions
-        assert 'report-example catalogue provided by skill' not in instructions
-        assert 'Never send the path or report body through it.' in instructions
-        assert 'Never put report Markdown in JavaScript' not in instructions
-        assert '## Attached worker guidance' not in instructions
-        assert '# Shared worker protocol' not in instructions
-        assert '../skills/' not in instructions and '.codex/plugins/' not in instructions
+        headings={
+            line[3:] for line in instructions.splitlines() if line.startswith('## ')
+        }
+        assert {
+            'Role and responsibility',
+            'Assignment contract',
+            'Evidence and verification',
+            'Report and handoff',
+            'Report class selection',
+            'Specialist workflow',
+            'Quality criteria',
+            'Recovery',
+        } <= headings
+        assert len(instructions) < 12_000
+        assert 'page of at most\n4,000 characters' in instructions
+        assert 'not a total context limit' in instructions
+        assert 'references/report-publication.md' in instructions
+        assert 'references/code-and-evidence.md' in instructions
+        assert 'references/interactive-resources.md' in instructions
+        assert 'first and only general catalogue query' not in instructions
+        assert 'final `__`-delimited segment' not in instructions
+        assert '.codex/plugins/' not in instructions
     control=(PLUGIN/'skills/cortex-control/SKILL.md').read_text()
     assert '[report example catalogue](references/index.md)' in control
-    assert 'Never delete and add the same path in one patch.' in (PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
 
 
 def test_source_check_is_read_only():
@@ -123,26 +111,27 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert "[xdotool,'key','--window',window,'ctrl+Return']" in source
     assert "state['thread_id']=created.pop()" in source
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'Before every tool call, name the concrete new information or state change' in orchestrator
-    assert 'A wait timeout is not a worker event' in orchestrator
-    assert 'After a timeout, call the native wait operation again.' in orchestrator
-    assert 'Treat concurrently dispatched independent workers that satisfy one prerequisite as' in orchestrator
-    assert 'fetch its previews in one `list_reports` call' in orchestrator
-    assert 'first and only general catalogue query for the exact set' in orchestrator
-    assert '`read_draft`, `write_report`,' in orchestrator
-    assert '`list_reports` and `read_report`' in orchestrator
-    assert 'Do not use broad\n  keyword searches' in orchestrator
-    assert 'Never search the general tool catalogue' in orchestrator
-    assert 'A truncated catalogue result does not establish any schema.' in orchestrator
-    assert 'final `__`-delimited\n  segment of its full name' in orchestrator
-    assert "live native spawn contract's no-history" in orchestrator
-    assert 'Use at least medium effort for Cortex workers until a lower effort is qualified' in orchestrator
-    assert '### Evidence-dependent ordering' in orchestrator
-    assert 'Do not\nrun a mutation owner alongside an active investigation' in orchestrator
-    assert 'Count neither files nor acceptance categories as an automatic' in orchestrator
-    assert 'never equate an omitted override with Luna' in orchestrator
-    assert "A timeout never releases the assigned worker's ownership." in orchestrator
-    assert 'never replace\n  an active Terra worker with Luna' in orchestrator
+    companion=sum(
+        len((PLUGIN/'skills'/name/'SKILL.md').read_text())
+        for name in (
+            'orchestrator',
+            'coordinator-communication',
+            'tool-discipline',
+            'content-safety',
+            'context-compaction',
+        )
+    )
+    assert companion < 25_000
+    assert '## Durable task and pipeline' in orchestrator
+    assert '## Choose the smallest useful work graph' in orchestrator
+    assert '## Model and effort' in orchestrator
+    assert '## Recovery after compaction or restart' in orchestrator
+    assert 'A 4,000-character limit is one page, never a total context limit.' in orchestrator
+    assert 'Never reassign or\nduplicate work because of a wait timeout' in orchestrator
+    assert 'Luna is eligible only for task classes where observed evaluations' in orchestrator
+    assert 'Answer short questions directly' in orchestrator
+    assert 'applicable artifact skill' in orchestrator
+    assert 'non-code artifacts' in (PLUGIN/'agent-sources/worker-protocol.md').read_text()
 
 
 def test_cli_helper_audits_all_thread_calls_with_shared_observer():
@@ -163,6 +152,62 @@ def test_cli_helper_audits_all_thread_calls_with_shared_observer():
     assert "sandbox_workspace_write.network_access=true" in source
 
 
+def test_cli_smoke_uses_fresh_private_default_store_and_retains_it(monkeypatch,tmp_path):
+    import runpy
+    cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
+    monkeypatch.setitem(cli['select_data_directory'].__globals__,'STATE',tmp_path/'observation')
+    cli['private']()
+    monkeypatch.delenv('CORTEX_DATA_DIR',raising=False)
+    first=cli['select_data_directory'](None,False)
+    second=cli['select_data_directory'](None,False)
+    assert first!=second and first.parent==cli['select_data_directory'].__globals__['STATE'] and second.parent==cli['select_data_directory'].__globals__['STATE']
+    assert first.stat().st_uid==second.stat().st_uid==__import__('os').getuid()
+    assert first.stat().st_mode & 0o077 == second.stat().st_mode & 0o077 == 0
+
+
+def test_cli_smoke_honors_explicit_and_environment_store_paths(monkeypatch,tmp_path):
+    import runpy
+    cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
+    monkeypatch.setitem(cli['select_data_directory'].__globals__,'STATE',tmp_path/'observation')
+    cli['private']()
+    explicit=tmp_path/'explicit'
+    assert cli['select_data_directory'](explicit,False)==explicit.resolve()
+    environment=tmp_path/'environment'
+    monkeypatch.setenv('CORTEX_DATA_DIR',str(environment))
+    assert cli['select_data_directory'](None,False)==environment.resolve()
+
+
+def test_cli_smoke_resume_requires_same_retained_store_or_explicit_unknown_store(monkeypatch,tmp_path):
+    import runpy
+    cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
+    monkeypatch.setitem(cli['select_data_directory'].__globals__,'STATE',tmp_path/'observation')
+    cli['private']()
+    monkeypatch.delenv('CORTEX_DATA_DIR',raising=False)
+    retained=cli['select_data_directory'](None,False)
+    assert cli['select_data_directory'](None,True,{'data':str(retained)})==retained
+    nonexistent=tmp_path/'other'
+    with pytest.raises(RuntimeError):
+        cli['select_data_directory'](nonexistent,True,{'data':str(retained)})
+    assert not nonexistent.exists()
+    environment_other=tmp_path/'environment-other'
+    monkeypatch.setenv('CORTEX_DATA_DIR',str(environment_other))
+    with pytest.raises(RuntimeError):
+        cli['select_data_directory'](None,True,{'data':str(retained)})
+    assert not environment_other.exists()
+    monkeypatch.delenv('CORTEX_DATA_DIR',raising=False)
+    with pytest.raises(RuntimeError,match='requires an explicit'):
+        cli['select_data_directory'](None,True,{})
+    explicit=tmp_path/'legacy-store'
+    with pytest.raises(RuntimeError,match='unavailable'):
+        cli['select_data_directory'](explicit,True,{})
+    assert not explicit.exists()
+    explicit.mkdir(mode=0o700)
+    assert cli['select_data_directory'](explicit,True,{})==explicit.resolve()
+    missing=tmp_path/'missing-retained'
+    with pytest.raises(RuntimeError,match='unavailable'):
+        cli['select_data_directory'](None,True,{'data':str(missing)})
+
+
 def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     import runpy
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='cortex_desktop_dev')
@@ -179,15 +224,18 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     assert classify([{'type':'input_text','text':'{"exit_code":0,"output":"npm error code EAI_AGAIN\\n"}'}],'exec_command')[:2]==('error','command_output_error')
     assert classify([{'type':'input_text','text':'{"exit_code":0}{"exit_code":2}'}],'functions.exec')[:2]==('error','command_exit_2')
     flags=helper['call_policy_flags']
-    assert 'unsafe_cortex_draft_template_literal' in flags(
+    assert flags(
         'apply_patch',
         'await tools.apply_patch(String.raw`*** Update File: /tmp/project/.cortex/draft.md`)',
         'planner','/tmp/project',
-    )
-    assert 'unsafe_cortex_draft_template_literal' not in flags(
+    )==[]
+    assert flags(
         'apply_patch',
         'await tools.apply_patch("*** Update File: /tmp/project/.cortex/draft.md\\n+Use `code`")',
         'planner','/tmp/project',
+    )==[]
+    assert 'forbidden_cortex_draft_deletion' in flags(
+        'apply_patch','*** Delete File: /tmp/project/.cortex/draft.md','planner','/tmp/project'
     )
     history=helper['tool_error_history']([
         {'timestamp':'1','thread_id':'w','role':'planner','tool':'mcp__cortex__create_draft',
@@ -249,8 +297,8 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         'task_name':'frontend','agent_type':'frontend_dev','model':'gpt-5.6-terra',
         'reasoning_effort':'high','fork_turns':'none','message':'private assignment',
     }))=={
-        'task_name':'frontend','agent_type':'frontend_dev','model':'gpt-5.6-terra',
-        'reasoning_effort':'high','fork_turns':'none',
+        'task_name':'frontend','agent_type':'frontend_dev','requested_model':'gpt-5.6-terra',
+        'requested_reasoning_effort':'high','fork_turns':'none',
     }
     assert classify([{'type':'input_text','text':'{"exit_code":130,"output":"^C"}'}],
                     'write_stdin','chars:"\\u0003"')[:2]==('stopped',None)
@@ -287,8 +335,7 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'timestamp':'3','thread_id':'worker','role':'technical_writer','tool':'send_message_to_thread','outcome':'error'},
     ])
     assert [item['violation'] for item in policy]==[
-        'forbidden_plugin_or_cache_access','worker_project_tool_before_cortex_bootstrap',
-        'worker_tool_after_successful_write_report'
+        'forbidden_plugin_or_cache_access','worker_tool_after_successful_write_report'
     ]
     duplicate=helper['call_policy_violations']([
         {'thread_id':'worker','role':'explorer','tool':'tool_catalogue_search','outcome':'success'},
@@ -296,12 +343,12 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'thread_id':'worker','role':'explorer','tool':'mcp__cortex__read_report','outcome':'success','document_kind':'pipeline','page':'start'},
         {'thread_id':'worker','role':'explorer','tool':'mcp__cortex__read_report','outcome':'success','document_kind':'pipeline','page':'start'},
     ])
-    assert [item['violation'] for item in duplicate]==[
-        'worker_report_catalogue_in_fresh_thread',
-        'worker_pipeline_read_in_fresh_thread',
-        'duplicate_unchanged_document_start',
-        'worker_pipeline_read_in_fresh_thread',
-    ]
+    assert duplicate==[]
+    legacy_advisory=helper['call_policy_violations']([{
+        'thread_id':'worker','role':'explorer','tool':'js','outcome':'success',
+        'policy_flags':['browser_before_local_url_ready','batched_browser_mutations'],
+    }])
+    assert legacy_advisory==[]
     active_draft=helper['call_policy_violations']([
         {'thread_id':'worker','role':'qa_engineer','tool':'exec_command','outcome':'running','session_ids':[17]},
         {'thread_id':'worker','role':'qa_engineer','tool':'mcp__cortex__create_draft','outcome':'success'},
@@ -339,7 +386,7 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     flags=helper['call_policy_flags']('exec_command','{cmd:"ps -eo pid,args"}','build_verification','/tmp/project')
     assert flags==['forbidden_global_process_probe']
     flags=helper['call_policy_flags']('exec_command','{cmd:"npm run build",max_output_tokens:4000}','frontend_dev','/tmp/project')
-    assert flags==['insufficient_diagnostic_output_budget']
+    assert flags==[]
     flags=helper['call_policy_flags']('exec_command','{cmd:"npm run build",max_output_tokens:16000}','frontend_dev','/tmp/project')
     assert flags==[]
     flags=helper['call_policy_flags']('exec_command','{cmd:"python3 -c \\\"print(open(\\\'.git/HEAD\\\').read())\\\""}','explorer','/tmp/project')
@@ -365,23 +412,12 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'thread_id':'worker','role':'build_verification','tool':'js','outcome':'error','browser_action':'create_tab','browser_origin':'http://localhost:5173','browser_mutations':2},
         {'thread_id':'worker','role':'build_verification','tool':'js','outcome':'success','browser_action':'create_tab','browser_origin':'http://localhost:8000'},
     ])
-    assert [item['violation'] for item in browser_policy]==[
-        'forbidden_browser_tab_attachment','worker_project_tool_before_cortex_bootstrap',
-        'batched_browser_mutations','worker_project_tool_before_cortex_bootstrap',
-        'browser_origin_not_http_verified','browser_origin_switch',
-        'repeated_browser_tab_creation','worker_project_tool_before_cortex_bootstrap'
-    ]
-    assert [row['violation'] for row in helper['orchestration_policy_violations'](browser_policy)]==[
-        'worker_project_tool_before_cortex_bootstrap',
-        'worker_project_tool_before_cortex_bootstrap',
-        'worker_project_tool_before_cortex_bootstrap',
-    ]
+    assert browser_policy==[]
+    assert helper['orchestration_policy_violations'](browser_policy)==[]
     premature=helper['call_policy_violations']([
         {'thread_id':'worker','role':'qa_engineer','tool':'js','outcome':'success','browser_action':'inventory'}
     ])
-    assert {item['violation'] for item in premature}=={
-        'browser_before_local_url_ready','worker_project_tool_before_cortex_bootstrap'
-    }
+    assert premature==[]
     coordinator_policy=helper['call_policy_violations']([
         {'thread_id':'root','role':'coordinator','tool':'spawn_agent','outcome':'success'},
         {'thread_id':'root','role':'coordinator','tool':'wait_agent','outcome':'success'},
@@ -393,14 +429,12 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     ]
     duplicate_owner=helper['call_policy_violations']([
         {'thread_id':'root','role':'coordinator','tool':'spawn_agent','outcome':'success',
-         'agent_type':'frontend_dev','model':'gpt-5.6-terra'},
+         'agent_type':'frontend_dev','model':'gpt-5.6-luna'},
         {'thread_id':'root','role':'coordinator','tool':'wait_agent','outcome':'success'},
         {'thread_id':'root','role':'coordinator','tool':'spawn_agent','outcome':'success',
          'agent_type':'frontend_dev'},
     ])
-    assert [item['violation'] for item in duplicate_owner]==[
-        'coordinator_duplicate_active_mutation_owner'
-    ]
+    assert duplicate_owner==[]  # The same profile does not prove resource overlap.
     released_owner=helper['call_policy_violations']([
         {'thread_id':'root','role':'coordinator','tool':'spawn_agent','outcome':'success',
          'agent_type':'frontend_dev'},
@@ -420,12 +454,12 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'thread_id':'root','role':'coordinator','tool':'mcp__cortex__write_report',
          'outcome':'success','summary_characters':141},
     ])
-    assert [item['violation'] for item in preview_policy]==['summary_exceeds_operating_target']
+    assert preview_policy==[]
     template_policy=helper['call_policy_violations']([
         {'thread_id':'planner','role':'planner','tool':'mcp__cortex__create_draft',
          'outcome':'success','template':'implementation'},
     ])
-    assert [item['violation'] for item in template_policy]==['draft_template_profile_mismatch']
+    assert template_policy==[]
     lifecycle_policy=helper['call_policy_violations']([
         {'thread_id':'worker','parent_thread_id':'root','role':'planner',
          'tool':'native_agent_result','outcome':'success'},
@@ -519,44 +553,38 @@ def test_markdown_local_links():
 
 def test_coordinator_cannot_drop_required_checks_on_environment_failure():
     text=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert "Only the user's explicit scope change can waive a required" in text
-    assert 'Do not replace browser verification with static inspection' in text
-    assert 'The coordinator never invokes a shell, terminal, command runner' in text
-    assert 'solely on the exact pipeline draft path' in text
-    assert 'this requirement never permits coordinator project commands' in text
-    assert 'schedule workers that need the same resource sequentially' in text
+    assert 'Preserve required checks until the user changes scope.' in text
+    assert 'Match completion evidence to the user\'s outcome.' in text
+    assert 'exact pipeline draft edit' in ' '.join(text.split())
+    assert 'One worker owns each shared or coupled mutation surface.' in text
+    assert 'unavailable attachment as an explicit gap' in text
 
 
-def test_shared_worker_protocol_forbids_cross_thread_resource_probes():
-    text=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
-    assert 'Never enumerate\nglobal processes, ports, terminals, browser sessions' in text
-    assert 'A browser tab owned by another native thread is unavailable' in text
-    assert 'Never call `getTab`, `browser.tabs.get`' in text
-    assert 'create exactly one fresh tab for the one current application origin' in text
-    assert 'omit `visible` when creating a tab in Chrome, Edge' in text
-    assert 'do not run `ps`, `pgrep`, `lsof`, port scans' in text
-    assert 'Never directly\nopen `.git/HEAD` merely because a `.git` directory was listed.' in text
-    assert 'Do not initialize the browser tool, request browser inventory' in text
-    assert 'one state-changing browser action per tool call' in text
+def test_shared_worker_protocol_routes_rare_interactive_procedure():
+    protocol=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
+    reference=(PLUGIN/'agent-sources/references/interactive-resources.md').read_text()
+    assert '[interactive resources](references/interactive-resources.md)' in protocol
+    assert 'Never inspect\nglobal processes, ports, tabs or devices' in reference
+    assert 'select, create or reuse only owned resources' in reference
+    assert 'Stop or close only sessions created by this assignment.' in reference
+    assert 'Accessibility element numbers belong only to the snapshot' not in protocol
 
 
 def test_native_instruction_boundaries_cover_observed_live_failures():
     coordinator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     communication=(PLUGIN/'skills/coordinator-communication/SKILL.md').read_text()
     discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
-    worker=(PLUGIN/'skills/cortex-control/SKILL.md').read_text()
-    assert "user's own latest prose" in coordinator
-    assert 'before sending commentary, questions or a final' in coordinator
+    publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
+    assert "language of their latest own prose" in coordinator
     assert "user's latest own prose" in communication
-    assert '## Code wrappers' in discipline
-    assert 'A syntax error before dispatch is a failed native call' in discipline
-    assert 'A `python3 -c` one-liner must not' in discipline
-    assert 'retries the exact loopback URL internally' in discipline
-    assert 'A Markdown body never belongs in a writer wrapper.' in discipline
-    assert 'use its returned `markdown` as the exact initial contents' in discipline
-    assert 'Do not call `read_draft` to repeat an unchanged' in discipline
-    assert 'Ordinary workers load their complete self-contained worker skill' in worker
-    assert 'Never substitute direct database\n   or final task-file access' in discipline
+    assert 'Reuse retained results while relevant state is unchanged.' in discipline
+    assert 'Re-read after user steering' in discipline
+    assert 'A wrapper must expose the full nested' in discipline
+    assert 'never replay a mutation for reassurance' in discipline
+    assert 'Use the draft reader only after compaction, restart' in publication
+    assert 'Correct deterministic edit or argument errors once' in publication
+    assert 'successful publication is the final tool action' in publication
+    assert len(discipline) < 4_000
 
 
 def test_cli_uncertain_submission_never_sends_again(monkeypatch,tmp_path):
@@ -573,7 +601,7 @@ def test_cli_uncertain_submission_never_sends_again(monkeypatch,tmp_path):
     monkeypatch.setitem(namespace,'save',lambda _: None)
     monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_: 0)
     monkeypatch.setitem(namespace,'tmux',lambda *args,**kwargs: sent.append(args))
-    monkeypatch.setitem(namespace,'time',types.SimpleNamespace(sleep=lambda _: None))
+    monkeypatch.setitem(namespace,'time',types.SimpleNamespace(sleep=lambda _: None,time=lambda: 123))
     import pytest
     with pytest.raises(RuntimeError,match='inspect the composer'):
         main()
@@ -616,16 +644,26 @@ def test_resumed_cli_observes_existing_thread_without_replaying_old_calls(monkey
     assert rows[0]['timestamp']==datetime.fromtimestamp(211,timezone.utc).isoformat()
 
 
-def test_marketplace_skills_deliver_every_complete_profile_without_registry():
-    from generate_agent_profiles import expected_skills
+def test_marketplace_skills_deliver_profiles_and_progressive_references():
+    from generate_agent_profiles import (
+        expected_agent_references,
+        expected_skills,
+        expected_worker_references,
+    )
     skills=expected_skills()
+    agent_references=expected_agent_references()
+    references=expected_worker_references()
     assert len(skills)==22
+    assert len(agent_references)==3
+    assert len(references)==66
+    assert all(path.read_bytes()==body for path,body in agent_references.items())
+    assert all(path.read_bytes()==body for path,body in references.items())
     for path,body in skills.items():
         assert path.read_bytes()==body
         name=path.parent.name.removeprefix('worker-')
         profile=tomllib.loads((PLUGIN/'agents'/f'{name}.toml').read_text())
         skill_body=body.decode().split('---\n',2)[2].lstrip()
-        profile_body=skill_body.partition('\n\n')[2].removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
+        profile_body=skill_body.removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
         assert profile_body==profile['developer_instructions']
     prepare=(ROOT/'scripts/prepare_codex.py').read_text()
     assert 'cortex_setup.py' not in prepare
@@ -673,12 +711,16 @@ def test_skill_read_allows_only_an_exit_preserving_suffix(tmp_path,monkeypatch):
     path.parent.mkdir(parents=True);path.write_text('instructions')
     suffix='; rc=$?; printf \'\\n__EXIT_STATUS__=%s\\n\' "$rc"; exit "$rc"'
     check=helper['worker_skill_read']
+    combined=f"wc -l {path} && sed -n '1,240p' {path}"
+    assert check('exec_command',json.dumps({'cmd':combined}))
     assert check('exec_command',json.dumps({'cmd':f"sed -n '1,240p' {path}"+suffix}))
     assert check('exec_command',json.dumps({'cmd':f'wc -l {path}'+suffix}))
     assert check('exec_command',json.dumps({'cmd':f'cat {path}; s=$?; echo "__EXIT_STATUS__=$s"; exit $s'}))
     assert check('exec_command',json.dumps({'cmd':f'cat {path}'+suffix.replace('rc','s').removesuffix('; exit "$s"')}))
     assert not check('exec_command',json.dumps({'cmd':f'cat {path}; s=$?; echo "__EXIT_STATUS__=$other"'}))
     assert not check('exec_command',json.dumps({'cmd':f'cat {path}'+suffix+'; touch /tmp/unrelated'}))
+    assert not check('exec_command',json.dumps({'cmd':f"find {path.parents[3]} -name SKILL.md"}))
+    assert not check('exec_command',json.dumps({'cmd':f"wc -l {path} && sed -n '1,240p' {path.parent/'references/other.md'}"}))
     assert helper['observed_outcome']([{'text':'__EXEC_EXIT_CODE__=3'}],'exec_command')[:2]==('error','command_exit_3')
     assert helper['is_orchestration_call']({'role':'general','tool':'exec_command','skill_instruction_read':True})
     assert not helper['is_orchestration_call']({'role':'general','tool':'exec_command'})
@@ -697,16 +739,15 @@ def test_original_request_audit_rejects_translation_and_lost_formatting():
     assert [r['violation'] for r in violations]==['coordinator_original_request_changed']
 
 
-def test_new_task_requires_publication_before_delegation():
+def test_new_task_allows_bounded_discovery_before_pipeline_publication():
     import runpy
     check=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')['call_policy_violations']
     def row(tool,**extra):return dict(thread_id='root',role='coordinator',tool=tool,outcome='success',**extra)
     begin=[row('mcp__cortex__create_task'),row('mcp__cortex__create_draft',template='pipeline')]
     spawn=row('spawn_agent',fork_turns='none',assigned_profile='general')
-    flag='coordinator_delegation_before_pipeline_publication'
-    assert flag in [x['violation'] for x in check(begin+[spawn])]
-    assert flag not in [x['violation'] for x in check(begin+[row('mcp__cortex__write_report'),spawn])]
-    assert flag not in [x['violation'] for x in check([row('mcp__cortex__read_report',document_kind='pipeline'),spawn])]
+    assert check(begin+[spawn])==[]
+    assert check(begin+[row('mcp__cortex__write_report'),spawn])==[]
+    assert check([row('mcp__cortex__read_report',document_kind='pipeline'),spawn])==[]
 
 
 def test_desktop_request_fidelity_requires_observed_editor_provenance():

@@ -48,7 +48,7 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
     assert '{{CURRENT_WORK_GRAPH}}' in draft['markdown']==path.read_text()
     assert draft['required_replacement_count']==6==len(draft['replaceable_markers'])
     assert draft['replaceable_markers'][0]=='{{CURRENT_OBJECTIVE_AND_STATUS}}'
-    assert "patch removal prefix '-'" in draft['edit_instruction']
+    assert "Preserve its identity and first-line marker" in draft['edit_instruction']
     arguments=dict(task_id=task,title='Pipeline',summary='Current work is recorded.',
                    author='coordinator',draft_id=draft['draft_id'],request_key=key())
     with pytest.raises(StoreError) as rejected:
@@ -302,11 +302,11 @@ def test_post_commit_file_failure_recovers_on_restart(store,tmp_path,monkeypatch
     arguments=dict(task_id=task,title='Work',summary='A concise result.',author='worker',draft_id=draft['draft_id'],request_key=delivery)
     finish=store._finish_source_deletions
     calls=0
-    def fail_after_commit(db):
+    def fail_after_commit(db,task):
         nonlocal calls
         calls+=1
         if calls==2:raise OSError('simulated power failure')
-        return finish(db)
+        return finish(db,task)
     monkeypatch.setattr(store,'_finish_source_deletions',fail_after_commit)
     with pytest.raises(StoreError,match='storage_error'):call_store(store,'write_report',arguments)
     restarted=Store(store.directory)
@@ -321,11 +321,13 @@ def test_restart_never_recreates_a_missing_project_root(tmp_path):
 
     project=tmp_path/'deleted-project'; project.mkdir()
     directory=tmp_path/'store'; store=Store(directory)
-    call_store(store,'create_task',dict(
-        project_root=str(project),request='Keep the project boundary.',request_key='create'))
+    task=call_store(store,'create_task',dict(
+        project_root=str(project),request='Keep the project boundary.',request_key='create'))['task_id']
     shutil.rmtree(project)
+    restarted=Store(directory)
+    assert not project.exists()
     with pytest.raises(StoreError,match='invalid_project'):
-        Store(directory)
+        call_store(restarted,'list_reports',dict(task_id=task))
     assert not project.exists()
 
 

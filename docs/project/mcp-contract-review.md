@@ -1,6 +1,18 @@
 # MCP contract review
 
-## Sources and design
+## Current format 11 follow-up
+
+The 2026-09-06 replacement retains seven operations and moves binding receipts,
+source revisions/completeness, artifact provenance, change queries, own draft
+discovery and explicit Cortex/normal state into their advertised schemas. The
+coordinator may retrieve necessary original sources and continuation pages.
+Local hooks share storage and validation, without a workflow or approval machine.
+See [storage](storage.md) and [hooks](../features/lifecycle-hooks/index.md).
+
+The review below records earlier designs and corrections; any first-page-only,
+no-hooks, fixed-tail or format-10 statements describe those historical snapshots.
+
+## Historical sources and design
 
 Reviewed against the official sources on 2026-09-04:
 
@@ -21,9 +33,10 @@ English descriptions, exact input constraints, output schemas and safety hints.
 The model receives data through tool results, not through hidden client metadata.
 Successful structured data is also serialized as an identical text content item.
 Skills contain execution policy rather than duplicated argument contracts.
-Tool descriptions allow selected authored report opening decision briefs as well as catalogue previews and
-the current pipeline; the native host attaches profiles and workers inspect full evidence. The server
-keeps the same tools available to both roles without an actor-binding mechanism.
+Tool descriptions allow catalogue previews, the current pipeline and bounded pages
+from selected authored reports; the native host attaches profiles and workers inspect
+the evidence needed for their decisions. The server keeps the same tools available
+to both roles without an actor-binding mechanism.
 
 ## Corrections made during review
 
@@ -37,11 +50,12 @@ Unknown tools and malformed protocol envelopes use JSON-RPC errors. Tool input
 and storage failures use visible error results. Storage failures explicitly warn
 when delivery is uncertain; changing arguments is not presented as a disk repair.
 
-A live native wrapper previously failed before MCP dispatch when report Markdown was
-embedded in a JavaScript template literal. The only body-bearing operation is now the
-built-in `apply_patch` file tool, using one escaped exact-marker hunk per call. Template
-literals and `String.raw` are forbidden and audited. Report bodies and paths never cross
-the writer call.
+A live native wrapper previously failed before MCP dispatch when executable template
+interpolation corrupted report Markdown. The report body is edited through the native
+`apply_patch` file tool and never passed to the Cortex writer. A JavaScript literal or
+`String.raw` wrapper is valid when it carries the patch intact to that tool; executable
+interpolation or substitution is forbidden. Correctness is determined from the observed
+patch outcome and subsequent publication receipt, not the wrapper's formatting.
 The draft creator allocates the correct project file, binds its short identifier to
 the calling native thread, and places that identifier in the filename and Markdown.
 The actor reads that exact draft through a bounded same-thread operation, updates the
@@ -148,8 +162,8 @@ Report page reads answer a concrete missing fact. Tiny connectivity/reference
 probes before publication are explicitly prohibited in the live property contract
 and shared worker guidance; the audit retains duplicate immutable-start findings.
 
-Report reference descriptions require exact equality with the retained authoritative
-receipt and validation before delegation/read dispatch. The fixed-length schema
-rejects truncated, extended or malformed references; a well-formed unknown reference
-still returns not_found and never selects a neighbouring report. These are the same
+When an operation uses a report reference, it must equal the retained authoritative
+receipt. The schema rejects truncated, extended or malformed references; a well-formed
+unknown reference still returns not_found and never selects a neighbouring report.
+No separate validation call or fixed pre-dispatch stage is required. These are the same
 seven operations with no storage migration or alias/correction route.

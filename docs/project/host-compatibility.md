@@ -19,7 +19,7 @@ from that catalogue. Needed declared Markdown references are valid. No installat
 scan, guessed cache version, agent TOML read, server inspection, custom loader, setup
 hook or personal registry is required. Read through the skill's end and retain actual
 command receipts; a truncated page or role description is insufficient. Generated
-worker skills declare their exact line count and final completion marker because
+worker skills retain a final completion marker and exact generated-byte checks because
 a successful partial range read does not demonstrate that the whole file was loaded.
 
 The [custom-agent guide](https://learn.chatgpt.com/docs/agent-configuration/subagents)
@@ -76,3 +76,19 @@ limitation. Standard automatic eviction of eligible completed contexts is distin
 from that failure. Never promise that a plugin prompt repairs host residency or
 silently switch the user's native interface. Current named-candidate outcomes are
 recorded in [release readiness](../release-readiness.md).
+
+## Lifecycle hooks in the format 11 candidate
+
+The new payload includes a default hooks manifest and one local Python handler.
+Use the installed host's documented event schemas and ordinary trust flow. The
+[official hook reference](https://learn.chatgpt.com/docs/hooks) says subagent hooks
+carry a parent session ID; only explicit agent/parent receipts establish actor
+identity. Tool-event actor identity can remain unknown. `SessionStart(compact)` is
+the recovery context channel, not PreCompact/PostCompact stdout.
+
+Documented UserPromptSubmit has no unique typed-message identity; it records a
+pending native capture signal instead of inventing a duplicate-free source ID.
+A fresh active task is still created and initially sourced by MCP. Real CLI/Desktop
+event coverage and timing are separate qualification evidence, reported in
+[release readiness](../release-readiness.md). Historical no-hooks observations do
+not establish support for this payload.

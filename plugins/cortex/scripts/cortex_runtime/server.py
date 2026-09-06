@@ -36,27 +36,29 @@ def thread_context(meta):
 def safe_observation_fields(operation,arguments,result=None):
     """Expose only bounded routing selectors needed to audit agent behavior."""
     arguments=arguments if isinstance(arguments,dict) else {}
+    result=result if isinstance(result,dict) else {}
+    capture=result.get('source_capture',{})
+    common=dict(source_capture_status=capture.get('status'),
+                source_revision=capture.get('revision'))
     if operation=='create_task':
-        return dict(original_request_sha256=(result or {}).get('original_request_sha256'))
+        return common|dict(original_request_sha256=result.get('original_request_sha256'))
     if operation=='read_report':
-        result=result if isinstance(result,dict) else {}
         report_id=result.get('report_id') or arguments.get('report_id')
-        return dict(document_kind=result.get('kind') or ('pipeline' if not report_id else 'unresolved'),
-                    report_id=report_id,
-                    requested_limit=arguments.get('limit',4000),
-                    page='continuation' if arguments.get('cursor') else 'start')
+        return common|dict(document_kind=result.get('kind') or ('pipeline' if not report_id else 'unresolved'),
+                           report_id=report_id,
+                           requested_limit=arguments.get('limit',4000),
+                           page='continuation' if arguments.get('cursor') else 'start')
     if operation=='list_reports':
-        return dict(requested_limit=arguments.get('limit',25),
-                    page='continuation' if arguments.get('cursor') else 'start')
-    if operation=='read_draft':
-        return dict(draft_id=arguments.get('draft_id'),page='continuation' if arguments.get('cursor') else 'start')
-    if operation=='create_draft':return dict(template=arguments.get('template'))
+        return common|dict(requested_limit=arguments.get('limit',25),
+                           page='continuation' if arguments.get('cursor') else 'start')
+    if operation=='read_draft':return common|dict(
+        draft_id=arguments.get('draft_id'),page='continuation' if arguments.get('cursor') else 'start')
+    if operation=='create_draft':return common|dict(template=arguments.get('template'))
     if operation=='write_report':
-        result=result if isinstance(result,dict) else {}
-        return dict(draft_id=arguments.get('draft_id'),report_id=result.get('report_id'),
-                    summary_characters=len(arguments.get('summary','')))
-    if operation=='set_governance':return dict(governance_mode=arguments.get('mode'))
-    return {}
+        return common|dict(draft_id=arguments.get('draft_id'),report_id=result.get('report_id'),
+                           summary_characters=len(arguments.get('summary','')))
+    if operation=='set_governance':return common|dict(governance_mode=arguments.get('mode'))
+    return common
 
 
 def observe(operation, outcome, replayed=False, meta=None, arguments=None, result=None):
@@ -107,7 +109,7 @@ class Server:
             if not isinstance(params,dict) or not isinstance(params.get('protocolVersion'),str) or not isinstance(params.get('capabilities'),dict) or not isinstance(params.get('clientInfo'),dict) or any(not isinstance(params['clientInfo'].get(k),str) for k in ('name','version')):
                 raise ProtocolError(-32602,'Invalid initialize parameters. Supply protocolVersion (string), capabilities (object), and clientInfo with name and version strings.')
             observe('initialize','success')
-            return dict(protocolVersion='2025-11-25', capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex resolves the current task only from native MCP thread metadata, including registered parent inheritance; task and thread identifiers never appear in tool arguments or results. SQLite metadata lives under $CODEX_HOME/cortex, where CODEX_HOME is already the .codex directory. create_draft chooses an editable path under <project_root>/.cortex, binds the short draft identifier to the calling native thread, pre-fills English report or pipeline headings, and returns the complete initial Markdown; the same identifier appears in the filename and Markdown. Use that returned Markdown as the source of truth and update its body in place with native file tools; do not call read_draft immediately after creation. read_draft remains available for recovery or a genuinely needed later read of an existing draft. Give only draft_id and short metadata to write_report. Markdown report bodies never cross write_report and are streamed without an application size limit into task files under <project_root>/.codex/cortex/<task>. Report files are immutable, while the writer prepends each pipeline edition to that task pipeline.md. Catalogue, report and draft reads are cursor-bounded. Coordinators read previews, the current pipeline beginning, selected authored report opening decision briefs for consequential choices (never ordinary report continuation pages), and only their exact pipeline draft content returned by create_draft or recovered through read_draft. Workers read selected relevant report bodies, their own returned or recovered draft, and project evidence. Native workers load their complete assigned bundled skill through its advertised standard mechanism. They may read that exact skill file but never explore plugin internals. Original user source is captured by storage from the current native UserMessage receipt, not transcribed by the model. After compaction or restart both roles refresh their live catalogue and durable context before continuing. All seven tools remain available to both roles; governance is advisory and storage has no semantic role gate.')
+            return dict(protocolVersion='2025-11-25', capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex provides seven advertised tools for thread-bound Markdown task memory, drafts, reports and advisory governance; their schemas are authoritative. Published Markdown stays in the project while SQLite retains metadata, relationships, revisions and receipts. Native user source capture reports completeness explicitly, and unavailable new host input does not hide already saved reports.')
         if method == 'ping':
             return {}
         if method == 'tools/list':

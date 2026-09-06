@@ -36,7 +36,7 @@ def tool(name, description, properties, required, read=False):
     properties.setdefault("redact_values",dict(type="array",maxItems=32,uniqueItems=True,
         items=string("Exact credential value only; never requirements, restrictions or ordinary prose.",16_000),
         description="Optional literal credentials to redact in newly captured native user messages. Omit otherwise; all other text is preserved."))
-    description += " On coordinator task calls other than create_task, the server archives pending native user text as immutable User steering reports before this operation, atomically. Workers never capture user input. Read operations may therefore create source reports. No model-authored copy is accepted. Capture occurs on the next successful Cortex call, not while the host is idle."
+    description += " Coordinator operations attempt pending native source capture and return explicit completeness; unavailable new sources do not deny archived reads. An accepted mutation delivery replay skips capture, preserves the current binding state rather than reapplying historical state, and leaves pending source for the next fresh coordinator operation. Each result includes the host-verified binding receipt and source revision. Workers never capture another thread input."
     return dict(name=name, title=name.replace("_", " ").capitalize(), description=description,
                 inputSchema=dict(type="object", properties=properties, required=required,
                                  additionalProperties=False),
@@ -53,6 +53,7 @@ TOOLS = [
          "lives under $CODEX_HOME/cortex; CODEX_HOME is already the .codex directory. "
          "Reads the current native turn\'s typed UserMessage receipt from the current CODEX_HOME host state, scoped to the exact host thread and canonical project. The model does not copy or supply the original task text. Fails closed if that source is unavailable; never substitute a summary. Returns its immutable report reference and source digest. Child threads inherit their registered "
          "parent task and cannot create tasks. Never pass task or thread IDs.", {
+             "state": string("Explicitly selected operating state; default cortex when creating an explicitly requested Cortex task. normal suspends automatic capture and hints.",6,enum=["cortex","normal"]),
              "project_root": string("Absolute existing canonical project directory supplied by the host.", 4096),
              "request_key": KEY,
              "redact_values": dict(type="array",maxItems=32,uniqueItems=True,
@@ -63,6 +64,7 @@ TOOLS = [
          "Append an advisory governance choice for the task resolved from current host thread "
          "metadata. Governance guides coordinator depth but never blocks storage operations, "
          "grants authority, or forces a fixed pipeline. Never pass task or thread IDs.", {
+             "state": string("Explicit user-selected cortex or normal state for this coordinator binding; omitted preserves current state. This never grants approval or accepts results.",6,enum=["cortex","normal"]),
              "mode": string("Coordinator-selected depth: minimal for bounded work, light for moderate work, or full for consequential risk.", 7, enum=["minimal", "light", "full"]),
              "rationale": string("Concise English rationale retained as a task report.", 16_000),
              "request_key": KEY,
@@ -75,7 +77,7 @@ TOOLS = [
          "The result returns the complete initial Markdown plus the exact required_first_line, "
          "the complete ordered replaceable_markers list and count, template name, character count, and SHA-256. Use that returned Markdown as the source "
          "of truth; no immediate read_draft call is needed. Preserve the first line byte-for-byte, "
-         "edit the existing file in place only after its following blank line, and replace every guidance comment or exact pipeline placeholder with complete English content. Use one built-in apply_patch call with one exact hunk per marker; never place the patch in a JavaScript template literal or String.raw. Each exact old marker must be a '-' removal line followed by '+' replacement content; leaving the marker as context and adding text below it does not replace it. "
+         "edit the existing file in place only after its following blank line, and replace every guidance comment or exact pipeline placeholder with complete English content. Use native file tools safely and inspect the actual result; all exact placeholders must be replaced. "
          "Use that file tool and never delete, rename, replace, recreate, or rewrite "
          "the entire draft file. Create a separate draft for every report or pipeline "
          "edition; one coordinator thread may own several drafts. Never pass a path, task ID, "
@@ -105,13 +107,14 @@ TOOLS = [
          "streams the complete file without a report-size limit, validates UTF-8, hashes and "
          "atomically publishes it under <project_root>/.codex/cortex/<task>/<report>.md, "
          "commits metadata, then deletes the source draft. Never put Markdown bodies in this MCP "
-         "request, writer metadata, arrays, chunks, or shell interpolation; only the built-in "
-         "apply_patch file tool may carry draft content. A pipeline draft's bytes are "
+         "request, writer metadata, arrays, chunks, or shell interpolation; native file tools carry draft content. A pipeline draft's bytes are "
          "prepended to the task's single pipeline.md and earlier editions "
          "remain below. Open authored reports with a decision brief that fits within the first 4000 Unicode characters including marker and title: conclusion, decisive observations, checked/open requirements, contradictions, limits, disconfirming evidence and next action. This is Markdown guidance, not server semantic validation. Publication ends this assignment; a later explicit native follow-up may produce another immutable report from the same thread. Before publication, stop every command session opened for this "
          "assignment and inspect its terminal result. After success keep "
          "the short report reference and preview. Retry an uncertain write only with its exact "
          "key and arguments.", {
+             "source_revision": dict(type="integer",minimum=0,maximum=2**53-1,description="Requirements source revision actually used for this evidence. Omit to retain the revision recorded when this draft was created. Later sources signal reconciliation, never automatic rejection of old evidence."),
+             "artifacts": dict(type="array",maxItems=100,description="Versions actually checked by this report; metadata assertions by the author, not automatic verification.",items=dict(type="object",additionalProperties=False,required=["reference","version"],properties={"reference":string("Artifact path or durable resource reference.",4096),"version":string("Checked SHA-256, commit or exact resource version.",256)})),
              "title": string("Readable English title for the report or pipeline edition.", 200),
              "summary": string("One decision-ready English preview of at most 100 Unicode characters. This operating target leaves well over half of the enforced 320-character transport maximum unused. Include the result and the most material check, blocker, or limitation; full evidence belongs in the file.", 320),
              "author": string("Short English worker/profile or coordinator label.", 120),
@@ -125,16 +128,18 @@ TOOLS = [
          "and may read selected report opening decision briefs when a consequential choice needs evidence. Workers select and read only reports required by "
          "their assignment.", {
              "cursor": string("Exact opaque next_cursor from the preceding catalogue page.", 256),
+             "changes_after": dict(type="integer",minimum=0,maximum=2**53-1,description="Return bounded task change metadata and allowlisted hook observations after this sequence; default zero. Continue with changes_next when non-null. Observations carry explicit hook provenance, actor scope and known command status, never raw output. Unknown fields remain null; changed_paths_complete exposes omitted path detail. Changes require coordinator interpretation, not mandatory revalidation."),
+             "drafts_after": dict(DRAFT,description="Continue the own unfinished draft listing after drafts_next. Draft discovery is restricted to this exact calling thread."),
              "limit": integer("Entries per page; default 25.", 100),
          }, [], read=True),
     tool("read_report",
          "Read a stored Markdown document through bounded cursor pages. Omit report_id and cursor "
          "to start at the newest beginning of the current pipeline. Supply a catalogue report_id "
          "to start only the ordinary report needed for the assignment. Coordinators read the "
-         "current pipeline beginning and the first page of a selected authored report for architecture, dependencies or acceptance; never follow an ordinary report cursor. Do not read original-request, steering or governance bodies as decision briefs. Workers read selected relevant report bodies. A pipeline update "
+         "current pipeline and any source, clarification, governance or evidence pages needed to recover requirements or make a decision. The 4000-character limit is a page size, not a total context limit. Workers read selected relevant report bodies. A pipeline update "
          "makes older pipeline cursors stale. Ordinary reports are immutable.", {
-             "report_id": dict(REPORT, description="Exact opaque report identifier copied unchanged from an acknowledged receipt or a coordinator-validated assignment. Before dispatch, check whole-value equality with that retained source as well as this property's pattern and length constraints. In an execution wrapper, retain the reference in a variable and use a conditional validation before invoking the MCP tool with that same variable. The invalid branch must make no storage call and must not throw a synthetic tool error. Ask the reference owner for its authoritative correction and wait instead; remain on the same assignment. A not_found result also requires source correction, never character guessing or trying another report. Do not use a native final merely to request the correction."),
-             "cursor": string("Exact opaque next_cursor from the preceding page. Coordinators must not follow an ordinary report cursor; its first page is their decision brief. Workers may continue selected detailed evidence.", 512),
+             "report_id": dict(REPORT, description="Exact opaque report identifier copied unchanged from an acknowledged receipt or a coordinator-validated assignment. Use the exact acknowledged reference. If it is unavailable or invalid, obtain its authoritative correction; do not guess or probe nearby identifiers."),
+             "cursor": string("Exact opaque next_cursor from the preceding page. Any actor may continue the selected source or evidence when needed.", 512),
              "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, [], read=True),
 ]
@@ -159,7 +164,7 @@ METADATA = dict(report_id=REPORT, title=output_string("Report title."),
                 created_at=output_string("Creation time in UTC ISO 8601."),
                 updated_at=output_string("Latest edition time in UTC ISO 8601."),
                 kind=output_string("Document kind.", enum=["report", "pipeline"]),
-                size_bytes=SIZE, sha256=HASH)
+                size_bytes=SIZE, sha256=HASH,source_revision=dict(type="integer",minimum=0),artifacts=dict(type="array",items=dict(type="object")),source_attachments=dict(type="array",items=dict(type="object")))
 OUTPUTS = {
     "create_task": object_schema(dict(original_report_id=REPORT, original_request_sha256=HASH, replayed=REPLAY)),
     "set_governance": object_schema(dict(
@@ -191,7 +196,7 @@ OUTPUTS = {
         sha256=HASH, next_cursor=NEXT)),
     "write_report": object_schema(dict(report_id=REPORT,
                                        summary=output_string("The accepted compact preview."),
-                                       size_bytes=SIZE, sha256=HASH, replayed=REPLAY)),
+                                       size_bytes=SIZE, sha256=HASH, source_revision=dict(type="integer",minimum=0),artifacts=dict(type="array",items=dict(type="object")),replayed=REPLAY)),
     "list_reports": object_schema(dict(
         reports=dict(type="array", items=object_schema(METADATA), description="Compact reports newest first."),
         next_cursor=NEXT)),
@@ -200,8 +205,16 @@ OUTPUTS = {
         total_characters=dict(type="integer", minimum=0, description="Unicode characters in the complete document."),
         next_cursor=NEXT)),
 }
+BINDING=object_schema(dict(receipt=output_string("Durable host-thread binding receipt."),thread_id=output_string("Host supplied calling thread."),parent_thread_id=dict(type=["string","null"]),state=output_string("Explicit Cortex participation state.",enum=["cortex","normal"])))
+CAPTURE=object_schema(dict(status=output_string("Capture coverage of this operation; not proof all requirements were applied.",enum=["complete","partial","unavailable","not_attempted"]),reason=dict(type=["string","null"]),revision=dict(type="integer",minimum=0),pending_turns=dict(type="integer",minimum=0,description="Unresolved native user-turn signals; these contain no archived text and do not advance source revision.")))
+OBSERVATION=object_schema(dict(source=output_string("Receipt provenance, not model verification.",enum=["hook"]),event_name=output_string("Observed lifecycle event."),actor_scope=output_string("Confirmed actor or parent session only.",enum=["actor","session"]),actor_thread_id=dict(type=["string","null"]),parent_session_id=dict(type=["string","null"]),binding_origin=dict(type=["string","null"]),tool_name=dict(type=["string","null"]),exit_code=dict(type=["integer","null"]),command_session_id=dict(type=["string","null"]),status=output_string("Explicit observed command/result state.",enum=["failed","exited","running","unverified","completed"]),truncated=dict(type=["boolean","null"]),error=dict(type=["boolean","null"]),changed_paths=dict(type="array",maxItems=16,items=output_string("Exact known changed path.",maxLength=4096)),changed_paths_total=dict(type="integer",minimum=0),changed_paths_complete=dict(type="boolean")))
+OUTPUTS["list_reports"]["properties"].update(changes=dict(type="array",items=object_schema(dict(sequence=dict(type="integer"),kind=output_string("Change kind."),reference=dict(type=["string","null"]),created_at=output_string("UTC timestamp."),observation=dict(anyOf=[OBSERVATION,dict(type="null")])))),changes_next=dict(type=["integer","null"]),own_drafts=dict(type="array",items=object_schema(dict(draft_id=DRAFT,draft_path=output_string("Owned unfinished draft path."),kind=output_string("Draft kind."),template=output_string("Draft template."),created_at=output_string("Creation timestamp.")))),drafts_next=dict(type=["string","null"]))
+OUTPUTS["list_reports"]["required"]=list(OUTPUTS["list_reports"]["properties"])
 for item in TOOLS:
-    item["outputSchema"] = OUTPUTS[item["name"]]
+    result=OUTPUTS[item["name"]]
+    result["properties"].update(binding=BINDING,source_capture=CAPTURE)
+    result["required"].extend(["binding","source_capture"])
+    item["outputSchema"] = result
 BY_NAME = {item["name"]: item for item in TOOLS}
 
 
@@ -237,7 +250,10 @@ ERROR_HELP = {
     "child_creation": "A worker thread cannot create a task. Use the task inherited from its registered parent.",
     "pipeline_missing": "The task has no pipeline. The coordinator must publish its initial pipeline edition.",
     "identifier_unavailable": "Short identifier allocation was exhausted. Retry the identical request later; never invent an identifier.",
-    "unsupported_storage": "This database format is unsupported. Use a fresh store; legacy formats are not migrated or retained.",
+    "unsupported_storage": "This database format is unsupported. Format 10 requires the separate stopped-access, backup-required cortex_migrate.py operation to format 11. No automatic migration is performed.",
+    "storage_busy": "Offline migration owns the storage access lock. Wait until stopped-access maintenance completes.",
+    "coordinator_only": "Only the bound coordinator can change Cortex participation state.",
+    "invalid_source_revision": "Use an existing requirements source revision actually used by the report.",
     "storage_error": "Storage did not complete cleanly. Preserve the draft. Check disk space and access, then retry only the identical request and key because publication may be uncertain.",
 }
 
@@ -291,9 +307,13 @@ def validate(name, args):
                 raise StoreError("invalid_arguments",key,f"{len(value)} Unicode characters",target,f"Rewrite {key} {target} and verify its character count.")
         elif rule["type"]=="array":
             item=rule["items"]
-            if (not isinstance(value,list) or len(value)>rule["maxItems"]
-                    or any(not isinstance(part,str) or not item["minLength"]<=len(part)<=item["maxLength"] for part in value)
-                    or len(set(value))!=len(value)):
-                raise StoreError("invalid_arguments",key,"invalid credential redaction list","bounded unique literal strings","Use only exact credential strings matching the advertised array constraints.")
+            valid=isinstance(value,list) and len(value)<=rule["maxItems"]
+            if valid and item["type"]=="object":
+                for part in value:
+                    if not isinstance(part,dict) or set(part)!=set(item["required"]):valid=False;break
+                    if any(not isinstance(part[field],str) or not limits["minLength"]<=len(part[field])<=limits["maxLength"] for field,limits in item["properties"].items()):valid=False;break
+            elif valid:
+                valid=all(isinstance(part,str) and item["minLength"]<=len(part)<=item["maxLength"] for part in value) and len(set(value))==len(value)
+            if not valid:raise StoreError("invalid_arguments",key,"invalid bounded metadata list","array matching its advertised items schema")
         elif type(value) is not int or value<rule["minimum"] or value>rule["maximum"]:
             raise StoreError("invalid_arguments",key,_received(value),f"integer {rule['minimum']}..{rule['maximum']}",f"Use a JSON integer from {rule['minimum']} through {rule['maximum']}.")

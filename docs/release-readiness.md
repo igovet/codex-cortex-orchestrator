@@ -1,4 +1,107 @@
-# Current candidate: complete skill loading — 2026-09-06
+# Format 11 v9 improvement candidate — bounded CLI/Desktop qualification passed
+
+The source replacement preserves semantic version 1.15.6, seven MCP operations and
+22 specialist profiles. It introduces compact instructions, task-isolated storage,
+source/provenance metadata, an offline migration and local lifecycle hooks.
+
+Candidate: `1.15.6+codex.sha256.0066c0266f853fd5`, full SHA-256
+`0066c0266f853fd53a82e6b911d49eec83cd92c89d3f8cfcf1ae479e1a619d9a`.
+Seven-tool catalogue digest:
+`eb2aea4c29706e269f611d4565dfec3b8a9a881c716e90cf13eb4e2f7f07557e`.
+
+The same five coordinator skills (orchestrator, content safety, context compaction,
+communication and tool discipline) total 20,694 characters versus 68,825 in baseline:
+a 69.93% reduction. The orchestrator file alone is 13,694 versus 49,860 (72.54%); the
+representative complete backend worker skill is 10,211 versus 36,610 (72.11%), and the
+shared worker protocol is 8,132 versus 34,282 (76.28%). These
+counts include front matter and use identical decoded-Unicode/newline treatment;
+conditional documentation, harvest, maintenance and rare references are excluded
+from the coordinator comparison in both variants. Size reduction is not a task-quality claim.
+
+Stamp, package validation and source-only sync passed sequentially. The focused suite
+passed **69 tests**; the complete suite passed **208 tests in 8.90 seconds**. All 30
+skills, profile generation and `git diff --check` passed.
+The [verification map](project/verification.md)
+links mandatory failure and recovery scenarios to their actual unit tests.
+
+The unchanged candidate completed consecutive ordinary CLI and actual Desktop
+documentation scenarios on 2026-09-06. Both coordinators used `gpt-5.6-luna` at
+high effort; both native technical writers used Luna at medium effort. Full skill
+loads, command receipts, bounded discovery, worker publication and coordinator
+acceptance passed the complete host-call review. Both audits exited zero, with no
+MCP or hook failures, Cortex protocol violations, truncated results or open command
+sessions. Independent README examples and contract checks passed, and all protected
+files retained their hashes.
+
+Independent read-only audits of both final archives verified Format 11 SQLite
+integrity and foreign keys, exact coordinator/child bindings, source revision 1,
+all declared artifact hashes, owner-private report files and their indexed hashes.
+Each archive has one physical pipeline with its newest section first and older
+content below it; all three drafts are published, with no pending deletion or
+unindexed report. All 107 local documentation links resolve.
+
+| Host | Host calls | MCP events | Hook actions | Total tokens | Cached input | Native task seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CLI | 86 | 12 | 37 | 1,309,671 | 1,216,512 | 207.747 |
+| Desktop | 70 | 14 | 30 | 1,314,999 | 1,208,320 | 155.101 |
+
+The CLI trace retains two failed project README patch attempts and their subsequent
+exact successful retry; these are recovered product errors, not an error-free run.
+Desktop had no tool errors. CLI emitted its normal exit-zero marker, and both exact
+isolated sessions were stopped after complete evidence capture. This qualifies the
+tested instruction-loading, documentation, report and hook path; it does not prove
+every task, recovery path or a general quality improvement. The 12-run comparison
+below remains a separate earlier payload, not a repeated benchmark of v9.
+
+On this exact candidate, 100 fresh Python subprocesses for each of three hook paths
+all exited zero with checked output and private observation receipts. The measured
+p95 including startup was 39.017 ms inactive, 47.452 ms for active tool receipts and
+50.982 ms for active deferred prompt capture. This meets the 100 ms local-handler
+target. Whole-task hook overhead at or below 5% is still unverified; internal handler
+durations omit startup and cannot establish that result. Each active benchmark used
+a fresh synthetic task and 100 distinct tool or turn identities; the inactive path
+had no store. These are local subprocess measurements, separate from model-run time.
+
+The earlier v5 qualification was rejected for incomplete initial command receipts and
+truncated catalogue discovery; product checks passed, while recovery later stalled
+after draft creation and was cancelled before lifecycle state was known. V6 completed
+and stopped normally with product checks 7/7 and no MCP or hook failures, but protocol
+qualification failed on the initial coordinator receipt and a recovered worker's
+draft-report hash correction patch, which initially failed context verification before
+repair. V7's CLI product checks passed 8/8 with complete receipts and no truncation,
+but post-publication handoff lookup was rejected. Its exploratory Desktop run passed
+product checks 8/8 and completed normally in 170.432 seconds using 1,686,903 tokens;
+The trace contains 74 host calls, 13 successful MCP events and 30 successful hook
+receipts; two catalogue searches were truncated across four wrapper/nested records and a status probe was
+rejected. V8 was source-only and never live. V9 adds the concrete names-only
+discovery example. The first v9 CLI smoke attempt omitted an explicit data store and
+selected an incompatible pre-existing isolated store, so setup was invalid; its
+product checks were 8/8 in 100.473 seconds using 582,992 tokens, but it recorded two
+unsupported-storage MCP errors and 14 hook storage errors, followed by model
+protocol errors. It is neither qualification nor a Format 11 runtime regression.
+The helper's fresh-store and exact-resume changes passed the source checks above.
+The successful final pair above used explicit fresh stores. The separate
+three-configuration/four-scenario Luna pilot remains the frozen v4 comparison with
+12/12 runs; all functional checks passed, with one baseline protocol pass and no
+candidate protocol passes. The [comparison and retained measurements](project/quality-evaluation.md)
+separate outcomes from protocol defects and exclude disclosed tuning/intervention
+attempts. Its full-hooks payload is
+`fd022bfc005647faab9ddde3ec5c493ea00773ce28b9389cf2ed355039796375`; its compact
+counterpart differs only in the active-hook manifest and generated package version.
+Three observer false flags were corrected in MAIN: two for safe literal quoted-Python
+full-skill reads and one for exact Desktop escaped-underscore plus terminal-newline
+source fidelity. Storage retains exact native bytes, and the observer guard verifies
+delivery before accepting an exact archive hash. Quoted-heredoc AST validation rejects
+shell expansion, with regression coverage added. V4 efficiency measurements and
+historical host passes below do not qualify v9.
+Immediate UserPromptSubmit publication
+without a native message identity is deliberately deferred, and reused-worker
+assignment-level stop coverage remains incomplete when the host omits that boundary.
+No stable plugin installation or configuration has been changed.
+
+---
+
+# Historical candidate: complete skill loading — 2026-09-06
 
 Candidate: `1.15.6+codex.sha256.fd0b4e63ad8eea97`, full SHA-256
 `fd0b4e63ad8eea97cd5bd39ce893675db5e2b0cc6fbcdc2c91fff4a35bf99345`.

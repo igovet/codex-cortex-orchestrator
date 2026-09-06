@@ -15,11 +15,15 @@ ROOT=Path(__file__).resolve().parents[1]
 def exchange(tmp_path,messages):
     messages=copy.deepcopy(messages)
     home=tmp_path/'host';(home/'sessions').mkdir(parents=True,exist_ok=True)
-    db=sqlite3.connect(home/'state_5.sqlite');db.execute('CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,cwd TEXT,rollout_path TEXT)')
+    db=sqlite3.connect(home/'state_5.sqlite')
+    db.execute('CREATE TABLE IF NOT EXISTS _sqlx_migrations(version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL, success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)')
+    db.execute("INSERT OR IGNORE INTO _sqlx_migrations VALUES (1,'fixture','now',1,X'00',1)")
+    db.execute('CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,cwd TEXT NOT NULL,rollout_path TEXT NOT NULL)')
     for m in messages:
         if m.get('method')=='tools/call' and m['params'].get('name')=='create_task' and 'request' in m['params'].get('arguments',{}):
             args=m['params']['arguments'];source=args.pop('request');thread=m['params'].get('_meta',META)['threadId'];path=home/'sessions'/(thread+'.jsonl')
             path.write_text('\n'.join(json.dumps(x) for x in [
+                dict(type='session_meta',payload=dict(id=thread,cwd=args['project_root'])),
                 dict(type='event_msg',payload=dict(type='task_started',turn_id='turn')),
                 dict(type='event_msg',payload=dict(type='item_completed',thread_id=thread,turn_id='turn',item=dict(type='UserMessage',id='original-message',content=[dict(type='text',text=source)]))),
             ])+'\n')
