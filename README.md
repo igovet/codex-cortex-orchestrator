@@ -559,8 +559,12 @@ protocol. Workers load their complete advertised skill normally and use applicab
 skills for documents, spreadsheets, research, designs or applications. Verification
 must establish the user's requested result, not automatically just passing code tests.
 
-Workers publish immutable English reports; the coordinator communicates in the
-user's language and owns pipeline editions. Reuse a completed suitable context for
+Workers publish immutable English reports and return their handoff once through the
+native final response. The coordinator uses the user's own language for updates,
+questions and final answers, unless the user explicitly requests another response
+language. English evidence, forwarded agent messages and recovery summaries do not
+change that choice; requested product language remains independent. The coordinator
+owns pipeline editions. Reuse a completed suitable context for
 a bounded continuation; use a fresh context when independent evidence is warranted.
 A confirmed terminal failure permits recovery from saved reports, unfinished drafts
 and actual project state. Missing results are not completion.

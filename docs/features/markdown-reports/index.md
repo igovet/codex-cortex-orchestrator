@@ -13,6 +13,14 @@ opening decision briefs help select relevant material. Workers receive a bounded
 assignment and selected predecessor references; they do not routinely read every
 report. After context loss, either role can retrieve the required source pages.
 
+The coordinator records and restores the user's response language independently
+of English internal reports and assignments. Progress updates, questions and final
+answers follow the user's own prose or explicit response-language preference;
+forwarded agent messages and recovery summaries do not change it. Requested product
+language and exact source text remain intact. Workers deliver a published report's
+compact handoff once through their native final response, without a duplicate
+cross-task message.
+
 Reports record the source revision and checked artifact versions on which their
 findings depend. A later message or observed file change signals possible stale
 evidence. The coordinator decides what needs reconciliation or another check;

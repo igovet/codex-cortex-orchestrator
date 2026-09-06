@@ -164,7 +164,8 @@ unless the user changes scope.
 
 After a successful report publication, return its identifier and compact handoff in
 the worker's native final response; the collaboration API delivers that response to
-the native parent automatically, so no handoff-tool lookup is needed. Only an
+the native parent automatically. Do not send or duplicate this handoff through
+cross-task messaging tools, and do not look up a separate handoff tool. Only an
 explicit native follow-up assignment authorizes another turn. A continuation of the
 same role may reuse retained instructions and evidence after checking new
 requirements and artifact revisions. A verifier may clarify or extend its own

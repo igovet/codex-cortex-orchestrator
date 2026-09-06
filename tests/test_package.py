@@ -613,7 +613,7 @@ def test_native_instruction_boundaries_cover_observed_live_failures():
     communication=(PLUGIN/'skills/coordinator-communication/SKILL.md').read_text()
     discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
     publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
-    assert "language of their latest own prose" in coordinator
+    assert "language of the user's latest own prose" in coordinator
     assert "user's latest own prose" in communication
     assert 'Reuse retained results while relevant state is unchanged.' in discipline
     assert 'Re-read after user steering' in discipline

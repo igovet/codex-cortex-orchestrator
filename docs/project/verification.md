@@ -1,5 +1,27 @@
 # Verification
 
+## Response language and native handoff source evidence
+
+Candidate `1.15.6+codex.sha256.cc594f16f07f34cf` preserves version 1.15.6, the seven
+MCP operations and 22 profiles. The coordinator's language guidance now covers
+updates, questions, final answers and recovery, while distinguishing the user's
+own prose from English reports and forwarded agent messages. The shared worker
+protocol explicitly keeps result delivery in the native final response.
+
+Stamp, package validation and source-only sync passed sequentially. All 27 package
+tests passed; the complete suite passed **241 tests in 10.79 seconds**. All 25
+changed skills passed skill validation, and the 22 generated worker skills and
+TOML profiles match their shared source. Live language checks use a Russian product
+request for an English README, with ordinary worker reporting and native delivery.
+This checks observable response language rather than inferring behavior from a
+prompt-text assertion. See [release readiness](../release-readiness.md) for host
+outcomes and retained failed attempts. All four language/handoff scenarios passed,
+with one native worker result and no cross-task message per run. Individual CLI and
+Desktop audits passed, but a consecutive successful pair remains unverified because
+the other runs retained unrelated status-probe and patch-construction failures.
+Forced compaction, explicit response-language switching and an exhaustive set of
+languages were not exercised by these focused scenarios.
+
 ## Project-local storage source evidence
 
 Candidate `1.15.6+codex.sha256.4b26dcd06eb65e14` passed stamp, package validation,

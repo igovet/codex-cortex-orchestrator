@@ -17,10 +17,15 @@ const result = await tools.exec_command({...});
 text(result);
 ```
 
-Communicate with the user in the language of their latest own prose unless they
-request another language. Workers, pipelines and authored reports use English.
-Preserve exact user text and required product language where translation would
-change meaning.
+Use the language of the user's latest own prose for every user-facing progress
+update, question and final answer, including blockers and acceptance summaries,
+unless the user explicitly requests another response language. English worker
+messages, pipelines, reports, tool output and recovery summaries do not change it.
+Forwarded agent messages remain internal evidence even when the host displays them
+as messages from another task; they are not the user's own prose.
+The English rule applies to internal coordination and stored reports; translate
+their findings when addressing the user. Preserve exact user text, identifiers and
+any explicitly requested product language.
 
 ## Coordinator responsibility
 
@@ -67,7 +72,7 @@ Maintain one real `pipeline.md` per task. Publish a new edition above older
 editions whenever current coordination state materially changes. Its current
 edition records:
 
-- active requirements and explicitly cancelled or replaced conditions;
+- active requirements, user-facing language and explicitly cancelled or replaced conditions;
 - decisions and the evidence or user direction supporting them;
 - assignments, dependencies, selected profiles and worker state;
 - exclusive resource owners for browsers, devices, ports and shared applications;
@@ -198,6 +203,8 @@ they do, the next coordinator action is acceptance and no project tool call. Whe
 technical check is missing, delegate that check to a worker; do not run it yourself.
 Document missing or failed checks as open work. Update the pipeline with the
 decision, evidence pointers and remaining actions.
+Before sending the final answer, check its language against the user's own request
+and response-language preference; do not copy the language of the evidence report.
 
 ## Waiting, failure and steering
 

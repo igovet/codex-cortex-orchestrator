@@ -1,4 +1,58 @@
-# Project-local SQLite candidate — CLI/Desktop qualification passed
+# Response language and native handoff — focused checks passed
+
+Candidate `1.15.6+codex.sha256.cc594f16f07f34cf` preserves semantic version 1.15.6,
+seven MCP operations and all 22 specialist profiles. Its full payload SHA-256 is
+`cc594f16f07f34cf537fb0b30854569c6b54c0e4568d88895aab52822f94cb88`; the unchanged catalogue
+digest is `f84b501e716b3990ba8308c428608061534b2dbc7a68d9dff177bf12b866be66`.
+
+The guidance separates the user's response language from English internal reports,
+forwarded agent messages and requested product language. It carries that choice
+through progress, final answers and context recovery. The shared worker protocol
+explicitly returns results through the native final response without a duplicate
+cross-task message. Runtime storage and tool contracts are unchanged.
+
+Stamp, package validation, source-only sync, 27 package tests and the complete
+**241-test suite (10.79 seconds)** passed sequentially. All 25 changed skills passed
+skill validation; generated profiles match their shared source. Documentation links
+and `git diff --check` passed.
+
+Four ordinary real-host runs on the same unchanged payload used Russian requests
+for English README documentation. All 15 coordinator messages, including four final
+answers, remained Russian. Every worker returned one English native final response;
+no run called cross-task messaging tools. Each executable example and protected-file
+hash check passed. Report hashes, SQLite integrity and the single pipeline were
+checked independently. Coordinators used Luna/high; workers used Luna/medium except
+the second CLI worker, which used Luna/high.
+
+**Strict consecutive CLI/Desktop qualification remains unverified.** Two individual
+audits passed, but the execution order below did not produce a consecutive successful
+pair. The failed runs remain part of the evidence; this focused change does not claim
+to fix unrelated waiting or patch-construction behavior.
+
+| Run order | Host calls | Recorded MCP events | Recorded hook actions | Total tokens | Native task seconds | Strict audit |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| CLI 1 | 72 | 12 | 32 | 965,895 | 211.468 | Passed; recovered missing-README read retained |
+| Desktop 1 | 86 | 13 | 34 | 1,619,133 | 261.287 | Rejected: wrapper syntax, draft patch and status probe |
+| Desktop 2 | 63 | 13 | 28 | 1,088,293 | 205.291 | Passed |
+| CLI 2 | 75 | 13 | 32 | 1,181,720 | 236.629 | Rejected: status probe after wait |
+
+The first Desktop run also produced overbroad wording about missing value fields;
+its successful example does not establish complete documentation accuracy. Its final
+usage was read after completion; event counts describe the retained audit snapshot.
+The second Desktop audit had no tool errors, policy flags, truncation or open
+sessions. The second CLI audit had no tool errors but retained its coordinator's
+unnecessary status probe; manual review also found an unnecessary catalogue lookup
+after the worker had supplied a report reference.
+
+Complete current call/event tails and audits were retained before session shutdown.
+CLI exit-zero markers were captured, and only the owned CLI/Desktop sessions and
+temporary observation streams were removed. Real Desktop used disposable profiles
+and exact-window submission receipts. Its X11 desktop-property warning did not
+prevent submission. The stable plugin, configuration and user task were not changed.
+Forced compaction, explicit response-language switching and exhaustive multilingual
+coverage were not exercised by these focused scenarios.
+
+## Previous project-local SQLite candidate — CLI/Desktop qualification passed
 
 Candidate `1.15.6+codex.sha256.4b26dcd06eb65e14` preserves semantic version 1.15.6,
 seven MCP operations and all 22 specialist profiles. The full payload SHA-256 is

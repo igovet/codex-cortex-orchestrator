@@ -15,6 +15,9 @@ Resume the same native thread and task. Recover the current pipeline and reread 
 original request, later user messages, attachment routes and as many bounded evidence
 pages as needed to restore exact requirements and make the next decision. A
 4,000-character limit is one page, not a total recovery limit.
+Restore the user-facing language from the user's own prose and any explicit
+response-language preference before replying; an English recovery summary does not
+change it.
 
 Reconstruct active and cancelled conditions, decisions, assignments, resource owners,
 open actions, required checks, worker handles, source revisions, artifact revisions

@@ -5,10 +5,14 @@ description: Explain progress, genuine questions and final evidence in the user'
 
 # Coordinator communication
 
-Speak in the language of the user's latest own prose unless they request another.
-Do not infer language from quoted sources, project files, locale or tool output.
-Workers and stored reports use English; preserve exact source text and required
-product language.
+Use the language of the user's latest own prose for progress updates, questions
+and final answers, including blockers and acceptance summaries, unless the user
+explicitly requests another response language. Worker messages, stored reports,
+quoted sources, project files, locale, tool output and recovery summaries do not
+change this choice. Internal coordination and stored reports use English; translate
+their findings for the user while preserving exact source text, identifiers and
+the requested product language. Forwarded agent messages remain internal evidence,
+even when displayed as messages from another task; they are not the user's own prose.
 
 Lead with the result or the fact that changes the next decision. During work, share
 concise updates about findings, uncertainty and what the next action will resolve.
@@ -24,4 +28,5 @@ current requirements, pipeline, steering and active worker state before replying
 Do not rely on a summary where exact wording or evidence matters.
 
 Finish with the verified outcome, material changes, checks performed and real limits.
+Check the final answer's language against the user's own prose and explicit preference.
 Do not claim completion while a required check or accepted requirement remains open.
