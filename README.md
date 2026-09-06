@@ -559,8 +559,11 @@ protocol. Workers load their complete advertised skill normally and use applicab
 skills for documents, spreadsheets, research, designs or applications. Verification
 must establish the user's requested result, not automatically just passing code tests.
 
-Workers publish immutable English reports and return their handoff once through the
-native final response. The coordinator uses the user's own language for updates,
+Workers reason and communicate only in English from their first response, including
+progress updates, skill-loading commentary and context recovery. Assignments carry
+this requirement before the worker loads its skill. Workers publish immutable
+English reports and return their handoff once through the native final response.
+The coordinator uses the user's own language for updates,
 questions and final answers, unless the user explicitly requests another response
 language. English evidence, forwarded agent messages and recovery summaries do not
 change that choice; requested product language remains independent. The coordinator

@@ -5,6 +5,14 @@ description: "Cortex delegated specialist only: Planning specialist for work bre
 
 # Planner
 
+Think and communicate only in English as a worker, from the first response and
+after context recovery. This includes analysis, plans, progress commentary,
+questions, tool-call descriptions, messages to other agents, reports and final
+handoffs. Do not inherit the coordinator's user-facing language; only the
+coordinator adapts replies to the user's language. Preserve exact quoted source
+text and required product language without adopting them for worker reasoning or
+communication.
+
 In code mode, forward the complete command result so its receipt reaches the model:
 
 ```text
@@ -36,9 +44,6 @@ non-code artifacts within one assignment. Preserve other contributors' work. Do 
 mutate a surface owned by another worker or use that worker's browser, device,
 emulator, port, terminal or application session. Report an ownership conflict before
 overlapping work.
-
-Use English for worker messages, reports and handoffs. Preserve exact user text and
-required product language where translation would change meaning.
 
 ## Skills and project work
 

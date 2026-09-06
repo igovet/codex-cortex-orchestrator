@@ -1,4 +1,55 @@
-# Response language and native handoff — focused checks passed
+# English-only workers from the first response — focused checks passed
+
+Candidate `1.15.6+codex.sha256.879d600bfb9e3966` preserves semantic version 1.15.6,
+seven MCP operations and all 22 specialist profiles. Its full payload SHA-256 is
+`879d600bfb9e3966385113b754b8f27400e4a3f13603fc8b0c4e5b119355bbe2`; the catalogue
+digest remains `f84b501e716b3990ba8308c428608061534b2dbc7a68d9dff177bf12b866be66`.
+
+The shared worker guidance now requires English for reasoning and every
+communication phase, including initial skill-loading commentary, progress,
+questions, handoffs and recovery. Assignments state the rule before skill loading.
+Only the coordinator follows the user's response language. Exact quoted source
+text and required product language remain intact. Runtime code, tool schemas and
+specialist routing are unchanged.
+
+Stamp, package validation, source-only sync, 27 package tests and the complete
+**241-test suite (10.82 seconds)** passed sequentially. All 24 changed skills passed
+validation; generated profiles match their shared source. Documentation links and
+`git diff --check` passed.
+
+Two ordinary real-host scenarios used Russian requests for short English README
+documentation on this unchanged payload. All nine worker messages were English,
+including the first commentary before any tool call in each run. All seven
+coordinator messages were Russian. Each worker published one report and delivered
+one native result, with no cross-task message. The README examples printed `12`
+and `7`; protected-file hashes, report hashes, SQLite integrity and the single
+physical pipeline passed independent checks. Coordinators used Luna/high; the CLI
+worker used Luna/high and the Desktop worker used Luna/medium.
+
+| Host | Host calls | MCP events | Hook actions | Worker messages | Coordinator messages | Total tokens | Native task seconds | Audit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| CLI | 65 | 13 | 30 | 6 English | 4 Russian | 1,005,464 | 254.836 | Report-reference flag retained |
+| Desktop | 66 | 13 | 31 | 3 English | 3 Russian | 1,055,264 | 214.416 | Passed |
+
+**Strict consecutive CLI/Desktop qualification remains unverified.** The CLI audit
+reported `worker_final_with_unobserved_report` because the handoff cited both its
+published worker report and the coordinator's predecessor pipeline. The retained
+publication receipts confirm both references; the audit requires every extracted
+report reference to belong to the worker. The flag was preserved rather than
+treated as a clean audit. Manual review also retained an unnecessary CLI catalogue
+lookup and no-op Git comparison. These observer and call-economy issues are outside
+this language change. Desktop's audit had no errors, policy flags, truncation or
+open sessions.
+
+Complete current calls, events and audits were retained before shutdown. The CLI
+exit-zero marker was captured; only the owned CLI/Desktop sessions and temporary
+observation streams were removed. Desktop used a disposable profile and an exact
+submission receipt; its X11 desktop-property warning did not prevent submission.
+The stable plugin, user configuration and referenced user task were not changed.
+The live checks establish observable message language; forced compaction and
+unexposed internal reasoning were not verified.
+
+## Previous response language and native handoff — focused checks passed
 
 Candidate `1.15.6+codex.sha256.cc594f16f07f34cf` preserves semantic version 1.15.6,
 seven MCP operations and all 22 specialist profiles. Its full payload SHA-256 is

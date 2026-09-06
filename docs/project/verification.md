@@ -1,5 +1,27 @@
 # Verification
 
+## Worker language from the first response
+
+Candidate `1.15.6+codex.sha256.879d600bfb9e3966` requires English-only worker
+reasoning and communication from the first response, including commentary before
+skill loading and after context recovery. Assignments carry that requirement;
+the coordinator's user-facing language rule is explicitly scoped to its own role.
+The shared source generates all 22 worker skills and TOML profiles.
+
+Stamp, package validation, source-only sync, 27 package tests and the complete
+**241-test suite (10.82 seconds)** passed sequentially. All 24 changed skills
+passed skill validation, and generated profiles match their source.
+
+One real CLI and one real Desktop scenario used the same unchanged payload and a
+Russian request for English documentation. All nine worker messages were English,
+including both initial messages before any tool call; all seven coordinator
+messages were Russian. Each native result was delivered once. Both examples,
+protected-file hashes and archive integrity checks passed. Desktop's audit passed;
+CLI retained a report-reference audit flag, so strict consecutive qualification
+remains unverified. See [release readiness](../release-readiness.md) for the
+flag's evidence and the limits of these focused checks. Forced compaction and
+unexposed internal reasoning were not verified by the message-language checks.
+
 ## Response language and native handoff source evidence
 
 Candidate `1.15.6+codex.sha256.cc594f16f07f34cf` preserves version 1.15.6, the seven

@@ -17,7 +17,9 @@ The coordinator records and restores the user's response language independently
 of English internal reports and assignments. Progress updates, questions and final
 answers follow the user's own prose or explicit response-language preference;
 forwarded agent messages and recovery summaries do not change it. Requested product
-language and exact source text remain intact. Workers deliver a published report's
+language and exact source text remain intact. All worker reasoning and communication
+use English from the first response, including skill-loading commentary and context
+recovery; assignments state this before skill loading. Workers deliver a published report's
 compact handoff once through their native final response, without a duplicate
 cross-task message.
 

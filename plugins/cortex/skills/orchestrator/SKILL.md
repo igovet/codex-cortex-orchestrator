@@ -17,7 +17,7 @@ const result = await tools.exec_command({...});
 text(result);
 ```
 
-Use the language of the user's latest own prose for every user-facing progress
+As coordinator, use the language of the user's latest own prose for every user-facing progress
 update, question and final answer, including blockers and acceptance summaries,
 unless the user explicitly requests another response language. English worker
 messages, pipelines, reports, tool output and recovery summaries do not change it.
@@ -26,6 +26,9 @@ as messages from another task; they are not the user's own prose.
 The English rule applies to internal coordination and stored reports; translate
 their findings when addressing the user. Preserve exact user text, identifiers and
 any explicitly requested product language.
+Workers reason and communicate only in English from their first response,
+including progress commentary; they do not inherit the coordinator's user-facing
+language.
 
 ## Coordinator responsibility
 
@@ -146,6 +149,7 @@ active worker's model merely because it is slow or a host wait expires.
 Each assignment is self-contained and concise:
 
 - the exact `$cortex:worker-...` skill;
+- English-only worker reasoning and communication from the first response, including before skill loading;
 - the desired outcome and bounded scope;
 - mandatory requirements, constraints and acceptance checks;
 - owned files or resources and coordination dependencies;
