@@ -282,6 +282,14 @@ def test_capacity_failure_is_an_error_and_interrupt_is_not_release():
     assert 'coordinator_spawn_retry_without_capacity_change' not in flags([failed,closed,failed])
 
 
+def test_internal_status_observation_after_wait_is_not_thread_messaging():
+    wait=row('wait_agent','parent','coordinator')
+    status=row('list_agents','parent','coordinator')
+    assert flags([wait,status])==set()
+    worker_message=row('send_message_to_thread','worker','general',parent_thread_id='parent')
+    assert 'forbidden_worker_app_thread_message' in flags([wait,status,worker_message])
+
+
 def test_completed_worker_gets_followup_not_queue_only_message():
     message=row('send_message','parent','coordinator',target_thread_id='worker')
     assert 'coordinator_message_to_completed_worker' in flags(published()+[message])

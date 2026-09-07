@@ -55,6 +55,17 @@ def project_store(workdir):
     return project/'.codex/cortex/cortex.sqlite3'
 
 
+def ensure_git_workspace(workdir):
+    """Give each disposable CLI scenario the repository shape workers expect."""
+    if not (workdir/'.git').exists():
+        subprocess.run(['git','init'],cwd=workdir,check=True,
+                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    subprocess.run(['git','config','user.name','Cortex Live Test'],cwd=workdir,check=True,
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    subprocess.run(['git','config','user.email','cortex-live-test@example.invalid'],cwd=workdir,check=True,
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
+
 def resumed_project_store(workdir,previous):
     """Verify retained state without guessing at or moving an obsolete store."""
     expected=project_store(workdir)
@@ -104,6 +115,7 @@ def start(args):
         raise RuntimeError('Exact smoke session already exists; stop it explicitly first')
     workdir=args.workdir.resolve(strict=True)
     if not workdir.is_dir():raise RuntimeError('Workdir must be a directory')
+    ensure_git_workspace(workdir)
     if args.resume_last:
         try:previous=json.loads((STATE/'last.json').read_text())
         except (OSError,ValueError):raise RuntimeError('saved smoke state is unavailable or invalid') from None
@@ -139,7 +151,8 @@ def start(args):
     if effort:command+=['-c','model_reasoning_effort='+effort]
     command+=['-c','agents.default_subagent_model='+json.dumps(LIVE_MODEL),
               '-c','developer_instructions='+json.dumps(LIVE_DEVELOPER_INSTRUCTIONS)]
-    command+=['-c','features.multi_agent_v2=true','-c','features.apps=false',
+    command+=['-c','features.multi_agent_v2=true','-c',
+              'features.apps='+('true' if args.apps_enabled else 'false'),
               '-c','mcp_servers.codebase_memory.enabled='+('true' if graph_enabled else 'false'),
               '-c','mcp_servers.node_repl.enabled=false',
               '-c','sandbox_workspace_write.network_access=true']
@@ -151,7 +164,7 @@ def start(args):
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
-    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'))
+    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'));s.add_argument('--apps-enabled',action='store_true',help='Enable app tooling for an isolated capability probe')
     s=sub.add_parser('send');s.add_argument('--prompt-file',type=Path,required=True)
     sub.add_parser('enter');sub.add_parser('status');sub.add_parser('audit')
     for name in ['capture','events','hooks']:
@@ -168,6 +181,10 @@ def main():
         if not data.get('resumed') and not data.get('original_request_sha256'):
             observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
             data['original_request_sha256']=observer['original_request_digest'](prompt)
+            # CLI native archives retain the separator newline after the
+            # orchestrator token. Reuse the verified delivery provenance path
+            # so that exact archive bytes are accepted without accepting edits.
+            data['desktop_editor_source_sha256']=observer['original_request_digest'](prompt)
             save(data)
         before=user_prompt_receipts(data,prompt)
         buffer=SESSION+'-prompt'

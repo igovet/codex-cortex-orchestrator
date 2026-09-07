@@ -148,6 +148,35 @@ def patch_event(root, command, **extra):
     return event(root, "PreToolUse", tool_name="apply_patch", tool_use_id="patch-call", tool_input={"command": command}, **extra)
 
 
+@pytest.mark.parametrize("tool_name", ["mcp__codex_app__send_message_to_thread", "send_message_to_thread"])
+def test_app_thread_message_tools_are_denied_before_dispatch(active, tool_name):
+    _, _, handler, root = active
+    blocked = handler.handle(event(root, "PreToolUse", tool_name=tool_name,
+                                  tool_use_id="message-call", tool_input={"threadId": "target", "prompt": "blocked"}))
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "before dispatch" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
+    assert handler.observation["outcome"] == "denied"
+
+
+@pytest.mark.parametrize("tool_name", ["Bash", "exec_command", "write_stdin", "read_file", "write_file"])
+def test_explicit_coordinator_identity_denies_project_host_tools_before_dispatch(active, tool_name):
+    _, _, handler, root = active
+    blocked = handler.handle(event(root, "PreToolUse", tool_name=tool_name,
+                                  tool_use_id="coordinator-call", agent_id="parent",
+                                  tool_input={"cmd": "pytest -q"}))
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "delegated to a native worker" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
+    assert handler.observation["role"] == "coordinator"
+    assert handler.observation["outcome"] == "denied"
+
+
+def test_recovery_reminds_coordinator_of_project_boundary(active):
+    _, _, handler, root = active
+    result = handler.handle(event(root, "SessionStart", source="compact"))
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "delegate every project-target read, edit, hash and verification" in context
+
+
 def test_patch_mentions_in_content_do_not_block_but_registered_mutation_does(active):
     store, storage, handler, root = active
     with store.connection() as db:

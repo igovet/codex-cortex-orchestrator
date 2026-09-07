@@ -1,13 +1,84 @@
 # Verification
 
+## Coordinator project-access enforcement — 2026-09-07
+
+Recovery context now repeats the mandatory project-access boundary so compaction
+cannot silently drop it. The hook accepts explicit coordinator identity when a host
+repeats the bound parent session on a tool event and denies known command/file tools
+before dispatch. Applying the same denial to an event without `agent_id` would also
+block native workers sharing the parent session, so those events remain observable
+and the audit rejects coordinator project access. Focused hook coverage exercises
+the explicit denial and recovery reminder.
+
+## Coordinator request-key runtime safety — 2026-09-07
+
+Coordinator instructions now require literal UUID or stable literal `request_key`
+values for Cortex calls that need a key and prohibit runtime generators such as
+`crypto.randomUUID()` inside `functions.exec` wrappers. This closes the observed
+failure where an unavailable host global raised before `create_task` reached the
+server, leaving missing receipt and server-event audit records. Package validation
+and the focused package regression assert that the orchestrator and pipeline
+publication guidance retain this rule. Fresh CLI/Desktop qualification is separate
+host evidence and remains required after the source stamp.
+
+Worker publication guidance also requires the live `template` argument on the
+initial `create_draft` call, using `general` for ordinary reports; empty argument
+objects are invalid and are covered by the package regression.
+
+## Coordinator project-access boundary — 2026-09-07
+
+The rejected revision-8 CLI run recorded two `coordinator_forbidden_tool`
+violations: coordinator `functions.exec` wrappers ran `sed` after task creation,
+once before worker dispatch and once during post-report verification. The worker
+completed its file mutation and report successfully, but the audit correctly
+failed the run. The coordinator skill now requires dispatching a worker before any
+project-target read, edit, hash or verification, including trivial one-file and
+byte-for-byte requests. Package regression coverage asserts the guidance. The
+coordinator may still read user-supplied sources and edit the exact Cortex-issued
+pipeline draft; it must use worker receipts for project evidence.
+
+## Worker app-message boundary — 2026-09-07
+
+The previous protection was instruction-only: generated worker profiles prohibited
+`codex_app.send_message_to_thread`, but the host still exposed that connector and
+the observer did not classify the observed worker call. The live observer now marks
+direct, quoted-bracket and simple static-alias `send_message_to_thread` calls,
+including known `codex_app`/`functions.exec` wrappers, as
+`forbidden_worker_app_thread_message`; orchestration audits fail when the route is
+observed. This is bounded static inspection, not exhaustive JavaScript evaluation.
+The bundled `PreToolUse` hook now also denies the canonical MCP operation and its
+direct alias before dispatch for every active Cortex task. This is a precise
+task-wide block because the documented tool event may not identify a worker; it does
+not claim to revoke the connector outside an active task.
+The installed Desktop provider is injected dynamically as the `codex_app` MCP
+server. The candidate `[mcp_servers.codex_app] disabled_tools=["send_message_to_thread"]`
+override fails bootstrap with `invalid transport`; the launcher does not claim a
+per-tool filter or shadow the provider. The shared worker protocol treats the
+boundary as hard and directs a worker to report an unavailable native channel in
+its native result.
+
+Package policy coverage passed 27 tests and coordination observer coverage passed
+16 tests after the change. The full suite passed 253 tests. The same isolated candidate was
+exercised in both required hosts: the CLI and Desktop capability probes observed no
+forbidden worker app-message route, and the native worker catalogues omitted both
+exact app-message names. The ordinary CLI and Desktop acceptance audits completed
+native reports but failed on coordinator policy violations; those nonzero outcomes
+remain part of the evidence and do not constitute clean acceptance. Full details
+are retained in the worker app-message verification checkpoint report.
+Internal native lifecycle/status observations remain permitted after a wait because
+they do not write a worker message into the app thread; the audit's forbidden route
+classification applies to thread-visible app messaging. The CLI helper now retains
+the exact native archive provenance marker needed to accept its separator newline
+without accepting changed request text.
+
 ## Current worker-model policy
 
 The coordinator route is now explicit: Luna is the default/priority model for
 ordinary work and all research, exploration and analysis assignments; Terra is
-reserved for complex work and stronger reviews; Sol is limited to narrow
+reserved for complex work; Sol is limited to narrow
 security-analysis microtasks and never security implementation. Worker effort is
-medium/high/xhigh/max for Luna and Terra, and medium/high/xhigh for Sol. Reviews
-record the inspected implementation model/effort and escalate as required. Other
+medium/high/xhigh for Terra and Sol. Reviews record the inspected implementation
+model/effort when relevant and do not automatically escalate. Other
 models or efforts remain disallowed unless directly requested by the user, whose
 override is preserved. The isolated observer's `worker_model_policy` checks these
 routes from observed assignment/participant metadata.
@@ -230,6 +301,10 @@ exact session. CLI smoke runs derive the store from the canonical workdir at
 mismatched store. `stop` preserves the store for resume and removes only the
 session and observation streams. Confirm the existing task, selective report
 recovery and no replacement task creation.
+Both live helpers initialize an empty workdir with `git init` before launching.
+This gives delegated workers the expected repository shape; a worker Git probe
+that would fail without `.git` remains advisory observer noise rather than a
+coordinator-boundary violation.
 Finish by stopping the exact session; after failure use `stop --interrupt`.
 Never kill the tmux server or use `codex exec` as native evidence.
 

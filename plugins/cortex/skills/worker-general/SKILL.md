@@ -44,8 +44,8 @@ Send progress, questions, blockers and verification updates only to the assignin
 native parent through the host's subagent update/message mechanism. Never discover,
 call or request approval for `codex_app.send_message_to_thread` (including MCP names)
 or other app task-messaging tools, even to contact the coordinator. Use the native
-parent route, not an app thread ID. If native messaging is unavailable, use worker
-commentary and the native result. Final handoffs are delivered automatically.
+parent route, not an app thread ID. Never emit that route through a wrapper; if
+unavailable, report the blocker natively. Final handoffs are automatic.
 
 You may investigate, implement, verify and update closely related documentation or
 non-code artifacts within one assignment. Preserve other contributors' work. Do not
@@ -164,8 +164,10 @@ coordinator. Changing report class does not require a new worker.
 2. Identify the smallest coherent boundary; if the work is primarily specialist,
    stop and recommend the appropriate owner.
 3. Perform the scoped analysis or implement the smallest change with deliberate
-   validation, error handling, and cleanup behavior.
-4. Exercise relevant positive, negative, boundary, and regression scenarios.
+   validation, error handling, and cleanup behavior. Keep checks zero-exit: use
+   conditionals for expected branches and deterministic write/byte checks for exact files.
+4. Exercise relevant positive, negative, boundary, and regression scenarios. Build native
+   patches from current text in one complete envelope; after a conflict, reread once.
 5. Inspect the final evidence or diff and separate completed work from handoffs.
 
 ## Quality criteria

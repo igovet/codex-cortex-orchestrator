@@ -35,15 +35,13 @@ WORKER_MODEL_CHOICES={
     'research': {'gpt-5.6-luna'},
     'exploration': {'gpt-5.6-luna'},
     'analysis': {'gpt-5.6-luna'},
-    'review': {'gpt-5.6-terra'},
     'security-implementation': {'gpt-5.6-luna','gpt-5.6-terra'},
 }
 WORKER_EFFORTS={
     'gpt-5.6-luna': {'medium','high','xhigh','max'},
-    'gpt-5.6-terra': {'medium','high','xhigh','max'},
+    'gpt-5.6-terra': {'medium','high','xhigh'},
     'gpt-5.6-sol': {'medium','high','xhigh'},
 }
-EFFORT_ORDER=('medium','high','xhigh','max')
 ADVISORY_POLICY_FLAGS={
     'unsafe_cortex_draft_template_literal','insufficient_diagnostic_output_budget',
     'worker_project_tool_before_cortex_bootstrap','worker_report_catalogue_in_fresh_thread',
@@ -52,6 +50,9 @@ ADVISORY_POLICY_FLAGS={
     'browser_before_local_url_ready','batched_browser_mutations',
     'forbidden_browser_tab_attachment','repeated_browser_tab_creation',
     'browser_origin_switch','browser_origin_not_http_verified',
+    # A worker may probe Git before the live harness has a repository. This is
+    # environmental noise, not a delegation or coordinator-boundary failure.
+    'git_command_without_git_workspace',
 }
 LIVE_DEVELOPER_INSTRUCTIONS=(
     'This is an isolated Cortex live-development test. The coordinator must use '
@@ -91,6 +92,13 @@ def worker_model_policy(model,effort,task_class='ordinary',explicit_user_overrid
         'microtask':'security-analysis-microtask',
     }
     task_class=aliases.get(task_class,task_class)
+    # Review is evidence provenance, not a model route. A review must carry
+    # the ordinary/complex/security classification that determines its model;
+    # the legacy label remains accepted as the ordinary default for bounded
+    # audit compatibility and never derives a stronger route from the inspected
+    # implementation.
+    if task_class=='review':
+        task_class='ordinary'
     choices=WORKER_MODEL_CHOICES.get(task_class)
     errors=[]
     if choices is None:
@@ -107,23 +115,6 @@ def worker_model_policy(model,effort,task_class='ordinary',explicit_user_overrid
         errors.append('worker_model_policy_violation')
     elif model not in WORKER_EFFORTS and effort is not None:
         errors.append('worker_model_policy_violation')
-    if task_class=='review' and not errors:
-        if (implementation_model not in {'gpt-5.6-luna','gpt-5.6-terra'}
-                or implementation_effort not in WORKER_EFFORTS.get(implementation_model,set())):
-            errors.append('worker_model_policy_violation')
-        elif implementation_model=='gpt-5.6-luna':
-            if model!='gpt-5.6-terra':
-                errors.append('worker_model_policy_violation')
-        elif implementation_model=='gpt-5.6-terra':
-            if model!='gpt-5.6-terra':
-                errors.append('worker_model_policy_violation')
-            elif implementation_effort not in EFFORT_ORDER or effort not in EFFORT_ORDER:
-                errors.append('worker_model_policy_violation')
-            elif (EFFORT_ORDER.index(implementation_effort)<len(EFFORT_ORDER)-1
-                  and EFFORT_ORDER.index(effort)<=EFFORT_ORDER.index(implementation_effort)):
-                errors.append('worker_model_policy_violation')
-        else:
-            errors.append('worker_model_policy_violation')
     return errors
 
 
@@ -138,6 +129,17 @@ def project_store(workdir):
     if not project.is_absolute() or not project.is_dir() or project.resolve(strict=True)!=project:
         raise RuntimeError('workdir must be an absolute existing canonical project directory')
     return project/'.codex/cortex/cortex.sqlite3'
+
+
+def ensure_git_workspace(workdir):
+    """Give each disposable Desktop scenario the repository shape workers expect."""
+    if not (workdir/'.git').exists():
+        subprocess.run(['git','init'],cwd=workdir,check=True,
+                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    subprocess.run(['git','config','user.name','Cortex Live Test'],cwd=workdir,check=True,
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    subprocess.run(['git','config','user.email','cortex-live-test@example.invalid'],cwd=workdir,check=True,
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 
 def live_test_config(source):
@@ -436,11 +438,30 @@ def raw_command_family(source):
 
 
 def nested_tool_invocations(source):
-    """Extract literal tools.NAME(...) calls and each call's own argument digest."""
+    """Extract statically visible tool calls and their argument digests.
+
+    This intentionally covers direct member calls, quoted bracket members and
+    simple const/let/var aliases. It does not claim to evaluate arbitrary
+    JavaScript or dynamic property construction.
+    """
     matches=[]
-    pattern=re.compile(r'\btools\.([A-Za-z0-9_]+)\s*\(')
-    for found in pattern.finditer(source):
-        index=found.end();depth=1;quote=None;escaped=False
+    direct_member=r'tools(?:\.([A-Za-z0-9_]+)|\[\s*(["\'])([A-Za-z0-9_]+)\2\s*\])'
+    alias_member=r'tools(?:\.([A-Za-z0-9_]+)|\[\s*(["\'])([A-Za-z0-9_]+)\3\s*\])'
+    direct=re.compile(r'\b'+direct_member+r'\s*\(')
+    aliases={}
+    alias_pattern=re.compile(r'\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*'+alias_member+r'\s*;?')
+    for found in alias_pattern.finditer(source):
+        name=found.group(2) or found.group(4)
+        if name:aliases[found.group(1)]=name
+    calls=[]
+    for found in direct.finditer(source):
+        calls.append((found.start(),found.end(),found.group(1) or found.group(3)))
+    if aliases:
+        alias_calls=re.compile(r'\b('+'|'.join(re.escape(name) for name in aliases)+r')\s*\(')
+        calls.extend((found.start(),found.end(),aliases[found.group(1)])
+                     for found in alias_calls.finditer(source))
+    for _,end,name in sorted(calls):
+        index=end;depth=1;quote=None;escaped=False
         while index<len(source) and depth:
             char=source[index]
             if quote:
@@ -451,8 +472,8 @@ def nested_tool_invocations(source):
             elif char=='(':depth+=1
             elif char==')':depth-=1
             index+=1
-        arguments=source[found.end():index-1] if depth==0 else source[found.end():]
-        matches.append((found.group(1),hashlib.sha256(arguments.encode()).hexdigest()[:12],arguments))
+        arguments=source[end:index-1] if depth==0 else source[end:]
+        matches.append((name,hashlib.sha256(arguments.encode()).hexdigest()[:12],arguments))
     return matches
 
 
@@ -918,6 +939,16 @@ def call_policy_flags(tool,arguments,role,workdir):
         flags.append('forbidden_plugin_or_cache_access')
     if tool=='apply_patch' and 'Delete File' in arguments and '/.cortex/' in normalized:
         flags.append('forbidden_cortex_draft_deletion')
+    # Native worker updates are delivered automatically by the parent/subagent
+    # channel. The host may expose app connectors globally, so detect an app
+    # task-message route at the observed call boundary and fail the live audit
+    # closed instead of treating the call as ordinary worker tooling.
+    app_message_route = (
+        tool in {'send_message_to_thread', 'mcp__codex_app__send_message_to_thread'}
+        or (tool == 'send_message_to_thread' and role not in {'coordinator', 'runtime'})
+    )
+    if role not in {'coordinator', 'runtime'} and app_message_route:
+        flags.append('forbidden_worker_app_thread_message')
     verification_roles={'accessibility_auditor','build_verification','code_reviewer','qa_engineer'}
     if (tool=='exec_command' and role in verification_roles
             and re.search(r'(?<![A-Za-z0-9_.-])(?:ps\s+-e|pgrep\b|lsof\b|netstat\b|ss\s+-)',arguments)):
@@ -931,10 +962,12 @@ def call_policy_flags(tool,arguments,role,workdir):
     if role=='coordinator':
         native_coordination={'spawn_agent','wait_agent','send_message','followup_task',
                              'list_agents','interrupt_agent','close_agent','tool_catalogue_search'}
-        pipeline_edit=tool=='apply_patch' and '/.cortex/pipeline-drafts/' in normalized
+        draft_edit=(tool=='apply_patch' and
+                    ('/.cortex/pipeline-drafts/' in normalized or
+                     '/.cortex/draft-reports/' in normalized))
         standard_skill=tool.startswith('skills__') or tool in {'skills_read','skills_list'}
         source_read=coordinator_source_read(tool,arguments)
-        if (tool not in native_coordination and not pipeline_edit and not standard_skill
+        if (tool not in native_coordination and not draft_edit and not standard_skill
                 and not instruction_read and not source_read
                 and not tool.startswith('mcp__cortex__')):
             flags.append('coordinator_forbidden_tool')
@@ -1101,8 +1134,11 @@ def observed_tool_calls(state):
                                 prior_assignments.append(dict(timestamp=entry['timestamp'],thread_id=child,
                                     tool='prior_final',report_ids=result.get('report_ids') or [result['report_id']]))
                         continue
-                if (thread['id']==state.get('thread_id') and payload.get('type')=='message'
-                        and payload.get('role')=='user' and state.get('desktop_editor_source_sha256')):
+                if ((thread['id']==state.get('thread_id')
+                     or (not state.get('thread_id') and not edges.get(thread['id'])))
+                        and payload.get('type')=='message'
+                        and payload.get('role')=='user'
+                        and state.get('desktop_editor_source_sha256')):
                     delivered='\n'.join(part.get('text','') for part in payload.get('content',[]) if isinstance(part,dict))
                     request_digests.update(delivered_request_digests(state,delivered))
                 item=payload.get('item') if payload.get('type')=='item_completed' else None
@@ -1419,6 +1455,16 @@ def classify_host_failures(rows):
             wrapper_error_intents[(row.get('thread_id'),row['result_digest'])]=row['intent_digest']
     later_success=set();later_family_success=set();later_tool_success=set();unresolved=[];resolved=[]
     for row in reversed(rows):
+        # functions.exec is a transport wrapper around the nested exec_command
+        # receipt. Its wrapper error is duplicate evidence when the nested host
+        # command is already recorded and classified below.
+        if (row.get('tool')=='functions.exec' and row.get('outcome')=='covered_by_nested'
+                and row.get('wrapper_outcome') in {'error','truncated','unverified','pending'}
+                and any(candidate.get('thread_id')==row.get('thread_id')
+                        and candidate.get('tool')=='exec_command'
+                        and candidate.get('result_digest')==row.get('result_digest')
+                        for candidate in rows)):
+            continue
         effective_outcome=row.get('outcome')
         # Covered wrapper rows remain useful for correlation, but their own transport
         # status must never disappear.  A nested call or host command succeeding does
@@ -1483,6 +1529,7 @@ def tool_error_history(rows):
 
 
 COORDINATION_TOOLS={'spawn_agent','wait_agent','send_message','followup_task',
+                    'send_message_to_thread','mcp__codex_app__send_message_to_thread',
                     'list_agents','interrupt_agent'}
 
 
@@ -1511,6 +1558,7 @@ def orchestration_policy_violations(violations):
     prefixes=('coordinator_','worker_final_','cortex_','mcp_','complex_planning_')
     exact={'forbidden_plugin_or_cache_access','forbidden_cortex_draft_deletion',
            'command_wrapper_missing_receipt',
+           'forbidden_worker_app_thread_message',
            'live_model_policy_violation',
            'worker_model_policy_violation',
            'worker_tool_after_successful_write_report','worker_draft_created_with_open_command_session',
@@ -1532,6 +1580,11 @@ def call_policy_violations(rows):
         role=row.get('role')
         tool=row.get('tool')
         model=row.get('model');effort=row.get('reasoning_effort')
+        if (role not in {'coordinator','runtime',None}
+                and tool in {'send_message_to_thread',
+                             'mcp__codex_app__send_message_to_thread'}
+                and 'forbidden_worker_app_thread_message' not in flags):
+            flags.append('forbidden_worker_app_thread_message')
         if role not in {'runtime',None}:
             if model is not None and model!=LIVE_MODEL:flags.append('live_model_policy_violation')
             if role=='coordinator' and effort is not None and effort!=LIVE_COORDINATOR_EFFORT:
@@ -1637,8 +1690,10 @@ def call_policy_violations(rows):
                     if thread in capacity_snapshot:
                         flags.append('coordinator_repeated_capacity_snapshot')
                     capacity_snapshot.add(thread)
-                elif thread in coordinator_waited:
-                    flags.append('coordinator_status_probe_after_wait')
+                # Native lifecycle/status observation is internal coordination
+                # and does not write a worker message into the app thread.
+                # Keep it legal after a wait; thread-visible worker messaging
+                # is audited separately by the app-route checks above.
             elif tool in {'send_message','followup_task'} and thread in coordinator_waited:
                 if reassigned:coordinator_waited.discard(thread)
                 elif (tool=='send_message'
@@ -1808,6 +1863,7 @@ def main():
         subprocess.run([str(ROOT/'scripts/cortex-dev'),'--prepare-only'],cwd=workdir,check=True)
         binary=Path(os.environ.get('CORTEX_DESKTOP_BINARY','/usr/bin/chatgpt')).resolve(strict=True)
         if not binary.is_file() or not os.access(binary,os.X_OK):raise RuntimeError('Actual Desktop executable unavailable')
+        ensure_git_workspace(workdir)
         profile=Path(tempfile.mkdtemp(prefix='profile-',dir=STATE));events=Path(tempfile.mkdtemp(prefix='events-',dir=STATE))
         prompt=None
         if args.prompt_file is not None:

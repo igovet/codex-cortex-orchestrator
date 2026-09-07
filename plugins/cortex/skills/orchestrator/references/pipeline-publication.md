@@ -9,6 +9,13 @@ first line as authoritative. Preserve the first line and following blank line.
 Replace each current-edition guidance marker once with concise English content; do
 not rewrite, rename, move or delete the draft.
 
+When a pipeline mutation schema requires `request_key`, pass a literal valid UUID or
+stable literal key directly in the tool arguments. Never construct it with
+`crypto.randomUUID()` or another assumed JavaScript global inside a
+`functions.exec` wrapper; the wrapper may fail before Cortex receives the call.
+Omit the key when the live contract permits the initial operation, and reuse the
+same literal key and unchanged arguments only for an exact retry.
+
 Edit only the exact pipeline draft path returned to this coordinator. Pass the exact
 patch intact to the native patch tool, directly or through a safe host wrapper, and
 inspect its complete receipt. An inert JavaScript string form is valid; executable
