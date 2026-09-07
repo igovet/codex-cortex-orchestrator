@@ -77,6 +77,21 @@ from that failure. Never promise that a plugin prompt repairs host residency or
 silently switch the user's native interface. Current named-candidate outcomes are
 recorded in [release readiness](../release-readiness.md).
 
+## Worker app-message boundary
+
+The worker protocol forbids app task messaging and requires progress, questions,
+blockers and final delivery to remain on the native parent/subagent route. The
+isolated observer classifies direct, quoted-bracket and simple static-alias worker
+`send_message_to_thread` calls, including known `functions.exec` wrappers, as
+forbidden orchestration outcomes, so CLI/Desktop qualification fails closed after
+observing the actual route. This is bounded static inspection, not exhaustive
+JavaScript evaluation. The installed Desktop provider is injected dynamically as the `codex_app` MCP
+server. The candidate `[mcp_servers.codex_app] disabled_tools=["send_message_to_thread"]`
+override fails bootstrap with `invalid transport`; the launcher therefore does
+not claim a per-tool filter or shadow the provider. This remains an audit boundary
+rather than host authorization: the plugin cannot hide or revoke an app connector
+supplied globally by Codex.
+
 ## Lifecycle hooks in the format 11 candidate
 
 The new payload includes a default hooks manifest and one local Python handler.

@@ -20,6 +20,8 @@ while hooks for different projects remain isolated.
 | PreCompact/PostCompact | Records observed compaction boundary | Their stdout is not the recovery context channel |
 | PostToolUse | Records selected statuses, exit/session receipts, truncation and change signals | Partial tool coverage; unknown actor remains session-scoped |
 | PreToolUse apply_patch | Checks actual parsed targets against registered Cortex files | Denies only established immutable-report/draft-integrity/ownership violations |
+| PreToolUse app-thread messaging | Denies `mcp__codex_app__send_message_to_thread` and its direct alias before dispatch for active Cortex tasks | Tool events may not identify a worker, so the exact denial is task-wide and does not revoke the connector outside Cortex |
+| PreToolUse coordinator project access | Denies known command/file tools when the host explicitly identifies the bound coordinator; records the boundary receipt | Tool events without `agent_id` remain session-scoped and cannot safely distinguish a native worker, so audits must reject observed coordinator violations |
 | SubagentStop/Stop | Diagnoses open drafts and missing saved publications | Advisory; reused assignment boundaries may be unavailable |
 | Interrupt/SessionEnd | Commits a short observed boundary receipt | Does not keep a session alive |
 
@@ -52,8 +54,9 @@ contradictory results never emit a completed file-change receipt.
 Patch parsing considers add/update/delete/move targets only. Content mentioning a
 protected path is not a mutation. Exact registered-file checks can protect another
 task's immutable report in the same canonical project without traversing task bodies
-or recovering unrelated tasks. Shell commands and unobserved editing routes are not
-covered by this hook.
+or recovering unrelated tasks. The app-message denial uses the documented MCP tool
+name and alias rather than parsing JavaScript. Shell commands and unobserved editing
+routes are not covered by this hook.
 
 Recovery output is bounded to about 1,000 tokens and repeated unchanged hints are
 suppressed. It links the pipeline and recent source references and lists bounded

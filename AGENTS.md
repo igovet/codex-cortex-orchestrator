@@ -40,6 +40,13 @@ Native test workers also use Luna, at medium or high effort; heavy models are
 prohibited in live CLI/Desktop tests. Keep this test policy in isolated launcher
 configuration, without changing stable user settings or general plugin routing.
 
+After any repository work, live-dev verification is mandatory in both real
+environments: run a focused CLI scenario and a focused Desktop scenario. CLI and
+Desktop are both required; neither substitutes for the other. Use the same
+unchanged isolated candidate and payload for consecutive CLI/Desktop parity
+qualification, and report either host as unavailable rather than treating the
+other host as a substitute.
+
 After a completed change run a focused ordinary interactive Codex live scenario.
 Use `./scripts/cortex-live-smoke start --workdir PATH` for the exact
 `cortex-markdown-smoke` session on the default tmux server. The helper creates bash,

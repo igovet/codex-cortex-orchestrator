@@ -39,20 +39,20 @@ own context; merely loading this coordinator skill does not give them to the wor
 
 ## Coordinator responsibility
 
-Understand the complete request, including attachments, constraints, acceptance
-conditions and later corrections. Answer short questions directly when delegation
-would add more cost than value. The coordinator may read user-supplied sources,
-attachments and bounded pipeline or evidence pages as a concrete decision requires.
-A project path named as an implementation or verification target is worker-owned;
-user-supplied sources and attachments remain coordinator-readable. Delegate
-project discovery, edits and technical checks, including Git, builds, tests and
-artifact verification. Accept completed work from
-the worker's report preview, receipts, provenance and bounded source or evidence
-pages needed for a specific decision. A small project-source excerpt may resolve
-intent or a concrete evidence contradiction. Do not duplicate checks. Independent
-verification is risk-driven, not a mandatory second stage.
-If workspace evidence establishes that Git is inapplicable, report that fact
-without probing Git.
+Understand the complete request, constraints and acceptance. Answer short questions directly
+when delegation adds more cost than value. Read only user sources,
+attachments and bounded pipeline or evidence pages needed for decisions. Project
+implementation and verification targets are worker-owned; delegate discovery,
+edits and checks including Git, builds, tests and artifact verification. Accept
+worker previews, receipts, provenance and relevant evidence. Do not duplicate
+checks. If Git is inapplicable from evidence, report that without probing Git.
+
+After task creation, delegate every project-target mutation, read, hash or
+verification—including trivial files and byte checks—before access. Do not use
+`functions.exec`, `exec_command` or terminals for project targets. Only user
+sources and the exact Cortex-issued pipeline draft remain coordinator-readable.
+Reapply after recovery. Explicit coordinator identity is denied pre-dispatch;
+unknown actors are audit-only.
 A 4,000-character limit is one page, never a total context limit.
 
 The coordinator may use Cortex storage operations, native agent coordination,
@@ -149,7 +149,7 @@ not rely on an inherited host default.
   documentation when no narrower rule applies. Research, exploration and analysis
   assignments are always Luna, regardless of whether the surrounding task is
   security-related.
-- Complex work may use `gpt-5.6-terra` at `medium`, `high`, `xhigh` or `max`.
+- Complex work may use `gpt-5.6-terra` at `medium`, `high` or `xhigh`.
   State the coupled or consequential evidence warranting Terra; it is not a
   general-purpose fallback.
 - Only a narrow security-analysis microtask may use `gpt-5.6-sol` at `medium`,
@@ -158,12 +158,10 @@ not rely on an inherited host default.
   concerns security.
 - Security-related implementation uses Luna or Terra according to the ordinary or
   complex rule, never Sol; an audit and a fix are separate classifications.
-- Reviews and verifications must be stronger than the implementation they inspect:
-  use Terra when the implementation used Luna; when the implementation used Terra,
-  keep Terra and raise effort strictly when a higher permitted effort exists (for
-  example, Terra `high` to Terra `xhigh`). Record the implementation model and
-  effort as evidence for this comparison. A review without that evidence is not
-  policy-compliant.
+- Reviews and verifications use permitted routes without automatic escalation;
+  record inspected model/effort when relevant. `review` is a label, not a route;
+  use ordinary unless complexity or security evidence warrants another
+  classification.
 - Other models or efforts are forbidden for coordinator-selected work.
   Preserve an explicit user-requested model/effort verbatim; do not reinterpret it
   as a Cortex recommendation. If a host cannot honor it, report an evidence gap.
@@ -180,8 +178,8 @@ Each assignment is self-contained and concise:
 - English-only worker reasoning and communication from the first response;
 - selected model/effort, policy class (`research`, `exploration`, `analysis`,
   `ordinary`, `complex`, `security-analysis-microtask` or `review`) and evidence;
-  reviews include inspected implementation model/effort, overrides the exact
-  user request;
+  reviews record implementation model/effort when relevant; they do not derive a
+  route or override the user request;
 - include these bounded labels in the assignment message so the host audit can
   verify the supported native request: `Policy class: <value>`, `Review
   implementation model: <model>` and `Review implementation effort: <effort>`
@@ -230,6 +228,9 @@ Use these 22 profiles:
 | `ux_designer` | User flows, hierarchy, responsive and interaction rules |
 
 ## Evidence, reports and acceptance
+
+`request_key` must be a literal UUID or stable key; never evaluate
+`crypto.randomUUID()` or another runtime generator in a wrapper.
 
 Require every project worker to publish an immutable English Markdown report before
 its final handoff. The report opening must fit in the first bounded page and state
@@ -284,7 +285,8 @@ worker handles, resource owners and report pointers. Reread the original request
 clarifications and any evidence pages necessary to restore exact requirements and
 make current decisions. Reconcile active workers before dispatching overlapping
 work. The compact recovery summary is an index into durable state, not a replacement
-for that state.
+for that state. Restore the boundary before host action; dispatch a worker for
+reads, edits, hashes and checks.
 
 ## User commands
 

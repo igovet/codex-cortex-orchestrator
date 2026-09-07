@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import runpy
 import sqlite3
@@ -37,6 +38,38 @@ def test_hook_actions_are_separate_from_model_and_mcp_events(tmp_path):
     assert rows[1]=={key:value for key,value in later.items() if key not in {'raw_output','arguments'}}
     assert rows[1]['command_session_id']=='command-7'
     assert rows[1]['parent_session_id']=='parent-2'
+
+
+def test_worker_static_bracket_and_alias_app_calls_are_observed(tmp_path,monkeypatch):
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    rollout=tmp_path/'worker.jsonl'
+    def entry(at,payload):
+        return json.dumps(dict(timestamp=datetime.fromtimestamp(at,timezone.utc).isoformat(),
+                               type='response_item',payload=payload))
+    source='const send = tools["mcp__codex_app__send_message_to_thread"]; await send({threadId:"x"});'
+    rollout.write_text('\n'.join([
+        entry(110,dict(type='custom_tool_call',call_id='c',name='functions.exec',input=source)),
+        entry(111,dict(type='custom_tool_call_output',call_id='c',output='Script completed')),
+    ])+'\n')
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,rollout_path TEXT,agent_role TEXT,model TEXT,reasoning_effort TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.executemany('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',[
+            ('root',str(rollout),None,'gpt-5.6-luna','high',100,'/fixture'),
+            ('child',str(rollout),'technical_writer','gpt-5.6-luna','medium',101,'/fixture'),
+        ])
+        db.execute('INSERT INTO thread_spawn_edges VALUES (?,?)',('root','child'))
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    rows=OBSERVER['observed_tool_calls'](dict(workdir='/fixture',started_at=100,
+                                              thread_created_since=100,events=str(tmp_path/'events')))
+    worker=[row for row in rows if row.get('thread_id')=='child'
+            and row.get('tool')=='mcp__codex_app__send_message_to_thread']
+    assert len(worker)==1
+    assert 'forbidden_worker_app_thread_message' in worker[0]['policy_flags']
+    violations=OBSERVER['call_policy_violations'](rows)
+    assert any(row['thread_id']=='child' and
+               row['violation']=='forbidden_worker_app_thread_message'
+               for row in violations)
 
 
 def test_all_participant_usage_counts_responses_once_and_cache_separately(tmp_path,monkeypatch):

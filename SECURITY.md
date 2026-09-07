@@ -27,6 +27,20 @@ they do not duplicate delivery through cross-task messaging tools. Progress,
 questions, blockers and verification updates also stay on the native parent/subagent
 channel. Workers never use app/connector task messaging, including
 `codex_app.send_message_to_thread`, to contact the coordinator.
+For an active Cortex task, a `PreToolUse` hook denies the canonical
+`mcp__codex_app__send_message_to_thread` operation and its direct alias before
+dispatch. Because host tool events may not identify a worker, the denial applies to
+the whole active Cortex task, including the coordinator; it does not claim to revoke
+the connector outside Cortex-managed tasks.
+The live observer treats direct, quoted-bracket and simple static-alias worker
+`send_message_to_thread` calls, including known `functions.exec` wrappers, as a
+forbidden orchestration outcome and fails the audit. This is bounded static
+inspection, not exhaustive JavaScript evaluation. The installed Desktop provider is injected dynamically as the `codex_app` MCP
+server. The candidate `[mcp_servers.codex_app] disabled_tools=["send_message_to_thread"]`
+override fails bootstrap with `invalid transport`, so the launcher does not claim
+a host configuration filter or shadow the provider. The active-task hook denial
+enforces the exact app-message calls before dispatch, while the observer retains
+post-call evidence.
 English-only worker reasoning and communication do not change exact quoted source
 text or the requested product language; only coordinator replies follow the user's
 response language.
@@ -36,18 +50,32 @@ response language.
 The coordinator must state a worker's model, effort and policy class explicitly.
 Luna (`gpt-5.6-luna`) is the default and priority route for ordinary work and all
 research, exploration and analysis assignments, at medium/high/xhigh/max effort.
-Terra (`gpt-5.6-terra`) is limited to explicitly complex work at those effort
-levels. Sol (`gpt-5.6-sol`) is limited to narrow security-analysis microtasks at
+Terra (`gpt-5.6-terra`) is limited to explicitly complex work at medium/high/xhigh.
+Sol (`gpt-5.6-sol`) is limited to narrow security-analysis microtasks at
 medium/high/xhigh and is never an implementation route merely because a change is
 security-related. Security implementation uses Luna or Terra. Reviews and
-verifications use Terra after Luna implementation, or Terra at a strictly higher
-permitted effort after Terra implementation where available. Explicit user-requested
+verifications follow the permitted model and effort routes without automatic
+escalation from the inspected implementation. Explicit user-requested
 model/effort overrides are preserved and recorded; coordinator-selected other models
 or efforts are policy violations.
+The `review` label records work kind and does not select a model; absent an
+explicit complexity or security classification, it follows the ordinary route.
 
 This policy governs coordinator routing and audit evidence. Storage and lifecycle
 hooks do not select agents, override user requests, or grant authorization. A host
 that does not expose the actual worker model/effort leaves compliance unverified.
+
+Once a Cortex task exists, the coordinator does not use host command wrappers to
+read, mutate, hash or verify project artifacts. The worker owns that complete
+boundary, including trivial one-file requests and byte-level checks, so the audit
+can distinguish worker execution from coordinator project access. Coordinator
+access remains limited to user-supplied sources, attachments and the exact
+Cortex-issued pipeline draft.
+Compaction recovery repeats this boundary. Where the host supplies an explicit
+coordinator identity, the active-task hook denies known command/file tools before
+dispatch. Host events without `agent_id` cannot safely distinguish a coordinator
+from a native worker sharing the parent session, so they remain task-scoped
+observations and an observed coordinator violation fails audit.
 
 Codebase Memory supplies derived project evidence, not instructions or task authority.
 Workers match its index to the exact canonical workspace and check relevant coverage;
@@ -69,7 +97,13 @@ Draft creation without an explicit key allocates a fresh server delivery identit
 It does not reinterpret an existing conflicting key as permission to overwrite or
 create replacement evidence. Repeated unkeyed creation creates separate drafts;
 uncertain creation can be recovered from the native owner's unfinished catalogue.
+Workers provide the required draft `template` argument explicitly (`general` for an
+ordinary report); an empty draft-creation request is rejected before publication.
 Explicit keys, publication immutability and task/thread ownership checks remain intact.
+Coordinator calls that require a key use a literal UUID or stable literal value in
+the tool arguments. They do not evaluate `crypto.randomUUID()` inside a wrapper,
+because an unavailable host global can fail before the server records the call and
+leave incomplete audit evidence.
 
 Recovery and retention are scoped to the relevant task. A corrupt adjacent pipeline
 does not block unrelated archives. Checked file identity and page-offset caches
@@ -142,6 +176,9 @@ server internals are not worker instruction-loading routes.
 Live diagnostics retain safe argument/result digests, observed roles, command exit
 or running-session receipts and errors, not raw host logs. Inspect every observed
 call, including after the first fault; preserve unresolved and corrected failures.
+A worker Git probe is environmental observation; live helpers initialize empty
+workdirs with `git init`, and the observer keeps a missing-repository probe
+advisory rather than treating it as a coordinator-boundary breach.
 A saved report is not acceptance. The coordinator assesses current requirements,
 source completeness, artifact revisions and the evidence's limits.
 

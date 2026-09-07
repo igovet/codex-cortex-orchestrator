@@ -58,6 +58,19 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
         assert '.codex/plugins/' not in instructions
     control=(PLUGIN/'skills/cortex-control/SKILL.md').read_text()
     assert '[report example catalogue](references/index.md)' in control
+    publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
+    assert 'crypto.randomUUID()' in publication
+    assert 'pass a literal UUID in the tool arguments' in publication
+    assert 'must include the required `template` argument' in publication
+    assert 'Never\ncall it with an empty argument object' in publication
+    orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+    assert '`request_key` must be a literal UUID or stable key' in orchestrator
+    assert '`crypto.randomUUID()` or another runtime generator' in orchestrator
+    assert 'After task creation, delegate every project-target mutation, read, hash or' in orchestrator
+    assert '`functions.exec`, `exec_command` or terminals for project targets' in orchestrator
+    assert 'Only user\nsources and the exact Cortex-issued pipeline draft remain coordinator-readable.' in orchestrator
+    pipeline_publication=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
+    assert 'When a pipeline mutation schema requires `request_key`' in pipeline_publication
 
 
 def test_source_check_is_read_only():
@@ -77,6 +90,7 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert "CORTEX_DATA_DIR=str(" not in source
     assert "for key in ['profile','events']:" in source
     assert 'def configure_workspace_network():' in source
+    assert "disable-app-message-tool" not in source
     assert "network_access = true" in source
     assert 'restore_workspace_network' in source
     assert "sub.add_parser('audit')" in source
@@ -155,6 +169,7 @@ def test_cli_helper_audits_all_thread_calls_with_shared_observer():
     assert "open_sessions=open_sessions" in source
     assert "open_cells=open_cells" in source
     assert "sandbox_workspace_write.network_access=true" in source
+    assert "desktop_editor_source_sha256']" in source
 
 
 def test_live_helpers_derive_only_the_canonical_project_store(tmp_path):
@@ -345,6 +360,13 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
                     'write_stdin','chars:"\\u0003"')[:2]==('stopped',None)
     invocations=helper['nested_tool_invocations']('text(await tools.exec_command({cmd:"ok"})); tools.mcp__cortex__read_report({limit:4000})')
     assert [name for name,_,_ in invocations]==['exec_command','mcp__cortex__read_report']
+    for source in (
+        'tools["mcp__codex_app__send_message_to_thread"]({threadId:"x"})',
+        'const send = tools.mcp__codex_app__send_message_to_thread; await send({threadId:"x"})',
+        'const send = tools["mcp__codex_app__send_message_to_thread"]; send({threadId:"x"})',
+    ):
+        assert [name for name,_,_ in helper['nested_tool_invocations'](source)] == [
+            'mcp__codex_app__send_message_to_thread']
     intent=helper['command_intent_digest']
     assert intent('{cmd:"npm install && npm run build"}')==intent('{cmd:"npm run build"}')
     assert intent('{"cmd":"npm install && npm run build"}')==intent('{"cmd":"npm run build"}')
@@ -374,8 +396,26 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'timestamp':'3','thread_id':'worker','role':'technical_writer','tool':'send_message_to_thread','outcome':'error'},
     ])
     assert [item['violation'] for item in policy]==[
-        'forbidden_plugin_or_cache_access','worker_tool_after_successful_write_report'
+        'forbidden_plugin_or_cache_access','forbidden_worker_app_thread_message',
+        'worker_tool_after_successful_write_report'
     ]
+    app_message=helper['call_policy_violations']([
+        {'thread_id':'worker','parent_thread_id':'root','role':'technical_writer',
+         'tool':'send_message_to_thread','tool_namespace':'codex_app',
+         'outcome':'success'},
+    ])
+    assert [item['violation'] for item in app_message]==[
+        'forbidden_worker_app_thread_message'
+    ]
+    wrapped_app_message=helper['call_policy_violations']([
+        {'thread_id':'worker','parent_thread_id':'root','role':'technical_writer',
+         'tool':'mcp__codex_app__send_message_to_thread','outcome':'success',
+         'nested':True},
+    ])
+    assert [item['violation'] for item in wrapped_app_message]==[
+        'forbidden_worker_app_thread_message'
+    ]
+    assert helper['orchestration_policy_violations'](app_message)==app_message
     duplicate=helper['call_policy_violations']([
         {'thread_id':'worker','role':'explorer','tool':'tool_catalogue_search','outcome':'success'},
         {'thread_id':'worker','role':'explorer','tool':'mcp__cortex__list_reports','outcome':'success'},
@@ -464,8 +504,11 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'thread_id':'root','role':'coordinator','tool':'send_message','outcome':'success'},
     ])
     assert [item['violation'] for item in coordinator_policy]==[
-        'coordinator_status_probe_after_wait','coordinator_unsolicited_message_after_wait'
+        'coordinator_unsolicited_message_after_wait'
     ]
+    assert helper['call_policy_flags'](
+        'apply_patch','*** Update File: /tmp/project/.cortex/draft-reports/d_1.md',
+        'coordinator','/tmp/project')==[]
     duplicate_owner=helper['call_policy_violations']([
         {'thread_id':'root','role':'coordinator','tool':'spawn_agent','outcome':'success',
          'agent_type':'frontend_dev','model':'gpt-5.6-luna'},
@@ -555,9 +598,7 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'thread_id':'w','tool':'command_execution','argument_digest':'large-sed-host',
          'intent_digest':'read-source','command_family':'sed','outcome':'success'},
     ])
-    assert [(row['tool'],row['effective_outcome']) for row in unresolved]==[
-        ('functions.exec','truncated')
-    ]
+    assert unresolved==[]
     assert [(row['tool'],row['effective_outcome']) for row in resolved]==[
         ('exec_command','truncated')
     ]
@@ -565,13 +606,16 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
         {'thread_id':'w','tool':'functions.exec','argument_digest':'poll-wrapper',
          'result_digest':'failed-poll','outcome':'covered_by_nested',
          'wrapper_outcome':'error'},
+        {'thread_id':'w','tool':'exec_command','argument_digest':'poll-command',
+         'result_digest':'failed-poll','outcome':'covered_by_command_execution',
+         'wrapper_outcome':'error'},
         {'thread_id':'w','tool':'write_stdin','argument_digest':'poll',
          'result_digest':'failed-poll','intent_digest':'build','outcome':'error'},
         {'thread_id':'w','tool':'exec_command','argument_digest':'retry',
          'intent_digest':'build','outcome':'success'},
     ])
-    assert unresolved==[]
-    assert {row['tool'] for row in resolved}=={'functions.exec','write_stdin'}
+    assert [row['tool'] for row in unresolved]==['exec_command']
+    assert {row['tool'] for row in resolved}=={'write_stdin'}
 
 
 def test_sync_cannot_install_without_isolated_entrypoint():
@@ -787,6 +831,23 @@ def test_new_task_allows_bounded_discovery_before_pipeline_publication():
     assert check(begin+[spawn])==[]
     assert check(begin+[row('mcp__cortex__write_report'),spawn])==[]
     assert check([row('mcp__cortex__read_report',document_kind='pipeline'),spawn])==[]
+
+
+def test_live_git_probe_is_advisory_and_launchers_initialize_workspaces(tmp_path):
+    import runpy
+    h=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    row={'thread_id':'worker','role':'technical_writer','tool':'exec_command',
+         'outcome':'error','policy_flags':['git_command_without_git_workspace']}
+    assert h['call_policy_violations']([row])==[]
+    h['ensure_git_workspace'](tmp_path)
+    assert (tmp_path/'.git').is_dir()
+
+
+def test_write_report_description_matches_artifact_schema():
+    source=(ROOT/'plugins/cortex/scripts/cortex_runtime/contracts.py').read_text()
+    assert 'Metadata arrays use the advertised item schemas' in source
+    assert 'Never put Markdown bodies or shell interpolation' in source
+    assert 'writer metadata, arrays, chunks' not in source
 
 
 def test_desktop_request_fidelity_requires_observed_editor_provenance():

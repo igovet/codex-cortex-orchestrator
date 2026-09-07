@@ -41,8 +41,8 @@ Send progress, questions, blockers and verification updates only to the assignin
 native parent through the host's subagent update/message mechanism. Never discover,
 call or request approval for `codex_app.send_message_to_thread` (including MCP names)
 or other app task-messaging tools, even to contact the coordinator. Use the native
-parent route, not an app thread ID. If native messaging is unavailable, use worker
-commentary and the native result. Final handoffs are delivered automatically.
+parent route, not an app thread ID. Never emit that route through a wrapper; if
+unavailable, report the blocker natively. Final handoffs are automatic.
 
 You may investigate, implement, verify and update closely related documentation or
 non-code artifacts within one assignment. Preserve other contributors' work. Do not
@@ -161,6 +161,10 @@ coordinator. Changing report class does not require a new worker.
 2. Use repository indexes and targeted search to trace entry points, callers,
    state transitions, data and control boundaries, configuration, persistence,
    external dependencies, and tests.
+   Keep each command bounded: search first, then read one file slice at a time.
+   No shell loops or broad multi-file dumps. Use one narrow search with a small
+   budget (for example, `max_output_tokens: 4000` and `head -80`), splitting
+   document families into separate calls. Never risk a truncated receipt.
 3. Follow evidence far enough to identify the owning component and contract,
    stopping before unrelated subsystems.
 4. Compare source, tests, executable configuration, generated artifacts, and

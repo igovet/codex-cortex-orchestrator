@@ -458,6 +458,23 @@ the host's native parent/subagent channel. They never use
 messages addressed to their coordinator. Completed work returns through the automatic
 native final handoff; no app-message approval is needed for worker updates.
 
+For an active Cortex task, the bundled `PreToolUse` hook denies both the canonical
+`mcp__codex_app__send_message_to_thread` call and its direct alias before dispatch.
+Tool-event payloads may not establish whether the caller is a worker, so this is a
+task-wide denial that also applies to a coordinator. The native parent/subagent route
+remains available for worker communication.
+
+The isolated CLI/Desktop observer also recognizes direct, quoted-bracket and
+simple static-alias worker calls to `send_message_to_thread`, including those in
+known `functions.exec` wrappers, as forbidden orchestration outcomes and fails
+its audit. This is bounded static inspection, not exhaustive JavaScript
+evaluation. A qualification guard based on the host's observed call boundary
+cannot remove an app connector that the host exposes. The installed Desktop
+provider is injected dynamically as the `codex_app` MCP server; the candidate
+`[mcp_servers.codex_app] disabled_tools=["send_message_to_thread"]` override
+fails bootstrap with `invalid transport`, so the launcher does not claim a
+per-tool filter or shadow the provider.
+
 ## Preferred worker route: Codebase Memory MCP
 
 A known filename or symbol does not establish its implementation: workers resolve
@@ -546,6 +563,14 @@ specific expertise, independent evidence or parallel work, not mandatory stages.
 Shared files, browsers, devices, ports and applications have one active owner.
 A timeout does not release that ownership.
 
+After a Cortex task is created, project artifacts belong to the worker for the
+whole mutation and verification boundary. The coordinator must dispatch the
+worker before reading, editing, hashing or checking a project target, even when
+the request is one small file; `functions.exec`, `exec_command` and terminal
+wrappers are not coordinator shortcuts. User-supplied sources and the exact
+Cortex-issued pipeline draft remain coordinator-readable, and the coordinator
+accepts the worker's receipts and report for project evidence.
+
 ### Markdown pipeline and readiness
 
 A task has one real `pipeline.md`, with its newest complete edition first. It
@@ -605,6 +630,13 @@ New drafts default to server-generated delivery identities, so a worker's later
 assignment does not depend on remembering earlier report keys. An uncertain
 unkeyed creation is recovered through the caller's unfinished-draft catalogue;
 repeating it creates another draft. Explicit keys retain exact-retry protection.
+Worker report creation still supplies the required `template` argument explicitly;
+ordinary worker reports use `general`, and an empty draft-creation argument object
+is invalid.
+When a coordinator must provide `request_key`, it uses a literal valid UUID or
+stable literal key in the tool arguments. Runtime expressions such as
+`crypto.randomUUID()` are not used inside wrappers because the host may not expose
+that JavaScript global before Cortex receives the call.
 Pipeline recovery and retention stay inside the affected task, so a corrupted
 neighbour does not block another archive. Validated file identities and page offsets
 avoid repeated full reads of unchanged reports; changed files are revalidated.
@@ -624,6 +656,10 @@ receipts; inactive conversations are not archived. Resume and compaction receive
 bounded recovery reminder through `SessionStart`, with repeated unchanged reminders
 suppressed. Subagent binding uses explicit native receipts rather than treating a
 parent `session_id` as the child identity.
+The recovery reminder repeats the project-access boundary. When a host explicitly
+identifies the coordinator on a command/file event, `PreToolUse` denies that route
+before dispatch; events without actor identity remain observable and are rejected
+by the audit if they show coordinator project access.
 
 `UserPromptSubmit` can only mark a pending follow-up because that event has no unique
 native message identifier; publication waits for an authoritative typed receipt.
@@ -637,7 +673,7 @@ source of execution status.
 
 Hooks record observations and diagnose unfinished work. They do not select models,
 assign work, approve actions, accept results or force endless continuation. Patch
-checks deny only confirmed integrity violations against registered Cortex files;
+checks and the pre-dispatch app-thread-message denial cover only their exact routes;
 text merely mentioning a protected path is not a mutation. Hook coverage is partial,
 and hook failures remain visible. See [lifecycle hooks](docs/features/lifecycle-hooks/index.md)
 and the [official hook reference](https://learn.chatgpt.com/docs/hooks).
@@ -699,18 +735,19 @@ Preserve the user's coordinator model and effort. Worker routing follows an expl
 policy: Luna (`gpt-5.6-luna`) is the default and priority model for ordinary work,
 including all research, exploration and analysis assignments, at `medium`, `high`,
 `xhigh` or `max`. Terra (`gpt-5.6-terra`) is reserved for work explicitly
-classified as complex, with those same effort levels. Sol (`gpt-5.6-sol`) is
+classified as complex, at `medium`, `high` or `xhigh`. Sol (`gpt-5.6-sol`) is
 reserved for narrow security-analysis microtasks at `medium`, `high` or `xhigh`;
 it is never selected for implementation merely because the task concerns security.
 Security-related implementation uses Luna or Terra.
 
-Reviews and verifications must be stronger than the implementation they inspect:
-Luna implementations are reviewed with Terra; Terra implementations stay on Terra
-with a strictly higher permitted effort where one exists (for example, `high` to
-`xhigh`). Assignments record the implementation model and effort used for this
-comparison. Every worker request states its model and effort explicitly. Other
+Reviews and verifications use the permitted model and effort routes without
+automatic escalation from the implementation they inspect. Assignments record the
+implementation model and effort when relevant to the review. Every worker request
+states its model and effort explicitly. Other
 models or efforts are forbidden for coordinator-selected work unless the user
 directly requested that override; the exact request is recorded and preserved.
+The `review` label records work kind and does not select a model; absent an
+explicit complexity or security classification, it follows the ordinary route.
 
 Obtain missing facts and tools directly; model escalation does not repair their
 absence. Never change a worker merely for a slow response or one timeout. Compare
@@ -903,6 +940,10 @@ Each new CLI smoke run uses the exact project-local store at
 `PATH/.codex/cortex/cortex.sqlite3`. A `--resume-last` run reuses that same
 canonical project store and rejects a missing or mismatched store. `stop` keeps the
 project store for resume and removes only the session and observation streams.
+The CLI helper initializes an empty workdir with `git init` before launching so
+worker Git probes have the expected repository shape. A worker Git probe in an
+uninitialized workspace is advisory observer noise, not a coordinator boundary
+failure.
 
 Inspect complete `calls` and `events`, including after a discovered fault, and run
 `audit` before stopping. A command wrapper must expose its exit status or running
@@ -914,6 +955,8 @@ Real Desktop uses `scripts/cortex-desktop-dev start --workdir PATH --prompt-file
 and the same isolated candidate in a disposable Electron profile. Confirm the
 prepared composer, then `send` focuses that exact window, submits with Ctrl+Enter
 and requires one new task receipt. Review its `calls`, `events` and `audit` too.
+The Desktop helper applies the same empty-workdir `git init` setup and treats a
+worker Git probe without a repository as advisory.
 Use ordinary hook trust; never bypass it for qualification. CLI/Desktop parity
 requires consecutive successful runs on one unchanged payload. Unavailable hosts
 and unrun checks remain unverified.

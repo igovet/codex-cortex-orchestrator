@@ -43,7 +43,9 @@ forbidden. See
 Current isolated live qualification uses Luna/high for every coordinator and Luna
 at medium/high for native workers. Product routing is stricter and explicit: Luna
 is the default/priority worker model for ordinary, research, exploration and
-analysis work; Terra is reserved for complex work and stronger reviews; Sol is
-limited to narrow security-analysis microtasks and never security implementation.
+analysis work; Terra is reserved for complex work; Sol is limited to narrow
+security-analysis microtasks and never security implementation. Reviews and
+verifications use the permitted model and effort routes without automatic
+escalation from the implementation they inspect.
 Explicit user-requested overrides remain intact. The isolated test policy does not
 replace the product's coordinator model selection.
