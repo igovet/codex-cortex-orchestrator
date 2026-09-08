@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import tempfile
 import tomllib
 from urllib.parse import urlsplit
@@ -175,17 +176,30 @@ def _validate_config_bytes(path: Path, data: bytes) -> None:
 
 
 def _rename_exchange(first: Path, second: Path) -> None:
-    """Atomically exchange two directory entries on Linux.
+    """Atomically exchange two directory entries on supported POSIX hosts.
 
     A normal ``os.replace`` has an unavoidable final TOCTOU window: an
     unrelated same-user writer can replace the config after our last read but
-    before the rename.  ``renameat2(RENAME_EXCHANGE)`` moves the old target
-    into our private temporary entry at the same syscall boundary, allowing
-    the caller to compare the exact inode which was present at publication.
+    before the rename.  Linux ``renameat2(RENAME_EXCHANGE)`` and macOS
+    ``renamex_np(RENAME_SWAP)`` move the old target into our private temporary
+    entry at the same syscall boundary, allowing the caller to compare the
+    exact inode which was present at publication.
     """
     if os.name != "posix":
         raise OSError(errno.ENOTSUP, "atomic compare-and-swap is unavailable")
     libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        renamex_np = getattr(libc, "renamex_np", None)
+        if renamex_np is None:
+            raise OSError(errno.ENOTSUP, "atomic compare-and-swap is unavailable")
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        # <stdio.h>: RENAME_SWAP exchanges two existing names atomically.
+        result = renamex_np(os.fsencode(first), os.fsencode(second), 0x00000002)
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
         raise OSError(errno.ENOTSUP, "atomic compare-and-swap is unavailable")

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
 import logging
+import os
 from pathlib import Path
 import tomllib
 
@@ -83,6 +84,27 @@ def test_provider_validates_exact_listener_and_auth_receipt():
     with pytest.raises(ValueError, match="verified loopback"):
         replace(settings(), base_url="https://chatgpt.com/backend-api/codex").resolved_base_url()
     assert replace(settings(), gateway_host="::1").resolved_base_url() == "http://[::1]:8799/backend-api/codex"
+
+
+def test_provider_uses_macos_atomic_rename_swap(monkeypatch, tmp_path):
+    calls = []
+
+    class RenameSwap:
+        def __call__(self, first, second, flags):
+            calls.append((first, second, flags))
+            return 0
+
+    class LibC:
+        renamex_np = RenameSwap()
+
+    monkeypatch.setattr(provider_module.sys, "platform", "darwin")
+    monkeypatch.setattr(provider_module.ctypes, "CDLL", lambda *_args, **_kwargs: LibC())
+    provider_module._rename_exchange(tmp_path / "candidate", tmp_path / "config.toml")
+    assert calls == [(
+        os.fsencode(tmp_path / "candidate"),
+        os.fsencode(tmp_path / "config.toml"),
+        0x00000002,
+    )]
 
 
 def test_connect_never_selects_an_unready_gateway(tmp_path, monkeypatch):
