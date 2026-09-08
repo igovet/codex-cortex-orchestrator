@@ -12,7 +12,7 @@ import time
 from urllib.request import urlopen
 
 from ..gateway.config import ConfigError, ConfigLoader, ConfigManager, write_default_config
-from .process import signal_owned, spawn_gateway
+from .process import gateway_processes, signal_gateway_process, signal_owned, spawn_gateway
 from .state import (
     GatewayState,
     RuntimePaths,
@@ -132,6 +132,28 @@ class GatewaySupervisor:
             and process_invocation_matches(state)
         )
 
+    def _drain_conflicting_gateway(self, host: str, port: int) -> None:
+        """Drain an older verified Cortex gateway before rebinding its port.
+
+        Marketplace upgrades can leave a gateway from an earlier cached
+        payload running without a readable state file in the current profile.
+        Only an exact same-user Cortex invocation is eligible; an unrelated
+        listener remains untouched and the subsequent readiness failure is
+        allowed to abort startup.
+        """
+        for pid in gateway_processes(host=host, port=port):
+            if not signal_gateway_process(pid, host=host, port=port):
+                if pid in gateway_processes(host=host, port=port):
+                    raise RuntimeError("conflicting Cortex gateway could not be signaled")
+                continue
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if pid not in gateway_processes(host=host, port=port):
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("conflicting Cortex gateway did not stop before restart")
+
     def ensure(self, *, wait_seconds: float = 10.0) -> dict[str, object]:
         if not self._external_manager and not self.loader.is_configured():
             # Proxy startup provisions defaults atomically and create-only;
@@ -179,6 +201,7 @@ class GatewaySupervisor:
                     # A stale package/health identity is still an owned
                     # process; drain it before attempting to bind its address.
                     self._drain_owned(state)
+                self._drain_conflicting_gateway(requested_listener[0], requested_listener[1])
                 process = spawn_gateway(codex_home=self.codex_home, plugin_root=self.plugin_root, host=requested_listener[0], port=requested_listener[1])
                 end = time.monotonic() + wait_seconds
                 while time.monotonic() < end:

@@ -916,10 +916,11 @@ entirely optional.
 
 ## Verification and diagnostics
 
-The optional Model Gateway lifecycle and provider patch behavior are documented
-in [Model Gateway lifecycle](docs/project/model-gateway.md). It is explicit
-opt-in through the global `CODEX_HOME` configuration; ordinary CLI/Desktop/MCP
-startup does not enable it by itself. The isolated launcher installs and
+The Model Gateway lifecycle and provider patch behavior are documented in
+[Model Gateway lifecycle](docs/project/model-gateway.md). Marketplace MCP
+startup enables the gateway by default through the global `CODEX_HOME`
+configuration; set `gateway.enabled = false` for explicit storage-only mode.
+The isolated launcher installs and
 version-checks a clean dependency target from the hash-locked Linux wheel set
 with pip `--require-hashes`, then invokes the prepared Marketplace cache's own
 gateway control entrypoint; runtime health binds the lock manifest digest,
@@ -936,7 +937,12 @@ recovery point. Gateway configuration and its control directory are private
 owner-only paths; unsafe existing entries fail closed. Provider updates use a
 locked descriptor/content compare-and-swap and refuse to overwrite unrelated
 concurrent edits.
-Compaction rewriting covers V2 `compaction_trigger` (auto compaction) and the
+When a requested listener is occupied by an older same-user Cortex gateway,
+startup verifies its complete command and packaged manifest, sends a controlled
+stop, waits for the listener to drain, and retries. An unrelated process is
+never terminated. The packaged dependency installer keeps its progress output
+off MCP stdout so it cannot corrupt the JSON-RPC handshake. Compaction
+rewriting covers V2 `compaction_trigger` (auto compaction) and the
 legacy `/backend-api/codex/responses/compact` JSON path (manual compaction).
 Recognized legacy JSON is routed in-call to the supported V2 path because the
 production upstream retired `/responses/compact`; opaque legacy bytes retain

@@ -30,6 +30,10 @@ def bootstrap() -> None:
         [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
          "--no-compile", "--upgrade", "--force-reinstall", "--require-hashes", "--target", str(target), "-r", str(lock)],
         check=True,
+        # MCP stdout is a newline-delimited JSON-RPC stream.  pip's progress
+        # output must never be mixed into it; failures remain visible on
+        # stderr and still abort the required server startup.
+        stdout=subprocess.DEVNULL,
     )
     os.environ["CORTEX_DEPENDENCY_DIR"] = str(target)
     GatewaySupervisor(codex_home=home).ensure()

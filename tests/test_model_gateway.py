@@ -45,6 +45,7 @@ from plugins.cortex.scripts.cortex_runtime.gateway.mitm import (
 )
 from plugins.cortex.scripts.cortex_runtime.runtime.supervisor import GatewaySupervisor
 import plugins.cortex.scripts.cortex_runtime.runtime.supervisor as supervisor_module
+import plugins.cortex.scripts.cortex_runtime.marketplace_bootstrap as marketplace_bootstrap
 from plugins.cortex.scripts.cortex_runtime.runtime.process import _gateway_environment
 from plugins.cortex.scripts import cortex_runtime_ctl as runtime_ctl_module
 from plugins.cortex.scripts.cortex_runtime_ctl import main as runtime_ctl_main
@@ -948,6 +949,71 @@ def test_ensure_drains_verified_child_after_readiness_failure(monkeypatch, tmp_p
     assert signals == [supervisor_module.signal.SIGTERM]
 
 
+def test_ensure_drains_legacy_cortex_gateway_before_rebind(monkeypatch, tmp_path: Path) -> None:
+    upstream = "https://chatgpt.com/backend-api/codex"
+    policy = PolicySnapshot(
+        1, "now", True, True, "gpt-5.6-luna", "medium", True,
+        ("127.0.0.1", 8787), upstream,
+    )
+
+    class Manager:
+        def snapshot(self):
+            return policy
+
+    class Child:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    child = Child()
+    state = type("State", (), {"pid": child.pid, "host": "127.0.0.1", "port": 8787, "upstream": upstream})()
+    conflicts = iter(([9876], []))
+    reads = iter([None, state])
+    signaled: list[tuple[int, str, int]] = []
+    supervisor = GatewaySupervisor(codex_home=tmp_path / "home", manager=Manager())
+    monkeypatch.setattr(supervisor, "startup_lock", lambda: nullcontext())
+    monkeypatch.setattr(supervisor_module, "gateway_processes", lambda **_kwargs: next(conflicts, []))
+    monkeypatch.setattr(
+        supervisor_module,
+        "signal_gateway_process",
+        lambda pid, **kwargs: signaled.append((pid, kwargs["host"], kwargs["port"])) or True,
+    )
+    monkeypatch.setattr(supervisor_module.GatewayState, "read", lambda _paths: next(reads, state))
+    monkeypatch.setattr(supervisor_module, "spawn_gateway", lambda **_kwargs: child)
+    monkeypatch.setattr(supervisor, "_healthy", lambda _state: True)
+    monkeypatch.setattr(supervisor, "status", lambda: {"status": "running"})
+
+    assert supervisor.ensure() == {"status": "running"}
+    assert signaled == [(9876, "127.0.0.1", 8787)]
+
+
+def test_marketplace_bootstrap_keeps_pip_output_off_mcp_stdout(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    pip_calls: list[dict[str, object]] = []
+    ensured: list[Path] = []
+
+    def fake_run(_args, **kwargs):
+        pip_calls.append(kwargs)
+
+    class Supervisor:
+        def __init__(self, *, codex_home):
+            ensured.append(codex_home)
+
+        def ensure(self):
+            return {"status": "running"}
+
+    monkeypatch.setattr(marketplace_bootstrap.subprocess, "run", fake_run)
+    monkeypatch.setattr(marketplace_bootstrap, "GatewaySupervisor", Supervisor)
+
+    marketplace_bootstrap.bootstrap()
+
+    assert pip_calls and pip_calls[0]["check"] is True
+    assert pip_calls[0]["stdout"] is marketplace_bootstrap.subprocess.DEVNULL
+    assert ensured == [home]
+
+
 def test_diagnostics_emit_all_bounded_outcome_fields(caplog: pytest.LogCaptureFixture) -> None:
     logger = logging.getLogger("cortex.gateway")
     with caplog.at_level(logging.INFO, logger="cortex.gateway"):
@@ -957,13 +1023,15 @@ def test_diagnostics_emit_all_bounded_outcome_fields(caplog: pytest.LogCaptureFi
     assert "authorization" not in message.lower()
 
 
-def test_startup_hooks_are_opt_in_and_mcp_recovery_does_not_change_tools() -> None:
+def test_marketplace_bootstrap_is_default_and_dev_recovery_stays_explicit() -> None:
     launcher = Path("scripts/cortex-dev").read_text()
     server = Path("plugins/cortex/scripts/cortex_runtime/server.py").read_text()
-    assert "gateway.enabled" not in launcher  # config presence, not an implicit enable
+    assert "gateway.enabled" not in launcher  # developer launcher only honors explicit config
     assert 'cached_control="${CODEX_HOME}/plugins/cache/cortex/cortex/${candidate_version}/scripts/cortex_runtime_ctl.py"' in launcher
     assert 'python3 -B "${cached_control}" ensure --codex-home "${CODEX_HOME}"' in launcher
     assert 'python3 -B "${script_dir}/../plugins/cortex/scripts/cortex_runtime_ctl.py" ensure' not in launcher
+    assert "from .marketplace_bootstrap import bootstrap" in server
+    assert "    bootstrap()" in server
     assert "recover_gateway_if_explicitly_enabled" in server
 
 

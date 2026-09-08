@@ -184,8 +184,10 @@ source completeness, artifact revisions and the evidence's limits.
 
 The Model Gateway starts by default for Marketplace MCP through the global
 `CODEX_HOME` configuration. Set `gateway.enabled = false` for explicit
-storage-only mode. Its local supervisor owns only its registered child process and
-does not receive or persist provider credentials. Listener and upstream changes
+storage-only mode. Its local supervisor owns its registered child process and
+may also drain an older same-user Cortex gateway only after matching the exact
+gateway argv and a real Cortex package manifest for the requested loopback
+listener; it never kills an unrelated port owner. Listener and upstream changes
 are applied by a drain-and-restart path; stop waits for owned runtime state to
 disappear and reports a timeout when it cannot. Provider patching validates the
 target as a regular, owner-controlled file, preserves unrelated TOML content,

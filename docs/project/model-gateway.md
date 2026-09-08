@@ -1,15 +1,14 @@
 # Model Gateway lifecycle
 
-The optional Model Gateway is controlled by the global
-`$CODEX_HOME/cortex/config.toml`. Ordinary startup remains unchanged when that
-file is absent or `gateway.enabled = false`.
+The Model Gateway is controlled by the global
+`$CODEX_HOME/cortex/config.toml`. Marketplace MCP startup enables it by
+default; set `gateway.enabled = false` for explicit storage-only mode.
 
-Marketplace startup is enabled by default. The packaged Python MCP entrypoint
-creates the owner-only config when absent, installs the exact
-hash-locked wheel set into `$CODEX_HOME/cortex/deps`, and calls the cached
-supervisor. Any dependency, ownership, config, payload, or readiness failure
-aborts MCP startup with a nonzero error. Set `gateway.enabled = false` in the
-config for an explicit storage-only MCP mode.
+The packaged Python MCP entrypoint creates the owner-only config when absent,
+installs the exact hash-locked wheel set into `$CODEX_HOME/cortex/deps`, and
+calls the cached supervisor. Installation output is kept off the MCP stdout
+JSON-RPC stream. Any dependency, ownership, config, payload, or readiness
+failure aborts MCP startup with a nonzero error.
 
 The isolated `scripts/cortex-dev` launcher checks the explicit gateway config
 before launching CLI or Desktop preparation and runs the packaged
@@ -17,10 +16,12 @@ Marketplace-cache `cortex_runtime_ctl.py ensure` selected from the prepared
 candidate receipt. MCP startup performs the same check for an existing
 explicitly enabled configuration. Recovery is fail-closed: bind,
 identity, dependency, or readiness failures propagate and prevent MCP startup
-from continuing with an unverified provider route. An absent configuration is
-created by proxy startup with defaults using an atomic create-only write; an
-existing file is validated and never overwritten. Recovery does not add tools
-or enable the gateway in an ordinary MCP process with no explicit config.
+from continuing with an unverified provider route. Before binding, the
+supervisor drains an older same-user Cortex gateway whose complete command and
+packaged manifest match the requested loopback listener, then retries the bind.
+It never terminates an unrelated process on the port. An absent configuration
+is created with defaults using an atomic create-only write; an existing file is
+validated and never overwritten.
 The packaged MCP manifest explicitly forwards both the observation directory
 and the isolated `CORTEX_DEPENDENCY_DIR` supplied by `scripts/cortex-dev`; this
 keeps cached MCP startup and the gateway child on the same pinned dependency

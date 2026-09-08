@@ -2,13 +2,87 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
 
-from .state import GatewayState, process_entrypoint, process_executable, process_identity, process_invocation_matches
+from .state import GatewayState, process_argv, process_entrypoint, process_executable, process_identity, process_invocation_matches
+
+
+def _is_cortex_entrypoint(path: Path) -> bool:
+    """Accept only a packaged Cortex gateway script as a restart target."""
+    try:
+        path = path.resolve(strict=True)
+        if path.name != "cortex_gateway.py" or path.parent.name != "scripts":
+            return False
+        manifest = path.parent.parent / ".codex-plugin" / "plugin.json"
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+        return value.get("name") == "cortex"
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def gateway_processes(*, host: str, port: int) -> list[int]:
+    """Find same-user Cortex gateway processes bound to the requested command.
+
+    The caller uses this only after a bind/readiness conflict.  Matching the
+    complete argv and a real Cortex package manifest prevents a generic
+    process using the same port from being treated as ours.
+    """
+    result: list[int] = []
+    proc_root = Path("/proc")
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return result
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        pid = int(entry.name)
+        try:
+            info = entry.stat()
+            if info.st_uid != os.getuid() or pid == os.getpid():
+                continue
+            args = process_argv(pid)
+            if len(args) != 8 or args[1] != "-B" or args[3:] != ["serve", "--host", host, "--port", str(port)]:
+                continue
+            executable = process_executable(pid)
+            if executable == "unknown" or os.path.realpath(args[0]) != executable:
+                continue
+            script = Path(args[2])
+            if not script.is_absolute() or not _is_cortex_entrypoint(script):
+                continue
+            result.append(pid)
+        except (FileNotFoundError, OSError, ValueError):
+            # Processes may disappear while /proc is being inspected.
+            continue
+    return result
+
+
+def signal_gateway_process(pid: int, *, host: str, port: int, sig: int = signal.SIGTERM) -> bool:
+    """Signal a verified Cortex gateway process without following PID reuse."""
+    try:
+        if pid <= 0 or pid == os.getpid():
+            return False
+        entry = Path("/proc") / str(pid)
+        info = entry.stat()
+        if info.st_uid != os.getuid():
+            return False
+        args = process_argv(pid)
+        if len(args) != 8 or args[1] != "-B" or args[3:] != ["serve", "--host", host, "--port", str(port)]:
+            return False
+        executable = process_executable(pid)
+        if executable == "unknown" or os.path.realpath(args[0]) != executable:
+            return False
+        if not Path(args[2]).is_absolute() or not _is_cortex_entrypoint(Path(args[2])):
+            return False
+        os.kill(pid, sig)
+        return True
+    except (FileNotFoundError, OSError, ValueError):
+        return False
 
 
 def _gateway_environment(codex_home: Path) -> dict[str, str]:
