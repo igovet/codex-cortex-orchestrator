@@ -15,8 +15,8 @@ from generate_agent_profiles import (
 
 
 def test_stamped_package_and_profiles():
-    assert validate().startswith('1.15.7+codex.sha256.')
-    assert len(list((PLUGIN/'agents').glob('*.toml')))==22
+    assert validate().startswith('1.15.8+codex.sha256.')
+    assert len(list((PLUGIN/'agents').glob('*.toml')))==23
     payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     assert all((PLUGIN/path).is_file() for path in payload)
     expected_runtime={
@@ -26,17 +26,61 @@ def test_stamped_package_and_profiles():
     assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}==expected_runtime
 
 
+def test_mcp_advertises_isolated_gateway_dependency_environment():
+    mcp = json.loads((PLUGIN/'.mcp.json').read_text())['mcpServers']['cortex']
+    assert set(mcp['env_vars']) == {'CORTEX_OBSERVATION_DIR', 'CORTEX_DEPENDENCY_DIR'}
+
+
+@pytest.mark.parametrize('ambient', [None, '/tmp/ambient-stale-dependency'])
+def test_desktop_environment_overwrites_dependency_path_after_preparation(tmp_path, monkeypatch, ambient):
+    import os
+    import runpy
+    owner = tmp_path/'owner'
+    dependency = owner/'.cortex-dev/.codex/cortex-deps'
+    dependency.mkdir(parents=True, mode=0o700)
+    dependency.chmod(0o700)
+    monkeypatch.setattr(Path, 'home', lambda: owner)
+    if ambient is None:
+        monkeypatch.delenv('CORTEX_DEPENDENCY_DIR', raising=False)
+    else:
+        monkeypatch.setenv('CORTEX_DEPENDENCY_DIR', ambient)
+    helper = runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'), run_name='observer')
+    env = helper['environment'](tmp_path/'profile', tmp_path/'events')
+    assert env['CORTEX_DEPENDENCY_DIR'] == str(dependency)
+    assert env['CORTEX_DEPENDENCY_DIR'] != ambient
+    assert dependency.stat().st_uid == os.getuid()
+    assert dependency.stat().st_mode & 0o077 == 0
+
+
+def test_desktop_environment_rejects_unsafe_dependency_directory(tmp_path, monkeypatch):
+    import runpy
+    owner = tmp_path/'owner'
+    dependency = owner/'.cortex-dev/.codex/cortex-deps'
+    dependency.mkdir(parents=True, mode=0o755)
+    dependency.chmod(0o755)
+    monkeypatch.setattr(Path, 'home', lambda: owner)
+    helper = runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'), run_name='observer')
+    with pytest.raises(RuntimeError, match='private owner-controlled'):
+        helper['environment'](tmp_path/'profile', tmp_path/'events')
+
+
 def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     check_agent_profiles()
     assert all(path.read_bytes() == body for path, body in expected_profiles().items())
     assert len(expected_agent_references())==3
-    assert len(expected_worker_references())==66
+    assert len(expected_worker_references())==69
     for path in (PLUGIN/'agents').glob('*.toml'):
         profile=tomllib.loads(path.read_text())
         instructions=profile['developer_instructions']
         headings={
             line[3:] for line in instructions.splitlines() if line.startswith('## ')
         }
+        if profile['name'] == 'senior_consultant':
+            assert '## Access boundary' in instructions
+            assert 'Do not run commands, tests or project checks' in instructions
+            assert 'references/report-publication.md' in instructions
+            assert 'You may investigate, implement' not in instructions
+            continue
         assert {
             'Role and responsibility',
             'Assignment contract',
@@ -61,8 +105,9 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
     assert 'crypto.randomUUID()' in publication
     assert 'pass a literal UUID in the tool arguments' in publication
-    assert 'must include the required `template` argument' in publication
-    assert 'Never\ncall it with an empty argument object' in publication
+    assert 'supply every required field, including on the initial call' in publication
+    assert 'Never probe required\nfields with an empty argument object' in publication
+    assert 'Omit `request_key` for' not in publication
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     assert '`request_key` must be a literal UUID or stable key' in orchestrator
     assert '`crypto.randomUUID()` or another runtime generator' in orchestrator
@@ -137,7 +182,9 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
             'context-compaction',
         )
     )
-    assert companion < 25_000
+    # The opt-in consultant adds a bounded coordinator packet/access policy while
+    # retaining the compact companion-skill budget.
+    assert companion < 27_000
     assert '## Durable task and pipeline' in orchestrator
     assert '## Choose the smallest useful work graph' in orchestrator
     assert '## Model and effort' in orchestrator
@@ -187,6 +234,10 @@ def test_live_helpers_derive_only_the_canonical_project_store(tmp_path):
 
 def test_live_helpers_remove_external_store_override_from_child_environments(monkeypatch,tmp_path):
     import runpy
+    home=tmp_path/'home'
+    dependency=home/'.cortex-dev/.codex/cortex-deps'
+    dependency.mkdir(parents=True,mode=0o700)
+    monkeypatch.setenv('HOME',str(home))
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
     monkeypatch.setenv('CORTEX_DATA_DIR',str(tmp_path/'external'))
     env=helper['environment'](tmp_path/'profile',tmp_path/'events')
@@ -480,11 +531,11 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     assert helper['local_http_origin']('curl http://127.0.0.1:5173/path')=='http://localhost:5173'
     assert helper['browser_mutation_count']('await tab.click(1); await tab.setValue(2, "x")')==2
     assert helper['draft_call_metadata'](
-        'apply_patch','*** Update File: /tmp/project/.cortex/draft-reports/d_1.md'
-    )=={'cortex_draft_edit':True}
+        'apply_patch','*** Update File: /tmp/project/.cortex/draft-reports/d_123456789abc.md'
+    )=={'cortex_draft_edit':True,'edited_draft_ids':['d_123456789abc'],'ordinary_draft_edit':True}
     assert helper['draft_call_metadata'](
-        'apply_patch','*** Update File: .cortex/draft-reports/d_2.md'
-    )=={'cortex_draft_edit':True}
+        'apply_patch','*** Update File: .cortex/draft-reports/d_123456789abc.md'
+    )=={'cortex_draft_edit':True,'edited_draft_ids':['d_123456789abc'],'ordinary_draft_edit':True}
     browser_policy=helper['call_policy_violations']([
         {'thread_id':'worker','role':'build_verification','tool':'command_execution','outcome':'success','command_family':'curl','local_http_origin':'http://localhost:5173'},
         {'thread_id':'worker','role':'build_verification','tool':'js','outcome':'success','browser_action':'attach_tab'},
@@ -736,9 +787,9 @@ def test_marketplace_skills_deliver_profiles_and_progressive_references():
     skills=expected_skills()
     agent_references=expected_agent_references()
     references=expected_worker_references()
-    assert len(skills)==22
+    assert len(skills)==23
     assert len(agent_references)==3
-    assert len(references)==66
+    assert len(references)==69
     assert all(path.read_bytes()==body for path,body in agent_references.items())
     assert all(path.read_bytes()==body for path,body in references.items())
     for path,body in skills.items():

@@ -54,7 +54,9 @@ def expected_profiles(plugin: Path = PLUGIN) -> dict[Path, bytes]:
         if report_template not in {"general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis"}:
             raise ValueError(f"invalid report template for {profile['name']}")
         values = sections((source_root / (Path(filename).stem + ".md")).read_text())
-        prompt = template.replace("{{Default report template}}", report_template)
+        selected_template = ((source_root / "consultant-protocol.md").read_text()
+                             if profile["name"] == "senior_consultant" else template)
+        prompt = selected_template.replace("{{Default report template}}", report_template)
         for key in SPECIALIZED:
             prompt = prompt.replace("{{" + key + "}}", values[key])
         if "{{" in prompt or "}}" in prompt:
@@ -155,4 +157,4 @@ if __name__ == "__main__":
         check() if args.action == "check" else write()
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Agent profile generation failed: {exc}") from None
-    print(f"Agent v2 profiles {args.action}: 22 compact prompts with shared references")
+    print(f"Agent v2 profiles {args.action}: 23 compact prompts with shared references")

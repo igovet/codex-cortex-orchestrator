@@ -1,0 +1,13 @@
+# Pinned runtime dependencies for the standalone gateway candidate.
+# The isolated developer launcher is the only supported installation route.
+aiohttp==3.14.3
+zstandard==0.25.0
+aiohappyeyeballs==2.7.1
+aiosignal==1.4.0
+attrs==26.1.0
+frozenlist==1.8.0
+idna==3.19
+multidict==6.7.1
+propcache==0.5.2
+typing_extensions==4.16.0
+yarl==1.24.5

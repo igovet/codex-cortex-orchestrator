@@ -12,9 +12,20 @@ META={'threadId':'00000000-0000-4000-8000-000000000001','x-codex-turn-metadata':
 ROOT=Path(__file__).resolve().parents[1]
 
 
+def storage_only_home(home: Path) -> Path:
+    """Keep stdio protocol tests independent of the optional gateway child."""
+    cortex = home / 'cortex'
+    cortex.mkdir(parents=True, exist_ok=True)
+    cortex.chmod(0o700)
+    config = cortex / 'config.toml'
+    config.write_text('schema_version = 1\n[gateway]\nenabled = false\n')
+    config.chmod(0o600)
+    return home
+
+
 def exchange(tmp_path,messages):
     messages=copy.deepcopy(messages)
-    home=tmp_path/'host';(home/'sessions').mkdir(parents=True,exist_ok=True)
+    home=storage_only_home(tmp_path/'host');(home/'sessions').mkdir(parents=True,exist_ok=True)
     db=sqlite3.connect(home/'state_5.sqlite')
     db.execute('CREATE TABLE IF NOT EXISTS _sqlx_migrations(version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL, success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)')
     db.execute("INSERT OR IGNORE INTO _sqlx_migrations VALUES (1,'fixture','now',1,X'00',1)")
@@ -75,7 +86,8 @@ def test_markdown_code_and_quotes_survive_wire_storage_and_restart(tmp_path):
 
 def test_raw_invalid_and_oversize_frames(tmp_path):
     raw='{"jsonrpc":"2.0","id":1,"method":"ping","method":"PRIVATE"}\n'+'x'*2_000_001+'\n'+json.dumps(dict(jsonrpc='2.0',id=3,method='ping'))+'\n'
-    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input=raw,text=True,capture_output=True,timeout=30)
+    home=storage_only_home(tmp_path/'host')
+    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input=raw,text=True,capture_output=True,env=os.environ|{'CODEX_HOME':str(home)},timeout=30)
     rows=[json.loads(line) for line in result.stdout.splitlines()]
     assert len(rows)==3 and rows[-1]['result']=={}
     assert 'PRIVATE' not in result.stdout and result.stderr==''

@@ -57,7 +57,7 @@ reports and indexed documentation. The native thread binding and current pipelin
 
 ## Profile routing and skill loading
 
-The orchestrator skill contains a routing table for all 22 specialists. Each has
+The orchestrator skill contains a routing table for all 23 specialists. Each has
 an exact `cortex:worker-*` skill token. The coordinator supplies that token and a
 self-contained assignment through ordinary native subagent tools. The worker loads
 its complete advertised skill before tool discovery or project work. Each assignment

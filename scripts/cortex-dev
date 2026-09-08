@@ -17,9 +17,122 @@ export HOME="${owner_home}/.cortex-dev"
 export CODEX_HOME="${HOME}/.codex"
 export PYTHONDONTWRITEBYTECODE=1
 umask 077
+# The gateway's pinned third-party dependencies are installed only into the
+# isolated dev CODEX_HOME. Stable user environments are never modified here.
+dependency_dir="${HOME}/.codex/cortex-deps"
+lock_file="${script_dir}/../plugins/cortex/requirements.lock"
+if [[ -L "${HOME}" || -L "${CODEX_HOME}" || -L "${HOME}/.codex" || -L "${dependency_dir}" ]]; then
+  echo 'isolated dependency path contains an unsafe symlink' >&2; exit 2
+fi
+if [[ -e "${dependency_dir}" && ! -d "${dependency_dir}" ]]; then
+  echo 'isolated dependency target is not a regular directory' >&2; exit 2
+fi
+if [[ -d "${dependency_dir}" ]]; then
+  # pip --target must never be allowed to write through a nested link into
+  # an unrelated tree.  Check every descendant before the destructive
+  # refresh, including links whose targets no longer exist.
+  if find "${dependency_dir}" -type l -print -quit | grep -q .; then
+    echo 'isolated dependency tree contains an unsafe descendant symlink' >&2; exit 2
+  fi
+  dependency_owner="$(stat -c '%u' -- "${dependency_dir}")"
+  if [[ "${dependency_owner}" != "${EUID}" ]]; then
+    echo 'isolated dependency target has the wrong owner' >&2; exit 2
+  fi
+  rm -rf -- "${dependency_dir}"
+fi
+mkdir -p -- "${dependency_dir}"
+chmod 700 -- "${dependency_dir}"
+export CORTEX_DEPENDENCY_DIR="${dependency_dir}"
+# Sanitize before invoking Python or pip; an ambient path must not influence
+# the installer process itself.  Later checks add only the verified isolated
+# dependency directory and packaged runtime path explicitly.
+export PYTHONPATH=""
+# The gateway's HTTPS MITM is intentionally scoped to chatgpt.com and cannot
+# serve package-index traffic.  Keep ambient proxy settings for the eventual
+# Codex child, but never let them affect the isolated dependency refresh.
+( unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy SSL_CERT_FILE
+  python3 -m pip install --disable-pip-version-check --no-input --no-cache-dir --no-compile --upgrade --force-reinstall --require-hashes --target "${dependency_dir}" \
+    -r "${lock_file}"
+)
+# Do not carry an ambient import path into the isolated profile.  The gateway
+# imports its own packaged script path, while preparation checks need only the
+# verified dependency tree plus that packaged runtime path.
+export PYTHONPATH="${dependency_dir}"
+PYTHONPATH="${script_dir}/../plugins/cortex/scripts:${dependency_dir}" python3 -B - "${script_dir}/../plugins/cortex/requirements.txt" "${dependency_dir}" "${script_dir}/../plugins/cortex" <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+from cortex_runtime.runtime.state import dependency_identity
+from pathlib import Path
+import sys
+
+requirements, target, plugin = map(Path, sys.argv[1:])
+sys.path.insert(0, str(target))
+for line in requirements.read_text(encoding="utf-8").splitlines():
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    name, expected = line.split("==", 1)
+    try:
+        actual = version(name)
+    except PackageNotFoundError as exc:
+        raise SystemExit(f"isolated dependency missing: {name}") from exc
+    if actual != expected:
+        raise SystemExit(f"isolated dependency mismatch: {name}={actual}, expected {expected}")
+manifest, installed, combined = dependency_identity(plugin, target, required=True)
+print(f"isolated dependency identity: manifest={manifest} bytes={installed} combined={combined}")
+PY
+# Package preparation records the exact lock and installed-byte identities in
+# the isolated candidate receipt before registration.
 "${script_dir}/sync-cortex.sh"
 # Registration and installation happen only here, inside the validated dev home.
 python3 -B "${script_dir}/prepare_codex.py"
+# Imports performed by an independent preparation/check can create bytecode
+# under the isolated dependency target.  Remove it before the candidate is
+# handed to live CLI/Desktop qualification; dependency_identity(required=True)
+# intentionally rejects any such residue.
+find "${dependency_dir}" -type d -name __pycache__ -prune -exec rm -rf -- {} +
+find "${dependency_dir}" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+PYTHONPATH="${script_dir}/../plugins/cortex/scripts:${dependency_dir}" python3 -B - "${script_dir}/../plugins/cortex" "${dependency_dir}" <<'PY'
+from pathlib import Path
+import sys
+from cortex_runtime.runtime.state import dependency_identity
+
+plugin, dependency = map(Path, sys.argv[1:])
+manifest, installed, combined = dependency_identity(plugin, dependency, required=True)
+print(f"isolated dependency clean identity: manifest={manifest} bytes={installed} combined={combined}")
+PY
+# Keep live-dev traffic on a separate fixed listener from the stable plugin.
+# Migrate only the former production-default port in this exact isolated home.
+PYTHONPATH="${script_dir}/../plugins/cortex/scripts:${dependency_dir}" python3 -B - <<'PY'
+from cortex_runtime.gateway.config import ConfigLoader, write_default_config
+from cortex_runtime.provider import _atomic_private_write, _read_config_observation, _upsert_key
+
+path = write_default_config()
+loader = ConfigLoader()
+config = loader.validate()
+if config.get('gateway', {}).get('port', 8787) == 8787:
+    observed = _read_config_observation(path)
+    updated = _upsert_key(observed[0].decode(), 'gateway', 'port', '18787').encode()
+    _atomic_private_write(path, updated, observed=observed)
+    loader.validate()
+PY
+# Ensure the isolated provider before CLI or Desktop loads its configuration.
+gateway_config="${CODEX_HOME}/cortex/config.toml"
+# Run the control path for every existing filesystem entry, including broken
+# symlinks and directories, so unsafe configured state fails closed.  Only a
+# truly absent path leaves ordinary startup unchanged.
+if [[ -e "${gateway_config}" || -L "${gateway_config}" ]]; then
+  candidate_version="$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' "${CODEX_HOME}/cortex-candidate.json")"
+  cached_control="${CODEX_HOME}/plugins/cache/cortex/cortex/${candidate_version}/scripts/cortex_runtime_ctl.py"
+  if [[ ! -f "${cached_control}" ]]; then
+    echo 'isolated Marketplace cache is missing its packaged gateway control entrypoint' >&2; exit 2
+  fi
+  # The Marketplace-installed plugin owns the gateway it will later recover.
+  # Starting the repository source tree here leaves a state identity that the
+  # cached MCP server cannot accept.
+  # Live CLI/Desktop preparation explicitly routes the isolated Codex profile
+  # through the verified gateway. This mutates only the disposable profile.
+  python3 -B "${cached_control}" ensure --codex-home "${CODEX_HOME}"
+fi
 if [[ "${prepare_only}" == 1 ]]; then exit 0; fi
 cd -- "${caller_workdir}"
 exec codex "$@"

@@ -11,7 +11,8 @@ The [official skill guide](https://learn.chatgpt.com/docs/build-skills) describe
 metadata-first discovery followed by loading the selected complete SKILL.md, with
 supporting references loaded as needed. The [plugin packaging guide](https://developers.openai.com/plugins/build/plugins)
 uses `.codex-plugin/plugin.json` with `"skills": "./skills/"`. Cortex retains that
-layout, all 22 complete worker skills, companion skills and seven MCP operations.
+layout, all 23 complete worker skills, including the report-only senior consultant,
+companion skills and seven MCP operations.
 
 A worker uses a complete body already injected by Codex or reads its exact advertised
 SKILL.md path from the available-skills catalogue. Documented path aliases are expanded
@@ -76,6 +77,26 @@ limitation. Standard automatic eviction of eligible completed contexts is distin
 from that failure. Never promise that a plugin prompt repairs host residency or
 silently switch the user's native interface. Current named-candidate outcomes are
 recorded in [release readiness](../release-readiness.md).
+
+Encrypted assignment text is not readable policy evidence. The isolated observer
+can nevertheless verify an executor's fixed Luna route from its exact native
+activity path, parent edge, actual model/effort and successful complete skill-read
+receipt. It retains the opaque-content marker and does not certify hidden scope
+or reasoning. A missing child, incomplete/truncated skill read, inherited context
+or mismatched route still fails this check; tool errors remain failures even when
+the actor later recovers. This avoids equating ciphertext with a routing violation
+while requiring positive evidence of the execution actually observed.
+
+Callable deferred tool names do not expose their input contracts. Coordinators
+and workers read the selected complete declaration when absent, reload it after
+compaction, and construct requests with all required fields and optional defaults.
+The shared instructions demonstrate both name discovery and selected-description
+reading; printing names twice does not load an input contract. Result sizes and
+remembered synonyms cannot redefine input fields or pagination bounds. The first
+recovery skill read also preserves its complete command receipt. Publication keys
+follow the writer's own declaration, independently of optional draft-retry keys.
+See [focused verification](verification.md) for the consecutive real-host audit
+results and rejected attempts.
 
 ## Worker app-message boundary
 

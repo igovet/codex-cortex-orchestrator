@@ -76,7 +76,7 @@ TOOLS = [
          "the selected template. The short draft_id appears in the filename and Markdown. "
          "The result returns the complete initial Markdown plus the exact required_first_line, "
          "the complete ordered replaceable_markers list and count, template name, character count, and SHA-256. Use that returned Markdown as the source "
-         "of truth; no immediate read_draft call is needed. Preserve the first line byte-for-byte, "
+         "of truth; copy patch context verbatim from this receipt, never reconstruct placeholder names from memory. No immediate read_draft call is needed. Preserve the first line byte-for-byte, "
          "edit the existing file in place only after its following blank line, and replace every guidance comment or exact pipeline placeholder with complete English content. Use native file tools safely and inspect the actual result; all exact placeholders must be replaced. "
          "Use that file tool and never delete, rename, replace, recreate, or rewrite "
          "the entire draft file. Create a separate draft for every report or pipeline "
@@ -105,12 +105,12 @@ TOOLS = [
          "another thread's draft, a published report, or an invented path.", {
              "draft_id": DRAFT,
              "cursor": string("Exact opaque next_cursor from the preceding page of this same draft.", 512),
-             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
+             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Normally omit this field and use the default. A document larger than one page requires its returned next_cursor, never a limit above the maximum or a renamed input field. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, ["draft_id"], read=True),
     tool("write_report",
          "Publish either one immutable report or a new current pipeline edition for the task "
          "resolved from host thread metadata. First call create_draft, fill the returned file "
-         "completely in English with native file tools, then send only its short draft_id. The "
+         "completely in English with native file tools, then send its short draft_id and all required publication metadata. The "
          "draft must belong to this exact native thread and remain at its server-issued path. The server "
          "streams the complete file without a report-size limit, validates UTF-8, hashes and "
          "atomically publishes it under <project_root>/.codex/cortex/<task>/<report>.md, "
@@ -126,7 +126,7 @@ TOOLS = [
              "summary": string("One decision-ready English preview of at most 100 Unicode characters. This operating target leaves well over half of the enforced 320-character transport maximum unused. Include the result and the most material check, blocker, or limitation; full evidence belongs in the file.", 320),
              "author": string("Short English worker/profile or coordinator label.", 120),
              "draft_id": DRAFT,
-             "request_key": KEY,
+             "request_key": dict(KEY, description="Required on the initial publication as well as any retry. Choose a new unique delivery key for this logical publication; the optional create_draft retry key does not replace it. " + KEY["description"]),
          }, ["title", "summary", "author", "draft_id", "request_key"]),
     tool("list_reports",
          "Return compact report metadata newest first for the task resolved from host thread "
@@ -147,7 +147,7 @@ TOOLS = [
          "makes older pipeline cursors stale. Ordinary reports are immutable.", {
              "report_id": dict(REPORT, description="Exact opaque report identifier copied unchanged from an acknowledged receipt or a coordinator-validated assignment. Use the exact acknowledged reference. If it is unavailable or invalid, obtain its authoritative correction; do not guess or probe nearby identifiers."),
              "cursor": string("Exact opaque next_cursor from the preceding page. Any actor may continue the selected source or evidence when needed.", 512),
-             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
+             "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Normally omit this field and use the default. A document larger than one page requires its returned next_cursor, never a limit above the maximum or a renamed input field. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, [], read=True),
 ]
 

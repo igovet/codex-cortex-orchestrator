@@ -14,7 +14,7 @@ setup=importlib.util.module_from_spec(spec);spec.loader.exec_module(setup)
 def test_plain_plugin_install_is_missing_profiles_until_explicit_setup(tmp_path):
     home=tmp_path/'codex'
     before=setup.register(PLUGIN,home)
-    assert len(before['missing'])==22 and not home.exists()
+    assert len(before['missing'])==23 and not home.exists()
     assert setup.register(PLUGIN,home,True)['installed']
     result=setup.register(PLUGIN,home)
     assert result['missing']==result['stale']==result['conflicts']==[]

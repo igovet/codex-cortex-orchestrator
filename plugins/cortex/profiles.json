@@ -161,6 +161,14 @@
       "report_template": "verification"
     },
     {
+      "name": "senior_consultant",
+      "filename": "senior-consultant.toml",
+      "description": "Bounded senior consultant for coordinator-requested decisions using selected published reports only.",
+      "select_when": "One difficult, ambiguous, or contradictory coordinator decision needs a focused report-only consultation.",
+      "avoid_when": "The question needs fresh project investigation, implementation, verification, acceptance, or plan ownership.",
+      "report_template": "general"
+    },
+    {
       "name": "technical_writer",
       "filename": "technical-writer.toml",
       "description": "Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.",

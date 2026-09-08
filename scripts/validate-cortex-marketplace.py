@@ -11,4 +11,4 @@ assert {t['name'] for t in TOOLS}=={'create_task','set_governance','create_draft
 market=json.loads((ROOT/'.agents/plugins/marketplace.json').read_text())
 assert market['name']=='cortex'
 assert market['plugins'][0]['source']['path']=='./plugins/cortex'
-print('Package validated: '+version+'; 7 tools; 22 profiles')
+print('Package validated: '+version+'; 7 tools; 23 profiles')

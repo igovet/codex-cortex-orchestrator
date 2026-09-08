@@ -43,7 +43,8 @@ def register(plugin,home,install=False):
     previous=json.loads(receipt.read_text()) if receipt.exists() else {}
     expected={}
     profiles=json.loads((plugin/'profiles.json').read_text())['profiles']
-    if len(profiles)!=22:raise ValueError('incomplete profile catalogue')
+    profile_count=23
+    if len(profiles)!=profile_count:raise ValueError('incomplete profile catalogue')
     for profile in profiles:
         name=profile['filename']
         if Path(name).name!=name or not name.endswith('.toml'):raise ValueError('invalid profile filename')
@@ -52,7 +53,7 @@ def register(plugin,home,install=False):
         if parsed['name']!=profile['name'] or not parsed.get('developer_instructions'):
             raise ValueError('invalid native profile')
         expected[name]=body
-    if len(expected)!=22:raise ValueError('duplicate profile filenames')
+    if len(expected)!=profile_count:raise ValueError('duplicate profile filenames')
     missing=[];stale=[];conflicts=[]
     for name,body in expected.items():
         target=directory/name;safe_path(target)
@@ -60,7 +61,7 @@ def register(plugin,home,install=False):
         elif target.read_bytes()!=body:
             if previous.get(name)==sha(target.read_bytes()):stale.append(name)
             else:conflicts.append(name)
-    result=dict(profiles=22,missing=missing,stale=stale,conflicts=conflicts,installed=False)
+    result=dict(profiles=profile_count,missing=missing,stale=stale,conflicts=conflicts,installed=False)
     if install and not conflicts:
         directory.mkdir(parents=True,exist_ok=True,mode=0o700)
         for name in missing+stale:atomic_write(directory/name,expected[name])

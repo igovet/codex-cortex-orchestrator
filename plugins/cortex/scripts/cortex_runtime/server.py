@@ -94,6 +94,20 @@ def observe(operation, outcome, replayed=False, meta=None, arguments=None, resul
         pass  # Observation never governs execution or changes a committed write.
 
 
+def recover_gateway_if_explicitly_enabled() -> None:
+    """Recover an explicitly configured gateway, failing closed on errors."""
+    from .runtime.supervisor import GatewaySupervisor
+
+    supervisor = GatewaySupervisor()
+    # Treat only a genuinely absent path as unconfigured.  Directories,
+    # symlinks, permissive files, and other existing states must fail closed
+    # through the loader rather than silently skipping recovery.
+    if supervisor.loader.is_configured():
+        snapshot = supervisor.manager.snapshot()
+        if snapshot.gateway_enabled:
+            supervisor.ensure()
+
+
 class ProtocolError(Exception):
     def __init__(self, code, message):
         self.code=code;self.message=message
@@ -187,6 +201,9 @@ def reject_duplicates(pairs):
 
 def main():
     os.umask(0o077)
+    from .marketplace_bootstrap import bootstrap
+    bootstrap()
+    recover_gateway_if_explicitly_enabled()
     server = Server()
     while True:
         line = sys.stdin.buffer.readline(MAX_REQUEST_BYTES+1)

@@ -18,6 +18,23 @@ const result = await tools.exec_command({...});
 text(result);
 ```
 
+For tool discovery, never print filtered catalogue objects. Emit names only:
+
+```text
+text(ALL_TOOLS.filter(x => /cortex/i.test(x.name)).map(x => x.name));
+```
+
+Next emit the complete declaration, using the exact observed name needed now:
+
+```text
+text(ALL_TOOLS.find(x => x.name === "mcp__cortex__create_draft").description);
+```
+
+Names alone contain no input contract. Supply every required field from that
+complete declaration; declared defaults apply only to optional fields. Never use
+an empty trial call to discover requirements. Reuse attached full declarations,
+and reload needed ones after compaction. Discover project tools separately.
+
 ## Role and responsibility
 
 Reproduce the delegated defect, prove its causal chain, implement the smallest
@@ -58,16 +75,7 @@ other applicable skills through the standard Codex mechanism when the artifact o
 workflow requires them. Read only the relevant declared references. Do not inspect
 plugin caches, agent TOML, manifests, server code or databases to reconstruct
 instructions.
-Use attached complete schemas directly. When discovery is needed, first emit only
-provider-qualified names, without descriptions or schemas. In code mode, for example:
-`text(ALL_TOOLS.filter(t => t.name.includes("codebase_memory")).map(t => t.name))`.
-Discover Cortex report operations separately by their provider names. A Cortex-only
-lookup does not discover project tools. Then read complete live contracts for only
-the individual operations needed now. Never dump descriptions for an entire provider
-or combine provider descriptions. Keep output sufficient for each selected contract;
-split reads instead of relying on truncation. Avoid broad description matching.
-Return or emit the complete result object from code-mode wrappers so terminal status
-or a session handle reaches the model.
+
 
 Use the project's instructions and routed documentation before nontrivial work.
 Confirm consequential claims in current source or the actual artifact.

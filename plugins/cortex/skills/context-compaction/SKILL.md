@@ -1,6 +1,6 @@
 ---
 name: context-compaction
-description: Restore coordinator and specialist context before continuing after summarization, compaction or restart.
+description: Restore coordinator and specialist context after compaction or restart. For the initial skill read, emit the complete command result with text(result), preserving output and exit_code or a running session_id.
 ---
 
 # Context recovery
@@ -8,14 +8,14 @@ description: Restore coordinator and specialist context before continuing after 
 Use this skill after summarization, compaction, reset, restart or terminal worker
 recovery. The recovery summary is an index into durable state, not a replacement for
 the original request, pipeline or evidence.
+Reload the next needed live tool declaration; remembered field names and values
+are not authoritative. Prefer its declared defaults.
 
 ## Coordinator
 
 Resume the same native thread and task. Recover the current pipeline and reread the
 original request, later user messages, attachment routes and as many bounded evidence
-pages as needed to restore exact requirements and make the next decision. A
-4,000-character limit is one page, not a total recovery limit.
-Restore the user-facing language from the user's own prose and any explicit
+pages as needed to restore exact requirements and make the next decision. Restore the user-facing language from the user's own prose and any explicit
 response-language preference before replying; an English recovery summary does not
 change it.
 
