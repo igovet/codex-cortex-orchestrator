@@ -255,6 +255,7 @@ class MitmProxy:
 
     async def start(self) -> None:
         self.server = await asyncio.start_server(self._client, self.host, self.port)
+        self.port = int(self.server.sockets[0].getsockname()[1])
 
     async def close(self) -> None:
         if self.server is not None:

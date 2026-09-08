@@ -993,7 +993,12 @@ those sanitized entries with local lifecycle telemetry: a preceding native
 compaction has no such user message. Network evidence alone cannot make that
 distinction, and a failed helper receipt must not be retried for this purpose.
 
-The feature is opt-in. `scripts/cortex-dev` prepares the isolated candidate,
+For Marketplace installation, the gateway starts by default. The packaged
+Python entrypoint creates the private config, installs
+the hash-locked runtime into `$CODEX_HOME/cortex/deps`, and ensures the cached
+gateway; failures abort startup. Set `gateway.enabled = false` in
+`$CODEX_HOME/cortex/config.toml` for explicit storage-only mode.
+`scripts/cortex-dev` remains the isolated developer launcher,
 ensures the explicitly configured gateway, and sets `HTTPS_PROXY`/`HTTP_PROXY`
 to the adjacent MITM listener plus the owner-only CA bundle; ordinary stable
 Codex configuration is untouched. The proxy accepts only loopback listener

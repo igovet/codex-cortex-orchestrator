@@ -182,8 +182,9 @@ advisory rather than treating it as a coordinator-boundary breach.
 A saved report is not acceptance. The coordinator assesses current requirements,
 source completeness, artifact revisions and the evidence's limits.
 
-The optional Model Gateway is explicit opt-in through the global `CODEX_HOME`
-configuration. Its local supervisor owns only its registered child process and
+The Model Gateway starts by default for Marketplace MCP through the global
+`CODEX_HOME` configuration. Set `gateway.enabled = false` for explicit
+storage-only mode. Its local supervisor owns only its registered child process and
 does not receive or persist provider credentials. Listener and upstream changes
 are applied by a drain-and-restart path; stop waits for owned runtime state to
 disappear and reports a timeout when it cannot. Provider patching validates the

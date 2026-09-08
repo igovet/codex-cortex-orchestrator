@@ -22,6 +22,7 @@
     "scripts/cortex_runtime/hook_storage.py",
     "scripts/cortex_runtime/hooks.py",
     "scripts/cortex_runtime/host_source.py",
+    "scripts/cortex_runtime/marketplace_bootstrap.py",
     "scripts/cortex_runtime/migrate.py",
     "scripts/cortex_runtime/project_storage.py",
     "scripts/cortex_runtime/provider.py",

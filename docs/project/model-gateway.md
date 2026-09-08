@@ -4,6 +4,13 @@ The optional Model Gateway is controlled by the global
 `$CODEX_HOME/cortex/config.toml`. Ordinary startup remains unchanged when that
 file is absent or `gateway.enabled = false`.
 
+Marketplace startup is enabled by default. The packaged Python MCP entrypoint
+creates the owner-only config when absent, installs the exact
+hash-locked wheel set into `$CODEX_HOME/cortex/deps`, and calls the cached
+supervisor. Any dependency, ownership, config, payload, or readiness failure
+aborts MCP startup with a nonzero error. Set `gateway.enabled = false` in the
+config for an explicit storage-only MCP mode.
+
 The isolated `scripts/cortex-dev` launcher checks the explicit gateway config
 before launching CLI or Desktop preparation and runs the packaged
 Marketplace-cache `cortex_runtime_ctl.py ensure` selected from the prepared

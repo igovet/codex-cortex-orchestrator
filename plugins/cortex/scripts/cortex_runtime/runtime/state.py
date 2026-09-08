@@ -127,6 +127,8 @@ class GatewayState:
     dependency_manifest_digest: str = "unbound"
     dependency_bytes_digest: str = "unbound"
     dependency_digest: str = "unbound"
+    # Actual OS-selected HTTPS MITM port; absent in legacy state files.
+    mitm_port: int | None = None
 
     @classmethod
     def new(cls, *, pid: int, host: str, port: int, plugin_version: str, package_digest: str, upstream: str, policy_revision: int, executable: str | None = None, plugin_root: Path | None = None) -> "GatewayState":
@@ -171,6 +173,7 @@ class GatewayState:
             if _safe_existing(paths.state) is None or _safe_existing(paths.pid) is None:
                 return None
             value = json.loads(paths.state.read_text(encoding="utf-8"))
+            value.setdefault("mitm_port", value.get("port", 8787) + 1)
             state = cls(**value)
             if state.pid <= 0 or str(state.pid) != paths.pid.read_text(encoding="ascii").strip():
                 return None
@@ -292,7 +295,7 @@ def dependency_identity(plugin_root: Path | None, target: Path | None = None, *,
         return "unbound", "unbound", "unbound"
     manifest = plugin_root / "requirements.lock"
     manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    raw_target = target or (Path(os.environ["CORTEX_DEPENDENCY_DIR"]) if os.environ.get("CORTEX_DEPENDENCY_DIR") else None)
+    raw_target = target or (Path(os.environ["CORTEX_DEPENDENCY_DIR"]) if os.environ.get("CORTEX_DEPENDENCY_DIR") else (Path(os.environ["CODEX_HOME"]) / "cortex" / "deps" if os.environ.get("CODEX_HOME") else None))
     if raw_target is None:
         if required:
             raise ValueError("CORTEX_DEPENDENCY_DIR is required for the isolated gateway")

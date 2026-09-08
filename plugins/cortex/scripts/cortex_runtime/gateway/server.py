@@ -67,8 +67,9 @@ async def serve(*, codex_home: Path | None = None, host: str | None = None, port
     # Keep the HTTP health/control listener intact and expose the client-facing
     # HTTPS CONNECT MITM on the adjacent owner-local port. Provider routing
     # uses the real upstream URL plus this explicit proxy endpoint.
-    mitm = MitmProxy(host=bind_host, port=bind_port + 1, codex_home=manager.loader.codex_home, manager=manager)
+    mitm = MitmProxy(host=bind_host, port=0, codex_home=manager.loader.codex_home, manager=manager)
     await mitm.start()
+    state = replace(state, mitm_port=mitm.port)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, bind_host, bind_port)

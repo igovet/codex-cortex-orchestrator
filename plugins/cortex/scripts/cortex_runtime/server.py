@@ -201,6 +201,8 @@ def reject_duplicates(pairs):
 
 def main():
     os.umask(0o077)
+    from .marketplace_bootstrap import bootstrap
+    bootstrap()
     recover_gateway_if_explicitly_enabled()
     server = Server()
     while True:

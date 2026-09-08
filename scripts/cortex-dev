@@ -121,7 +121,8 @@ if [[ -e "${gateway_config}" || -L "${gateway_config}" ]]; then
   python3 -B "${cached_control}" ensure --codex-home "${CODEX_HOME}"
   # Codex keeps the real upstream URL; the isolated gateway's adjacent
   # owner-local listener is the HTTPS CONNECT MITM transport.
-  export HTTPS_PROXY="http://${CORTEX_GATEWAY_HOST:-127.0.0.1}:${CORTEX_GATEWAY_PROXY_PORT:-8788}"
+  mitm_port="$(python3 -B "${cached_control}" status --codex-home "${CODEX_HOME}" | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("runtime") or {}; p=r.get("mitm_port"); sys.exit(2) if not isinstance(p,int) else print(p)')"
+  export HTTPS_PROXY="http://${CORTEX_GATEWAY_HOST:-127.0.0.1}:${mitm_port}"
   export HTTP_PROXY="${HTTPS_PROXY}"
   export NO_PROXY="127.0.0.1,localhost,[::1]"
   export SSL_CERT_FILE="${CODEX_HOME}/cortex/mitm/ca-bundle.pem"
