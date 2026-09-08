@@ -11,7 +11,7 @@ import time
 from urllib.parse import urlsplit
 
 try:
-    from aiohttp import ClientSession, ClientTimeout, DummyCookieJar, TCPConnector, web
+    from aiohttp import ClientSession, ClientTimeout, DummyCookieJar, TCPConnector, TraceConfig, WSMsgType, WSServerHandshakeError, web
 except ImportError as exc:  # pragma: no cover - exercised by packaging checks
     raise RuntimeError("Cortex Model Gateway requires the aiohttp dependency") from exc
 
@@ -28,6 +28,7 @@ from .defaults import (
 from .diagnostics import generated_error, log_outcome, request_id
 from .headers import forwarded_header_items, response_header_items
 from .transform import TransformError, transform_compaction, transform_legacy_compaction
+from .mitm import rewrite_ws_compaction
 
 LOGGER = logging.getLogger("cortex.gateway")
 NAMESPACE = "/backend-api/codex"
@@ -96,11 +97,20 @@ class GatewayProxy:
 
     async def start(self) -> None:
         if self._session is None:
+            trace = TraceConfig()
+
+            async def reject_redirect(*_args):
+                # ws_connect uses the HTTP client's redirect machinery. Stop
+                # before a second request can carry authentication elsewhere.
+                raise ConnectionError("upstream redirects are not supported")
+
+            trace.on_request_redirect.append(reject_redirect)
             self._session = ClientSession(
                 connector=TCPConnector(limit=32, enable_cleanup_closed=True),
                 timeout=ClientTimeout(total=None, sock_connect=UPSTREAM_CONNECT_TIMEOUT_SECONDS, sock_read=UPSTREAM_READ_TIMEOUT_SECONDS),
                 auto_decompress=False,
                 cookie_jar=DummyCookieJar(),
+                trace_configs=[trace],
             )
 
     async def close(self) -> None:
@@ -174,7 +184,7 @@ class GatewayProxy:
             raise ValueError("ambiguous_backend_path")
         safe_path = NAMESPACE if not segments else NAMESPACE + "/" + "/".join(segments)
         parsed = urlsplit(snapshot.upstream)
-        query = request.query_string
+        query = request.raw_path.partition("?")[2]
         target = f"{parsed.scheme}://{parsed.netloc}{safe_path}" + (f"?{query}" if query else "")
         final = urlsplit(target)
         local_test_upstream = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
@@ -270,6 +280,11 @@ class GatewayProxy:
             request["gateway_outcome"] = "namespace_rejected"
             status, body, headers = generated_error(str(exc), "The requested backend namespace is not supported.", status=404)
             return web.Response(status=status, body=body, headers=headers)
+
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            if request.method != "GET" or request.path != V2_PATH:
+                return web.Response(status=404)
+            return await self._proxy_websocket(request, snapshot, target)
 
         legacy_compaction = request.path == LEGACY_PATH
         if legacy_compaction:
@@ -495,6 +510,116 @@ class GatewayProxy:
                 disconnect_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await disconnect_task
+
+    async def _proxy_websocket(self, request: web.Request, snapshot: PolicySnapshot, target: str) -> web.StreamResponse:
+        await self.start()
+        assert self._session is not None
+        # Each leg has its own RFC 6455 handshake. Authentication and semantic
+        # headers pass through; keys, extensions and framing belong to the leg.
+        handshake = {"host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions", "sec-websocket-protocol", "content-length"}
+        headers = [(key, value) for key, value in request.headers.items() if key.lower() not in handshake]
+        protocols = tuple(part.strip() for part in request.headers.get("Sec-WebSocket-Protocol", "").split(",") if part.strip())
+        try:
+            upstream = await self._session.ws_connect(
+                target, headers=headers, protocols=protocols, compress=0,
+                autoping=False, autoclose=False, max_msg_size=32 * 1024 * 1024,
+            )
+        except WSServerHandshakeError as exc:
+            request["gateway_outcome"] = "websocket_handshake_rejected"
+            status, body, response_headers_ = generated_error("websocket_handshake_rejected", "The upstream rejected the WebSocket handshake.", status=exc.status)
+            return web.Response(status=status, body=body, headers=response_headers_)
+        except Exception:
+            request["gateway_outcome"] = "upstream_unavailable"
+            return web.Response(status=502)
+
+        downstream = web.WebSocketResponse(
+            protocols=(upstream.protocol,) if upstream.protocol else (),
+            compress=False, autoping=False, autoclose=False, max_msg_size=32 * 1024 * 1024,
+        )
+        for key, value in upstream._response.headers.items():
+            if key.lower() not in handshake | {"sec-websocket-accept", "content-encoding", "transfer-encoding"}:
+                downstream.headers.add(key, value)
+        pumps: list[asyncio.Task] = []
+        try:
+            if not self.manager.snapshot().gateway_enabled:
+                return web.Response(status=503)
+            await downstream.prepare(request)
+
+            async def relay(source, destination, *, client: bool) -> None:
+                while True:
+                    message = await source.receive()
+                    if message.type == WSMsgType.TEXT:
+                        outgoing = message.data
+                        if client:
+                            policy = self.manager.snapshot()
+                            if not policy.gateway_enabled:
+                                await downstream.close(code=1012, message=b"Gateway disabled")
+                                return
+                            metadata = {}
+                            kind = "websocket_ordinary"
+                            if policy.router_enabled and policy.compaction_enabled:
+                                rewritten = rewrite_ws_compaction(outgoing.encode("utf-8"), policy)
+                                if rewritten is not None:
+                                    outgoing = rewritten[0].decode("utf-8")
+                                    metadata = rewritten[1]
+                                    kind = "websocket_compaction"
+                            if not metadata:
+                                try:
+                                    body = json.loads(outgoing)
+                                    if isinstance(body, dict):
+                                        reasoning = body.get("reasoning")
+                                        effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+                                        metadata = {"original_model": body.get("model"), "routed_model": body.get("model"), "original_reasoning_effort": effort, "routed_reasoning_effort": effort}
+                                except (ValueError, RecursionError):
+                                    pass
+                            await destination.send_str(outgoing)
+                            log_outcome(LOGGER, request_id=request_id(), request_kind=kind,
+                                        config_revision=policy.revision, http_status=101,
+                                        transport_outcome="forwarded", duration_ms=0, **metadata)
+                        else:
+                            await destination.send_str(outgoing)
+                    elif message.type == WSMsgType.BINARY:
+                        if client and not self.manager.snapshot().gateway_enabled:
+                            await downstream.close(code=1012)
+                            return
+                        await destination.send_bytes(message.data)
+                    elif message.type == WSMsgType.PING:
+                        await destination.ping(message.data)
+                    elif message.type == WSMsgType.PONG:
+                        await destination.pong(message.data)
+                    elif message.type == WSMsgType.CLOSE:
+                        await destination.close(code=message.data or 1000, message=(message.extra or "").encode())
+                        return
+                    elif message.type in {WSMsgType.CLOSED, WSMsgType.CLOSING}:
+                        return
+                    elif message.type == WSMsgType.ERROR:
+                        raise ConnectionError("WebSocket transport failed")
+
+            pumps = [asyncio.create_task(relay(downstream, upstream, client=True)),
+                     asyncio.create_task(relay(upstream, downstream, client=False))]
+            done, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            for pump in done:
+                pump.result()
+            request["gateway_outcome"] = "websocket_closed"
+        except (TransformError, ConfigError):
+            request["gateway_outcome"] = "websocket_policy_rejected"
+            await downstream.close(code=1008, message=b"Gateway policy rejected the request")
+        except asyncio.CancelledError:
+            request["gateway_outcome"] = "client_disconnected"
+            raise
+        except Exception:
+            request["gateway_outcome"] = "websocket_transport_error"
+            if downstream.prepared:
+                await downstream.close(code=1011, message=b"Gateway transport failed")
+        finally:
+            for pump in pumps:
+                if not pump.done():
+                    pump.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+            await upstream.close()
+            if downstream.prepared:
+                await downstream.close()
+        return downstream
 
 
 GATEWAY_PROXY_KEY = web.AppKey("gateway_proxy", GatewayProxy)

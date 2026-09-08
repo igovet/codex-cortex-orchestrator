@@ -76,7 +76,7 @@ TOOLS = [
          "the selected template. The short draft_id appears in the filename and Markdown. "
          "The result returns the complete initial Markdown plus the exact required_first_line, "
          "the complete ordered replaceable_markers list and count, template name, character count, and SHA-256. Use that returned Markdown as the source "
-         "of truth; no immediate read_draft call is needed. Preserve the first line byte-for-byte, "
+         "of truth; copy patch context verbatim from this receipt, never reconstruct placeholder names from memory. No immediate read_draft call is needed. Preserve the first line byte-for-byte, "
          "edit the existing file in place only after its following blank line, and replace every guidance comment or exact pipeline placeholder with complete English content. Use native file tools safely and inspect the actual result; all exact placeholders must be replaced. "
          "Use that file tool and never delete, rename, replace, recreate, or rewrite "
          "the entire draft file. Create a separate draft for every report or pipeline "

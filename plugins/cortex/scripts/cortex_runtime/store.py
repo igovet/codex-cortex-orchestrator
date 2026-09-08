@@ -688,7 +688,7 @@ class Store:
             result=dict(draft_id=draft_id,draft_path=str(path),kind=kind,
                         template=args["template"],
                         required_first_line=f"Cortex draft ID: `{draft_id}`",
-                        edit_instruction="Edit the registered file in place. Preserve its identity and first-line marker, replace every listed placeholder, and retain complete UTF-8 Markdown. Use the native file tool safely and inspect its actual result.",
+                        edit_instruction="Edit the registered file in place. Copy patch context verbatim from this receipt's Markdown and listed markers; never reconstruct placeholder names from memory. Preserve its identity and first-line marker, replace every listed placeholder, and retain complete UTF-8 Markdown. Inspect the native file tool's actual result.",
                         replaceable_markers=replaceable_markers,
                         required_replacement_count=len(replaceable_markers),
                         markdown=markdown,total_characters=len(markdown),

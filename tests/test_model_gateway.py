@@ -562,7 +562,7 @@ def test_runtime_identity_rejects_gateway_path_as_unused_python_argv_token(tmp_p
 
 def test_provider_patch_uses_configured_port_and_does_not_claim_unverified_gate() -> None:
     patch = provider_patch(ProviderSettings(gateway_host="127.0.0.1", gateway_port=8799))
-    assert "https://chatgpt.com/backend-api/codex" in patch
+    assert "http://127.0.0.1:8799/backend-api/codex" in patch
     assert "[features]" in patch
     assert patch.index("[features]") < patch.index("[model_providers.cortex]")
     assert "remote_compaction_v2 = false" in patch
@@ -635,6 +635,9 @@ def test_provider_patch_uses_effective_codex_home_when_omitted(tmp_path: Path, m
     stable_config = stable / "config.toml"
     stable_config.write_text('model_provider = "stable"\n')
     monkeypatch.setenv("CODEX_HOME", str(isolated))
+    def connect(supervisor):
+        return apply_provider_patch(supervisor.codex_home, ProviderSettings())
+    monkeypatch.setattr(runtime_ctl_module.GatewaySupervisor, "connect", connect)
     assert runtime_ctl_main(["configure", "--provider"]) == 0
     assert (isolated / "config.toml").is_file()
     assert (isolated / "cortex" / "config.toml").is_file()
@@ -991,6 +994,7 @@ def test_ensure_drains_legacy_cortex_gateway_before_rebind(monkeypatch, tmp_path
 def test_marketplace_bootstrap_keeps_pip_output_off_mcp_stdout(monkeypatch, tmp_path: Path) -> None:
     home = tmp_path / "codex"
     monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("CORTEX_DEPENDENCY_DIR", raising=False)
     pip_calls: list[dict[str, object]] = []
     ensured: list[Path] = []
 
@@ -1001,11 +1005,15 @@ def test_marketplace_bootstrap_keeps_pip_output_off_mcp_stdout(monkeypatch, tmp_
         def __init__(self, *, codex_home):
             ensured.append(codex_home)
 
-        def ensure(self):
+        def connect(self):
             return {"status": "running"}
+
+        def startup_lock(self):
+            return nullcontext()
 
     monkeypatch.setattr(marketplace_bootstrap.subprocess, "run", fake_run)
     monkeypatch.setattr(marketplace_bootstrap, "GatewaySupervisor", Supervisor)
+    monkeypatch.setattr(marketplace_bootstrap, "verified_dependencies", lambda *_: ("manifest", "bytes", "combined"))
 
     marketplace_bootstrap.bootstrap()
 

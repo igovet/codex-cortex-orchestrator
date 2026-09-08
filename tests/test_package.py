@@ -15,8 +15,8 @@ from generate_agent_profiles import (
 
 
 def test_stamped_package_and_profiles():
-    assert validate().startswith('1.15.7+codex.sha256.')
-    assert len(list((PLUGIN/'agents').glob('*.toml')))==22
+    assert validate().startswith('1.15.8+codex.sha256.')
+    assert len(list((PLUGIN/'agents').glob('*.toml')))==23
     payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     assert all((PLUGIN/path).is_file() for path in payload)
     expected_runtime={
@@ -68,13 +68,19 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     check_agent_profiles()
     assert all(path.read_bytes() == body for path, body in expected_profiles().items())
     assert len(expected_agent_references())==3
-    assert len(expected_worker_references())==66
+    assert len(expected_worker_references())==69
     for path in (PLUGIN/'agents').glob('*.toml'):
         profile=tomllib.loads(path.read_text())
         instructions=profile['developer_instructions']
         headings={
             line[3:] for line in instructions.splitlines() if line.startswith('## ')
         }
+        if profile['name'] == 'senior_consultant':
+            assert '## Access boundary' in instructions
+            assert 'Do not run commands, tests or project checks' in instructions
+            assert 'references/report-publication.md' in instructions
+            assert 'You may investigate, implement' not in instructions
+            continue
         assert {
             'Role and responsibility',
             'Assignment contract',
@@ -175,7 +181,9 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
             'context-compaction',
         )
     )
-    assert companion < 25_000
+    # The opt-in consultant adds a bounded coordinator packet/access policy while
+    # retaining the compact companion-skill budget.
+    assert companion < 27_000
     assert '## Durable task and pipeline' in orchestrator
     assert '## Choose the smallest useful work graph' in orchestrator
     assert '## Model and effort' in orchestrator
@@ -518,11 +526,11 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     assert helper['local_http_origin']('curl http://127.0.0.1:5173/path')=='http://localhost:5173'
     assert helper['browser_mutation_count']('await tab.click(1); await tab.setValue(2, "x")')==2
     assert helper['draft_call_metadata'](
-        'apply_patch','*** Update File: /tmp/project/.cortex/draft-reports/d_1.md'
-    )=={'cortex_draft_edit':True}
+        'apply_patch','*** Update File: /tmp/project/.cortex/draft-reports/d_123456789abc.md'
+    )=={'cortex_draft_edit':True,'edited_draft_ids':['d_123456789abc'],'ordinary_draft_edit':True}
     assert helper['draft_call_metadata'](
-        'apply_patch','*** Update File: .cortex/draft-reports/d_2.md'
-    )=={'cortex_draft_edit':True}
+        'apply_patch','*** Update File: .cortex/draft-reports/d_123456789abc.md'
+    )=={'cortex_draft_edit':True,'edited_draft_ids':['d_123456789abc'],'ordinary_draft_edit':True}
     browser_policy=helper['call_policy_violations']([
         {'thread_id':'worker','role':'build_verification','tool':'command_execution','outcome':'success','command_family':'curl','local_http_origin':'http://localhost:5173'},
         {'thread_id':'worker','role':'build_verification','tool':'js','outcome':'success','browser_action':'attach_tab'},
@@ -774,9 +782,9 @@ def test_marketplace_skills_deliver_profiles_and_progressive_references():
     skills=expected_skills()
     agent_references=expected_agent_references()
     references=expected_worker_references()
-    assert len(skills)==22
+    assert len(skills)==23
     assert len(agent_references)==3
-    assert len(references)==66
+    assert len(references)==69
     assert all(path.read_bytes()==body for path,body in agent_references.items())
     assert all(path.read_bytes()==body for path,body in references.items())
     for path,body in skills.items():

@@ -12,7 +12,7 @@
 - Keep knowledge commands, index routing and rereading after summarization as
   bundled model instructions; do not rebuild a workflow engine around them.
 - Keep explicit retention cleanup as a host-side command with project isolation.
-- Preserve semantic version 1.15.7 for this release; update the payload hash after
+- Preserve semantic version 1.15.8 for this release; update the payload hash after
   every installable payload edit.
 - Bind tasks to host MCP thread metadata after real CLI/Desktop observation; no model-authored task selector or latest-task fallback.
 
@@ -22,7 +22,8 @@
 - Qualify Cortex calls and report lifecycle independently from project development
   diagnostics; retain both without conflating their acceptance boundaries.
 
-- Distribute the 22 complete worker profiles as native plugin skills. Ordinary
+- Distribute the 23 complete worker profiles as native plugin skills, including an
+  opt-in report-only senior consultant. Ordinary
   native subagents load the complete assigned skill by attachment or its advertised path; marketplace operation does not
   depend on global TOML registration or a custom spawn selector. Keep optional
   TOML exports generated from the same source, outside installation prerequisites.

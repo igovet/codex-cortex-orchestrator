@@ -8,7 +8,7 @@
 ## Inventory totals
 
 Two feature groups: seven storage operations, one host-side retention command,
-22 specialist profiles, and knowledge/routing skills. Two documented groups.
+23 specialist profiles, including the opt-in report-only senior consultant, and knowledge/routing skills. Two documented groups.
 
 ## Unmapped surfaces
 

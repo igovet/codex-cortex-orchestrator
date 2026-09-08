@@ -20,7 +20,7 @@ Retention cleanup must receive active task exclusions from the coordinator;
 storage cannot infer native agent liveness.
 
 A plugin cache containing agent TOML files does not populate Codex's personal
-agent registry. Cortex therefore distributes all 22 specialist profiles as worker
+agent registry. Cortex therefore distributes all 23 specialist profiles as worker
 skills and assigns their exact tokens to ordinary native subagents. Dev preparation
 must not register personal profiles, or it can hide marketplace installation bugs.
 Verify runs with an empty personal agents directory and inspect actual skill loading.

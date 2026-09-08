@@ -1,5 +1,16 @@
 # Verification
 
+## 1.15.8 automatic provider and senior consultant — 2026-09-08
+
+The candidate adds automatic Marketplace provider setup and a separate optional
+senior consultant while preserving the seven tools and 22 executor profiles.
+After the consultant follow-up repair, package/source-sync checks and all 382 tests
+passed sequentially. Actual host
+outcomes, rejected attempts, consultation usage and unrun scenarios are recorded
+in the [focused verification report](../features/senior-consultant/verification.md).
+The consultant's explicit Sol/Astra exception is separate from the ordinary worker
+model policy below; it does not change the main session's model.
+
 ## Coordinator project-access enforcement — 2026-09-07
 
 Recovery context now repeats the mandatory project-access boundary so compaction
@@ -562,3 +573,9 @@ Live development uses Luna/high for the coordinator and Luna at medium/high for
 native workers. The isolated helpers layer this user-requested test policy and audit
 actual participant/selector receipts. Heavy live-test models are rejected. This does
 not change stable settings or the plugin's general user-selected model policy.
+
+The final 1.15.8 consultant repair passed 382 tests and consecutive focused CLI
+then actual Desktop audits on unchanged payload `3443aff2cf72630c`: 50/62 host
+call records and 13/14 MCP outcomes, respectively. Both audits exited zero.
+See the [detailed report](../features/senior-consultant/verification.md) for token
+usage, earlier rejections, observable-route limits and unrun scenarios.

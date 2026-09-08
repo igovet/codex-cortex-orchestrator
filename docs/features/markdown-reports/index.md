@@ -38,10 +38,11 @@ dependency, shared-resource or acceptance decisions, the coordinator records use
 durable requirements, decisions, assignments, ownership and open actions. This does
 not impose a universal publication stage before delegation.
 
-Each of the 22 specialists loads its complete marketplace worker skill through
+Each of the 23 specialists loads its complete marketplace worker skill through
 native attachment or the exact advertised `SKILL.md` path. Needed declared
-references are loaded on demand. One shared protocol and specialization fragments
-generate all skills and optional TOML exports. No installation scan or personal
+references are loaded on demand. The 22 executor profiles share one protocol;
+the report-only consultant has a separate access protocol and shares publication.
+Specialization fragments generate all skills and optional TOML exports. No installation scan or personal
 agent registry is needed. See [host compatibility](../../project/host-compatibility.md).
 
 One worker may investigate, implement, verify and document a bounded result.

@@ -25,7 +25,16 @@ def _is_cortex_entrypoint(path: Path) -> bool:
         return False
 
 
-def gateway_processes(*, host: str, port: int) -> list[int]:
+def _same_codex_home(pid: int, codex_home: Path) -> bool:
+    try:
+        expected = b"CODEX_HOME=" + os.fsencode(codex_home)
+        with open(f"/proc/{pid}/environ", "rb") as stream:
+            return expected in stream.read(1024 * 1024).split(b"\0")
+    except OSError:
+        return False
+
+
+def gateway_processes(*, host: str, port: int, codex_home: Path) -> list[int]:
     """Find same-user Cortex gateway processes bound to the requested command.
 
     The caller uses this only after a bind/readiness conflict.  Matching the
@@ -44,7 +53,7 @@ def gateway_processes(*, host: str, port: int) -> list[int]:
         pid = int(entry.name)
         try:
             info = entry.stat()
-            if info.st_uid != os.getuid() or pid == os.getpid():
+            if info.st_uid != os.getuid() or pid == os.getpid() or not _same_codex_home(pid, codex_home):
                 continue
             args = process_argv(pid)
             if len(args) != 8 or args[1] != "-B" or args[3:] != ["serve", "--host", host, "--port", str(port)]:
@@ -62,14 +71,14 @@ def gateway_processes(*, host: str, port: int) -> list[int]:
     return result
 
 
-def signal_gateway_process(pid: int, *, host: str, port: int, sig: int = signal.SIGTERM) -> bool:
+def signal_gateway_process(pid: int, *, host: str, port: int, codex_home: Path, sig: int = signal.SIGTERM) -> bool:
     """Signal a verified Cortex gateway process without following PID reuse."""
     try:
         if pid <= 0 or pid == os.getpid():
             return False
         entry = Path("/proc") / str(pid)
         info = entry.stat()
-        if info.st_uid != os.getuid():
+        if info.st_uid != os.getuid() or not _same_codex_home(pid, codex_home):
             return False
         args = process_argv(pid)
         if len(args) != 8 or args[1] != "-B" or args[3:] != ["serve", "--host", host, "--port", str(port)]:

@@ -25,7 +25,7 @@ class ProviderSettings:
     name: str = "OpenAI"
     gateway_host: str = DEFAULT_HOST
     gateway_port: int = DEFAULT_PORT
-    base_url: str | None = "https://chatgpt.com/backend-api/codex"
+    base_url: str | None = None
     wire_api: str = "responses"
     # Credentials may only be routed through a gateway whose process and
     # candidate identity were verified by the supervisor.  The safe default
@@ -34,16 +34,20 @@ class ProviderSettings:
     requires_openai_auth: bool = False
     gateway_verified: bool = False
     supports_websockets: bool = False
-    remote_compaction_v2: bool = False
+    remote_compaction_v2: bool | None = False
     feature_gate_validated: bool = False
 
     def resolved_base_url(self) -> str:
         if self.requires_openai_auth and not self.gateway_verified:
             raise ValueError("authenticated provider routing requires a verified owned gateway")
-        value = self.base_url or "https://chatgpt.com/backend-api/codex"
+        if self.gateway_host not in {"127.0.0.1", "localhost", "::1"} or not 1 <= self.gateway_port <= 65535:
+            raise ValueError("provider requires a fixed loopback listener")
+        authority = f"[{self.gateway_host}]" if ":" in self.gateway_host else self.gateway_host
+        expected = f"http://{authority}:{self.gateway_port}/backend-api/codex"
+        value = self.base_url or expected
         parsed = urlsplit(value)
-        if parsed.scheme != "https" or parsed.hostname != "chatgpt.com" or parsed.port not in (None, 443) or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path.rstrip("/") != "/backend-api/codex":
-            raise ValueError("provider base_url must target the fixed HTTPS upstream namespace")
+        if value.rstrip("/") != expected or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("provider base_url must target the verified loopback listener")
         if self.remote_compaction_v2 and not self.feature_gate_validated:
             raise ValueError("remote_compaction_v2 requires an explicit validation receipt")
         return value.rstrip("/")
@@ -313,6 +317,8 @@ def _upsert_key(text: str, section: str, key: str, value: str) -> str:
         for index in reversed(matching[1:]):
             del lines[index]
         return "".join(lines)
+    if end and not lines[end - 1].endswith(("\n", "\r")):
+        lines[end - 1] += newline
     lines.insert(end, f"{key} = {value}{newline}")
     return "".join(lines)
 
@@ -321,7 +327,8 @@ def render_provider_config(original: bytes, settings: ProviderSettings) -> bytes
     """Render a reversible, comment-preserving provider edit and validate it."""
     text = original.decode("utf-8") if original else ""
     text = _upsert_key(text, "", "model_provider", '"cortex"')
-    text = _upsert_key(text, "features", "remote_compaction_v2", str(settings.remote_compaction_v2 and settings.feature_gate_validated).lower())
+    if settings.remote_compaction_v2 is not None:
+        text = _upsert_key(text, "features", "remote_compaction_v2", str(settings.remote_compaction_v2 and settings.feature_gate_validated).lower())
     for key, value in (
         ("name", json.dumps(settings.name)),
         ("base_url", json.dumps(settings.resolved_base_url())),
@@ -338,7 +345,7 @@ def render_provider_config(original: bytes, settings: ProviderSettings) -> bytes
     return result
 
 
-def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings) -> dict[str, str]:
+def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings, *, managed: bool = False) -> dict[str, str]:
     """Apply an explicit provider edit with a locked, compare-and-swap publish."""
     path = codex_config_path(codex_home)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -355,8 +362,29 @@ def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings) ->
         observed = _read_config_observation(path)
         original, original_token = observed
         _validate_config_bytes(path, original)
+        route_path = path.with_name("config.toml.cortex-route.json")
+        if managed:
+            parsed = tomllib.loads(original.decode())
+            saved_bytes, _ = _read_config_observation(route_path)
+            saved = json.loads(saved_bytes) if saved_bytes else None
+            if saved:
+                current_fields = parsed.get("model_providers", {}).get("cortex")
+                matches_installed = parsed.get("model_provider") == "cortex" and current_fields == saved["installed"]
+                matches_pending = (not saved.get("committed", True)
+                                   and parsed.get("model_provider") == saved.get("before_selector")
+                                   and current_fields == saved.get("before_fields"))
+                if not (matches_installed or matches_pending):
+                    return {"path": str(path), "status": "user_override"}
+            if not saved:
+                if parsed.get("model_provider", "openai") != "openai" or "cortex" in parsed.get("model_providers", {}):
+                    raise ValueError("automatic Cortex routing requires the OpenAI provider and an unused cortex provider name")
+                if parsed.get("openai_base_url") or os.environ.get("OPENAI_BASE_URL"):
+                    raise ValueError("automatic Cortex routing cannot replace a custom OpenAI upstream")
         updated = render_provider_config(original, settings)
         if updated == original:
+            if managed and saved and not saved.get("committed", True):
+                saved["committed"] = True
+                _atomic_private_write(route_path, json.dumps(saved).encode())
             return {"path": str(path), "backup": str(backup), "status": "unchanged"}
         try:
             backup_info = backup.lstat()
@@ -403,6 +431,17 @@ def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings) ->
             ):
                 raise ValueError("provider backup is an unsafe link or file")
 
+        if managed:
+            installed = tomllib.loads(updated.decode())["model_providers"]["cortex"]
+            plugin_keys = [key for key in parsed.get("plugins", {}) if key.startswith("cortex@")]
+            journal = {"previous": saved["previous"] if saved else parsed.get("model_provider"), "installed": installed,
+                       "plugin_key": saved.get("plugin_key") if saved else plugin_keys[0] if len(plugin_keys) == 1 else None,
+                       "before_selector": parsed.get("model_provider"),
+                       "before_fields": parsed.get("model_providers", {}).get("cortex"), "committed": False}
+            # Publish recovery metadata before routing any credentials. A
+            # failed config CAS leaves an inert journal, never a missing undo.
+            _atomic_private_write(route_path, json.dumps(journal).encode())
+
         # Re-open and compare immediately before publication.  The lock
         # serializes cooperating provider writers; the descriptor/content CAS
         # prevents an unrelated same-user editor from being overwritten.
@@ -416,9 +455,99 @@ def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings) ->
             os.chmod(temporary, 0o600)
             _assert_config_unchanged(path, (original, original_token))
             _publish_config_cas(path, Path(temporary), (original, original_token))
+            if managed:
+                journal["committed"] = True
+                _atomic_private_write(route_path, json.dumps(journal).encode())
         finally:
             try:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
     return {"path": str(path), "backup": str(backup), "status": "updated"}
+
+
+def _atomic_private_write(path: Path, data: bytes, *, observed=None) -> None:
+    if observed is None:
+        observed = _read_config_observation(path)
+    fd, name = tempfile.mkstemp(prefix=".cortex-route.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _publish_config_cas(path, Path(name), observed)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _remove_key(text: str, section: str, key: str) -> str:
+    target = tuple(section.split(".")) if section else ()
+    current = ()
+    pattern = re.compile(rf"^\s*(?:{re.escape(key)}|\"{re.escape(key)}\"|'{re.escape(key)}')\s*=")
+    lines = []
+    for line in text.splitlines(keepends=True):
+        header = _parse_header(line)
+        if header:
+            current = header[0]
+        if current != target or not pattern.match(line):
+            lines.append(line)
+        elif " #" in line:
+            lines.append("#" + line.partition(" #")[2])
+    return "".join(lines)
+
+
+def restore_provider(codex_home: Path | None) -> dict[str, str]:
+    """Undo only still-owned route fields, retaining subsequent user edits."""
+    path = codex_config_path(codex_home)
+    journal_path = path.with_name("config.toml.cortex-route.json")
+    if not journal_path.exists() and not journal_path.is_symlink():
+        return {"status": "unmanaged"}
+    with _provider_write_lock(path.parent):
+        saved = json.loads(_read_config_observation(journal_path)[0])
+        observed = _read_config_observation(path)
+        original = observed[0]
+        _validate_config_bytes(path, original)
+        parsed = tomllib.loads(original.decode())
+        text = original.decode()
+        if parsed.get("model_provider") == "cortex":
+            if saved["previous"] is None:
+                text = _remove_key(text, "", "model_provider")
+            else:
+                text = _upsert_key(text, "", "model_provider", json.dumps(saved["previous"]))
+        current = parsed.get("model_providers", {}).get("cortex", {})
+        for key, value in saved["installed"].items():
+            before_fields = saved.get("before_fields") or {}
+            if key in current and (current[key] == value or (not saved.get("committed", True) and key in before_fields and current[key] == before_fields[key])):
+                text = _remove_key(text, "model_providers.cortex", key)
+        # Empty generated table headers are safe to remove; retain any table
+        # with user fields, and all comments/other TOML bytes.
+        lines = text.splitlines(keepends=True)
+        for index in range(len(lines) - 1, -1, -1):
+            if _parse_header(lines[index]) == (("model_providers", "cortex"), False):
+                end = index + 1
+                while end < len(lines) and _parse_header(lines[end]) is None:
+                    end += 1
+                if not any(line.strip() and not line.lstrip().startswith("#") for line in lines[index + 1:end]):
+                    del lines[index]
+        updated = "".join(lines).encode()
+        _validate_config_bytes(path, updated)
+        _assert_config_unchanged(path, observed)
+        _atomic_private_write(path, updated, observed=observed)
+        journal_path.unlink()
+    return {"status": "restored", "path": str(path)}
+
+
+def managed_plugin_disabled(codex_home: Path | None) -> bool:
+    """Observe removal/disable of the exact Marketplace entry seen at setup."""
+    path = codex_config_path(codex_home)
+    journal_path = path.with_name("config.toml.cortex-route.json")
+    journal_bytes = _read_config_observation(journal_path)[0]
+    if not journal_bytes:
+        return False
+    key = json.loads(journal_bytes).get("plugin_key")
+    if not key:
+        return False
+    config = tomllib.loads(_safe_config_bytes(path).decode())
+    entry = config.get("plugins", {}).get(key)
+    return entry is None or entry.get("enabled") is False

@@ -5,8 +5,11 @@ The Model Gateway is controlled by the global
 default; set `gateway.enabled = false` for explicit storage-only mode.
 
 The packaged Python MCP entrypoint creates the owner-only config when absent,
-installs the exact hash-locked wheel set into `$CODEX_HOME/cortex/deps`, and
-calls the cached supervisor. Installation output is kept off the MCP stdout
+installs the exact hash-locked wheel set into `$CODEX_HOME/cortex/deps/<lock-digest>`, and
+calls the cached supervisor's `connect` operation. Private dependency receipts
+allow verified trees to be reused across MCP/worker starts. Different lock
+revisions use separate trees. The isolated launcher's supplied dependency tree
+is verified and retained. Installation output is kept off the MCP stdout
 JSON-RPC stream. Any dependency, ownership, config, payload, or readiness
 failure aborts MCP startup with a nonzero error.
 
@@ -46,16 +49,28 @@ does not drain, reload returns a structured failure and the control command
 exits nonzero; it never reports successful convergence. A process reporting
 `draining` is not readiness-successful and cannot be reused for convergence.
 `stop` sends a controlled drain signal and waits up to its deadline for runtime
-state removal. Provider configuration is opt-in (`configure --provider`): it
+state removal. Provider configuration is automatic after readiness: it
 uses the effective `CODEX_HOME` (or an explicit `--codex-home`), preserves the
 existing Codex TOML including inline table-header comments, and writes a
 first-version `config.toml.cortex-backup` before an atomic update. Backup
 publication is create-only under concurrent configure calls, so the first
-complete recovery point is never overwritten. The feature
-flag is emitted under `[features]` as `remote_compaction_v2 = false` unless an
-explicit validation receipt authorizes enabling it. Valid quoted table headers,
+complete recovery point is never overwritten. Automatic setup preserves
+feature flags, model and reasoning-effort choices. Valid quoted table headers,
 array-table boundaries, and inline comments are preserved; settings are inserted
 only into their semantic TOML tables.
+
+The provider points to the verified fixed loopback listener, with
+`requires_openai_auth = true` and `supports_websockets = true`. Codex supplies
+its existing authentication. Automatic setup requires its normal OpenAI route;
+custom providers/upstreams and existing user-owned `cortex` definitions are
+rejected. A separate private route journal stores the previous selection and
+owned fields, supports interrupted publication recovery, and preserves later
+user overrides. Stop/disable restores only unchanged owned values. The running
+gateway observes removal/disable of the exact Marketplace entry recorded at
+setup, restores the route and drains. A forcibly killed gateway cannot observe
+uninstallation. The first MCP startup can occur after the client loaded its
+configuration: a new task or Desktop restart may be needed. No hot migration of
+existing clients is claimed. See the official [custom provider documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers).
 
 When `gateway.enabled` changes from true to false, `ensure` drains and waits for
 the positively owned child to remove its runtime state, then reports `stopped`;
@@ -79,13 +94,11 @@ ordinary or opaque legacy wire formats are forwarded byte-for-byte. No request
 body, credentials, or headers are logged. The runtime keeps a private,
 rotating gateway outcome log bounded to 256 KiB.
 
-The client-facing transport is an HTTPS CONNECT MITM on the adjacent listener:
-Codex connects to `chatgpt.com:443` through the local proxy, the proxy opens a
-new TLS connection to the fixed upstream, and the HTTP upgrade's `101 Switching
-Protocols` response is forwarded before any WebSocket frame inspection begins.
-Only subsequent RFC 6455 client frames are eligible for the bounded inspector;
-the handshake is not decoded as a request body. The MITM removes the optional
-`permessage-deflate` offer so eligible JSON is uncompressed. The installed
+The client-facing transport is HTTP/SSE and WebSocket on the same fixed local
+provider listener. The proxy opens TLS to the fixed upstream. Each WebSocket
+leg has its own handshake, masking and message framing, with compression
+disabled; application headers, message content and control signals are relayed.
+Redirects are rejected before a second authenticated handshake request. The installed
 Codex binary's source markers point to `core/src/compact_remote_v2.rs` and
 `codex-api/src/endpoint/responses_websocket.rs`, and its request schema exposes
 `response.create`, `input`, `reasoning`, `store`, and `stream`. The precise
@@ -112,11 +125,14 @@ user message immediately before the compaction indicates standalone steering;
 absence of that message leaves the event as auto-or-unknown. Do not repeat a
 one-shot prompt to obtain this correlation.
 
-The isolated `scripts/cortex-dev` path enables this only for its prepared,
-owner-only candidate by setting `HTTPS_PROXY` and `HTTP_PROXY` to the MITM and
-`SSL_CERT_FILE` to its private CA bundle. Stable Codex configuration is not
-changed. Diagnostics record only bounded route/model/effort/status metadata;
+The isolated `scripts/cortex-dev` path invokes the same provider setup only in
+its prepared, owner-only candidate. It no longer sets proxy or certificate
+variables. Diagnostics record only bounded route/model/effort/status metadata;
 cookies, authorization, bodies, and WebSocket payloads are excluded.
+The isolated launcher migrates its former default port 8787 to 18787 so live
+checks can coexist with a running stable gateway. Other explicitly configured
+isolated ports are retained. Process replacement is scoped to the same Codex
+home and never drains the stable listener during a development run.
 
 The isolated developer launcher removes the owner-controlled dependency target
 before installing the Linux CPython 3.11/3.12 wheel set from
@@ -136,9 +152,9 @@ incoming `Host` is validated as a loopback listener authority, then rewritten
 only on the upstream wire to the configured upstream authority; HTTP/1.1 cannot
 route to `chatgpt.com` while presenting `127.0.0.1` as its virtual host. This is
 transport metadata, not a semantic request rewrite, and prevents Cloudflare
-from rejecting the request before authentication. The sole body exception is
-enabled compaction policy, which rewrites only `model` and `reasoning.effort`;
-its representation metadata is updated only as required for those rewritten
-bytes. Redirects are not followed, so forwarded credentials cannot cross the
+from rejecting the request before authentication. The body exceptions are the
+compaction model/effort policy and the recognized HTTP compaction compatibility
+fields described above; representation metadata changes only as required for
+those rewritten bytes. Redirects are not followed, so forwarded credentials cannot cross the
 fixed upstream boundary. Response header multiplicity and streamed body chunks
 are retained; client cancellation cancels only that request's upstream task.

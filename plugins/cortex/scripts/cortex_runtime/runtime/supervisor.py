@@ -12,6 +12,7 @@ import time
 from urllib.request import urlopen
 
 from ..gateway.config import ConfigError, ConfigLoader, ConfigManager, write_default_config
+from ..provider import ProviderSettings, apply_provider_patch, restore_provider
 from .process import gateway_processes, signal_gateway_process, signal_owned, spawn_gateway
 from .state import (
     GatewayState,
@@ -141,18 +142,35 @@ class GatewaySupervisor:
         listener remains untouched and the subsequent readiness failure is
         allowed to abort startup.
         """
-        for pid in gateway_processes(host=host, port=port):
-            if not signal_gateway_process(pid, host=host, port=port):
-                if pid in gateway_processes(host=host, port=port):
+        for pid in gateway_processes(host=host, port=port, codex_home=self.codex_home):
+            if not signal_gateway_process(pid, host=host, port=port, codex_home=self.codex_home):
+                if pid in gateway_processes(host=host, port=port, codex_home=self.codex_home):
                     raise RuntimeError("conflicting Cortex gateway could not be signaled")
                 continue
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
-                if pid not in gateway_processes(host=host, port=port):
+                if pid not in gateway_processes(host=host, port=port, codex_home=self.codex_home):
                     break
                 time.sleep(0.05)
             else:
                 raise RuntimeError("conflicting Cortex gateway did not stop before restart")
+
+    def connect(self) -> dict[str, object]:
+        """Converge the owned listener before selecting it in Codex."""
+        result = self.ensure()
+        snapshot = self.manager.snapshot()
+        if not snapshot.gateway_enabled:
+            result["provider"] = restore_provider(self.codex_home)
+            return result
+        if result.get("status") != "running":
+            raise RuntimeError("provider routing requires a ready owned gateway")
+        result["provider"] = apply_provider_patch(self.codex_home, ProviderSettings(
+            gateway_host=snapshot.host, gateway_port=snapshot.port,
+            requires_openai_auth=True, gateway_verified=True,
+            supports_websockets=True, remote_compaction_v2=None,
+        ), managed=True)
+        result["client_config_application"] = "next_config_load"
+        return result
 
     def ensure(self, *, wait_seconds: float = 10.0) -> dict[str, object]:
         if not self._external_manager and not self.loader.is_configured():
@@ -165,6 +183,7 @@ class GatewaySupervisor:
         except ConfigError:
             raise
         if not snapshot.gateway_enabled:
+            restore_provider(self.codex_home)
             with self.startup_lock():
                 state = GatewayState.read(self.paths)
                 if state and self._drainable_owned(state):
@@ -248,6 +267,8 @@ class GatewaySupervisor:
             # Disabling is also a lifecycle transition.  Never report a
             # successful reload while an owned child can still forward.
             if binding_changed or not snapshot.gateway_enabled:
+                if not snapshot.gateway_enabled:
+                    restore_provider(self.codex_home)
                 if not signal_owned(state, signal.SIGTERM):
                     result = self.status()
                     result.update({"reload_status": "failed", "reload_error": "owned gateway could not be signaled"})
@@ -276,6 +297,7 @@ class GatewaySupervisor:
         return self.status()
 
     def stop(self, *, drain: bool = True, deadline: float = 30.0) -> dict[str, object]:
+        restore_provider(self.codex_home)
         state = GatewayState.read(self.paths)
         if state and state_matches_process(state):
             signal_owned(state, signal.SIGTERM if drain else signal.SIGKILL)

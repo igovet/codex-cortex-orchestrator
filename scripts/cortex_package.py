@@ -16,7 +16,7 @@ from plugins.cortex.scripts.cortex_runtime.runtime.state import dependency_ident
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT/'plugins/cortex'
-BASE = '1.15.7'
+BASE = '1.15.8'
 
 
 def _assert_no_symlink_tree(path, *, label='candidate'):
@@ -139,7 +139,8 @@ def validate(plugin=PLUGIN):
                         raise ValueError('hooks must use the packaged Python handler')
     profiles=json.loads((plugin/'profiles.json').read_text())['profiles']
     agents=list((plugin/'agents').glob('*.toml'))
-    if len(profiles)!=22 or len(agents)!=22 or len({p['name'] for p in profiles})!=22:
+    expected_profile_count=23
+    if len(profiles)!=expected_profile_count or len(agents)!=expected_profile_count or len({p['name'] for p in profiles})!=expected_profile_count:
         raise ValueError('profile count')
     for profile in profiles:
         parsed=tomllib.loads((plugin/'agents'/profile['filename']).read_text())

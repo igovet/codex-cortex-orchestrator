@@ -13,7 +13,7 @@
         evidence assessment, user steering, and completion.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-1.15.7-7c3aed" alt="Cortex 1.15.7" />
+        <img src="https://img.shields.io/badge/Cortex-1.15.8-7c3aed" alt="Cortex 1.15.8" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -60,7 +60,12 @@ Then complete the setup end to end:
    subagent support; enable multi_agent_v2 only when needed by the installed host.
    Cortex does not require changing agents.default_subagent_model.
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
-5. Confirm the plugin catalogue includes the 22 `cortex:worker-*` specialist
+   Follow **Automatic provider and compaction paths**: first MCP startup verifies
+   the gateway and configures its local provider automatically. Do not add proxy
+   environment variables or a CA certificate. Verify the generated route and
+   fresh model traffic after Codex reloads configuration. If a new task or restart
+   is still needed, report that explicitly and preserve active work.
+5. Confirm the plugin catalogue includes the 23 `cortex:worker-*` specialist
    skills. Verify complete native skill loading or exact advertised SKILL.md reads;
    catalogue discovery alone is insufficient. Do not read TOML or server internals. See the current
    host compatibility limitation below. Start a fresh task after updating the plugin.
@@ -110,8 +115,11 @@ choice is required, explain exactly what is needed and ask me before proceeding.
 | Bash | **3.2+** | Runs repository development and local-source synchronization scripts |
 | Operating system | macOS or Linux; WSL is recommended on Windows | The MCP server launches through `python3` and repository tooling uses Bash |
 
-No additional Python packages are required through `pip`: the Cortex runtime
-uses the Python standard library. Confirm that the required tools are available:
+Report storage uses the Python standard library. The enabled Model Gateway
+automatically installs its hash-locked Python dependencies in a private Cortex
+directory; Python must have `pip` available. The current gateway wheel set and
+process verification target Linux CPython 3.11/3.12; macOS gateway qualification
+is pending. Confirm that the required tools are available:
 
 ```bash
 python3 --version
@@ -187,7 +195,7 @@ Python versions and launch environments. Bundled lifecycle hooks use the host’
 ### Required Codex configuration
 
 > [!IMPORTANT]
-> Configure Codex before the first Cortex 1.15.7 orchestration, then start a **new task**.
+> Configure Codex before the first Cortex 1.15.8 orchestration, then start a **new task**.
 > Cortex requires available native subagents. It does not require Luna or a
 > change to the user's global default subagent model.
 
@@ -235,7 +243,7 @@ user's configured approval policy.
 
 ### Marketplace specialist delivery
 
-All 22 specialist profiles are distributed as `cortex:worker-*` skills through the
+All 23 specialist profiles are distributed as `cortex:worker-*` skills through the
 standard plugin manifest. Each native worker loads its complete selected skill
 before project work: use an attached body or read the exact SKILL.md path supplied
 in the host's available-skills catalogue. Needed declared Markdown references load
@@ -377,7 +385,7 @@ CLI, use `$cortex:orchestrator` or `/skills`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.15.7 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
+| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.15.8 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
 | `$cortex:orchestrator help` | Show read-only help without changing the project or task storage | `$cortex:orchestrator help` |
 | `$cortex:orchestrator harvest` | Update missing or stale source-backed project knowledge | `$cortex:orchestrator harvest` |
 | `$cortex:orchestrator harvest-refresh` | Re-audit and rebuild project knowledge documentation | `$cortex:orchestrator harvest-refresh` |
@@ -403,7 +411,7 @@ $cortex:orchestrator harvest-refresh
 > ### Knowledge maintenance is an explicit route, not a lifecycle prerequisite
 >
 > Run `$cortex:orchestrator harvest` when an existing repository needs a
-> source-backed knowledge baseline. Cortex 1.15.7 never blocks ordinary coordination
+> source-backed knowledge baseline. Cortex 1.15.8 never blocks ordinary coordination
 > because harvest has not run or project documentation is incomplete.
 
 Start the knowledge update with:
@@ -685,7 +693,7 @@ requires and uses previews to select relevant reports. Reuse a completed context
 for an appropriate continuation; independent verification uses a fresh context when
 required by the risk. See [comparative evaluation](docs/project/quality-evaluation.md).
 
-Cortex includes 22 advisory specialist profiles:
+Cortex includes 23 advisory specialist profiles:
 
 | Area | Profiles |
 | --- | --- |
@@ -693,19 +701,27 @@ Cortex includes 22 advisory specialist profiles:
 | Implementation | `frontend_dev`, `backend_dev`, `fullstack_dev`, `mobile_dev`, `data_engineer`, `devops_engineer`, `general` |
 | Diagnosis and improvement | `debugger`, `refactorer`, `performance_engineer`, `ux_designer`, `accessibility_auditor`, `accessibility_fixer` |
 | Quality control | `qa_engineer`, `code_reviewer`, `security_auditor`, `build_verification` |
+| Consultation | `senior_consultant` |
 | Documentation | `technical_writer` |
 
 The host-supplied orchestrator skill contains a routing table for all profiles.
 The coordinator names the exact packaged worker skill and supplies the
 complete English assignment and constraints with `fork_turns: "none"`. The worker
 loads its complete skill through host attachment or the exact advertised SKILL.md
-path before applying it to project work. Already attached live schemas need no
+path before applying it to project work. For `senior_consultant`, the coordinator
+supplies the complete skill and publication reference as attached instructions or
+verbatim bodies; the consultant does not run commands to load guidance.
+The native assignment is named `senior_consultant` for observable role attribution.
+Missing tool declarations are discovered individually; publication uses only the
+live declaration's fields and a complete call whose receipt is inspected.
+Already attached live schemas need no
 catalogue round trip. Neither role explores the installation or reads profile TOML,
 manifests or server internals. No custom loader is needed.
 
 Profiles have structured role, input, workflow, quality, reporting and recovery
-sections. One shared source protocol plus 22 specialization fragments generates
-22 self-contained worker skills and matching optional Agent v2 TOML exports. A byte-for-byte test prevents
+sections. The 22 executors share one source protocol; the consultant has a separate
+report-only protocol. These protocols and 23 specialization fragments generate
+23 self-contained worker skills and matching optional Agent v2 TOML exports. A byte-for-byte test prevents
 profile drift. Each profile also fixes its default draft class:
 
 | Draft template | Profiles |
@@ -716,6 +732,7 @@ profile drift. Each profile also fixes its default draft class:
 | `verification` | `qa_engineer`, `code_reviewer`, `security_auditor`, `build_verification`, `accessibility_auditor`, `performance_engineer` |
 | `documentation` | `technical_writer` |
 | `general` | `general` |
+| `general` | `senior_consultant` |
 
 Choose the report class that fits the assignment’s result. A profile default does
 not require another worker for a suitable different class. Optional [report examples](plugins/cortex/skills/cortex-control/references/index.md)
@@ -739,6 +756,26 @@ classified as complex, at `medium`, `high` or `xhigh`. Sol (`gpt-5.6-sol`) is
 reserved for narrow security-analysis microtasks at `medium`, `high` or `xhigh`;
 it is never selected for implementation merely because the task concerns security.
 Security-related implementation uses Luna or Terra.
+
+The opt-in `senior_consultant` route answers one bounded coordinator question from
+selected published reports. Standard consultation is Sol (`gpt-5.6-sol`) at
+`medium`; narrow and harder questions use Sol `low` and `high` respectively.
+`gpt-6-astra` at `low`, `medium` or `high` is reserved for a justified deeper
+escalation after Sol evidence remains unresolved. The consultant cannot read
+project sources or indexes, run commands/tests/network/environment checks, edit
+project files, launch agents, accept tasks, or alter the coordinator plan. Its only
+write is its own Markdown report. Each packet carries one question, goal/constraints,
+requirements revision, exact report IDs and artifact versions, attempts/results, and
+facts versus hypotheses; repeated consultation requires new evidence or a clarified
+question. Insufficient evidence must produce an exact data request and recommended
+executor profile. The coordinator records the consultation and decision in the
+current pipeline; the recommendation never replaces executor verification or
+acceptance.
+
+The coordinator supplies the consultant's complete instructions alongside its
+compact evidence packet, without inherited conversation. Its separate protocol
+keeps the 22 executor profiles unchanged. See the [consultation cycle and access
+limits](docs/features/senior-consultant/index.md).
 
 Reviews and verifications use the permitted model and effort routes without
 automatic escalation from the implementation they inspect. Assignments record the
@@ -783,7 +820,7 @@ The complete installable product lives under `plugins/cortex/`. Root-level
 | `plugins/cortex/scripts/cortex_runtime/server.py` | Bounded stdio transport and private errors |
 | `plugins/cortex/scripts/cortex_clear.py` | Explicit host-side retention command |
 | `plugins/cortex/scripts/cortex_split.py` | Stopped-access split from a legacy shared store |
-| `plugins/cortex/profiles.json` | 22 advisory specialist descriptions |
+| `plugins/cortex/profiles.json` | 23 advisory specialist descriptions |
 | `plugins/cortex/skills/orchestrator/SKILL.md` | Coordination and model selection |
 | `plugins/cortex/skills/cortex-control/SKILL.md` | Shared worker reporting protocol |
 | `.agents/plugins/marketplace.json` | Repository Marketplace |
@@ -881,8 +918,8 @@ SQLite and task directories together while storage access is stopped.
 
 ### Versioning
 
-This release uses semantic version **1.15.7** as requested. The manifest
-and MCP server advertise `1.15.7+codex.sha256.<digest-prefix>`, computed from the
+This release uses semantic version **1.15.8** per the current release instruction. The manifest
+and MCP server advertise `1.15.8+codex.sha256.<digest-prefix>`, computed from the
 complete installable payload. Regenerate the suffix whenever that payload changes.
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
@@ -890,7 +927,7 @@ preparation verify it; the server is not a workflow compatibility layer.
 ### Development agreements
 
 - Keep one authoritative bundled orchestrator and exactly seven public operations.
-- Keep all 22 profiles with a shared free-form Markdown reporting workflow.
+- Keep all 23 profiles with a shared free-form Markdown reporting workflow.
 - Keep model selection, delegation, steering and completion in the coordinator.
 - Store one latest-first pipeline file; ordinary reports remain immutable.
 - Keep tool argument contracts in advertised schemas, not model instructions.
@@ -931,7 +968,12 @@ waits for runtime-state removal before reporting it stopped. A reload to the
 disabled state stops the child and request handling rejects any race rather
 than forwarding; if reload cannot signal or drain the owned child, it returns
 failure and the control command exits nonzero. Draining health is not
-readiness. Provider backups are
+readiness. After readiness, Cortex automatically selects its local Codex
+provider at `http://127.0.0.1:8787/backend-api/codex` (or the configured fixed
+loopback listener). It uses Codex's existing OpenAI authentication and preserves
+model choices, reasoning effort, feature flags and unrelated configuration.
+No proxy variables, local CA certificate or special product launcher are needed.
+Provider backups are
 published create-only so concurrent configuration cannot overwrite the first
 recovery point. Gateway configuration and its control directory are private
 owner-only paths; unsafe existing entries fail closed. Provider updates use a
@@ -950,30 +992,42 @@ their original path and bytes. The HTTP compaction routes force the upstream-
 required `store: false` and `stream: true` values. The optional WebSocket
 transport inspects only uncompressed direct `response.create` compaction
 messages and rewrites only `model` and `reasoning.effort`, preserving the
-message's other fields, fragmentation, and masking semantics; it does not
+message's other fields; it does not
 apply a separate HTTP store rewrite.
 
-### MITM transport and compaction paths
+### Automatic provider and compaction paths
 
-The isolated launcher routes Codex through an owner-local HTTPS proxy. The
-client first sends `CONNECT chatgpt.com:443` to the MITM; after the local TLS
-certificate is accepted, the MITM opens a fresh TLS connection to the fixed
-`chatgpt.com:443` upstream. For Responses WebSocket traffic, the HTTP upgrade
-is forwarded and the upstream's `101 Switching Protocols` headers cross the
-tunnel. Only after that `101` does the MITM inspect RFC 6455 client frames; the
-HTTP CONNECT and handshake are not the compaction payload. The optional
-`permessage-deflate` offer is removed so the narrow inspector receives
-uncompressed JSON frames.
+Cortex's first MCP startup verifies the owned gateway and updates the effective
+user `config.toml` with a local `cortex` model provider. HTTP/SSE and Responses
+WebSocket requests use the same fixed loopback listener. The gateway establishes
+TLS to `chatgpt.com` and keeps authentication in transit only. WebSocket framing
+and handshakes are separate on each leg, with compression disabled; message
+content, application headers, ping/pong and close behavior are relayed.
+
+Codex applies the route when it next loads configuration. Installing a plugin
+does not guarantee that MCP has started or that an existing task has reloaded
+its provider. A new task or Desktop restart can still be necessary; Cortex
+does not interrupt active tasks. A healthy gateway alone does not prove client
+routing: verify fresh model-request outcomes from that exact client.
+
+Automatic setup requires the normal OpenAI provider. It refuses to replace a
+custom provider or custom upstream. Subsequent user provider edits take
+precedence. A private route journal records the fields Cortex owns, and
+`config.toml.cortex-backup` preserves the original file. Disabling the gateway
+or the recorded Marketplace entry restores matching owned fields and drains
+the gateway; unrelated later edits survive. Plugin removal is observed while
+the independent gateway is running. If it was forcibly killed first, its
+observer cannot perform cleanup. Configuration already loaded by an active
+client changes only on that client's next configuration load.
 
 Codex's installed source markers identify the remote V2 compactor in
 `core/src/compact_remote_v2.rs` and its WebSocket request builder in
 `codex-api/src/endpoint/responses_websocket.rs`, with the request schema fields
 `response.create`, `input`, `reasoning`, `store`, and `stream`. When that V2
 request is sent as an uncompressed direct `response.create` message containing
-an input item whose type is `compaction_trigger`, the MITM reassembles bounded
-fragments and rewrites only `model` and `reasoning.effort`. `store`, `stream`,
-all other JSON fields, frame masking, fragmentation, and control-frame order
-are preserved. A direct HTTP V2 request with the same trigger follows the
+an input item whose type is `compaction_trigger`, the gateway receives the bounded
+message and rewrites only `model` and `reasoning.effort`. `store`, `stream`,
+and all other JSON fields are preserved. A direct HTTP V2 request with the same trigger follows the
 existing HTTP policy, which also applies its upstream-required storage/stream
 normalization.
 
@@ -1001,13 +1055,12 @@ distinction, and a failed helper receipt must not be retried for this purpose.
 
 For Marketplace installation, the gateway starts by default. The packaged
 Python entrypoint creates the private config, installs
-the hash-locked runtime into `$CODEX_HOME/cortex/deps`, and ensures the cached
-gateway; failures abort startup. Set `gateway.enabled = false` in
+the hash-locked runtime into `$CODEX_HOME/cortex/deps/<lock-digest>`, and ensures the cached
+gateway and provider; failures abort startup. A verified dependency tree is reused
+by subsequent MCP processes, including workers. Set `gateway.enabled = false` in
 `$CODEX_HOME/cortex/config.toml` for explicit storage-only mode.
 `scripts/cortex-dev` remains the isolated developer launcher,
-ensures the explicitly configured gateway, and sets `HTTPS_PROXY`/`HTTP_PROXY`
-to the adjacent MITM listener plus the owner-only CA bundle; ordinary stable
-Codex configuration is untouched. The proxy accepts only loopback listener
+uses the same automatic provider code in its disposable profile. The proxy accepts only loopback listener
 authorities and the fixed upstream. Logs contain bounded model/effort,
 request-kind, and status metadata only: cookies, authorization values, request
 bodies, and WebSocket payloads are never written to diagnostics.
@@ -1016,8 +1069,7 @@ The `/backend-api/codex/responses/compact` handler is retained solely as a
 compatibility mapping for older manual callers: decodable JSON is routed to the
 supported V2 path, while opaque legacy bytes remain byte-for-byte pass-through.
 It is not a second WebSocket route or a fallback retry. The HTTP proxy module
-also remains the gateway's direct HTTP/health server; the isolated Codex
-provider path uses the HTTPS CONNECT MITM described above.
+serves HTTP, health and WebSocket traffic on the provider listener.
 Every proxied request emits bounded, secret-free model/effort and request-kind
 telemetry to the private rotating gateway log; malformed ordinary or opaque
 legacy bytes remain unchanged. The proxy preserves path/query, body bytes, and

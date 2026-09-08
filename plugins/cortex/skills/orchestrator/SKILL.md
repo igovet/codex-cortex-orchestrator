@@ -30,12 +30,22 @@ Workers reason and communicate only in English from their first response,
 including progress commentary; they do not inherit the coordinator's user-facing
 language.
 
-For every native delegation, lead the assignment with the selected exact
-`$cortex:worker-...` skill token and require its complete loading before tool discovery
-or project work. A generic role label or product brief does not load the worker
-protocol. Include English-only communication from the first response. These short
-assignment requirements carry the worker's graph and native-message rules into its
-own context; merely loading this coordinator skill does not give them to the worker.
+For executor delegation, lead with the exact `$cortex:worker-...` skill token;
+require complete loading before discovery or project work and English-only
+communication from the first response. A role label or this coordinator skill
+does not load the worker's graph and native-message protocol.
+
+The report-only senior consultant is the exception to filesystem skill loading.
+Read [its complete skill](../worker-senior-consultant/SKILL.md) and
+[publication reference](../worker-senior-consultant/references/report-publication.md)
+at these exact relative paths. No directory listing, search or installation
+exploration is permitted. After the exact token,
+begin: "Complete instructions follow. Do not open files or run commands to load
+guidance. Discover tool names first, then one exact complete declaration; never
+dump multiple tool descriptions. Ask your native parent if anything is missing." Attach both full bodies,
+not paths or summaries, after the evidence packet. Instructions are outside the
+packet's size bound. Discover only needed tool definitions with complete schemas.
+Name the native assignment `senior_consultant` so its role remains observable.
 
 ## Coordinator responsibility
 
@@ -158,6 +168,10 @@ not rely on an inherited host default.
   concerns security.
 - Security-related implementation uses Luna or Terra according to the ordinary or
   complex rule, never Sol; an audit and a fix are separate classifications.
+- Opt-in `senior_consultant` handles one bounded question: Sol `medium` standard,
+  Sol `low` narrow, Sol `high` harder; Astra `low`/`medium`/`high` only for a
+  justified deeper escalation. This is configurable, never automatic, and never
+  changes the coordinator model.
 - Reviews and verifications use permitted routes without automatic escalation;
   record inspected model/effort when relevant. `review` is a label, not a route;
   use ordinary unless complexity or security evidence warrants another
@@ -177,7 +191,9 @@ Each assignment is self-contained and concise:
 - load that skill completely before tool discovery or project work;
 - English-only worker reasoning and communication from the first response;
 - selected model/effort, policy class (`research`, `exploration`, `analysis`,
-  `ordinary`, `complex`, `security-analysis-microtask` or `review`) and evidence;
+  `ordinary`, `complex`, `security-analysis-microtask`, `consultation`,
+  `consultation-narrow`, `consultation-hard`, `consultation-deeper` or `review`)
+  and evidence;
   reviews record implementation model/effort when relevant; they do not derive a
   route or override the user request;
 - include these bounded labels in the assignment message so the host audit can
@@ -200,7 +216,7 @@ Include the short skill-loading requirement above, not a pasted worker protocol,
 tool schema or generic startup checklist. Workers load their selected complete skill through the standard skill
 mechanism and progressively load any applicable artifact skill.
 
-Use these 22 profiles:
+Use these 23 profiles:
 
 | Profile | Select for |
 | --- | --- |
@@ -224,6 +240,7 @@ Use these 22 profiles:
 | `qa_engineer` | Acceptance coverage, regression tests and quality evidence |
 | `refactorer` | Behavior-preserving structural improvement |
 | `security_auditor` | Trust boundaries, auth, secrets, crypto and dependency risk |
+| `senior_consultant` | One coordinator decision using selected published reports only |
 | `technical_writer` | Source-backed durable project documentation |
 | `ux_designer` | User flows, hierarchy, responsive and interaction rules |
 
@@ -249,6 +266,18 @@ they do, the next coordinator action is acceptance and no project tool call. Whe
 technical check is missing, delegate that check to a worker; do not run it yourself.
 Document missing or failed checks as open work. Update the pipeline with the
 decision, evidence pointers and remaining actions.
+
+For `senior_consultant`, send one packet with the question, goal/constraints,
+requirements revision, exact report IDs and artifact versions, attempts/results, and
+facts versus hypotheses. It reads named reports and writes only its own report.
+Require conclusion, evidence, assumptions/contradictions, recommendation,
+discriminating check, reconsideration conditions, and an exact data request/profile
+when evidence is insufficient. Record question, worker, model/effort, inputs,
+report, and coordinator decision in the pipeline; repeat only with new evidence.
+Start the consultant with no inherited conversation so it receives only this
+compact packet, and explicitly select its model and effort through the native
+interface. Do not pass unverified report IDs from another task: publish the
+collected evidence in the current task before selecting it for consultation.
 Before sending the final answer, check its language against the user's own request
 and response-language preference; do not copy the language of the evidence report.
 

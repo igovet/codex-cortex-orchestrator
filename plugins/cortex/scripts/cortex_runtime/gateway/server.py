@@ -14,9 +14,9 @@ from aiohttp import web
 
 from .config import ConfigManager, ConfigLoader, write_default_config
 from .proxy import create_app
-from .mitm import MitmProxy
 from .diagnostics import configure_file_logging
 from ..runtime.state import GatewayState, RuntimePaths, dependency_identity, payload_digest
+from ..provider import managed_plugin_disabled, restore_provider
 
 
 async def serve(*, codex_home: Path | None = None, host: str | None = None, port: int | None = None) -> None:
@@ -64,12 +64,6 @@ async def serve(*, codex_home: Path | None = None, host: str | None = None, port
             "port": bind_port,
         },
     )
-    # Keep the HTTP health/control listener intact and expose the client-facing
-    # HTTPS CONNECT MITM on the adjacent owner-local port. Provider routing
-    # uses the real upstream URL plus this explicit proxy endpoint.
-    mitm = MitmProxy(host=bind_host, port=0, codex_home=manager.loader.codex_home, manager=manager)
-    await mitm.start()
-    state = replace(state, mitm_port=mitm.port)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, bind_host, bind_port)
@@ -92,11 +86,26 @@ async def serve(*, codex_home: Path | None = None, host: str | None = None, port
                 if not stop.done():
                     stop.set_result(None)
             elif not updated.restart_required:
-                state.write(replace(state, policy_revision=updated.revision))
+                replace(state, policy_revision=updated.revision).write(paths)
         except Exception:
             # The manager retains the last valid immutable snapshot; the
             # health endpoint exposes the sanitized stale status.
             pass
+
+    async def watch_configuration() -> None:
+        # Marketplace disabling/removal prevents future MCP startup. The
+        # independent owned gateway therefore observes its recorded entry and
+        # restores only still-owned provider fields before draining itself.
+        while not stop.done():
+            await asyncio.sleep(1)
+            try:
+                disabled = not manager.snapshot().gateway_enabled or managed_plugin_disabled(manager.loader.codex_home)
+                if disabled:
+                    restore_provider(manager.loader.codex_home)
+                    request_stop()
+            except (OSError, ValueError):
+                # Transient/invalid edits do not authorize a config rewrite.
+                logging.getLogger("cortex.gateway").warning("gateway_configuration_watch outcome=invalid_configuration")
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -108,10 +117,12 @@ async def serve(*, codex_home: Path | None = None, host: str | None = None, port
             loop.add_signal_handler(signal.SIGHUP, request_reload)
         except (NotImplementedError, RuntimeError):
             pass
+    watcher = asyncio.create_task(watch_configuration())
     try:
         await stop
     finally:
-        await mitm.close()
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
         await runner.cleanup()
         log_handler.close()
         for path in (paths.state, paths.pid):

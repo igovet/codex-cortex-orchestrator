@@ -25,7 +25,7 @@ specialists, approve actions, accept results or impose mandatory stages. Only
 confirmed registered-file integrity violations may deny a patch. Hook metadata and
 model actions remain separately observable.
 
-Use semantic version 1.15.7 for this release. Recompute the complete payload hash
+Use semantic version 1.15.8 for this release. Recompute the complete payload hash
 before package checks or tests after every installable edit. Run release-sensitive
 checks sequentially. Do not modify stable Codex configuration or plugin caches.
 Use the dedicated isolated candidate launcher for real-host verification.

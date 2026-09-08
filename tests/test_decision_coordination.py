@@ -395,6 +395,10 @@ def test_profiles_route_graph_details_to_generated_reference():
     canonical=(ROOT/'plugins/cortex/agent-sources/references/code-and-evidence.md').read_bytes()
     for path in (ROOT / 'plugins/cortex/skills').glob('worker-*/SKILL.md'):
         text = path.read_text()
+        if path.parent.name == 'worker-senior-consultant':
+            assert 'Do not inspect source files' in text
+            assert '[code and evidence discovery]' not in text
+            continue
         assert '[code and evidence discovery](references/code-and-evidence.md)' in text
         assert (path.parent/'references/code-and-evidence.md').read_bytes()==canonical
         assert 'Match a code index to the canonical assignment workspace' in canonical.decode()
@@ -419,7 +423,10 @@ def test_generated_skill_loading_boundary_matches_actual_file_end():
         for reference in (path.parent/'references').glob('*.md'):
             assert reference.read_bytes()==(sources/reference.name).read_bytes()
         assert '## Report class selection' in text
-        assert 'Changing report class does not require a new worker.' in text
+        if path.parent.name == 'worker-senior-consultant':
+            assert 'Use the ordinary `general` report class.' in text
+        else:
+            assert 'Changing report class does not require a new worker.' in text
         assert 'fresh correctly matched worker' not in text
     publication=(sources/'report-publication.md').read_text()
     interaction=(sources/'interactive-resources.md').read_text()

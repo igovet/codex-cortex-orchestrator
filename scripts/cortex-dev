@@ -100,9 +100,22 @@ plugin, dependency = map(Path, sys.argv[1:])
 manifest, installed, combined = dependency_identity(plugin, dependency, required=True)
 print(f"isolated dependency clean identity: manifest={manifest} bytes={installed} combined={combined}")
 PY
-# A configured gateway is an explicit opt-in.  Ensure it before launching the
-# CLI (and before Desktop's --prepare-only path); absent config leaves ordinary
-# startup unchanged.
+# Keep live-dev traffic on a separate fixed listener from the stable plugin.
+# Migrate only the former production-default port in this exact isolated home.
+PYTHONPATH="${script_dir}/../plugins/cortex/scripts:${dependency_dir}" python3 -B - <<'PY'
+from cortex_runtime.gateway.config import ConfigLoader, write_default_config
+from cortex_runtime.provider import _atomic_private_write, _read_config_observation, _upsert_key
+
+path = write_default_config()
+loader = ConfigLoader()
+config = loader.validate()
+if config.get('gateway', {}).get('port', 8787) == 8787:
+    observed = _read_config_observation(path)
+    updated = _upsert_key(observed[0].decode(), 'gateway', 'port', '18787').encode()
+    _atomic_private_write(path, updated, observed=observed)
+    loader.validate()
+PY
+# Ensure the isolated provider before CLI or Desktop loads its configuration.
 gateway_config="${CODEX_HOME}/cortex/config.toml"
 # Run the control path for every existing filesystem entry, including broken
 # symlinks and directories, so unsafe configured state fails closed.  Only a
@@ -119,13 +132,6 @@ if [[ -e "${gateway_config}" || -L "${gateway_config}" ]]; then
   # Live CLI/Desktop preparation explicitly routes the isolated Codex profile
   # through the verified gateway. This mutates only the disposable profile.
   python3 -B "${cached_control}" ensure --codex-home "${CODEX_HOME}"
-  # Codex keeps the real upstream URL; the isolated gateway's adjacent
-  # owner-local listener is the HTTPS CONNECT MITM transport.
-  mitm_port="$(python3 -B "${cached_control}" status --codex-home "${CODEX_HOME}" | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("runtime") or {}; p=r.get("mitm_port"); sys.exit(2) if not isinstance(p,int) else print(p)')"
-  export HTTPS_PROXY="http://${CORTEX_GATEWAY_HOST:-127.0.0.1}:${mitm_port}"
-  export HTTP_PROXY="${HTTPS_PROXY}"
-  export NO_PROXY="127.0.0.1,localhost,[::1]"
-  export SSL_CERT_FILE="${CODEX_HOME}/cortex/mitm/ca-bundle.pem"
 fi
 if [[ "${prepare_only}" == 1 ]]; then exit 0; fi
 cd -- "${caller_workdir}"

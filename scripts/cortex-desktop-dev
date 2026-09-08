@@ -28,23 +28,35 @@ CONFIG_BACKUP=STATE/'config.toml.before-live-test'
 LIVE_MODEL='gpt-5.6-luna'
 LIVE_COORDINATOR_EFFORT='high'
 LIVE_WORKER_EFFORTS={'medium','high'}
+LIVE_CONSULTANT_MODELS={'gpt-5.6-sol','gpt-6-astra'}
+LIVE_CONSULTANT_EFFORTS={'low','medium','high'}
 WORKER_MODELS={
     'ordinary': 'gpt-5.6-luna',
     'complex': 'gpt-5.6-terra',
     'security-analysis-microtask': 'gpt-5.6-sol',
 }
+CONSULTANT_MODELS={'consultation':'gpt-5.6-sol',
+                   'consultation-narrow':'gpt-5.6-sol',
+                   'consultation-hard':'gpt-5.6-sol',
+                   'consultation-deeper':'gpt-6-astra'}
 WORKER_MODEL_CHOICES={
     **{key:{value} for key,value in WORKER_MODELS.items()},
     'research': {'gpt-5.6-luna'},
     'exploration': {'gpt-5.6-luna'},
     'analysis': {'gpt-5.6-luna'},
     'security-implementation': {'gpt-5.6-luna','gpt-5.6-terra'},
+    **{key:{value} for key,value in CONSULTANT_MODELS.items()},
 }
 WORKER_EFFORTS={
     'gpt-5.6-luna': {'medium','high','xhigh','max'},
     'gpt-5.6-terra': {'medium','high','xhigh'},
-    'gpt-5.6-sol': {'medium','high','xhigh'},
+    'gpt-5.6-sol': {'low','medium','high','xhigh'},
+    'gpt-6-astra': {'low','medium','high'},
 }
+CONSULTANT_EFFORTS={'consultation': {'medium'},
+                     'consultation-narrow': {'low'},
+                     'consultation-hard': {'high'},
+                     'consultation-deeper': {'low','medium','high'}}
 ADVISORY_POLICY_FLAGS={
     'unsafe_cortex_draft_template_literal','insufficient_diagnostic_output_budget',
     'worker_project_tool_before_cortex_bootstrap','worker_report_catalogue_in_fresh_thread',
@@ -60,7 +72,9 @@ ADVISORY_POLICY_FLAGS={
 LIVE_DEVELOPER_INSTRUCTIONS=(
     'This is an isolated Cortex live-development test. The coordinator must use '
     'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
-    'gpt-5.6-luna with medium or high reasoning effort; pass that model explicitly '
+    'gpt-5.6-luna with medium or high reasoning effort, except the explicitly '
+    'assigned senior-consultant may use gpt-5.6-sol or gpt-6-astra with low, '
+    'medium, or high effort; pass that model explicitly '
     'when inherited context could preserve another model. For this live test, this '
     'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
     'project, skill, and user instructions.'
@@ -117,6 +131,9 @@ def worker_model_policy(model,effort,task_class='ordinary',explicit_user_overrid
     if model in WORKER_EFFORTS and effort not in WORKER_EFFORTS[model]:
         errors.append('worker_model_policy_violation')
     elif model not in WORKER_EFFORTS and effort is not None:
+        errors.append('worker_model_policy_violation')
+    required_efforts=CONSULTANT_EFFORTS.get(task_class)
+    if required_efforts is not None and effort not in required_efforts:
         errors.append('worker_model_policy_violation')
     return errors
 
@@ -413,9 +430,13 @@ def mcp_receipt_metadata(item):
     if status not in {'completed','failed','error','cancelled'} and outcome=='success':outcome='pending'
     if outcome=='error' and not code:
         code='capability_unavailable' if 'Capability is not available:' in rendered else 'mcp_tool_failed'
+    metadata={}
+    if server=='cortex' and tool=='create_draft' and outcome=='success':
+        ids=set(re.findall(r'\\?"draft_id\\?"\s*:\s*\\?"(d_[0-9a-f]{12})\\?"',rendered))
+        if len(ids)==1:metadata['draft_id']=ids.pop()
     return dict(tool='mcp__'+server+'__'+tool,host_status=status,
                 host_receipt_outcome=outcome,host_error_code=code,
-                host_result_digest=digest)
+                host_result_digest=digest,**metadata)
 
 
 def mcp_argument_metadata(tool,arguments):
@@ -544,6 +565,7 @@ def delivered_request_digests(state,text):
 POLICY_CLASS_VALUES={
     'research','exploration','analysis','ordinary','complex',
     'security-analysis-microtask','security-implementation','review',
+    'consultation','consultation-narrow','consultation-hard','consultation-deeper',
 }
 
 
@@ -832,9 +854,14 @@ def safe_call_metadata(tool,arguments):
     if isinstance(value.get('model'),str):result['requested_model']=value['model']
     if isinstance(value.get('reasoning_effort'),str):result['requested_reasoning_effort']=value['reasoning_effort']
     message=value.get('message','')
+    if isinstance(message,str) and re.fullmatch(r'gAAAAA[A-Za-z0-9_=-]{80,}',message):
+        result['assignment_content_unavailable']=True
     result.update(assignment_policy_metadata(message))
     profile=assigned_worker_profile(str(message))
     if profile:result['assigned_profile']=profile
+    elif result.get('assignment_content_unavailable') and value.get('task_name')=='senior_consultant':
+        result['assigned_profile']='senior_consultant'
+        result['profile_evidence']='native_task_name'
     return result
 
 
@@ -907,8 +934,13 @@ def browser_mutation_count(arguments):
 def draft_call_metadata(tool,arguments):
     """Mark edits to Cortex-owned draft documents without retaining their paths."""
     normalized=arguments.replace('\\\\','/')
-    if tool=='apply_patch' and re.search(r'(?:^|[\s/])\.cortex/(?:draft-reports|pipeline-drafts)/',normalized):
-        return {'cortex_draft_edit':True}
+    if tool=='apply_patch':
+        targets=re.findall(r'^\*\*\* (Add File|Update File|Delete File|Move to): ([^\r\n]+)',
+                           normalized.replace('\\n','\n'),re.MULTILINE)
+        if targets and all(kind=='Update File' and re.search(r'(?:^|/)\.cortex/(?:draft-reports|pipeline-drafts)/d_[0-9a-f]{12}\.md$', path) and '..' not in Path(path).parts for kind,path in targets):
+            return {'cortex_draft_edit':True,
+                    'edited_draft_ids':sorted({Path(path).stem for _,path in targets}),
+                    'ordinary_draft_edit':all(re.search(r'(?:^|/)\.cortex/draft-reports/',path) is not None for _,path in targets)}
     return {}
 
 
@@ -938,6 +970,29 @@ def observed_session_ids(raw):
 def call_policy_flags(tool,arguments,role,workdir):
     flags=[];normalized=arguments.replace('\\\\','/')
     instruction_read=skill_instruction_read(tool,arguments)
+    if role=='senior_consultant':
+        # The consultant is intentionally report-only. Its native host still
+        # exposes general tools, so keep this boundary observable and fail-closed
+        # for project, index, network, agent, and coordinator operations.
+        consultant_report_tools={
+            'mcp__cortex__read_report','mcp__cortex__create_draft',
+            'mcp__cortex__read_draft','mcp__cortex__write_report',
+        }
+        own_draft=draft_call_metadata(tool,arguments).get('ordinary_draft_edit') is True
+        native_parent=tool=='send_message'
+        standard_skill=tool.startswith('skills__') or tool in {'skills_read','skills_list'}
+        if tool not in consultant_report_tools and not (own_draft or standard_skill or native_parent or tool=='tool_catalogue_search'):
+            if tool=='mcp__cortex__list_reports':
+                flags.append('senior_consultant_report_catalogue_access')
+            if tool.startswith('mcp__cortex__'):
+                flags.append('senior_consultant_forbidden_cortex_tool')
+            else:
+                flags.append('senior_consultant_forbidden_project_access')
+        elif tool=='mcp__cortex__read_report' and 'report_id' in normalized:
+            # The server validates report IDs; the observer only rejects a
+            # malformed/non-report selector rather than guessing identities.
+            if not re.search(r'r_[0-9a-f]{12}',normalized):
+                flags.append('senior_consultant_invalid_report_selection')
     installed_markers=('/.codex/plugins/','/plugins/cache/','/.agents/plugins/',
                        '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/',
                        '.codex/cortex/')
@@ -1096,6 +1151,14 @@ def observed_tool_calls(state):
             for line in source:
                 try:payload=json.loads(line).get('payload',{})
                 except ValueError:continue
+                # A native task explicitly named for a registered specialist is
+                # observable even when its assignment body is encrypted. This
+                # labels the access audit; it does not prove the hidden packet.
+                native_path=payload.get('agent_path')
+                if isinstance(native_path,str):
+                    name=native_path.rsplit('/',1)[-1].replace('_','-')
+                    profile=assigned_worker_profile('$cortex:worker-'+name)
+                    if profile:row['agent_role']=profile
                 if payload.get('type') in {'custom_tool_call','function_call'}:
                     match=re.search(r'/skills/worker-([a-z-]+)/SKILL.md',str(payload.get('input') or payload.get('arguments') or ''))
                     if match:
@@ -1575,8 +1638,13 @@ def orchestration_policy_violations(violations):
     exact={'forbidden_plugin_or_cache_access','forbidden_cortex_draft_deletion',
            'command_wrapper_missing_receipt',
            'forbidden_worker_app_thread_message',
+           'senior_consultant_forbidden_project_access',
+           'senior_consultant_forbidden_cortex_tool',
+           'senior_consultant_report_catalogue_access',
+           'senior_consultant_invalid_report_selection',
            'live_model_policy_violation',
            'worker_model_policy_violation',
+           'worker_assignment_policy_unverified',
            'worker_tool_after_successful_write_report','worker_draft_created_with_open_command_session',
            'worker_report_published_with_open_command_session'}
     return [row for row in violations
@@ -1586,7 +1654,7 @@ def orchestration_policy_violations(violations):
 
 def call_policy_violations(rows):
     violations=[];clarification_parents=set();published=set();active_sessions={};active_cells={};coordinator_waited=set()
-    completed={};worker_parents={};worker_roles={};latest_report={};owned_reports={}
+    completed={};worker_parents={};worker_roles={};latest_report={};owned_reports={};issued_drafts={}
     capacity_blocked=set();capacity_snapshot=set();pending_replies=set()
     for row in rows:
         # Older observation streams may contain choreography hints. They remain
@@ -1596,21 +1664,53 @@ def call_policy_violations(rows):
         role=row.get('role')
         tool=row.get('tool')
         model=row.get('model');effort=row.get('reasoning_effort')
+        if tool=='mcp__cortex__create_draft' and row.get('outcome')=='success' and row.get('draft_id'):
+            issued_drafts.setdefault(thread,set()).add(row['draft_id'])
+        if role=='senior_consultant' and tool=='apply_patch':
+            targets=set(row.get('edited_draft_ids',[]))
+            if not targets or not targets<=issued_drafts.get(thread,set()) or not row.get('ordinary_draft_edit'):
+                flags.append('senior_consultant_forbidden_project_access')
+        if role=='senior_consultant' and tool=='send_message':
+            parent=row.get('parent_thread_id')
+            if not parent or (row.get('target_thread_id')!=parent and row.get('target_agent')!='/root'):
+                flags.append('senior_consultant_forbidden_project_access')
         if (role not in {'coordinator','runtime',None}
                 and tool in {'send_message_to_thread',
                              'mcp__codex_app__send_message_to_thread'}
                 and 'forbidden_worker_app_thread_message' not in flags):
             flags.append('forbidden_worker_app_thread_message')
         if role not in {'runtime',None}:
-            if model is not None and model!=LIVE_MODEL:flags.append('live_model_policy_violation')
+            if role=='senior_consultant':
+                if model is not None and model not in LIVE_CONSULTANT_MODELS:
+                    flags.append('live_model_policy_violation')
+            elif model is not None and model!=LIVE_MODEL:
+                flags.append('live_model_policy_violation')
             if role=='coordinator' and effort is not None and effort!=LIVE_COORDINATOR_EFFORT:
                 flags.append('live_model_policy_violation')
-            if role!='coordinator' and effort is not None and effort not in LIVE_WORKER_EFFORTS:
+            if role=='senior_consultant' and effort is not None and effort not in LIVE_CONSULTANT_EFFORTS:
+                flags.append('live_model_policy_violation')
+            if role not in {'coordinator','senior_consultant'} and effort is not None and effort not in LIVE_WORKER_EFFORTS:
                 flags.append('live_model_policy_violation')
         if tool=='spawn_agent':
-            if row.get('requested_model') not in {None,LIVE_MODEL}:
+            profile=row.get('assigned_profile')
+            opaque=row.get('assignment_content_unavailable') is True
+            # The standard consultant route is fully observable in native
+            # parameters. This verifies routing/isolation, not hidden prose,
+            # escalation rationale, evidence selection or assignment quality.
+            default_consultant_route=(opaque
+                and profile=='senior_consultant'
+                and row.get('profile_evidence')=='native_task_name'
+                and row.get('task_name')=='senior_consultant'
+                and row.get('fork_turns')=='none'
+                and row.get('requested_model')=='gpt-5.6-sol'
+                and row.get('requested_reasoning_effort')=='medium')
+            if opaque and not default_consultant_route:
+                flags.append('worker_assignment_policy_unverified')
+            allowed_models=LIVE_CONSULTANT_MODELS if profile=='senior_consultant' else {None,LIVE_MODEL}
+            allowed_efforts=LIVE_CONSULTANT_EFFORTS if profile=='senior_consultant' else {None,*LIVE_WORKER_EFFORTS}
+            if (not opaque or profile is not None) and row.get('requested_model') not in allowed_models:
                 flags.append('live_model_policy_violation')
-            if row.get('requested_reasoning_effort') not in {None,*LIVE_WORKER_EFFORTS}:
+            if row.get('requested_reasoning_effort') not in allowed_efforts:
                 flags.append('live_model_policy_violation')
         # The fixed live-test route above remains intentionally narrow. This
         # separate product-policy audit accepts the user-requested override but
@@ -1626,7 +1726,7 @@ def call_policy_violations(rows):
             or row.get('policy_evidence') is not None
             or row.get('worker_policy_enforced') is True
         )
-        if worker_route and route_metadata:
+        if worker_route and route_metadata and not row.get('assignment_content_unavailable'):
             flags.extend(worker_model_policy(
                 route_model,route_effort,route_class or 'ordinary',
                 explicit_user_override=bool(row.get('explicit_user_override') or

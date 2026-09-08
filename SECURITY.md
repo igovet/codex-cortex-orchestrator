@@ -61,9 +61,45 @@ or efforts are policy violations.
 The `review` label records work kind and does not select a model; absent an
 explicit complexity or security classification, it follows the ordinary route.
 
+The opt-in `senior_consultant` has a separate bounded route: Sol medium for a
+standard question, Sol low for a narrow question, and Sol high for a harder
+question. Astra (`gpt-6-astra`) at low/medium/high is permitted only for an
+explicitly justified deeper escalation after unresolved Sol evidence. The
+coordinator keeps its own model unchanged and must state the consultation policy
+class in the native assignment.
+
 This policy governs coordinator routing and audit evidence. Storage and lifecycle
 hooks do not select agents, override user requests, or grant authorization. A host
 that does not expose the actual worker model/effort leaves compliance unverified.
+
+Consultant access is report-only. Its packet names one bounded question, current
+requirements revision, exact published report IDs and artifact versions, attempts,
+results, and facts versus hypotheses. It may read the current task pipeline when
+needed and those selected reports only, using bounded pages. It may not inspect
+source/project files or indexes, run commands/tests/network/environment checks,
+edit project files or the coordinator pipeline, launch agents, accept tasks, or
+change the plan. Its sole write is its own draft-backed Markdown report. The
+observer flags non-report tools and unbounded report catalogue access. A thin
+evidence result must request exact data and name the recommended executor profile;
+consultation is advisory and never establishes implementation verification or
+acceptance. Repeating a consultation requires new evidence, a clarified packet or
+justified deeper escalation.
+
+The separate consultant protocol receives complete attached instructions and
+does not permit shell reads even for skill loading. Role restrictions are model
+instructions, with post-run enforcement by the development audit, not a host
+sandbox or revoked tool catalogue. The audit checks that patch targets are ordinary
+draft IDs observed as issued to that consultant; pipeline and foreign draft edits
+fail. Selected-report scope is instruction-enforced; the server independently
+enforces task isolation and draft ownership. Native parent messages may request
+missing evidence, but the consultant may not contact other agents.
+When native assignment bodies are encrypted in host records, the audit reports
+`worker_assignment_policy_unverified` unless the exact native name
+`senior_consultant`, explicit Sol medium and no conversation inheritance prove
+the standard consultation route. This narrow check verifies routing and isolation,
+not the hidden packet. Other opaque routes, including Astra escalation, remain
+unverified. Visible consultant calls still receive the full access/ownership audit.
+This unresolved observation still prevents clean audit qualification.
 
 Once a Cortex task exists, the coordinator does not use host command wrappers to
 read, mutate, hash or verify project artifacts. The worker owns that complete
@@ -192,8 +228,16 @@ are applied by a drain-and-restart path; stop waits for owned runtime state to
 disappear and reports a timeout when it cannot. Provider patching validates the
 target as a regular, owner-controlled file, preserves unrelated TOML content,
 writes a first-version backup with create-only publication, and replaces the
-file atomically. The provider
-feature flag remains disabled unless an explicit validation receipt enables it.
+file atomically. Automatic provider setup follows verified readiness, targets
+only the exact loopback listener, enables existing OpenAI authentication and
+WebSocket support, and preserves feature flags and model/effort preferences.
+It rejects pre-existing custom provider/upstream configurations. Later user
+route edits are preserved. A private journal tracks only owned route fields;
+disable/stop restores matching values rather than replacing the whole config
+with an old backup. The running gateway observes removal or disable of the exact
+Marketplace entry recorded at setup and restores before draining. An absent or
+forcibly killed observer cannot provide uninstall cleanup; already loaded client
+configuration still requires a reload.
 Provider configuration follows the effective `CODEX_HOME` unless an explicit
 override is supplied; it never falls back to a stable config from an isolated
 launcher. Existing commented table headers remain singular and valid. Each
@@ -240,7 +284,10 @@ Compaction routing classifies direct V2 `compaction_trigger` requests as
 upstream-required `store: false` and `stream: true` values. The optional
 WebSocket route recognizes only uncompressed direct `response.create`
 compaction messages and rewrites only model and reasoning effort, preserving
-other fields and frame semantics without applying a separate store rewrite.
+other fields without applying a separate store rewrite. Each WebSocket leg owns
+its handshake, masking and framing. Application headers, text/binary messages,
+ping/pong and close signals are relayed. Upstream redirects are rejected before
+the client can replay credentials, including during WebSocket handshakes.
 Recognized legacy JSON is selected in-call to the supported V2 path because the
 upstream retired `/responses/compact`; opaque legacy bytes retain their
 original path and bytes. No redirect or retry is used. Every proxied request emits bounded model/effort/request-kind telemetry
@@ -248,20 +295,21 @@ without bodies, credentials, or raw headers. Invalid ordinary JSON and opaque
 legacy wire formats remain byte-for-byte pass-through, while unsupported
 encodings and recognized payloads with invalid controls remain explicit errors.
 
-The client-facing route is an HTTPS CONNECT MITM: only after a successful
-`101 Switching Protocols` upgrade are uncompressed WebSocket frames inspected;
-the CONNECT and handshake are not treated as request bodies. Automatic and
+The client-facing route is the local Codex model provider, using the fixed
+HTTP/SSE/WebSocket listener. No MITM listener, certificate or proxy environment
+variables are created by this path. Only after a successful upstream upgrade
+are WebSocket messages forwarded. Automatic and
 standalone compaction may share the same V2 `response.create` trigger, so
 origin attribution requires correlation with local lifecycle events rather
-than another network submission. The isolated launcher supplies the proxy and
-private CA only to its prepared candidate; stable configuration is untouched.
+than another network submission. The isolated launcher exercises this same
+provider setup only in its prepared candidate profile.
 
 Upstream Codex source confirms the automatic trigger path: `compact_remote_v2.rs`
 labels `run_inline_remote_auto_compact_task` with `CompactionTrigger::Auto`,
 `compact_remote_v2_attempt.rs` appends `ResponseItem::CompactionTrigger {}`
 before calling `ModelClientSession::stream`, and
 `responses_websocket.rs` serializes/sends the request as the shared
-`ResponsesWsRequest::ResponseCreate` WebSocket text message. The MITM therefore
+`ResponsesWsRequest::ResponseCreate` WebSocket text message. The gateway therefore
 sees automatic V2 compaction in the same outbound WebSocket handler; it is not
 the retired legacy compact endpoint. Only the installed binary's threshold
 decision remains unverified because its Rust source is stripped.

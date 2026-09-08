@@ -12,7 +12,7 @@ import tempfile
 import time
 import uuid
 
-BASE_VERSION = "1.15.7"
+BASE_VERSION = "1.15.8"
 
 
 def _safe_existing(path: Path) -> os.stat_result | None:
@@ -295,7 +295,7 @@ def dependency_identity(plugin_root: Path | None, target: Path | None = None, *,
         return "unbound", "unbound", "unbound"
     manifest = plugin_root / "requirements.lock"
     manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    raw_target = target or (Path(os.environ["CORTEX_DEPENDENCY_DIR"]) if os.environ.get("CORTEX_DEPENDENCY_DIR") else (Path(os.environ["CODEX_HOME"]) / "cortex" / "deps" if os.environ.get("CODEX_HOME") else None))
+    raw_target = target or (Path(os.environ["CORTEX_DEPENDENCY_DIR"]) if os.environ.get("CORTEX_DEPENDENCY_DIR") else (Path(os.environ["CODEX_HOME"]) / "cortex" / "deps" / manifest_digest if os.environ.get("CODEX_HOME") else None))
     if raw_target is None:
         if required:
             raise ValueError("CORTEX_DEPENDENCY_DIR is required for the isolated gateway")

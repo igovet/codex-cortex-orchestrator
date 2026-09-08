@@ -11,7 +11,8 @@ The [official skill guide](https://learn.chatgpt.com/docs/build-skills) describe
 metadata-first discovery followed by loading the selected complete SKILL.md, with
 supporting references loaded as needed. The [plugin packaging guide](https://developers.openai.com/plugins/build/plugins)
 uses `.codex-plugin/plugin.json` with `"skills": "./skills/"`. Cortex retains that
-layout, all 22 complete worker skills, companion skills and seven MCP operations.
+layout, all 23 complete worker skills, including the report-only senior consultant,
+companion skills and seven MCP operations.
 
 A worker uses a complete body already injected by Codex or reads its exact advertised
 SKILL.md path from the available-skills catalogue. Documented path aliases are expanded
