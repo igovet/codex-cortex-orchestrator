@@ -182,5 +182,86 @@ advisory rather than treating it as a coordinator-boundary breach.
 A saved report is not acceptance. The coordinator assesses current requirements,
 source completeness, artifact revisions and the evidence's limits.
 
+The optional Model Gateway is explicit opt-in through the global `CODEX_HOME`
+configuration. Its local supervisor owns only its registered child process and
+does not receive or persist provider credentials. Listener and upstream changes
+are applied by a drain-and-restart path; stop waits for owned runtime state to
+disappear and reports a timeout when it cannot. Provider patching validates the
+target as a regular, owner-controlled file, preserves unrelated TOML content,
+writes a first-version backup with create-only publication, and replaces the
+file atomically. The provider
+feature flag remains disabled unless an explicit validation receipt enables it.
+Provider configuration follows the effective `CODEX_HOME` unless an explicit
+override is supplied; it never falls back to a stable config from an isolated
+launcher. Existing commented table headers remain singular and valid. Each
+provider publication uses an owner-only update lock and a descriptor/content
+compare-and-swap check, failing without replacement when an unrelated editor
+changes the Codex file. The gateway configuration file and `cortex` control
+directory reject symlinks, non-regular paths, other-user ownership, and
+group/other permission bits; configured unsafe paths fail closed rather than
+being treated as absent. Each
+request's upstream cancellation is scoped to its own task; a shared client
+session is not closed because another client disconnected. Request path/query,
+body bytes, and header pairs are tunneled without filtering; the incoming
+loopback `Host` authority is rewritten only on the upstream wire to the fixed
+`chatgpt.com` authority because HTTP/1.1 virtual-host routing cannot use the
+local listener authority. This transport-only adjustment prevents Cloudflare
+virtual-host rejection; only the explicit compaction model/effort policy may
+rewrite a request body. Runtime identity
+requires the normalized stamped payload digest and exact Python entrypoint
+arguments, not merely a gateway path appearing somewhere in argv. Reload
+returns failure and the control command exits nonzero when the owned process
+cannot be signaled or drained. The isolated gateway dependency targets are
+cleaned and version-verified after installation; launcher recovery uses the
+prepared Marketplace cache's packaged control entrypoint. Gateway
+Host authority validation rejects empty, malformed, and non-loopback IPv6 forms;
+only explicit loopback authorities are accepted.
+The packaged MCP manifest forwards the launcher-provided isolated dependency
+directory; this is required for the cached MCP process to start its pinned
+gateway child without inheriting an ambient dependency path.
+The Desktop launcher derives the canonical prepared dependency directory,
+rejects missing, symlinked, or permissive trees, removes inherited values, and
+overwrites the child environment with the validated owner-only path.
+The isolated launcher uses the complete Linux CPython 3.11/3.12
+`requirements.lock` wheel hash set with pip `--require-hashes` and `--no-compile`.
+Runtime health includes both the lock-manifest digest and installed dependency
+byte digest, so an artifact substituted under an expected version cannot satisfy
+the owned-process identity check. Disabling the explicit gateway drains the
+positively owned child and waits for state removal; a reload transition stops
+the child and an in-flight race is rejected at the proxy, so a disabled
+configuration does not leave a healthy local proxy forwarding requests. A
+draining health result is never accepted as readiness by the supervisor.
+Compaction routing classifies direct V2 `compaction_trigger` requests as
+`auto_compaction` and decodable legacy compact-path requests as
+`manual_compaction`; the HTTP routes rewrite model, reasoning effort, and the
+upstream-required `store: false` and `stream: true` values. The optional
+WebSocket route recognizes only uncompressed direct `response.create`
+compaction messages and rewrites only model and reasoning effort, preserving
+other fields and frame semantics without applying a separate store rewrite.
+Recognized legacy JSON is selected in-call to the supported V2 path because the
+upstream retired `/responses/compact`; opaque legacy bytes retain their
+original path and bytes. No redirect or retry is used. Every proxied request emits bounded model/effort/request-kind telemetry
+without bodies, credentials, or raw headers. Invalid ordinary JSON and opaque
+legacy wire formats remain byte-for-byte pass-through, while unsupported
+encodings and recognized payloads with invalid controls remain explicit errors.
+
+The client-facing route is an HTTPS CONNECT MITM: only after a successful
+`101 Switching Protocols` upgrade are uncompressed WebSocket frames inspected;
+the CONNECT and handshake are not treated as request bodies. Automatic and
+standalone compaction may share the same V2 `response.create` trigger, so
+origin attribution requires correlation with local lifecycle events rather
+than another network submission. The isolated launcher supplies the proxy and
+private CA only to its prepared candidate; stable configuration is untouched.
+
+Upstream Codex source confirms the automatic trigger path: `compact_remote_v2.rs`
+labels `run_inline_remote_auto_compact_task` with `CompactionTrigger::Auto`,
+`compact_remote_v2_attempt.rs` appends `ResponseItem::CompactionTrigger {}`
+before calling `ModelClientSession::stream`, and
+`responses_websocket.rs` serializes/sends the request as the shared
+`ResponsesWsRequest::ResponseCreate` WebSocket text message. The MITM therefore
+sees automatic V2 compaction in the same outbound WebSocket handler; it is not
+the retired legacy compact endpoint. Only the installed binary's threshold
+decision remains unverified because its Rust source is stripped.
+
 See [storage](docs/project/storage.md), [hooks](docs/features/lifecycle-hooks/index.md),
 and [verification](docs/project/verification.md).

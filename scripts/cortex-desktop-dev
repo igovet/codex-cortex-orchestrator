@@ -20,7 +20,10 @@ from datetime import datetime
 import shutil
 
 ROOT=Path(__file__).resolve().parents[1]
-STATE=Path(tempfile.gettempdir())/f'cortex-markdown-desktop-{os.getuid()}'
+# A caller may select a second owner-only observation root when an earlier
+# manual Desktop session is intentionally left open. The default remains the
+# historical single disposable session directory.
+STATE=Path(os.environ.get('CORTEX_DESKTOP_STATE_DIR', str(Path(tempfile.gettempdir())/f'cortex-markdown-desktop-{os.getuid()}'))).resolve()
 CONFIG_BACKUP=STATE/'config.toml.before-live-test'
 LIVE_MODEL='gpt-5.6-luna'
 LIVE_COORDINATOR_EFFORT='high'
@@ -231,7 +234,20 @@ def environment(profile,events):
     owner=Path.home()
     for key in ['CODEX_APP_TOOLS_PIPE_PATH','CODEX_INTERNAL_ORIGINATOR_OVERRIDE','CODEX_MCP_NODE_PATH','CODEX_CI','CODEX_SHELL','CODEX_PERMISSION_PROFILE','CODEX_SESSION_ID','CODEX_THREAD_ID','CORTEX_DATA_DIR']:
         env.pop(key,None)
-    env.update(HOME=str(owner/'.cortex-dev'),CODEX_HOME=str(owner/'.cortex-dev/.codex'),CODEX_ELECTRON_USER_DATA_PATH=str(profile),CORTEX_OBSERVATION_DIR=str(events))
+    dependency_dir=owner/'.cortex-dev/.codex/cortex-deps'
+    try:
+        resolved=dependency_dir.resolve(strict=True)
+        info=dependency_dir.stat()
+    except OSError as exc:
+        raise RuntimeError('isolated dependency directory is unavailable after preparation') from exc
+    if (resolved != dependency_dir or not dependency_dir.is_dir()
+            or info.st_uid != os.getuid() or info.st_mode & 0o077):
+        raise RuntimeError('isolated dependency directory must be a private owner-controlled directory')
+    # Preparation runs in a child process, so its export cannot mutate this
+    # Desktop launcher's environment.  Scrub any inherited value and publish
+    # only the canonical prepared target to the cached MCP process.
+    env.pop('CORTEX_DEPENDENCY_DIR',None)
+    env.update(HOME=str(owner/'.cortex-dev'),CODEX_HOME=str(owner/'.cortex-dev/.codex'),CODEX_ELECTRON_USER_DATA_PATH=str(profile),CORTEX_OBSERVATION_DIR=str(events),CORTEX_DEPENDENCY_DIR=str(dependency_dir))
     return env
 
 

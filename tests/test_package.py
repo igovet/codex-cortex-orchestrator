@@ -26,6 +26,44 @@ def test_stamped_package_and_profiles():
     assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}==expected_runtime
 
 
+def test_mcp_advertises_isolated_gateway_dependency_environment():
+    mcp = json.loads((PLUGIN/'.mcp.json').read_text())['mcpServers']['cortex']
+    assert set(mcp['env_vars']) == {'CORTEX_OBSERVATION_DIR', 'CORTEX_DEPENDENCY_DIR'}
+
+
+@pytest.mark.parametrize('ambient', [None, '/tmp/ambient-stale-dependency'])
+def test_desktop_environment_overwrites_dependency_path_after_preparation(tmp_path, monkeypatch, ambient):
+    import os
+    import runpy
+    owner = tmp_path/'owner'
+    dependency = owner/'.cortex-dev/.codex/cortex-deps'
+    dependency.mkdir(parents=True, mode=0o700)
+    dependency.chmod(0o700)
+    monkeypatch.setattr(Path, 'home', lambda: owner)
+    if ambient is None:
+        monkeypatch.delenv('CORTEX_DEPENDENCY_DIR', raising=False)
+    else:
+        monkeypatch.setenv('CORTEX_DEPENDENCY_DIR', ambient)
+    helper = runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'), run_name='observer')
+    env = helper['environment'](tmp_path/'profile', tmp_path/'events')
+    assert env['CORTEX_DEPENDENCY_DIR'] == str(dependency)
+    assert env['CORTEX_DEPENDENCY_DIR'] != ambient
+    assert dependency.stat().st_uid == os.getuid()
+    assert dependency.stat().st_mode & 0o077 == 0
+
+
+def test_desktop_environment_rejects_unsafe_dependency_directory(tmp_path, monkeypatch):
+    import runpy
+    owner = tmp_path/'owner'
+    dependency = owner/'.cortex-dev/.codex/cortex-deps'
+    dependency.mkdir(parents=True, mode=0o755)
+    dependency.chmod(0o755)
+    monkeypatch.setattr(Path, 'home', lambda: owner)
+    helper = runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'), run_name='observer')
+    with pytest.raises(RuntimeError, match='private owner-controlled'):
+        helper['environment'](tmp_path/'profile', tmp_path/'events')
+
+
 def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     check_agent_profiles()
     assert all(path.read_bytes() == body for path, body in expected_profiles().items())

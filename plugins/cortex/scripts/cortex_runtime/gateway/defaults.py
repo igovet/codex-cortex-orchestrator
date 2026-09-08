@@ -1,0 +1,18 @@
+"""Single source of truth for Model Gateway defaults and limits."""
+
+DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_EFFORT = "medium"
+SCHEMA_VERSION = 1
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8787
+DEFAULT_UPSTREAM = "https://chatgpt.com/backend-api/codex"
+ALLOWED_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+MAX_MODEL_LENGTH = 128
+MAX_BODY_BYTES = 16 * 1024 * 1024
+MAX_COMPRESSED_BODY_BYTES = 8 * 1024 * 1024
+MAX_JSON_DEPTH = 100
+MAX_CONCURRENT_REQUESTS = 32
+DEFAULT_DRAIN_SECONDS = 30.0
+BODY_READ_TIMEOUT_SECONDS = 30.0
+UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10.0
+UPSTREAM_READ_TIMEOUT_SECONDS = 300.0

@@ -799,6 +799,11 @@ The complete installable product lives under `plugins/cortex/`. Root-level
 sets its own `HOME` and `CODEX_HOME`, prepares the content-stamped package through
 the supported sync path and launches ordinary Codex in the caller's project.
 It does not create tmux or modify the stable installed plugin.
+The packaged MCP manifest forwards the isolated dependency directory so cached
+MCP startup can launch the gateway with the same hash-locked dependency set.
+The Desktop helper derives and validates that prepared owner-only directory
+after `--prepare-only`, overwriting any conflicting ambient value before
+launching Electron.
 
 ```bash
 ./scripts/cortex-dev --prepare-only
@@ -910,6 +915,106 @@ entirely optional.
 ---
 
 ## Verification and diagnostics
+
+The optional Model Gateway lifecycle and provider patch behavior are documented
+in [Model Gateway lifecycle](docs/project/model-gateway.md). It is explicit
+opt-in through the global `CODEX_HOME` configuration; ordinary CLI/Desktop/MCP
+startup does not enable it by itself. The isolated launcher installs and
+version-checks a clean dependency target from the hash-locked Linux wheel set
+with pip `--require-hashes`, then invokes the prepared Marketplace cache's own
+gateway control entrypoint; runtime health binds the lock manifest digest,
+installed dependency-byte digest, exact stamped payload, and entrypoint
+invocation. If the explicit gateway configuration is changed to
+`gateway.enabled = false`, the launcher ensure path drains the owned child and
+waits for runtime-state removal before reporting it stopped. A reload to the
+disabled state stops the child and request handling rejects any race rather
+than forwarding; if reload cannot signal or drain the owned child, it returns
+failure and the control command exits nonzero. Draining health is not
+readiness. Provider backups are
+published create-only so concurrent configuration cannot overwrite the first
+recovery point. Gateway configuration and its control directory are private
+owner-only paths; unsafe existing entries fail closed. Provider updates use a
+locked descriptor/content compare-and-swap and refuse to overwrite unrelated
+concurrent edits.
+Compaction rewriting covers V2 `compaction_trigger` (auto compaction) and the
+legacy `/backend-api/codex/responses/compact` JSON path (manual compaction).
+Recognized legacy JSON is routed in-call to the supported V2 path because the
+production upstream retired `/responses/compact`; opaque legacy bytes retain
+their original path and bytes. The HTTP compaction routes force the upstream-
+required `store: false` and `stream: true` values. The optional WebSocket
+transport inspects only uncompressed direct `response.create` compaction
+messages and rewrites only `model` and `reasoning.effort`, preserving the
+message's other fields, fragmentation, and masking semantics; it does not
+apply a separate HTTP store rewrite.
+
+### MITM transport and compaction paths
+
+The isolated launcher routes Codex through an owner-local HTTPS proxy. The
+client first sends `CONNECT chatgpt.com:443` to the MITM; after the local TLS
+certificate is accepted, the MITM opens a fresh TLS connection to the fixed
+`chatgpt.com:443` upstream. For Responses WebSocket traffic, the HTTP upgrade
+is forwarded and the upstream's `101 Switching Protocols` headers cross the
+tunnel. Only after that `101` does the MITM inspect RFC 6455 client frames; the
+HTTP CONNECT and handshake are not the compaction payload. The optional
+`permessage-deflate` offer is removed so the narrow inspector receives
+uncompressed JSON frames.
+
+Codex's installed source markers identify the remote V2 compactor in
+`core/src/compact_remote_v2.rs` and its WebSocket request builder in
+`codex-api/src/endpoint/responses_websocket.rs`, with the request schema fields
+`response.create`, `input`, `reasoning`, `store`, and `stream`. When that V2
+request is sent as an uncompressed direct `response.create` message containing
+an input item whose type is `compaction_trigger`, the MITM reassembles bounded
+fragments and rewrites only `model` and `reasoning.effort`. `store`, `stream`,
+all other JSON fields, frame masking, fragmentation, and control-frame order
+are preserved. A direct HTTP V2 request with the same trigger follows the
+existing HTTP policy, which also applies its upstream-required storage/stream
+normalization.
+
+The upstream Codex sources make the automatic route more precise: `core/src/compact_remote_v2.rs`
+sets `CompactionTrigger::Auto` for `run_inline_remote_auto_compact_task`, while
+`core/src/compact_remote_v2_attempt.rs` appends `ResponseItem::CompactionTrigger {}`
+and calls `ModelClientSession::stream`. The shared
+`codex-api/src/endpoint/responses_websocket.rs` serializes that request as
+`ResponsesWsRequest::ResponseCreate` and sends it as a WebSocket text message.
+Thus automatic compaction reaches the same outbound `response.create` WebSocket
+handler as other V2 requests; it does not use `/backend-api/codex/responses/compact`.
+The installed binary is stripped, so these source links establish the trigger
+and handler shape while its exact threshold branch remains unverified locally.
+
+Automatic compaction and a standalone `/compact` action can converge on the
+same remote V2 `response.create`/`compaction_trigger` wire shape. The gateway
+therefore identifies the protocol trigger, not the origin story: its bounded
+log records `auto_compaction` for the HTTP V2 classifier and
+`websocket_compaction` for the WebSocket frame classifier. To distinguish
+automatic from standalone behavior without another submission, correlate
+those sanitized entries with local lifecycle telemetry: a preceding native
+`/compact` user message indicates standalone steering, while a threshold-driven
+compaction has no such user message. Network evidence alone cannot make that
+distinction, and a failed helper receipt must not be retried for this purpose.
+
+The feature is opt-in. `scripts/cortex-dev` prepares the isolated candidate,
+ensures the explicitly configured gateway, and sets `HTTPS_PROXY`/`HTTP_PROXY`
+to the adjacent MITM listener plus the owner-only CA bundle; ordinary stable
+Codex configuration is untouched. The proxy accepts only loopback listener
+authorities and the fixed upstream. Logs contain bounded model/effort,
+request-kind, and status metadata only: cookies, authorization values, request
+bodies, and WebSocket payloads are never written to diagnostics.
+
+The `/backend-api/codex/responses/compact` handler is retained solely as a
+compatibility mapping for older manual callers: decodable JSON is routed to the
+supported V2 path, while opaque legacy bytes remain byte-for-byte pass-through.
+It is not a second WebSocket route or a fallback retry. The HTTP proxy module
+also remains the gateway's direct HTTP/health server; the isolated Codex
+provider path uses the HTTPS CONNECT MITM described above.
+Every proxied request emits bounded, secret-free model/effort and request-kind
+telemetry to the private rotating gateway log; malformed ordinary or opaque
+legacy bytes remain unchanged. The proxy preserves path/query, body bytes, and
+all non-authority header pairs; it rewrites only the local incoming `Host`
+authority to the configured upstream authority on the upstream wire so
+Cloudflare virtual-host routing succeeds. This is transport metadata, not a
+semantic body rewrite. Compaction alone rewrites `model` and
+`reasoning.effort`.
 
 Run release-sensitive checks sequentially on one stamped checkout:
 
