@@ -175,6 +175,7 @@ def test_recovery_reminds_coordinator_of_project_boundary(active):
     result = handler.handle(event(root, "SessionStart", source="compact"))
     context = result["hookSpecificOutput"]["additionalContext"]
     assert "delegate every project-target read, edit, hash and verification" in context
+    assert "emit the complete result with text(result), never text(result.output)" in context
 
 
 def test_patch_mentions_in_content_do_not_block_but_registered_mutation_does(active):

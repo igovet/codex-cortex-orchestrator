@@ -105,8 +105,9 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
     assert 'crypto.randomUUID()' in publication
     assert 'pass a literal UUID in the tool arguments' in publication
-    assert 'must include the required `template` argument' in publication
-    assert 'Never\ncall it with an empty argument object' in publication
+    assert 'supply every required field, including on the initial call' in publication
+    assert 'Never probe required\nfields with an empty argument object' in publication
+    assert 'Omit `request_key` for' not in publication
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     assert '`request_key` must be a literal UUID or stable key' in orchestrator
     assert '`crypto.randomUUID()` or another runtime generator' in orchestrator

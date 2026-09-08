@@ -11,11 +11,12 @@ Before a call, name the concrete fact, state change or acceptance condition it m
 resolve. Reuse retained results while relevant state is unchanged. A timeout, quiet
 worker or desire to reconfirm does not justify another call.
 
-Use only tools available to the current host and role. Read the live description and
-schema before first use or after context loss. Construct one complete request from
-observed identifiers and cursor values; omit unknown optional fields. Do not copy
-tool argument contracts into skills, discover required fields by causing errors or
-inspect plugin internals as a substitute for advertised operations.
+Use only tools available to this host and role. Read the complete live declaration
+before first use and reload it after context loss; a name or recovery summary is
+insufficient. Use minimal requests with declared defaults and observed identifiers.
+Check supplied keys and values before dispatch. Do not copy argument contracts into
+skills, infer synonymous fields, discover requirements by causing errors, or inspect
+plugin internals instead of advertised operations.
 
 Batch independent reads when useful and inspect every result. Keep dependent reads,
 mutations, approvals and retries sequential. A wrapper must expose the full nested
@@ -32,8 +33,7 @@ shell substitution or evaluation, and never put its body in Cortex writer argume
 
 Inspect success, error and truncation signals before making claims. For discovery,
 use complete schemas already attached when available; otherwise select only needed
-tool names and complete schemas. Narrow broad catalogue searches before printing,
-or obtain complete details for selected entries as needed. A truncated result is
+tool names and complete schemas. Open selected full declarations individually. A truncated result is
 incomplete evidence: resolve the missing fact before relying on it. Observer-only
 rendering truncation does not by itself prove the native call failed. Retain
 acknowledged identifiers and never replay a mutation for reassurance. Correct one
@@ -41,5 +41,4 @@ deterministic error from the live declaration when the fix is unambiguous; other
 stop that route. Follow the tool's advertised retry contract for uncertain delivery.
 
 Record failures and unrun checks without secrets, private report bodies or raw host
-logs. After compaction, restore saved identifiers, relevant live declarations,
-current ownership and the exact operation that remained unfinished before resuming.
+logs. Recover ownership and acknowledged references before resuming.

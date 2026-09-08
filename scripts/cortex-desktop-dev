@@ -1122,6 +1122,33 @@ def event_call_candidate(candidates,event_time_ns,report_id=None,event=None):
     return identity_matches[0] if len(identity_matches)==1 else None
 
 
+def native_spawn_route_metadata(row,agent_paths,edges,thread_details,calls):
+    """Correlate an opaque spawn with its actual child and complete skill read.
+
+    Native activity paths and parent edges establish identity. Role names alone
+    never link a worker. This proves the observed route, not encrypted prose.
+    """
+    if row.get('tool')!='spawn_agent' or row.get('outcome')!='success':return {}
+    parent=row.get('thread_id');name=row.get('task_name')
+    if not parent or not isinstance(name,str):return {}
+    parent_paths=[path for path,thread in agent_paths.items() if thread==parent]
+    if parent in edges and len(parent_paths)!=1:return {}
+    parent_path=parent_paths[0] if parent_paths else '/root'
+    child=agent_paths.get(parent_path+'/'+name)
+    if not child or edges.get(child)!=parent:return {}
+    detail=thread_details.get(child,{})
+    profile=detail.get('agent_role')
+    if not profile or assigned_worker_profile('$cortex:worker-'+profile.replace('_','-'))!=profile:return {}
+    complete=any(call.get('thread_id')==child and call.get('worker_skill_complete')
+                 and call.get('outcome') in {'success','covered_by_command_execution'}
+                 and call.get('wrapper_outcome','success')=='success' for call in calls)
+    if not complete:return {}
+    return dict(spawned_thread_id=child,observed_worker_profile=profile,
+                observed_worker_model=detail.get('model'),
+                observed_worker_effort=detail.get('reasoning_effort'),
+                worker_route_evidence='native_child_and_complete_skill')
+
+
 def observed_tool_calls(state):
     """Return argument-free call metadata plus the observed wrapper outcome."""
     database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
@@ -1408,6 +1435,11 @@ def observed_tool_calls(state):
                         row['outcome']=outcome
                         row['completed_timestamp']=entry.get('timestamp')
                         row['result_digest']=result_digest
+                        if (row.get('skill_instruction_read') and row.get('role') not in {'coordinator','runtime',None}
+                                and worker_skill_read(row['tool'],arguments)
+                                and '<!-- END OF COMPLETE CORTEX WORKER SKILL -->' in rendered_output
+                                and outcome=='success'):
+                            row['worker_skill_complete']=True
                         sessions=observed_session_ids(payload.get('output',''))
                         if sessions:row['session_ids']=sessions
                         if row['tool']=='write_stdin':
@@ -1459,6 +1491,8 @@ def observed_tool_calls(state):
         if row.get('tool')=='followup_task' and row.get('completed_timestamp'):
             row['requested_timestamp']=row.get('timestamp')
             row['timestamp']=row['completed_timestamp']
+    for row in calls:
+        row.update(native_spawn_route_metadata(row,agent_paths,edges,thread_details,calls))
     ordered=sorted(calls,key=order)
     cell_intents={};session_intents={}
     for row in ordered:
@@ -1704,7 +1738,19 @@ def call_policy_violations(rows):
                 and row.get('fork_turns')=='none'
                 and row.get('requested_model')=='gpt-5.6-sol'
                 and row.get('requested_reasoning_effort')=='medium')
-            if opaque and not default_consultant_route:
+            # In isolated live runs every executor has the same explicit Luna
+            # policy. Require a linked native child, completed skill loading and
+            # matching actual model/effort instead of pretending to read its
+            # encrypted assignment. Hidden rationale remains unavailable.
+            observed_executor_route=(opaque
+                and row.get('worker_route_evidence')=='native_child_and_complete_skill'
+                and row.get('observed_worker_profile') not in {None,'worker','senior_consultant'}
+                and row.get('fork_turns')=='none'
+                and row.get('requested_model')==LIVE_MODEL
+                and row.get('requested_reasoning_effort') in LIVE_WORKER_EFFORTS
+                and row.get('observed_worker_model')==row.get('requested_model')
+                and row.get('observed_worker_effort')==row.get('requested_reasoning_effort'))
+            if opaque and not (default_consultant_route or observed_executor_route):
                 flags.append('worker_assignment_policy_unverified')
             allowed_models=LIVE_CONSULTANT_MODELS if profile=='senior_consultant' else {None,LIVE_MODEL}
             allowed_efforts=LIVE_CONSULTANT_EFFORTS if profile=='senior_consultant' else {None,*LIVE_WORKER_EFFORTS}

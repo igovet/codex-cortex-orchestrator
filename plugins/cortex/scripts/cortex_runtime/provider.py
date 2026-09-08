@@ -37,6 +37,7 @@ class ProviderSettings:
     supports_websockets: bool = False
     remote_compaction_v2: bool | None = False
     feature_gate_validated: bool = False
+    context_management: bool | None = None
 
     def resolved_base_url(self) -> str:
         if self.requires_openai_auth and not self.gateway_verified:
@@ -337,12 +338,22 @@ def _upsert_key(text: str, section: str, key: str, value: str) -> str:
     return "".join(lines)
 
 
-def render_provider_config(original: bytes, settings: ProviderSettings) -> bytes:
+def _compaction_features(settings: ProviderSettings) -> dict[str, bool]:
+    values = {}
+    if settings.remote_compaction_v2 is not None:
+        values["remote_compaction_v2"] = bool(settings.remote_compaction_v2 and settings.feature_gate_validated)
+    if settings.context_management is not None:
+        values["context_management"] = settings.context_management
+    return values
+
+
+def render_provider_config(original: bytes, settings: ProviderSettings, *, preserved_features: set[str] | None = None) -> bytes:
     """Render a reversible, comment-preserving provider edit and validate it."""
     text = original.decode("utf-8") if original else ""
     text = _upsert_key(text, "", "model_provider", '"cortex"')
-    if settings.remote_compaction_v2 is not None:
-        text = _upsert_key(text, "features", "remote_compaction_v2", str(settings.remote_compaction_v2 and settings.feature_gate_validated).lower())
+    for key, value in _compaction_features(settings).items():
+        if key not in (preserved_features or set()):
+            text = _upsert_key(text, "features", key, str(value).lower())
     for key, value in (
         ("name", json.dumps(settings.name)),
         ("base_url", json.dumps(settings.resolved_base_url())),
@@ -377,6 +388,8 @@ def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings, *,
         original, original_token = observed
         _validate_config_bytes(path, original)
         route_path = path.with_name("config.toml.cortex-route.json")
+        preserved_features = set()
+        feature_journal = {}
         if managed:
             parsed = tomllib.loads(original.decode())
             saved_bytes, _ = _read_config_observation(route_path)
@@ -394,7 +407,23 @@ def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings, *,
                     raise ValueError("automatic Cortex routing requires the OpenAI provider and an unused cortex provider name")
                 if parsed.get("openai_base_url") or os.environ.get("OPENAI_BASE_URL"):
                     raise ValueError("automatic Cortex routing cannot replace a custom OpenAI upstream")
-        updated = render_provider_config(original, settings)
+            feature_journal = dict((saved or {}).get("features", {}))
+            current_features = parsed.get("features", {})
+            for key, value in _compaction_features(settings).items():
+                current = current_features.get(key)
+                prior = feature_journal.get(key)
+                if prior and current != prior["installed"] and not (
+                    not saved.get("committed", True) and current == prior.get("before")
+                ):
+                    # A later user choice wins on subsequent connect calls.
+                    preserved_features.add(key)
+                    continue
+                feature_journal[key] = {
+                    "previous": prior["previous"] if prior else current,
+                    "installed": value,
+                    "before": current,
+                }
+        updated = render_provider_config(original, settings, preserved_features=preserved_features)
         if updated == original:
             if managed and saved and not saved.get("committed", True):
                 saved["committed"] = True
@@ -451,6 +480,7 @@ def apply_provider_patch(codex_home: Path | None, settings: ProviderSettings, *,
             journal = {"previous": saved["previous"] if saved else parsed.get("model_provider"), "installed": installed,
                        "plugin_key": saved.get("plugin_key") if saved else plugin_keys[0] if len(plugin_keys) == 1 else None,
                        "before_selector": parsed.get("model_provider"),
+                       "features": feature_journal,
                        "before_fields": parsed.get("model_providers", {}).get("cortex"), "committed": False}
             # Publish recovery metadata before routing any credentials. A
             # failed config CAS leaves an inert journal, never a missing undo.
@@ -534,6 +564,12 @@ def restore_provider(codex_home: Path | None) -> dict[str, str]:
             before_fields = saved.get("before_fields") or {}
             if key in current and (current[key] == value or (not saved.get("committed", True) and key in before_fields and current[key] == before_fields[key])):
                 text = _remove_key(text, "model_providers.cortex", key)
+        for key, owned in saved.get("features", {}).items():
+            if parsed.get("features", {}).get(key) == owned["installed"]:
+                if owned["previous"] is None:
+                    text = _remove_key(text, "features", key)
+                else:
+                    text = _upsert_key(text, "features", key, str(owned["previous"]).lower())
         # Empty generated table headers are safe to remove; retain any table
         # with user fields, and all comments/other TOML bytes.
         lines = text.splitlines(keepends=True)

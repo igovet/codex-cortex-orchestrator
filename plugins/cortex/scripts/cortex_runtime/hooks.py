@@ -264,7 +264,7 @@ def _context_output(event, message):
 def restoration(snapshot):
     # Only server-generated references/counters enter developer context. Report
     # titles, summaries, prompts, paths and arbitrary pipeline prose never do.
-    lines = ["Cortex recovery: the current native binding is active. Load the Cortex context-compaction skill. "
+    lines = ["Cortex recovery: the current native binding is active. Load the Cortex context-compaction skill; for that read and subsequent commands, emit the complete result with text(result), never text(result.output). "
              "Read the latest pipeline and relevant source pages to recover requirements, cancellations, decisions, assignments, "
              "resource owners and unfinished actions. The coordinator decides interpretation and completion."]
     pipeline = snapshot["pipeline"]

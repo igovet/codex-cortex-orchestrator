@@ -69,6 +69,61 @@ def test_automatic_provider_honors_later_user_override(tmp_path):
     assert tomllib.loads(path.read_text())["model_provider"] == "custom"
 
 
+@pytest.mark.parametrize("feature_text", ["", "context_management = true\nremote_compaction_v2 = false\n"])
+def test_compaction_feature_selection_is_reversible(tmp_path, feature_text):
+    original = '[features]\nother_feature = true\n' + feature_text
+    path = config_file(tmp_path, original)
+    configured = replace(settings(), context_management=False,
+                         remote_compaction_v2=True, feature_gate_validated=True)
+    apply_provider_patch(tmp_path, configured, managed=True)
+    assert tomllib.loads(path.read_text())["features"] == {
+        "other_feature": True, "context_management": False, "remote_compaction_v2": True,
+    }
+    assert apply_provider_patch(tmp_path, configured, managed=True)["status"] == "unchanged"
+    # Reconnecting on a new listener must retain the original feature values.
+    apply_provider_patch(tmp_path, replace(configured, gateway_port=8800), managed=True)
+    restore_provider(tmp_path)
+    assert tomllib.loads(path.read_text())["features"] == tomllib.loads(original)["features"]
+
+
+def test_compaction_features_preserve_later_user_choices(tmp_path):
+    path = config_file(tmp_path, '')
+    configured = replace(settings(), context_management=False,
+                         remote_compaction_v2=True, feature_gate_validated=True)
+    apply_provider_patch(tmp_path, configured, managed=True)
+    path.write_text(path.read_text().replace('context_management = false', 'context_management = true')
+                    .replace('remote_compaction_v2 = true', 'remote_compaction_v2 = false'))
+    apply_provider_patch(tmp_path, replace(configured, gateway_port=8800), managed=True)
+    assert tomllib.loads(path.read_text())["features"] == {
+        "context_management": True, "remote_compaction_v2": False,
+    }
+    restore_provider(tmp_path)
+    assert tomllib.loads(path.read_text())["features"] == {
+        "context_management": True, "remote_compaction_v2": False,
+    }
+
+
+def test_compaction_feature_journal_recovers_failed_publication(tmp_path, monkeypatch):
+    path = config_file(tmp_path, '[features]\ncontext_management = true\n')
+    configured = replace(settings(), context_management=False,
+                         remote_compaction_v2=True, feature_gate_validated=True)
+    publish = provider_module._publish_config_cas
+
+    def fail_config(target, temporary, expected):
+        if target == path:
+            raise RuntimeError("interrupted config publication")
+        return publish(target, temporary, expected)
+
+    monkeypatch.setattr(provider_module, '_publish_config_cas', fail_config)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        apply_provider_patch(tmp_path, configured, managed=True)
+    monkeypatch.setattr(provider_module, '_publish_config_cas', publish)
+    apply_provider_patch(tmp_path, configured, managed=True)
+    assert tomllib.loads(path.read_text())["features"]["context_management"] is False
+    restore_provider(tmp_path)
+    assert tomllib.loads(path.read_text())["features"] == {"context_management": True}
+
+
 @pytest.mark.parametrize("original", ['model_provider = "other"\n', '[model_providers.cortex]\nname = "user"\n', 'openai_base_url = "https://other.invalid"\n'])
 def test_automatic_provider_never_replaces_custom_route(tmp_path, original):
     path = config_file(tmp_path, original)

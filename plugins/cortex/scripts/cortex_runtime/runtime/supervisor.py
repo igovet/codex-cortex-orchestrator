@@ -167,7 +167,8 @@ class GatewaySupervisor:
         result["provider"] = apply_provider_patch(self.codex_home, ProviderSettings(
             gateway_host=snapshot.host, gateway_port=snapshot.port,
             requires_openai_auth=True, gateway_verified=True,
-            supports_websockets=True, remote_compaction_v2=None,
+            supports_websockets=True, remote_compaction_v2=True,
+            feature_gate_validated=True, context_management=False,
         ), managed=True)
         result["client_config_application"] = "next_config_load"
         return result

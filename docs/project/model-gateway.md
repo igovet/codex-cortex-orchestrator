@@ -55,7 +55,11 @@ existing Codex TOML including inline table-header comments, and writes a
 first-version `config.toml.cortex-backup` before an atomic update. Backup
 publication is create-only under concurrent configure calls, so the first
 complete recovery point is never overwritten. Automatic setup preserves
-feature flags, model and reasoning-effort choices. Valid quoted table headers,
+model and reasoning-effort choices and unrelated feature flags. It selects
+`context_management = false` and `remote_compaction_v2 = true`, journaling the
+previous presence/value of each key. Reconnect preserves later user feature
+overrides, and disconnect restores only unchanged owned feature values.
+Valid quoted table headers,
 array-table boundaries, and inline comments are preserved; settings are inserted
 only into their semantic TOML tables.
 
@@ -76,7 +80,17 @@ When `gateway.enabled` changes from true to false, `ensure` drains and waits for
 the positively owned child to remove its runtime state, then reports `stopped`;
 it does not leave a healthy proxy running under a disabled configuration.
 
-Compaction routing covers both supported wire paths. A POST to
+The experimental context-management flow can install a new context window
+without any server summary. Codex's
+[upstream implementation](https://github.com/openai/codex/commit/32b65bb)
+explicitly routes token-budget compaction through a local reset while retaining
+the compaction lifecycle events. Thus a `compacted` event or a successful
+notes/thread-hint request alone cannot establish model-based summarization.
+Automatic provider setup disables that mode and selects the V2 summary flow;
+an already running client needs a configuration reload. A later user override
+back to context management is respected but restores the local-reset behavior.
+
+Compaction routing covers both supported summary wire paths. A POST to
 `/backend-api/codex/responses` is classified as `auto_compaction` only when it
 contains a direct `compaction_trigger`; a POST to
 `/backend-api/codex/responses/compact` is classified as `manual_compaction`

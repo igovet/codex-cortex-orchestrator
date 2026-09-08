@@ -56,15 +56,30 @@ Then complete the setup end to end:
    documented update flow instead of adding a duplicate. Then install the
    plugin (or use the README's documented remove/reinstall update flow) with:
    codex plugin add cortex@cortex --json
-4. Preserve existing ~/.codex/config.toml and model preferences. Verify native
+4. Preserve existing global $CODEX_HOME/config.toml (normally ~/.codex/config.toml)
+   and model preferences while applying the required Cortex provider and
+   compaction settings below. Verify native
    subagent support; enable multi_agent_v2 only when needed by the installed host.
    Cortex does not require changing agents.default_subagent_model.
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
-   Follow **Automatic provider and compaction paths**: first MCP startup verifies
-   the gateway and configures its local provider automatically. Do not add proxy
-   environment variables or a CA certificate. Verify the generated route and
-   fresh model traffic after Codex reloads configuration. If a new task or restart
-   is still needed, report that explicitly and preserve active work.
+   Follow **Automatic provider and compaction paths** after both installation
+   and update: start the installed Cortex MCP so it verifies the gateway and
+   applies the global provider and compaction configuration automatically.
+   Installing the plugin alone is not proof that this initialization ran.
+   Inspect the effective global config and verify all of the following:
+   - model_provider = "cortex";
+   - model_providers.cortex points to the verified loopback listener, with
+     wire_api = "responses", requires_openai_auth = true and supports_websockets = true;
+   - features.context_management = false;
+   - features.remote_compaction_v2 = true.
+   Preserve unrelated settings and the generated backup/route journal. If a
+   later user override prevents these settings from applying, explain the
+   conflict and resolve that choice with the user instead of silently replacing it.
+   Do not add proxy environment variables or a CA certificate. Verify a fresh
+   model request through the gateway after Codex reloads configuration. If a new
+   task or restart is still needed, report that explicitly and preserve active
+   work. Do not claim compaction routing is verified without observing an actual
+   compaction request and its routed model/effort.
 5. Confirm the plugin catalogue includes the 23 `cortex:worker-*` specialist
    skills. Verify complete native skill loading or exact advertised SKILL.md reads;
    catalogue discovery alone is insufficient. Do not read TOML or server internals. See the current
@@ -745,6 +760,15 @@ Workers use exact advertised skill paths and declared references; they do not en
 [Tool discipline](plugins/cortex/skills/tool-discipline/SKILL.md) requires checking
 live tool declarations, complete arguments and actual results; it forbids guessed
 calls and unexplained mutation replays. Profiles do not authorize tools or select models.
+Discovery first lists tool names, then opens one selected complete declaration;
+a name-only result cannot supply an input contract. Calls include every required
+field; declared defaults apply only to optional controls. After compaction, actors
+reload the next needed declaration and preserve the full command result, including
+exit status or a running handle, from the first recovery read onward.
+New workers receive self-contained assignments and selected evidence without the
+coordinator's conversation history. Report publication follows its own live key
+requirements, which differ from draft creation. The required draft identity line
+is registration metadata and must not be treated as an unfilled guidance marker.
 
 ### Adaptive model policy
 
@@ -971,7 +995,9 @@ failure and the control command exits nonzero. Draining health is not
 readiness. After readiness, Cortex automatically selects its local Codex
 provider at `http://127.0.0.1:8787/backend-api/codex` (or the configured fixed
 loopback listener). It uses Codex's existing OpenAI authentication and preserves
-model choices, reasoning effort, feature flags and unrelated configuration.
+model choices, reasoning effort and unrelated configuration. It selects the
+remote summary compactor with `remote_compaction_v2 = true` and
+`context_management = false`; both feature edits are journaled and reversible.
 No proxy variables, local CA certificate or special product launcher are needed.
 Provider backups are
 published create-only so concurrent configuration cannot overwrite the first
@@ -996,6 +1022,22 @@ message's other fields; it does not
 apply a separate HTTP store rewrite.
 
 ### Automatic provider and compaction paths
+
+After installation or update, the first startup of the installed Cortex MCP
+applies these settings to the global `$CODEX_HOME/config.toml` (normally
+`~/.codex/config.toml`), not a project-local config. Marketplace installation by
+itself does not run this setup; MCP initialization must occur. Model traffic
+uses the new settings when the client next loads configuration.
+
+Automatic setup selects Codex's remote summary compaction mode. The experimental
+`context_management` mode can reset a context window locally without asking a
+model to summarize it; there is no summary request for a proxy to reroute in that
+case. Cortex sets `features.context_management = false` and
+`features.remote_compaction_v2 = true` on connection. These choices take effect
+on the next configuration load, apply to native workers as well as coordinators,
+and restore their previous values on disconnect if still unchanged. Subsequent
+user feature overrides are preserved; opting back into context management also
+opts out of this guarantee of remote summary routing.
 
 Cortex's first MCP startup verifies the owned gateway and updates the effective
 user `config.toml` with a local `cortex` model provider. HTTP/SSE and Responses

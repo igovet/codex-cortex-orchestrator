@@ -139,3 +139,31 @@ def test_opaque_default_consultant_route_requires_all_native_evidence():
             row['violation'] for row in flags({**base,**change})}
     assert 'live_model_policy_violation' in {
         row['violation'] for row in flags({**base,'model':'gpt-5.6-terra'})}
+
+
+def test_opaque_executor_route_requires_linked_child_and_complete_skill():
+    request={'message':'gAAAAA'+'x'*100,'task_name':'author_spec',
+             'model':'gpt-5.6-luna','reasoning_effort':'high','fork_turns':'none'}
+    row={'thread_id':'parent','role':'coordinator','tool':'spawn_agent','outcome':'success',
+         **OBSERVER['safe_call_metadata']('spawn_agent',json.dumps(request))}
+    paths={'/root/author_spec':'child'};edges={'child':'parent'}
+    details={'child':{'agent_role':'technical_writer','model':'gpt-5.6-luna','reasoning_effort':'high'}}
+    read={'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
+          'wrapper_outcome':'success','worker_skill_complete':True}
+    evidence=OBSERVER['native_spawn_route_metadata']
+    check=OBSERVER['call_policy_violations']
+    assert check([row])  # Ciphertext alone remains insufficient.
+    observed=evidence(row,paths,edges,details,[read])
+    assert observed['spawned_thread_id']=='child'
+    assert observed['worker_route_evidence']=='native_child_and_complete_skill'
+    assert check([{**row,**observed}])==[]
+    assert evidence(row,paths,{'child':'unrelated'},details,[read])=={}
+    assert evidence(row,{'/root/another_name':'child'},edges,details,[read])=={}
+    assert evidence(row,paths,edges,details,[])=={}
+    assert evidence(row,paths,edges,details,[{**read,'wrapper_outcome':'truncated'}])=={}
+    for change in ({'observed_worker_model':'gpt-5.6-terra'},
+                   {'observed_worker_effort':'medium'},
+                   {'observed_worker_profile':'senior_consultant'},
+                   {'fork_turns':'all'}, {'requested_model':'gpt-5.6-sol'}):
+        assert 'worker_assignment_policy_unverified' in {
+            flag['violation'] for flag in check([{**row,**observed,**change}])}

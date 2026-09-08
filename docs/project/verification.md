@@ -1,5 +1,110 @@
 # Verification
 
+## Clean CLI/Desktop audit pair — 2026-09-09
+
+Candidate `1.15.8+codex.sha256.d3b300414bf3198d` completed consecutive real CLI
+and Desktop document scenarios on the same unchanged isolated payload and
+dependency identity. Both used Luna high coordinators and Luna medium native
+authors without inherited coordinator conversation. The ordinary request asked
+for a task-service lifecycle specification with invariants and conflicting
+requests, author delegation, and coordinator review.
+
+| Host | Observed calls | MCP events | Final audit | Completed automatic compaction (2026-09-08 UTC) |
+| --- | ---: | ---: | --- | --- |
+| CLI | 84 | 14 | Exit 0; all failure and policy lists empty | 20:55:29.983 |
+| Desktop | 86 | 15 | Exit 0; all failure and policy lists empty | 21:00:04.306, 21:04:14.539, 21:05:08.926 |
+
+Each listed compaction has a nonempty native server response ID. The isolated
+configuration lowered the automatic threshold to 40000; no manual compact or
+context-reset action was sent. Gateway metadata recorded the V2 high-to-medium
+routing, and both tasks continued to native final answers. The test threshold
+was removed afterward. CLI exited 0 before its exact tmux session was removed;
+Desktop's exact isolated process and disposable profile were stopped after its
+completed-task receipt. The stable installation and active user tasks were not
+modified.
+
+The changes address broad catalogue truncation, name-only discovery mistaken for
+full declarations, guessed/missing arguments, recovery reads losing exit receipts,
+and inherited conversation in new assignments. The publication reference no
+longer suggests that an initial writer key can be omitted; the writer property
+explicitly requires it on the initial call. Permanent draft identity metadata is
+distinguished from replaceable guidance. Encrypted assignments retain their
+opaque marker; fixed isolated worker routing is verified from actual child
+linkage, model/effort and complete skill-loading evidence, without claiming to
+inspect hidden prose.
+
+Source verification passed sequentially: package validation, source-only sync
+check, and all 388 tests (eight existing aiohttp warnings, no skips). The final
+focused package/thread tests passed 44 cases first. Generated instructions retain
+all 22 executor profiles and the separate consultant profile within the existing
+prompt budgets.
+
+Earlier attempts were rejected for truncated catalogue output, missing or invalid
+arguments, incomplete command receipts, inherited worker context, and a false
+positive marker check. One earlier CLI run of this same final candidate had a
+patch-context error, corrected it, and remained rejected by the audit; the clean
+pair above was a fresh run, not a relabelled recovery. Complete current calls and
+MCP event tails plus audits were captured before rejected clients were stopped.
+No failed outcome was suppressed to obtain the passing pair.
+
+This is bounded evidence for the observed document workflow, not a claim that
+all future model runs are error-free. Both final deliveries used coordinator
+review of the author's report; no independent reviewer was required by the test
+request. CLI published an accepted pipeline edition. Desktop delivered native
+final acceptance with its initial pipeline and immutable author report; this
+probe does not certify that every final acceptance is mirrored in a new pipeline
+edition. Cross-model routing, long native-residency pressure, resume and broader
+project workloads were not rerun for this candidate. The earlier summary-routing
+probe below remains historical evidence with its original failures intact.
+
+## Automatic summary compaction mode — 2026-09-08
+
+Candidate `1.15.8+codex.sha256.95d66b6c01eaf5ed` selects
+`features.context_management = false` and `features.remote_compaction_v2 = true`
+through automatic provider connection. The global route journal records prior
+feature values, recovers interrupted publication, and preserves subsequent user
+overrides. README installation/update instructions now require MCP initialization,
+inspection of the effective global configuration, and fresh routing evidence.
+
+Source verification: package validation and source-only sync succeeded; all
+387 tests passed with eight existing aiohttp warnings. Focused gateway/provider
+tests first passed 107 cases with two missing-zstandard skips in the system
+Python; the complete dependency-equipped suite had no skips. The new tests cover
+absent and existing feature keys, repeated connection/listener changes, later
+user choices, restoration, and interrupted config publication.
+
+Real CLI and Desktop used the same unchanged isolated candidate and dependency
+identity, Luna high coordinators, and Luna medium/high workers. Only the isolated
+test configuration lowered `model_auto_compact_token_limit` to 40000. Ordinary
+document work grew the context; no `/compact` or `new_context` action was sent.
+Both hosts produced a V2 WebSocket compaction request with gateway-observed
+`high` to `medium` rewriting, a completed native compaction containing a nonempty
+server response ID, and subsequent ordinary requests continuing the task:
+
+| Host | Native compaction completion (UTC) | Continuation |
+| --- | --- | --- |
+| CLI | 2026-09-08 19:17:28 | Resumed report review and completed the document task; client exit 0. |
+| Desktop | 2026-09-08 19:24:07 | Continued task creation, authoring, and independent review. |
+
+This confirms automatic summary routing in both real hosts, but **does not
+qualify as a clean full orchestration parity run**. CLI inspection covered 73
+host calls and 18 MCP events: one oversized report read was rejected and then
+corrected, and an encrypted worker assignment remained policy-unverified.
+Desktop inspection covered 103 calls and 18 MCP events: one invalid report read
+was corrected, while two encrypted assignments remained policy-unverified. The
+Desktop scenario was stopped after the successful compaction probe and review,
+with an author correction and coordinator wait still active. Neither audit
+failure was suppressed; complete current calls/events and audit results were
+captured before the exact isolated clients were stopped.
+
+An earlier exploratory run with a 55000 threshold also produced completed remote
+summaries for both a coordinator and its native worker, but had a truncated file
+read and a failed patch and was rejected as a clean run. The first Desktop
+preparation attempt failed downloading a dependency; a longer download timeout
+allowed the unchanged candidate to start. The stable installation and its active
+tasks were not modified. Cross-model live routing was not exercised because
+these tests use Luna; the live comparison demonstrates effort rewriting.
+
 ## 1.15.8 automatic provider and senior consultant — 2026-09-08
 
 The candidate adds automatic Marketplace provider setup and a separate optional

@@ -97,9 +97,18 @@ When native assignment bodies are encrypted in host records, the audit reports
 `worker_assignment_policy_unverified` unless the exact native name
 `senior_consultant`, explicit Sol medium and no conversation inheritance prove
 the standard consultation route. This narrow check verifies routing and isolation,
-not the hidden packet. Other opaque routes, including Astra escalation, remain
-unverified. Visible consultant calls still receive the full access/ownership audit.
-This unresolved observation still prevents clean audit qualification.
+not the hidden packet. For ordinary isolated Luna workers, the audit instead
+requires an exact native activity path and parent edge, a successful complete
+worker-skill read, and matching requested/observed model and effort with no
+conversation inheritance. Missing linkage, incomplete reads, mismatched routes,
+and other opaque routes (including Astra escalation) remain unverified. Assignment
+prose and rationale are never claimed as inspected. All visible worker calls
+still receive the full error, access, ownership and publication audit.
+Recovery context explicitly preserves complete command receipts before the first
+skill read. Input requirements remain in live schemas; publication instructions
+must not suggest omitting fields required by the selected operation. These are
+model instructions and audit evidence, not a guarantee that every future model
+turn follows the protocol.
 
 Once a Cortex task exists, the coordinator does not use host command wrappers to
 read, mutate, hash or verify project artifacts. The worker owns that complete
@@ -230,9 +239,13 @@ target as a regular, owner-controlled file, preserves unrelated TOML content,
 writes a first-version backup with create-only publication, and replaces the
 file atomically. Automatic provider setup follows verified readiness, targets
 only the exact loopback listener, enables existing OpenAI authentication and
-WebSocket support, and preserves feature flags and model/effort preferences.
+WebSocket support, and preserves model/effort preferences and unrelated feature
+flags. It selects `context_management = false` and `remote_compaction_v2 = true`
+so automatic compaction invokes remote summarization instead of a local context
+reset. Both feature edits retain their prior values in the private journal;
+later user overrides survive reconnect and restoration.
 It rejects pre-existing custom provider/upstream configurations. Later user
-route edits are preserved. A private journal tracks only owned route fields;
+route edits are preserved. A private journal tracks owned route and compaction feature fields;
 disable/stop restores matching values rather than replacing the whole config
 with an old backup. The running gateway observes removal or disable of the exact
 Marketplace entry recorded at setup and restores before draining. An absent or

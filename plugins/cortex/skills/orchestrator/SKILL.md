@@ -17,6 +17,23 @@ const result = await tools.exec_command({...});
 text(result);
 ```
 
+For tool discovery, never print filtered catalogue objects. Emit names only:
+
+```text
+text(ALL_TOOLS.filter(x => /cortex/i.test(x.name)).map(x => x.name));
+```
+
+Next emit the complete declaration, using the exact observed name needed now:
+
+```text
+text(ALL_TOOLS.find(x => x.name === "mcp__cortex__create_task").description);
+```
+
+Names alone contain no input contract. Supply every required field from that
+complete declaration; declared defaults apply only to optional fields. Never use
+an empty trial call to discover requirements. Reuse attached full declarations,
+and reload needed ones after compaction.
+
 As coordinator, use the language of the user's latest own prose for every user-facing progress
 update, question and final answer, including blockers and acceptance summaries,
 unless the user explicitly requests another response language. English worker
@@ -79,14 +96,8 @@ stale evidence with judgment. Preserve required checks until the user changes sc
 ## Durable task and pipeline
 
 For new work create one task; for continuation use the same native thread and task.
-Discover and call only the seven advertised Cortex operations needed for task
-creation, governance, drafts and bounded report access. Use attached schemas
-directly. When discovery is needed, select only the needed Cortex operation names;
-for example, `text(ALL_TOOLS.filter(t => t.name.includes("cortex")).map(t => t.name))`
-emits names only; load complete advertised contracts only for selected names. Avoid broad description matching
-and unrelated catalogue dumps. Choose an output budget sufficient for the selected
-contracts or split bounded discovery. Follow live schemas; do not duplicate argument
-contracts here, guess identifiers, inspect SQLite or edit published report files.
+Keep argument contracts in live schemas; never guess identifiers, inspect SQLite
+or edit published reports.
 
 Maintain one real `pipeline.md` per task. Publish a new edition above older
 editions whenever current coordination state materially changes. Its current
@@ -131,11 +142,10 @@ One worker owns each shared or coupled mutation surface. Schedule users of the s
 browser, device, emulator, port, external application or overlapping files
 sequentially unless isolation is established. Record the owner in the pipeline.
 
-Reuse a completed worker context for a bounded continuation of the same role when
-its retained evidence remains applicable; a verifier may clarify or extend its own
-findings. Use a fresh worker when a check is claimed independent or risk justifies
-independence. Never reassign or
-duplicate work because of a wait timeout; ownership ends only after completion,
+Reuse retained evidence for same-role continuation; use a fresh worker for
+independent checks. Never reassign or
+duplicate work because of a wait timeout; ownership ends
+only after completion,
 confirmed terminal failure or user cancellation. Recover a failed worker from its
 saved report, draft and observed project state before deciding whether a new owner
 is needed.
@@ -185,6 +195,10 @@ expires.
 
 ## Assignments
 
+Start each new worker with no inherited conversation: supply its self-contained
+assignment and selected evidence. Continue an existing owner in its own retained
+context when applicable.
+
 Each assignment is self-contained and concise:
 
 - the exact `$cortex:worker-...` skill;
@@ -196,8 +210,7 @@ Each assignment is self-contained and concise:
   and evidence;
   reviews record implementation model/effort when relevant; they do not derive a
   route or override the user request;
-- include these bounded labels in the assignment message so the host audit can
-  verify the supported native request: `Policy class: <value>`, `Review
+- include these bounded labels to retain assignment routing provenance: `Policy class: <value>`, `Review
   implementation model: <model>` and `Review implementation effort: <effort>`
   when reviewing; include `User-requested override: yes|no`;
 - the desired outcome and bounded scope;
@@ -313,9 +326,7 @@ current pipeline, new source revisions, attachment availability, open actions,
 worker handles, resource owners and report pointers. Reread the original request,
 clarifications and any evidence pages necessary to restore exact requirements and
 make current decisions. Reconcile active workers before dispatching overlapping
-work. The compact recovery summary is an index into durable state, not a replacement
-for that state. Restore the boundary before host action; dispatch a worker for
-reads, edits, hashes and checks.
+work. Restore the project-access boundary before host action.
 
 ## User commands
 
