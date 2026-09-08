@@ -18,7 +18,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python3 -m pip install -r plugins/cortex/requirements.lock
+      # requirements.lock contains Linux wheel hashes for the isolated runtime.
+      # CI runs on macOS too, so install the pinned cross-platform requirements.
+      - run: python3 -m pip install -r plugins/cortex/requirements.txt
       - run: python3 -m pip install pytest jsonschema
       - run: python3 -B scripts/validate-cortex-marketplace.py
       - run: PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q

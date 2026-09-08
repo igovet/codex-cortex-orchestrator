@@ -233,6 +233,10 @@ def test_live_helpers_derive_only_the_canonical_project_store(tmp_path):
 
 def test_live_helpers_remove_external_store_override_from_child_environments(monkeypatch,tmp_path):
     import runpy
+    home=tmp_path/'home'
+    dependency=home/'.cortex-dev/.codex/cortex-deps'
+    dependency.mkdir(parents=True,mode=0o700)
+    monkeypatch.setenv('HOME',str(home))
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
     monkeypatch.setenv('CORTEX_DATA_DIR',str(tmp_path/'external'))
     env=helper['environment'](tmp_path/'profile',tmp_path/'events')
