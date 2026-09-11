@@ -317,6 +317,11 @@ class Store:
 
     def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None):
         validate(operation,args)
+        # Pipeline editions are coordinator-owned durable task state. Reject a
+        # worker request before entering the transaction so no draft file,
+        # delivery receipt, or other task state is created for the attempt.
+        if operation=="create_draft" and args.get("template")=="pipeline" and parent_thread_id is not None:
+            raise StoreError("coordinator_pipeline_only")
         if operation=="create_draft" and "request_key" not in args:
             args=dict(args,request_key=str(uuid.uuid4()))
         if operation=="create_task" and parent_thread_id is not None:raise StoreError("child_creation")

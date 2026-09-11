@@ -36,7 +36,9 @@ rollout content alone does not prevent archive reads. Each process retains at mo
 ## Publication and recovery
 
 The draft creator allocates a short identifier, canonical path and required marker,
-and records its task, native owner, device and inode. Actors edit that exact file
+and records its task, native owner, device and inode. Only the bound coordinator
+may create a pipeline draft; worker pipeline requests are rejected before draft
+allocation, while ordinary worker report drafts remain available. Actors edit that exact file
 in place. Replacement, deletion, renaming, recreation, symlinks, special files and
 unsafe ownership are rejected. Unfilled packaged guidance markers also prevent
 publication; this is template validation, not a semantic acceptance test.

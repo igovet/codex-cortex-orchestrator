@@ -1,0 +1,128 @@
+{
+  "condition_independent_identity": [
+    "suite_version",
+    "task_id",
+    "prompt_sha256",
+    "fixture_tree_sha256",
+    "oracle_sha256",
+    "reset_sha256"
+  ],
+  "families": [
+    {
+      "family": "factual-investigation",
+      "fixture_tree_path": "trees/F-01",
+      "fixture_tree_sha256": "d1ebe1a4b3f5f045d3c1ac556f10152cac6c1b70e626de0650ccf7cb4404fa17",
+      "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
+      "oracle_path": "oracle.py",
+      "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
+      "prompt_path": "prompts/F-01.txt",
+      "prompt_sha256": "57115337f3a8721fa133c29015f0d3f9ee498729b50734a55cc53b68a8146533",
+      "protected_paths": [
+        "USER-NOTE.txt"
+      ],
+      "reset_command": "python3 reset.py --task TASK_ID --destination WORKTREE",
+      "reset_path": "reset.py",
+      "reset_policy": "Destination must be absent; reset copies the tree byte-for-byte and never overwrites.",
+      "reset_sha256": "d12d9e40a58270810fd84138081d918fbd5b3d3c0c2f76de24342ba0e836516d",
+      "task_id": "F-01"
+    },
+    {
+      "family": "bug-fix-regression",
+      "fixture_tree_path": "trees/F-02",
+      "fixture_tree_sha256": "84931999b4eddd29472273823de76d5d4005e09e7e89ef073678a29d6274a5d3",
+      "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
+      "oracle_path": "oracle.py",
+      "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
+      "prompt_path": "prompts/F-02.txt",
+      "prompt_sha256": "cbcf9c8a7e63c7cfadaea66e41a7fc40bafd0448e5b9bbb66dd1b490bcd56450",
+      "protected_paths": [
+        "USER-NOTE.txt"
+      ],
+      "reset_command": "python3 reset.py --task TASK_ID --destination WORKTREE",
+      "reset_path": "reset.py",
+      "reset_policy": "Destination must be absent; reset copies the tree byte-for-byte and never overwrites.",
+      "reset_sha256": "d12d9e40a58270810fd84138081d918fbd5b3d3c0c2f76de24342ba0e836516d",
+      "task_id": "F-02"
+    },
+    {
+      "family": "multi-file-feature",
+      "fixture_tree_path": "trees/F-03",
+      "fixture_tree_sha256": "5a2c794914d4a9f8f2af63a03fdf2906cf3e9fbc449cffe4d29fbc52b17e5d07",
+      "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
+      "oracle_path": "oracle.py",
+      "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
+      "prompt_path": "prompts/F-03.txt",
+      "prompt_sha256": "0e4eef7bd282213a3a4383839ce7a2b1e7204bf430dce68fc874fc7a329c4ce2",
+      "protected_paths": [
+        "USER-NOTE.txt"
+      ],
+      "reset_command": "python3 reset.py --task TASK_ID --destination WORKTREE",
+      "reset_path": "reset.py",
+      "reset_policy": "Destination must be absent; reset copies the tree byte-for-byte and never overwrites.",
+      "reset_sha256": "d12d9e40a58270810fd84138081d918fbd5b3d3c0c2f76de24342ba0e836516d",
+      "task_id": "F-03"
+    },
+    {
+      "family": "test-authoring",
+      "fixture_tree_path": "trees/F-04",
+      "fixture_tree_sha256": "e465adc500bf5211c4732bc4f82df7cb9a42c8115c933118a2e00eee7c1681c5",
+      "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
+      "oracle_path": "oracle.py",
+      "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
+      "prompt_path": "prompts/F-04.txt",
+      "prompt_sha256": "0ce3f96bb1f79e6753c4b72d1e6b15ac4f7ba8511d7024c930f651f98ec33752",
+      "protected_paths": [
+        "USER-NOTE.txt"
+      ],
+      "reset_command": "python3 reset.py --task TASK_ID --destination WORKTREE",
+      "reset_path": "reset.py",
+      "reset_policy": "Destination must be absent; reset copies the tree byte-for-byte and never overwrites.",
+      "reset_sha256": "d12d9e40a58270810fd84138081d918fbd5b3d3c0c2f76de24342ba0e836516d",
+      "task_id": "F-04"
+    },
+    {
+      "family": "documentation-api-correction",
+      "fixture_tree_path": "trees/F-05",
+      "fixture_tree_sha256": "5835d38a0f46d797e502df3eddfccc18f4dbb1248827f0980dc9c06ee0367c23",
+      "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
+      "oracle_path": "oracle.py",
+      "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
+      "prompt_path": "prompts/F-05.txt",
+      "prompt_sha256": "b3b6e59a5a995240939d77dc178b9bfd127e760e5006574038fea253259e6b16",
+      "protected_paths": [
+        "USER-NOTE.txt"
+      ],
+      "reset_command": "python3 reset.py --task TASK_ID --destination WORKTREE",
+      "reset_path": "reset.py",
+      "reset_policy": "Destination must be absent; reset copies the tree byte-for-byte and never overwrites.",
+      "reset_sha256": "d12d9e40a58270810fd84138081d918fbd5b3d3c0c2f76de24342ba0e836516d",
+      "task_id": "F-05"
+    },
+    {
+      "family": "security-sensitive-change",
+      "fixture_tree_path": "trees/F-06",
+      "fixture_tree_sha256": "e6c9c5a9b69750f3b151f230f1153c9af213077caec138c291c0b761e4755ba0",
+      "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
+      "oracle_path": "oracle.py",
+      "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
+      "prompt_path": "prompts/F-06.txt",
+      "prompt_sha256": "670b284663b8f9b9a525a5b83a3e011e6b0bd31dcb8778463289d13aa4e1f694",
+      "protected_paths": [
+        "USER-NOTE.txt"
+      ],
+      "reset_command": "python3 reset.py --task TASK_ID --destination WORKTREE",
+      "reset_path": "reset.py",
+      "reset_policy": "Destination must be absent; reset copies the tree byte-for-byte and never overwrites.",
+      "reset_sha256": "d12d9e40a58270810fd84138081d918fbd5b3d3c0c2f76de24342ba0e836516d",
+      "task_id": "F-06"
+    }
+  ],
+  "hash_algorithm": "sha256",
+  "ledger_schema_path": "ledger_schema.json",
+  "ledger_schema_sha256": "6a3aae21a7f91901d220ec4b48a9f86945759f2f7edfe9059e923aa91049bea8",
+  "manifest_version": "phase2-cli-v1-manifest",
+  "mapping_policy": "No arm, condition, randomization label, or baseline/candidate mapping is stored here.",
+  "protected_paths": "USER-NOTE.txt must remain byte-for-byte unchanged in every task.",
+  "suite_version": "phase2-cli-v1",
+  "tree_hash_definition": "sha256 of sorted relative-path NUL file-sha256 newline records"
+}

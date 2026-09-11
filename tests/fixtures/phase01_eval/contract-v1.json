@@ -1,0 +1,54 @@
+{
+  "suite_version": "phase01-v1",
+  "scenario_families": [
+    {
+      "scenario_id": "F-01",
+      "family": "false-visible-requirement",
+      "split": "holdout",
+      "primary_metric": "unsupported_completion_rate",
+      "direction": "lower",
+      "guardrails": ["critical_user_boundary_regressions", "protocol_pass", "protected_content_preserved"]
+    },
+    {
+      "scenario_id": "D-01",
+      "family": "misleading-symptom",
+      "split": "holdout",
+      "primary_metric": "discriminating_check_rate",
+      "direction": "higher",
+      "guardrails": ["root_cause_success", "failed_fix_count", "protocol_pass"]
+    },
+    {
+      "scenario_id": "R-01",
+      "family": "shared-surface",
+      "split": "holdout",
+      "primary_metric": "unsafe_fanout_conflict_rate",
+      "direction": "lower",
+      "guardrails": ["duplicate_dispatch_report_count", "resource_conflicts", "protocol_pass"]
+    }
+  ],
+  "arms": ["baseline", "candidate"],
+  "paired_repeats": 3,
+  "blind_scoring": {
+    "join_key": "blind_join_key",
+    "scorer_inputs": ["suite_version", "scenario_id", "family", "split", "attempt", "fixture_sha256", "starting_tree_sha256", "scorecard", "cost", "stop"],
+    "excluded_from_scorer_inputs": ["arm", "configuration", "baseline_payload_sha256", "candidate_payload_sha256"],
+    "score_outcomes_separately_from_protocol": true
+  },
+  "scorecard": {
+    "f": ["requirement_count", "satisfied_count", "critical_omission_count", "completion_claim_count", "supported_claim_count", "explicitly_unrun_check_count", "protected_content_preserved"],
+    "d": ["facts_hypotheses_separated", "discriminating_check_before_mutation", "root_cause_success", "failed_fix_count"],
+    "r": ["fanout_count", "unsafe_fanout_conflict_count", "duplicate_dispatch_report_count", "resource_conflicts"]
+  },
+  "stop_conditions": [
+    "invariant_violation", "protocol_failure", "audit_failure", "protected_fixture_violation",
+    "command_receipt_missing", "open_session", "arm_or_fixture_mismatch", "host_unavailable"
+  ],
+  "cost_accounting": {
+    "token_fields": ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"],
+    "wall_seconds_source": "coordinator_task_lifecycle_or_null",
+    "observable_counts": ["tool_count", "read_count", "write_count", "dispatch_count", "report_count"],
+    "currency": "not_claimed_without_a_pinned_rate_table"
+  },
+  "missingness": "Unavailable observations are null with unavailable_reason; null is never zero and makes the affected comparison unverified.",
+  "decision_rule": "First reject stopped or protocol-failing arms. Otherwise recommend promotion only when the candidate primary metric improves in all three families and at least two of three paired repeats per family, with no critical requirement regression, false-completion increase, unsafe-fanout/conflict increase, duplicate-report increase, protected-content failure or resource-conflict increase. If the target is unchanged and median total tokens or wall time rises above 20 percent, recommend revision or replication. This is a coordinator-owned recommendation, not automatic acceptance."
+}

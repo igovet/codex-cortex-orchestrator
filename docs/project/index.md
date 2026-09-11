@@ -9,6 +9,7 @@ execution and semantic judgment. The complete runtime is packaged below
 - [Verification](verification.md)
 - [Marketplace skills and native agent capacity](host-compatibility.md)
 - [Comparative outcome evaluation](quality-evaluation.md)
+- [Phase 5 adaptive selection (offline)](phase5-adaptive-selection.md)
 - [MCP contract review](mcp-contract-review.md)
 - [Markdown coordination feature](../features/markdown-reports/index.md)
 - [Release evidence](../release-readiness.md)

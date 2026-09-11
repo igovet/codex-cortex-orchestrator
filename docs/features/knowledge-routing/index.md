@@ -60,7 +60,8 @@ reports and indexed documentation. The native thread binding and current pipelin
 The orchestrator skill contains a routing table for all 23 specialists. Each has
 an exact `cortex:worker-*` skill token. The coordinator supplies that token and a
 self-contained assignment through ordinary native subagent tools. The worker loads
-its complete advertised skill before tool discovery or project work. Each assignment
+the complete matching `skills/worker-*/SKILL.md` file from the supplied Skills
+catalogue before any Cortex call, tool discovery or project work. Each assignment
 leads with the exact worker-skill token and this short loading requirement; a generic
 role or product brief does not transfer the shared protocol. Already attached
 live schemas can be used directly, without a separate MCP catalogue bootstrap or a

@@ -1,0 +1,1 @@
+$cortex:orchestrator Make event logging safe for secrets. Add redact_token(token) and ensure format_event(event, token) never emits the raw token while retaining the event name. Add a regression test for token non-disclosure, document the safety behavior, and preserve USER-NOTE.txt byte-for-byte. Report checks you did not run.

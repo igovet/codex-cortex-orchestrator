@@ -94,13 +94,15 @@ use `search_graph` for symbols, `trace_path` for relationships and `get_code_sni
 for source. Retain useful results. Unavailable tools or insufficient coverage require
 a concrete limitation and bounded source fallback, not stronger reasoning.
 
-Read Cortex reports only when their evidence is needed. Start with a page of at most
-4,000 characters and follow the returned cursor for as many pages as the named fact
-requires. This is a page-size bound, not a total context limit. Do not reread
-unchanged pages or inspect the Cortex database or final report files directly.
-Obtain archived Cortex source, pipeline and report text through bounded Cortex read
-operations even when their filesystem paths are visible. Native file tools may edit
-only a server-issued unpublished Cortex draft returned for this assignment; assigned
+Private Cortex evidence has a strict boundary: never shell, probe, search or open
+`.codex/cortex/`. Select only
+assignment-relevant immutable reports named by coordinator or exact ID;
+retrieve them only through bounded `mcp__cortex__read_report` with that exact
+`report_id`, a page of at most
+4,000 characters and only needed cursors; this is not a total context limit. No
+catalogues or substitute paths. Missing evidence is a stated gap/impact; never
+guess or scan the cache. Only the exact server-issued unpublished draft may be
+edited for publication. Assigned
 project code and artifacts remain editable within the assignment.
 
 For detailed graph selection, pagination and fallback rules, read
@@ -108,6 +110,14 @@ For detailed graph selection, pagination and fallback rules, read
 repository investigation is part of the assignment.
 
 ## Evidence and verification
+
+### Optional context-selected guidance
+
+When relevant, map fresh claims to evidence and unrun checks; distinguish
+facts/hypotheses and name one discriminating check before repair; state independence,
+mutation surface, shared resources, dependencies, and expected output before parallel
+dispatch. Advisory only: no mandatory stages, gates, approvals, report sections, or
+automatic acceptance.
 
 Choose checks that prove the assigned outcome at its relevant boundary. Distinguish
 observations, inference, failed checks and checks not run. A command receipt must
@@ -118,17 +128,15 @@ Bound output so decisive diagnostics are visible and never rely on truncated out
 Record the source or artifact revision and complete receipts for each check so the
 coordinator can assess the report without duplicating project verification.
 
-Use artifact-appropriate verification. Code may require focused tests, builds or
-runtime behavior; documents need render, content and link checks; spreadsheets need
-formula and output validation; research needs source and citation checks; designs and
-application workflows need inspection of the actual delivered state. Follow the
-loaded artifact skill.
+Use checks suited to the artifact: tests/builds/runtime for code, render/content/link
+checks for documents, formula/output checks for sheets, source/citation checks for
+research, and inspection for designs or workflows. Do not repeat unchanged checks;
+inspect complete results before dependent work and follow live schemas rather than
+guessing arguments.
 
-Do not repeat a read, search, test or status call when relevant state has not changed.
-Each call must resolve a concrete fact, change state or check an acceptance condition.
-Inspect the complete result before dependent work. Follow live tool schemas and
-retry guidance rather than copying argument contracts from prose or learning them
-through speculative failures.
+Checks `PYTHONDONTWRITEBYTECODE=1` for Python. Never use `rm -rf`,
+`find ... -delete`, `git clean`, reset/checkout, or recursive cleanup. Owned paths
+only; leave residue; report blockers/authority.
 
 For an interactive browser, device, emulator, port or application, create and use
 only resources owned by this assignment. Keep long-running command handles until
@@ -194,9 +202,9 @@ facts, options and consequences. Do not invent authority, bypass native permissi
 or start a separate user conversation. Required checks remain open when unavailable
 unless the user changes scope.
 
-After a successful report publication, return its identifier and compact handoff in
-the worker's native final response; the collaboration API delivers that response to
-the native parent automatically. Do not send or duplicate this handoff through
+After publication, the native final names only the assignment-owned report ID plus
+a compact handoff. Put every other report ID only in the saved report. The
+collaboration API delivers the final automatically. Do not duplicate it through
 cross-task messaging tools, and do not look up a separate handoff tool. Only an
 explicit native follow-up assignment authorizes another turn. A continuation of the
 same role may reuse retained instructions and evidence after checking new

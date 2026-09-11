@@ -137,6 +137,38 @@ def test_draft_is_bound_to_creator_thread_and_many_coordinator_drafts_are_distin
     assert accepted['report_id']
 
 
+def test_only_coordinator_can_create_pipeline_draft_workers_publish_reports(tmp_path):
+    server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));root,worker=tid(),tid()
+    create(server,tmp_path,root)
+
+    pipeline=ok(call(server,'create_draft',dict(template='pipeline',request_key='coordinator-pipeline'),root))
+    assert pipeline['kind']=='pipeline'
+    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
+        before=db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
+
+    denied=call(server,'create_draft',dict(template='pipeline',request_key='worker-pipeline'),worker,root)
+    error(denied,'coordinator_pipeline_only')
+    denied_body=denied['content'][0]['text']
+    assert 'pipeline' in denied_body and 'no draft was created' in denied_body
+    assert ok(call(server,'list_reports',{},worker,root))['own_drafts']==[]
+    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]==before
+
+    published=[]
+    for template,body in [('general','General worker evidence.'),('verification','Verification worker evidence.')]:
+        draft=ok(call(server,'create_draft',dict(template=template),worker,root))
+        assert draft['kind']=='report'
+        path=Path(draft['draft_path']);path.write_text(draft['required_first_line']+'\n\n'+body)
+        result=ok(call(server,'write_report',dict(
+            title=template.capitalize()+' evidence',summary='Worker report published.',
+            author='worker',draft_id=draft['draft_id'],request_key=template+'-publication'),worker,root))
+        published.append(result)
+
+    assert len({item['report_id'] for item in published})==2
+    assert all(item['report_id'].startswith('r_') for item in published)
+    assert ok(call(server,'list_reports',{},root))['reports'][0]['kind']=='report'
+
+
 def test_followup_drafts_get_fresh_server_keys_and_preserve_published_report(tmp_path):
     server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
     root,worker=tid(),tid()

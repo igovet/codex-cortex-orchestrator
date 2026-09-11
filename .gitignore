@@ -8,3 +8,7 @@ __pycache__/
 
 docs/implementation
 *.log
+
+# Root-level artifacts produced by Desktop parity smoke qualification.
+/desktop-parity-prompt.txt
+/desktop-smoke.md

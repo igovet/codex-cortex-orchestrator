@@ -1,0 +1,1 @@
+$cortex:orchestrator Author focused executable tests for the existing calculator API. Add tests/test_calculator.py with independent tests for add, positive division, negative operands, and the zero-divisor error. Do not change src/calculator.py or USER-NOTE.txt. Report checks you did not run.

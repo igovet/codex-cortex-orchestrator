@@ -6,6 +6,32 @@ All 22 executor profiles remain available with their shared publication protocol
 The consultant uses a separate access protocol and the same report publication.
 See the [verification report](verification.md) for actual host outcomes, usage and limits.
 
+## Risk-triggered transition use
+
+Consultation is an optional coordinator decision at a work transition, not a
+stage or gate. Consider one bounded consultation only when at least one
+consequence trigger and at least one uncertainty trigger apply; otherwise proceed
+without it. Consequences cover material architecture/public-tool/storage/security/
+release/migration/multi-owner decisions, hard-to-reverse external/scope/
+compatibility choices, contradictory repair-to-acceptance evidence or broad claims,
+and replanning after repeated failure or surprise. Uncertainty covers material
+alternatives, fact/hypothesis conflict or an untested critical assumption, no
+discriminating check/evidence boundary, or a fresh view likely to change the
+decision.
+
+Routine/reversible/deterministic work, ordinary tests, already-decided detail,
+phase/time/report existence alone, executor-evidence requests, unchanged packets,
+consultation chains/sign-off/fixed counts and active incident recovery are
+excluded. The consultation may run concurrently when safe, never blocks by rule,
+and never transfers planning, steering, evidence interpretation, acceptance or
+user communication. Its compact packet records the question, goal/constraints/
+revision, transition/deadline, alternatives, facts/hypotheses, selected report
+IDs and artifact versions, attempts/results, ownership boundaries, mutable
+decision and requested check, without copied report bodies or private data. The
+coordinator records triggers, selected report, decision, rationale, owner, next
+check and whether advice changed the decision. Evaluate quality and overhead
+against the unchanged baseline.
+
 ## Example complete cycle
 
 An explorer publishes a report for artifact revision A: the response is stale,

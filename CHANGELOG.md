@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.15.9
+
+Stable release candidate `1.15.9+codex.sha256.e4f332d43bf38024` is release-ready
+after final consecutive real CLI/Desktop qualification (`r_648c4f40dcf9`),
+offline tests, and independent reviews. The user cancelled the Phase 2 outcome
+comparison; it is non-blocking and non-scoring, with no efficacy comparison,
+score, or promotion claim. Earlier failures remain historical diagnostics.
+
+Add the versioned Phase 0 held-out evaluation contract with blind paired-repeat
+scoring, explicit stop/null/cost semantics, and coordinator-owned promotion
+recommendations. Add optional Phase 1 guidance for evidence and unrun-check
+mapping, fact-versus-hypothesis debugging, and parallel-dispatch declarations;
+these cues remain advisory and do not add runtime gates or server enforcement.
+Add optional risk-triggered senior consultation guidance: a transition must have
+both a consequence and an uncertainty trigger, with bounded packet/record and
+baseline quality/overhead evaluation. Consultation remains coordinator-selected,
+non-blocking and outside acceptance, planning and steering ownership.
+
+Preserve raw upstream model-catalogue responses by disabling aiohttp's implicit
+`Accept-Encoding` injection in the gateway. Caller-supplied `Accept-Encoding`
+values remain lossless, and response content is still streamed without automatic
+decompression. Add focused coverage for absent, `gzip`, and `br` negotiation.
+
 ## 1.15.7
 
 Restore explicit Codebase Memory discovery in all 22 worker profiles. Structural

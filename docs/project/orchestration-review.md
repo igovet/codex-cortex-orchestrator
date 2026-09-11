@@ -22,6 +22,8 @@ historical measurements, not evidence for a newly edited payload.
 | Report prose mistaken for file access | A report recorded the advertised skill path it had loaded | Classify patch access from edit headers, not mentioned paths in report content; actual plugin edit targets remain forbidden. |
 | Successful MCP labeled failed after consumer exception | A successful project listing was followed by store(undefined), which failed in JavaScript | Respect the native MCP receipt when assigning the MCP-error flag; keep the consumer failure visible and require its explanation. |
 | Overbroad audit attribution | One failed Git command in a batch marked unrelated Python commands as Git violations | Classify each nested command from its own arguments; keep the actual failed command and complete wrapper outcome visible. |
+| Worker tooling promoted to orchestration failure | A canary's ordinary Codebase Memory calls and Git exit-128 diagnostics were conflated with acceptance-critical policy; a path marker lacked target provenance | Keep external worker tooling outside the orchestration-call boundary. Record safe path-policy provenance/target classes and promote only explicit unauthorized access or Cortex/transport/task-impacting conditions. |
+| Native worker probed the private Cortex task cache | A fresh CLI observer event identified an unauthorized `.codex/cortex/` marker, but the retired run did not retain enough safe provenance to review the exact command | Workers must select assignment-relevant immutable reports through bounded `mcp__cortex__read_report` only and report missing evidence. Keep the cache hard stop fail-closed; retain only hashes, enums, terminal receipts and actor/thread lineage for future review. |
 
 ## Primary guidance and application
 

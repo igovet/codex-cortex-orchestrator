@@ -21,7 +21,6 @@ from .config import ConfigError, ConfigManager, PolicySnapshot
 from .defaults import (
     BODY_READ_TIMEOUT_SECONDS,
     MAX_COMPRESSED_BODY_BYTES,
-    MAX_CONCURRENT_REQUESTS,
     UPSTREAM_CONNECT_TIMEOUT_SECONDS,
     UPSTREAM_READ_TIMEOUT_SECONDS,
 )
@@ -87,7 +86,6 @@ class GatewayProxy:
         self._session = session
         self._owns_session = session is None
         self._active = 0
-        self._active_lock = asyncio.Lock()
         self._draining = False
         self.identity = identity or {}
 
@@ -106,9 +104,19 @@ class GatewayProxy:
 
             trace.on_request_redirect.append(reject_redirect)
             self._session = ClientSession(
-                connector=TCPConnector(limit=32, enable_cleanup_closed=True),
+                # Do not impose a fixed connection/slot ceiling. Request
+                # admission is governed by the existing transport, policy,
+                # body and cancellation checks below, not a proxy semaphore.
+                connector=TCPConnector(limit=0, enable_cleanup_closed=True),
                 timeout=ClientTimeout(total=None, sock_connect=UPSTREAM_CONNECT_TIMEOUT_SECONDS, sock_read=UPSTREAM_READ_TIMEOUT_SECONDS),
                 auto_decompress=False,
+                # aiohttp otherwise adds ``Accept-Encoding`` to requests that
+                # did not contain it.  That can make a raw upstream response
+                # (notably the model catalogue) arrive in an encoding the
+                # Codex client did not request and then fail JSON decoding.
+                # skip_auto_headers suppresses only the implicit header; an
+                # explicit caller-supplied value remains in ``headers``.
+                skip_auto_headers={"Accept-Encoding"},
                 cookie_jar=DummyCookieJar(),
                 trace_configs=[trace],
             )
@@ -226,15 +234,10 @@ class GatewayProxy:
             outcome = "rejected_draining"
             self._log_request(request, status=status, outcome=outcome, started=started)
             return response
-        async with self._active_lock:
-            if self._active >= MAX_CONCURRENT_REQUESTS:
-                status, body, headers = generated_error("concurrency_limit", "The gateway is at its request capacity.", status=503)
-                response = web.Response(status=status, body=body, headers=headers)
-                status_code = status
-                outcome = "rejected_concurrency"
-                self._log_request(request, status=status, outcome=outcome, started=started)
-                return response
-            self._active += 1
+        # Track in-flight work for controlled drain only. There is no
+        # admission limit: every request that passes the checks above proceeds
+        # through the ordinary forwarding path.
+        self._active += 1
         try:
             try:
                 response = await self._proxy_request(request)
@@ -258,8 +261,7 @@ class GatewayProxy:
                 status, body, headers = generated_error("gateway_error", "The gateway could not complete the request.", status=500)
                 return web.Response(status=status, body=body, headers=headers)
         finally:
-            async with self._active_lock:
-                self._active = max(0, self._active - 1)
+            self._active = max(0, self._active - 1)
             self._log_request(request, status=status_code, outcome=outcome, started=started)
 
     async def _proxy_request(self, request: web.Request) -> web.StreamResponse:

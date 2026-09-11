@@ -1,0 +1,1 @@
+$cortex:orchestrator Add a multi-file status feature for the catalog. Implement src/status.py with build_status(catalog), returning a JSON-serializable object containing state="ready" and item_count from catalog.count(). Add tests/test_status.py and document the public behavior in README.md. Preserve USER-NOTE.txt byte-for-byte and report checks you did not run.

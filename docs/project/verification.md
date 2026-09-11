@@ -1,5 +1,219 @@
 # Verification
 
+## Stable release payload — 1.15.9
+
+The current Cortex semantic version is `1.15.9`, with stamped payload
+`1.15.9+codex.sha256.e4f332d43bf38024` as declared by the plugin manifest and
+resolved by the package validator. Final consecutive real CLI and Desktop
+qualification passed on this unchanged candidate (`r_648c4f40dcf9`). Combined
+with the offline tests and independent reviews, this supports stable,
+release-ready orchestrator functionality. The user cancelled the Phase 2
+outcome comparison; it is non-blocking and non-scoring, and no efficacy
+comparison is claimed.
+
+## Current 1.15.9 stable release status
+
+| Gate or evidence | Status | Exact retained evidence |
+| --- | --- | --- |
+| Final consecutive real CLI qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on CLI |
+| Final consecutive real Desktop qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on Desktop |
+| Phase 2 outcome evaluation | CANCELLED — non-blocking, non-scoring | User-directed cancellation; no efficacy comparison, score, promotion, or quality conclusion is claimed |
+| Phase 3 validator repairs | READY offline | `r_02db5d25f90e` — final adversarial review PASS |
+| Phase 4 telemetry repairs | READY offline | `r_6b761e716df9` — independent re-review READY |
+| Phase 5 adaptive overlay | READY offline | `r_e95d3d29d46f` — final adversarial re-review PASS |
+
+Both final host runs used isolated preparation, Luna coordination/workers, no
+Astra, and no stable installation or configuration change. Their audits reported
+zero failures, policy violations, open sessions/cells, integrity invalidators,
+or quality findings. Phase 2 is cancelled by the user and must not be restarted
+or interpreted as an efficacy comparison; the Phase 3–5 repairs are READY
+offline as recorded above.
+
+Earlier excluded live attempts and constrained control/preflight checks remain
+historical evidence only. They are not relabeled, merged, retried, scored, or
+used as substitutes for the current qualification. Superseded candidate
+identities and earlier failures remain historical diagnostics only.
+
+## Coordinator draft-publication guidance repair — 2026-09-11
+
+The coordinator skill and pipeline-publication reference now require treating the
+`create_draft` Markdown and ordered `replaceable_markers` as authoritative,
+replacing every exact marker before `write_report`, and matching document kind to
+ownership (`pipeline` edition for the coordinator versus non-pipeline report for a
+worker). A deterministic `draft_guidance_remaining` response keeps the same draft,
+request key and metadata for one in-place correction retry; acknowledged
+publications are never replayed. This is model guidance only: no server-side
+approval machine or acceptance semantics were added. Focused skill assertions and
+skill validation passed; no live CLI/Desktop run was performed for this repair.
+
+## Desktop activation fallback repair — 2026-09-10
+
+The Desktop helper now preserves strict activation for successful
+`windowactivate --sync` calls. A fallback is permitted only when the command
+returns the exact `XGetWindowProperty[_NET_WM_DESKTOP] failed (code=1)` warning.
+It records that bounded diagnostic, rechecks the launched PID, runs one
+`windowfocus --sync`, requires `getactivewindow` to identify the same window, and
+rechecks the PID before click or `Ctrl+Enter`. Different xdotool errors, failed
+focus, active-window mismatch, or ownership change fail closed. The existing
+prepared-composer and exactly-one-new-task-receipt gates are unchanged.
+
+Focused regressions cover normal activation, exact-warning fallback success,
+other X11 errors, and PID ownership change during fallback. Package, sync, full
+test, and real-host qualification results for this repair must be recorded below;
+no live Desktop run is claimed by this source change alone.
+
+## Desktop spawn provenance and newline skill-read repair — 2026-09-10
+
+The isolated Desktop launcher now requires every `spawn_agent` request to record
+the child `model`, `reasoning_effort`, and `fork_turns` explicitly. The observer
+continues to require matching native child model/effort, parent linkage, and
+complete skill evidence; missing requested fields remain unverified. Focused
+regressions cover both an explicit Luna/effort route and an omitted-field failure.
+
+The command-aware observer parser preserves literal newlines outside quotes as
+linear boundaries, allowing a bounded batch of approved `sed` skill/reference
+reads. Newlines inside quotes, escaped newlines, mixed approved/private targets,
+and direct or ambiguous private-cache access remain fail-closed. Focused positive
+and negative regressions cover these boundaries. No live CLI or Desktop run was
+performed for this source repair.
+
+## Opaque Desktop route fallback repair — 2026-09-10
+
+The observer now accepts effective Luna worker-route compliance when an encrypted
+native assignment makes both requested model and effort fields unavailable and
+the exact `assignment_content_unavailable=true` marker is present, but only with
+a unique native child path, validated parent edge, registered executor
+profile, actual `gpt-5.6-luna` model, allowed medium/high effort, `fork_turns=none`,
+and one successful complete worker-skill receipt. It records bounded actual-route
+provenance without reconstructing or hashing hidden assignment prose. A visible
+requested field retains strict requested/observed matching; missing, partial,
+conflicting, duplicate, incomplete, failed, or ambiguous evidence remains
+`worker_assignment_policy_unverified`. Retained command errors, pending waits,
+MCP failures, and content-safety findings remain independent acceptance failures.
+
+Native `SubAgentActivity` evidence is lifecycle-aware: one `started` and one
+`completed` record for the same child/path coalesce into one route identity.
+Repeated starts, repeated completions, or a path resolving to different children
+remain ambiguous and fail closed; parent-edge, model/effort, and complete-skill
+receipt conflicts retain the same strict rejection behavior.
+
+Focused observer regressions cover the positive unavailable-fields join and
+negative route, receipt, profile, model, effort, fork, partial-request, lifecycle,
+and duplicate-evidence cases. No live CLI or Desktop run was performed for this
+source-only observer repair.
+
+## Historical 1.15.9 candidate (superseded): Permission-safe worker checks and post-wait sequencing — 2026-09-09
+
+The superseded historical payload was `1.15.9+codex.sha256.3b0e71f080f852ff`.
+Its implementation evidence records 439 offline tests passed and 2 skipped after the final stamp;
+package validation, marketplace validation, and source-only sync also passed.
+
+That historical repair added two independent protections for disposable live runs:
+worker guidance prefixes Python checks with `PYTHONDONTWRITEBYTECODE=1` and avoids
+recursive cache cleanup, while both isolated launchers force that environment value
+even when the ambient value is `0`. Pre-existing residue remains untouched and a
+blocking check must report its exact authority requirement; host permissions and
+`scripts/cortex-dev` preparation are unchanged.
+
+Coordinator guidance now treats pending/timeout `wait_agent` results as absence of
+new evidence and requires another bounded wait for the same owner. Internal status
+and selected evidence reads remain legal; unsolicited `send_message`/`followup_task`
+remain audit violations. Legal transitions are limited to an inbound same-owner
+reply, direct user steering/clarification, or intentional follow-up after terminal
+worker result/report reconciliation. This is model guidance, not a server gate.
+
+Focused offline bytecode and sequencing regressions were part of that historical release's checks.
+Real CLI/Desktop qualification, consecutive parity, matrix/scoring, and
+model-level compliance are intentionally unrun and remain pending; no current live
+qualification claim is established by this implementation assignment.
+
+## Observer provenance boundary — 2026-09-10
+
+The live observer now keeps ordinary external worker tooling separate from
+orchestration acceptance. Codebase Memory calls, Git/rg nonzero diagnostics and
+ordinary workspace path observations remain visible worker evidence; they do not
+become orchestration failures from tool identity or exit status alone. Path-policy
+rows carry only safe provenance, target class, access kind and decision metadata,
+plus bounded argument/workdir and command-intent digests, terminal exit status and
+truncation state when unambiguous. Violations retain those hashes and actor/thread
+lineage without retaining private paths, commands or report content.
+MCP error and missing-receipt policy flags are likewise scoped to actual
+`mcp__cortex__*` invocations; a failed, properly receipted external MCP provider
+call remains a worker diagnostic. Namespaced host rows are canonicalized while
+retaining `tool_namespace` in violation evidence, so a Cortex receipt failure
+cannot disappear during audit promotion.
+An explicit unauthorized plugin/cache/Cortex target remains acceptance-critical,
+while static mentions and approved skill reads remain allowed. Focused regressions
+cover ordinary Codebase Memory, Git exit 128, a non-prohibited worker path, an
+approved instruction read, command-aware `rg`/`grep` pattern-vs-target-vs-ambiguous
+classification, and a genuine unauthorized cache target. No live CLI or
+Desktop scenario was run for this repair; those gates remain coordinator-owned.
+
+## Private-root preflight provenance repair — 2026-09-10
+
+The deny-only worker guard now accepts a missing `agent_id` only when the hook
+payload supplies a matching child thread and parent session that the durable
+task binding validates. Session-scoped coordinator/system events without that
+provenance remain unblocked. Running worker shell receipts retain a task-scoped
+command-session ID and effective work directory; a later `write_stdin` event can
+recover that worker scope and directory even when its event omits `agent_id`.
+The command-session table is created idempotently for existing v11 stores.
+
+Focused positive and negative regressions cover validated parent/child provenance,
+untrusted parent claims, coordinator compatibility, private stateful
+`write_stdin`, and unknown command sessions. No live CLI or Desktop scenario was
+run; those gates remain coordinator-owned.
+
+## Historical 1.15.9 candidate (superseded): Phase 0–1 evaluation contract and guidance — 2026-09-09
+
+The historical release source and generated payload were versioned `1.15.9`, stamped as
+`1.15.9+codex.sha256.6d67370022e39830` (digest
+`6d67370022e398307af4e7fe4a06cf85c47ca2c4aaa42401baa3377909df65bf`). The
+new offline contract at
+[`tests/fixtures/phase01_eval/contract-v1.json`](../../tests/fixtures/phase01_eval/contract-v1.json)
+keeps the historical six-configuration comparator intact and adds three held-out
+families with three paired baseline/candidate repeats. Blind scoring, invariant
+and protocol stops, token/wall/tool cost fields, explicit unavailable/null
+handling, and the coordinator-owned promotion/revision rule are covered by
+`tests/test_phase01_eval_contract.py`.
+
+Optional context-selected guidance is present in the coordinator and shared
+worker instructions only: fresh evidence plus unrun checks for completion claims,
+fact/hypothesis separation plus one discriminating check before nontrivial repair,
+and an independence/mutation-surface/resource/dependency/output declaration before
+parallel dispatch. It remains advisory; no server gate, mandatory stage, or
+automatic acceptance behavior was added.
+
+Sequential source checks passed: package validation, marketplace validation,
+source-only sync check, focused tests (95 passed), and the complete suite (402
+passed, 2 skipped). The coordinator overlay adds risk-triggered consultation:
+one bounded advisory consultation is considered only when both consequence and
+uncertainty triggers apply, with explicit exclusions, compact packet/record fields,
+and baseline quality/overhead evaluation. It does not create a gate or transfer
+planning, steering, evidence, acceptance or communication ownership.
+
+Fresh consecutive real-host qualification was reported for that unchanged
+historical payload on both CLI and Desktop. CLI produced `notes.md` with exactly
+36 bytes, final byte `0a`,
+and SHA-256 `b366b4a09a694e27cd0bc93a2ec11b1a2a7ef1657761af45c4fbf5342b67e733`,
+plus immutable worker report `r_d76979ae22c9`. Its 10 MCP events and 62 host
+calls had no open sessions, policy violations, or orchestration failures; one
+worker shell check exited 1 and was later resolved by an exact successful check,
+and is retained in the audit evidence. Desktop produced the identical artifact
+and worker report `r_fe9198033a67`; its 12 MCP events and 66 host calls had a
+fully clean audit (zero failures, policy violations, and open resources), with
+1,111,747 total tokens in 168.746s. Both coordinators used Luna/high and workers
+Luna/medium. The Desktop send helper reported one X11 desktop-property warning
+but exited zero and observed the exact new-task receipt. Both disposable sessions
+were stopped; post-stop Desktop status correctly reported no active session.
+CLI token usage was not retained before its observation streams were removed.
+Stable installation and user tasks were not modified. The three-family Phase-0
+outcome suite remains unrun. These historical host results do not qualify either
+the superseded `1.15.9+codex.sha256.3b0e71f080f852ff` payload or the current
+`1.15.9+codex.sha256.620f15774f61a921` payload. At that historical snapshot,
+current CLI/Desktop runs remained pending; the later broad results are recorded
+above.
+
 ## Clean CLI/Desktop audit pair — 2026-09-09
 
 Candidate `1.15.8+codex.sha256.d3b300414bf3198d` completed consecutive real CLI
@@ -172,6 +386,12 @@ override fails bootstrap with `invalid transport`; the launcher does not claim a
 per-tool filter or shadow the provider. The shared worker protocol treats the
 boundary as hard and directs a worker to report an unavailable native channel in
 its native result.
+
+The coordinator's native-worker tracking route is explicit: subagents spawned via
+`collaboration.spawn_agent` use only `collaboration.wait_agent`,
+`collaboration.list_agents`, `collaboration.send_message` and
+`collaboration.followup_task`. Codex app thread tools are reserved for explicit
+user-owned task management and are not orchestration-worker controls.
 
 Package policy coverage passed 27 tests and coordination observer coverage passed
 16 tests after the change. The full suite passed 253 tests. The same isolated candidate was
@@ -410,18 +630,45 @@ Before adopting a new host-context mechanism, observe the actual incoming
 coordinator and child metadata on both CLI and Desktop first. Verify exact parent
 linkage; never infer support from upstream code alone.
 
-After exiting ordinary Codex, capture `Cortex live-dev exit=0`, then `stop` the
-exact session. CLI smoke runs derive the store from the canonical workdir at
+After exiting ordinary Codex, confirm that the owned pane is an idle live bash,
+that the current capture contains exactly one `Cortex live-dev exit=0`, and that
+the ownership-bound process snapshot has no descendants. Phase 2 collection
+repeats the status and process snapshot before sealing evidence, and `stop`
+rechecks them against the bundle before stopping the exact session. CLI smoke
+runs derive the store from the canonical workdir at
 `PATH/.codex/cortex/cortex.sqlite3`. Resume with the same workdir and
 `--resume-last`; it reuses that exact project-local store and rejects a missing or
 mismatched store. `stop` preserves the store for resume and removes only the
 session and observation streams. Confirm the existing task, selective report
 recovery and no replacement task creation.
-Both live helpers initialize an empty workdir with `git init` before launching.
-This gives delegated workers the expected repository shape; a worker Git probe
-that would fail without `.git` remains advisory observer noise rather than a
-coordinator-boundary violation.
-Finish by stopping the exact session; after failure use `stop --interrupt`.
+For a new evaluation start, pass `--evaluation-fresh-store`. This explicit Linux-only
+CLI guard requires a supported architecture/syscall mapping and same-filesystem
+staging, builds the complete owner-private `.codex/cortex` hierarchy in an external
+same-filesystem stage, and installs it once as the project `.codex` destination with
+no-replace semantics. Unsupported, unavailable, raced, or otherwise unproven
+conditions fail closed before canonical project mutation; uncertain loser stages
+are retained outside the project rather than removed by pathname. Git/config
+readiness is completed before that commit. It
+rejects an existing/symlinked/non-private/escaping database target and leaves
+`cortex.sqlite3` absent for runtime initialization. Its launcher receipt contains
+only opaque, project-relative and digest-based provenance. It performs no delete,
+truncate, migration, overwrite, or acceptance of existing state; ordinary and
+`--resume-last` starts are unchanged.
+Both live helpers require the supplied workdir to already be a Git repository
+root. They never run `git init` or write local identity settings. Create a fresh
+empty directory with `mktemp -d` and run `git init` explicitly for an isolated
+qualification. A worker Git probe that would fail without `.git` remains advisory
+observer noise rather than a coordinator-boundary violation.
+Finish by collecting the sealed evidence from the stable task-terminal composer
+or exited bash. The composer path requires repeated stable process, capture, calls,
+events, and audit state, explicitly completed waits, and an exact final report/
+pipeline call-event identity join; then use bundle-gated
+`stop --interrupt`. The bash path retains its exit-marker requirement. Orphan
+recovery remains dead-pane-only and repeats plus hashes status, process, and marker
+capture immediately before stop. Stop only the exact session.
+The report and draft identities must each be nonempty, correctly typed and match
+`r_[0-9a-f]{12}` / `d_[0-9a-f]{12}` on both the final call and event before the
+join; missing, empty, malformed, wrong-type, mismatched, or equal-null values reject.
 Never kill the tmux server or use `codex exec` as native evidence.
 
 Actual Desktop uses
@@ -474,6 +721,22 @@ the earlier host-check failure under `resolved_host_failures`; it is never erase
 If a run must be rejected, collect the complete current `calls` and `events`
 and execute `audit` before stopping that isolated run. One early fault must not hide
 other calls that were already dispatched.
+The Desktop helper scopes `calls`, `events`, `hooks`, usage, and open-resource
+accounting to `session.json`'s submitted coordinator and its native descendants.
+Other recent same-workdir roots are listed as `foreign_task_roots` and fail the
+audit; their worker sessions and lifecycle records are not attributed to the
+selected task. Conflicting row identities fail closed. Duplicate edges,
+self-parenting, cycles, and malformed recent edge components are emitted under
+`invalid_task_topology`; cyclic foreign components are also retained under
+`foreign_task_roots`, so they cannot disappear behind an empty roots array.
+The `usage` action consumes this validated inventory and fails explicitly with
+`invalid_topology` rather than recomputing an overwrite-prone child-parent map.
+Only the exact advertised orchestrator `SKILL.md` is a valid coordinator cache
+read; worker skills, other skills, and references remain forbidden.
+For the next c4 follow-up parity qualification, create a fresh temporary empty Git
+project with `mktemp -d` and `git init`, then use that exact directory for both
+unchanged-candidate CLI and Desktop runs. This is experiment isolation for that
+qualification, not a mandatory Cortex product stage.
 
 Browser-dependent workers run sequentially when the host exposes one shared browser
 surface. Each worker uses only tabs and command sessions created in its own native
@@ -514,6 +777,18 @@ TOML, server internals and plugin enumeration remain forbidden accesses. A mixed
 command is not classified as instruction-only, but an approved skill read alongside
 ordinary worker project discovery is not itself forbidden cache access. Review each
 access and the participant's role, full loading evidence and truncation.
+The observer preserves this distinction through simple `rg`/`grep` pipelines:
+quoted private-cache exclusion patterns are static mentions, while direct private
+operands, unquoted globs and opaque shell syntax remain unauthorized. A valid
+declared Markdown reference is instruction loading, not a duplicate complete
+worker-skill receipt.
+An exact Python `-c` or quoted-heredoc audit helper may compare a literal private
+marker as data. The exception requires every marker literal to be a direct Python
+comparison operand; assignment, file/process calls, comments, interpolation,
+malformed code and a private working directory remain unauthorized.
+Worker final handoffs name only the report published for that assignment. Input,
+pipeline, catalogue, predecessor and other-worker report IDs belong in the saved
+report body so cited evidence cannot be confused with worker-owned publication.
 Encrypted assignment content remains opaque. See [host compatibility](host-compatibility.md).
 A standalone wrapper text item `exit_status=N`
 is an explicit command receipt; stdout containing that string is not sufficient.

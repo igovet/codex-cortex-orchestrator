@@ -21,11 +21,12 @@ durable state before dependency, shared-resource or acceptance decisions rather 
 requiring pipeline publication as a universal first stage.
 
 Lifecycle hooks perform short local storage and integrity work. They do not select
-specialists, approve actions, accept results or impose mandatory stages. Only
-confirmed registered-file integrity violations may deny a patch. Hook metadata and
-model actions remain separately observable.
+specialists, approve actions, accept results or impose mandatory stages. Confirmed
+registered-file integrity violations and the narrow worker private-root execution
+boundary may deny a patch; no other workflow decision is enforced. Hook metadata
+and model actions remain separately observable.
 
-Use semantic version 1.15.8 for this release. Recompute the complete payload hash
+Use semantic version 1.15.9 for this release. Recompute the complete payload hash
 before package checks or tests after every installable edit. Run release-sensitive
 checks sequentially. Do not modify stable Codex configuration or plugin caches.
 Use the dedicated isolated candidate launcher for real-host verification.
