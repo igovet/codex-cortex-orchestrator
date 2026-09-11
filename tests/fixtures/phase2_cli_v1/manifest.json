@@ -11,7 +11,7 @@
     {
       "family": "factual-investigation",
       "fixture_tree_path": "trees/F-01",
-      "fixture_tree_sha256": "2b1562d4f51386cb691a44c4b7e464c530c7282c6d8201c38812319c155cd8da",
+      "fixture_tree_sha256": "d1ebe1a4b3f5f045d3c1ac556f10152cac6c1b70e626de0650ccf7cb4404fa17",
       "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
       "oracle_path": "oracle.py",
       "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
@@ -29,7 +29,7 @@
     {
       "family": "bug-fix-regression",
       "fixture_tree_path": "trees/F-02",
-      "fixture_tree_sha256": "1d3d4016e56134d9166d33c974eef9ca9ecfb1df0e0bd094a60e22999c04e02f",
+      "fixture_tree_sha256": "84931999b4eddd29472273823de76d5d4005e09e7e89ef073678a29d6274a5d3",
       "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
       "oracle_path": "oracle.py",
       "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
@@ -47,7 +47,7 @@
     {
       "family": "multi-file-feature",
       "fixture_tree_path": "trees/F-03",
-      "fixture_tree_sha256": "bc14a2b4f248e8ab931b5f7d08d77b18e75ce74c8d36da591eae9cf6bae67886",
+      "fixture_tree_sha256": "5a2c794914d4a9f8f2af63a03fdf2906cf3e9fbc449cffe4d29fbc52b17e5d07",
       "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
       "oracle_path": "oracle.py",
       "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
@@ -65,7 +65,7 @@
     {
       "family": "test-authoring",
       "fixture_tree_path": "trees/F-04",
-      "fixture_tree_sha256": "7ee888643313da5fdea2eaabf78a059161b32f0fb0548ac5d1316761bef304bc",
+      "fixture_tree_sha256": "e465adc500bf5211c4732bc4f82df7cb9a42c8115c933118a2e00eee7c1681c5",
       "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
       "oracle_path": "oracle.py",
       "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
@@ -83,7 +83,7 @@
     {
       "family": "documentation-api-correction",
       "fixture_tree_path": "trees/F-05",
-      "fixture_tree_sha256": "bd555c00a19a97d6b78cd707d2a9558759ee19945be9cb6ab9daa4461789b2d7",
+      "fixture_tree_sha256": "5835d38a0f46d797e502df3eddfccc18f4dbb1248827f0980dc9c06ee0367c23",
       "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
       "oracle_path": "oracle.py",
       "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",
@@ -101,7 +101,7 @@
     {
       "family": "security-sensitive-change",
       "fixture_tree_path": "trees/F-06",
-      "fixture_tree_sha256": "c438fad74be21eef04c819b03d686507715f8e029ae18d514f9e73c6005de552",
+      "fixture_tree_sha256": "e6c9c5a9b69750f3b151f230f1153c9af213077caec138c291c0b761e4755ba0",
       "oracle_command": "python3 oracle.py TASK_ID WORKTREE",
       "oracle_path": "oracle.py",
       "oracle_sha256": "6aacfc8ea6cfcdc5545ae8256d92f5eed46ffef3571bc06365800864dff11b74",

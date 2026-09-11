@@ -133,6 +133,7 @@ def make_success(task_id, path):
         )
         (path / "README.md").write_text("# Catalog status\n\n`build_status(catalog)` returns state=ready and item_count.\n")
     elif task_id == "F-04":
+        (path / "tests").mkdir(parents=True, exist_ok=True)
         (path / "tests/test_calculator.py").write_text(
             "import unittest\nfrom src.calculator import add, divide\n\n"
             "class CalculatorTests(unittest.TestCase):\n"
@@ -236,6 +237,7 @@ def test_f03_rejects_empty_required_files(tmp_path):
 def test_f04_rejects_comment_padded_noop_test(tmp_path):
     path = tmp_path / "F-04"
     assert run_reset("F-04", path).returncode == 0
+    (path / "tests").mkdir(parents=True, exist_ok=True)
     (path / "tests/test_calculator.py").write_text(
         "import unittest\n\n"
         "# add divide assertRaises -\n"
@@ -323,6 +325,7 @@ def test_semantic_regressions_reject_comment_tokens_and_irrelevant_assertion(tas
 def test_f04_rejects_four_vacuous_assert_true_tests(tmp_path):
     path = tmp_path / "F-04-vacuous"
     assert run_reset("F-04", path).returncode == 0
+    (path / "tests").mkdir(parents=True, exist_ok=True)
     (path / "tests/test_calculator.py").write_text(
         "import unittest\n\n"
         "# add divide negative zero assertRaises\n"
