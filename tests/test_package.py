@@ -16,6 +16,31 @@ from generate_agent_profiles import (
 )
 
 
+def _private_candidate_home(tmp_path, monkeypatch):
+    import hashlib
+
+    owner = tmp_path/'owner'
+    candidate = owner/'.cortex-dev/.codex/cortex-candidate.json'
+    candidate.parent.mkdir(parents=True, mode=0o700)
+    candidate.parent.chmod(0o700)
+    candidate.write_text(json.dumps({'digest': hashlib.sha256(b'candidate').hexdigest()}))
+    candidate.chmod(0o600)
+    owner.chmod(0o700)
+    monkeypatch.setattr(Path, 'home', lambda: owner)
+    return owner
+
+
+def _inject_portable_noreplace(cli, monkeypatch):
+    def install(stage, target):
+        if target.exists() or target.is_symlink():
+            raise RuntimeError('evaluation fresh-store target appeared during commit')
+        stage.rename(target)
+
+    monkeypatch.setitem(
+        cli['prepare_evaluation_fresh_store'].__globals__, '_linux_noreplace', install,
+    )
+
+
 def test_stamped_package_and_profiles():
     assert validate().startswith('1.15.9+codex.sha256.')
     assert len(list((PLUGIN/'agents').glob('*.toml')))==23
@@ -668,6 +693,7 @@ def test_cli_evaluation_fresh_store_creates_private_parents_and_redacted_provena
     candidate.chmod(0o600)
     monkeypatch.setattr(Path, 'home', lambda: owner)
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
+    _inject_portable_noreplace(cli, monkeypatch)
     project = (tmp_path/'project').resolve()
     project.mkdir()
     receipt = cli['prepare_evaluation_fresh_store'](project)
@@ -725,8 +751,9 @@ def test_cli_evaluation_fresh_store_rejects_existing_target_without_mutation(tmp
     else: assert store.is_symlink()
 
 
-def test_cli_evaluation_fresh_store_rejects_escape_and_nonprivate_parent(tmp_path):
+def test_cli_evaluation_fresh_store_rejects_escape_and_nonprivate_parent(tmp_path, monkeypatch):
     import runpy
+    _private_candidate_home(tmp_path, monkeypatch)
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
     project = (tmp_path/'project').resolve(); project.mkdir()
     outside = tmp_path/'outside'; outside.mkdir(mode=0o700)
@@ -748,6 +775,7 @@ def test_cli_evaluation_fresh_store_unknown_architecture_fails_closed(tmp_path, 
     candidate.write_text(json.dumps({'digest': 'a' * 64})); candidate.chmod(0o600)
     monkeypatch.setattr(Path, 'home', lambda: owner)
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
+    monkeypatch.setattr(cli['platform'], 'system', lambda: 'Linux')
     monkeypatch.setattr(cli['platform'], 'machine', lambda: machine)
     project = tmp_path/'project'; project.mkdir()
     with pytest.raises(RuntimeError, match='architecture is unsupported'):
@@ -761,7 +789,8 @@ def test_cli_evaluation_fresh_store_noreplace_preserves_existing_winner_and_clea
     stage = tmp_path/'stage'; target = tmp_path/'target'
     stage.mkdir(mode=0o700); (stage/'marker').write_text('loser')
     target.mkdir(mode=0o700); (target/'marker').write_text('winner')
-    with pytest.raises(RuntimeError, match='target appeared'):
+    expected = 'target appeared' if sys.platform.startswith('linux') else 'requires Linux'
+    with pytest.raises(RuntimeError, match=expected):
         cli['_linux_noreplace'](stage, target)
     assert (target/'marker').read_text() == 'winner'
     assert (stage/'marker').read_text() == 'loser'
@@ -976,6 +1005,7 @@ def test_cli_start_postcommit_failure_marks_store_unusable_consumes_control_and_
     project = (tmp_path/'project').resolve(); project.mkdir()
     subprocess.run(['git', 'init', '-q', str(project)], check=True)
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
+    _inject_portable_noreplace(cli, monkeypatch)
     globals_ = cli['start'].__globals__
     monkeypatch.setitem(globals_, 'STATE', tmp_path/'cli-state')
     monkeypatch.setitem(globals_, 'PHASE2_CONTROL_SHA256', 'b' * 64)
@@ -1046,6 +1076,7 @@ def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, mon
     project = (tmp_path/'project').resolve(); project.mkdir()
     subprocess.run(['git', 'init', '-q', str(project)], check=True)
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
+    _inject_portable_noreplace(cli, monkeypatch)
     globals_ = cli['start'].__globals__; monkeypatch.setitem(globals_, 'STATE', tmp_path/'cli-state')
     calls = []
     def fake_tmux(*args, **kwargs):
@@ -1101,6 +1132,7 @@ def test_cli_postcommit_receipt_io_failure_remains_typed_and_refuses_control_and
     project = (tmp_path/'project').resolve(); project.mkdir()
     subprocess.run(['git', 'init', '-q', str(project)], check=True)
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
+    _inject_portable_noreplace(cli, monkeypatch)
     globals_ = cli['start'].__globals__; state_root = tmp_path/'cli-state'
     monkeypatch.setitem(globals_, 'STATE', state_root)
     monkeypatch.setitem(globals_, 'PHASE2_CONTROL_SHA256', 'c' * 64)
@@ -1152,7 +1184,9 @@ def test_cli_postcommit_receipt_io_failure_remains_typed_and_refuses_control_and
 def test_cli_launch_transaction_crash_windows_are_fail_closed(tmp_path, monkeypatch):
     import runpy
 
+    _private_candidate_home(tmp_path, monkeypatch)
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
+    _inject_portable_noreplace(cli, monkeypatch)
     globals_ = cli['start'].__globals__; state_root = tmp_path/'cli-state'
     monkeypatch.setitem(globals_, 'STATE', state_root)
     monkeypatch.setitem(globals_, 'PHASE2_CONTROL_SHA256', 'e' * 64)
