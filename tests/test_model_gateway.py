@@ -26,7 +26,7 @@ from plugins.cortex.scripts.cortex_runtime.gateway.headers import forwarded_head
 from plugins.cortex.scripts.cortex_runtime.gateway.transform import TransformError, transform_compaction
 from plugins.cortex.scripts.cortex_runtime.gateway.config import PolicySnapshot
 from plugins.cortex.scripts.cortex_runtime.gateway.proxy import create_app
-from plugins.cortex.scripts.cortex_runtime.gateway.proxy import GatewayProxy, _valid_loopback_authority
+from plugins.cortex.scripts.cortex_runtime.gateway.proxy import GATEWAY_PROXY_KEY, GatewayProxy, _valid_loopback_authority
 from plugins.cortex.scripts.cortex_runtime.gateway.defaults import MAX_BODY_BYTES
 from plugins.cortex.scripts.cortex_runtime.runtime.state import RuntimePaths
 from plugins.cortex.scripts.cortex_runtime.runtime.state import GatewayState, dependency_identity, payload_digest as runtime_payload_digest, state_matches_process
@@ -1215,6 +1215,20 @@ def test_cold_invalid_config_fails_without_defaults(tmp_path: Path) -> None:
         ConfigManager(ConfigLoader(home)).snapshot()
 
 
+def test_legacy_capacity_configuration_is_rejected_as_unknown(tmp_path: Path) -> None:
+    """There is no configurable proxy slot ceiling to accidentally enable."""
+    home = tmp_path / "codex"
+    path = write_default_config(home)
+    path.write_text(
+        "schema_version = 1\n"
+        "[gateway]\n"
+        "enabled = true\n"
+        "max_concurrent_requests = 1\n"
+    )
+    with pytest.raises(ConfigError, match="unknown gateway key"):
+        ConfigManager(ConfigLoader(home)).snapshot()
+
+
 def test_request_headers_are_forwarded_losslessly_including_duplicates() -> None:
     headers = [
         ("Authorization", "Bearer synthetic"),
@@ -1235,6 +1249,72 @@ def test_request_headers_are_forwarded_losslessly_including_duplicates() -> None
     # The legacy mapping remains available for diagnostics, but is explicitly
     # not used by the proxy because it cannot represent duplicate fields.
     assert forwarded_headers(headers)["Cookie"] == "session=b"
+
+
+def test_gateway_forwards_when_legacy_capacity_would_be_saturated() -> None:
+    """Admission must not reject or retry when the old 32-slot count is full."""
+    async def scenario() -> None:
+        seen: list[bytes] = []
+
+        async def upstream_handler(request: web.Request) -> web.Response:
+            seen.append(await request.read())
+            return web.Response(status=200, body=b"forwarded-once")
+
+        upstream_app = web.Application()
+        upstream_app.router.add_route("*", "/{tail:.*}", upstream_handler)
+        upstream_runner = web.AppRunner(upstream_app)
+        await upstream_runner.setup()
+        upstream_site = web.TCPSite(upstream_runner, "127.0.0.1", 0)
+        await upstream_site.start()
+        upstream_port = upstream_site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+
+        class Manager:
+            def snapshot(self) -> PolicySnapshot:
+                return PolicySnapshot(
+                    revision=1,
+                    loaded_at=datetime.now(timezone.utc).isoformat(),
+                    router_enabled=False,
+                    compaction_enabled=False,
+                    model="gpt-5.6-luna",
+                    effort="medium",
+                    gateway_enabled=True,
+                    listener=("127.0.0.1", 8787),
+                    upstream=f"http://127.0.0.1:{upstream_port}/backend-api/codex",
+                )
+
+        app = create_app(Manager())
+        proxy = app[GATEWAY_PROXY_KEY]
+        proxy_runner = web.AppRunner(app)
+        await proxy_runner.setup()
+        proxy_site = web.TCPSite(proxy_runner, "127.0.0.1", 0)
+        await proxy_site.start()
+        proxy_port = proxy_site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+        try:
+            # This models the state that previously produced a local 503. The
+            # value is drain bookkeeping only and must not affect admission.
+            proxy._active = 32
+            async with ClientSession() as client:
+                response = await client.post(
+                    f"http://127.0.0.1:{proxy_port}/backend-api/codex/responses",
+                    data=b"single-logical-request",
+                )
+                assert response.status == 200
+                assert response.headers.get("Retry-After") is None
+                assert await response.read() == b"forwarded-once"
+            assert seen == [b"single-logical-request"]
+            for _ in range(100):
+                if proxy.active_requests == 32:
+                    break
+                await asyncio.sleep(0.01)
+            assert proxy.active_requests == 32
+        finally:
+            # Restore the synthetic drain count before app cleanup so the test
+            # does not wait on work that it created only for this assertion.
+            proxy._active = 0
+            await proxy_runner.cleanup()
+            await upstream_runner.cleanup()
+
+    asyncio.run(scenario())
 
 
 def test_proxy_preserves_ordinary_bytes_and_rewrites_v2_fields() -> None:
@@ -1318,6 +1398,77 @@ def test_proxy_preserves_ordinary_bytes_and_rewrites_v2_fields() -> None:
             assert seen[-1][1].get("Cookie") == "principal=b"
         await proxy_runner.cleanup()
         await upstream_runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_proxy_preserves_accept_encoding_and_raw_response_bytes() -> None:
+    async def scenario() -> None:
+        seen_accept_encoding: list[str | None] = []
+        response_bodies = {
+            "gzip": b"\x1f\x8bsynthetic-gzip-bytes",
+            "br": b"\x8bsynthetic-br-bytes",
+        }
+
+        async def upstream_handler(request: web.Request) -> web.Response:
+            encoding = request.headers.get("Accept-Encoding")
+            seen_accept_encoding.append(encoding)
+            if encoding is None:
+                return web.json_response({"models": ["gpt-5.6-luna"]})
+            assert encoding in response_bodies
+            return web.Response(
+                body=response_bodies[encoding],
+                headers={"Content-Encoding": encoding, "Content-Type": "application/octet-stream"},
+            )
+
+        upstream_app = web.Application()
+        upstream_app.router.add_route("*", "/{tail:.*}", upstream_handler)
+        upstream_runner = web.AppRunner(upstream_app)
+        await upstream_runner.setup()
+        upstream_site = web.TCPSite(upstream_runner, "127.0.0.1", 0)
+        await upstream_site.start()
+        upstream_port = upstream_site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+
+        class Manager:
+            def snapshot(self) -> PolicySnapshot:
+                return PolicySnapshot(
+                    revision=1,
+                    loaded_at=datetime.now(timezone.utc).isoformat(),
+                    router_enabled=False,
+                    compaction_enabled=False,
+                    model="gpt-5.6-luna",
+                    effort="medium",
+                    gateway_enabled=True,
+                    listener=("127.0.0.1", 8787),
+                    upstream=f"http://127.0.0.1:{upstream_port}/backend-api/codex",
+                )
+
+        proxy_runner = web.AppRunner(create_app(Manager()))
+        await proxy_runner.setup()
+        proxy_site = web.TCPSite(proxy_runner, "127.0.0.1", 0)
+        await proxy_site.start()
+        proxy_port = proxy_site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+        try:
+            async with ClientSession(auto_decompress=False, skip_auto_headers={"Accept-Encoding"}) as client:
+                response = await client.get(f"http://127.0.0.1:{proxy_port}/backend-api/codex/models")
+                assert response.status == 200
+                identity_body = await response.read()
+                assert identity_body == b'{"models": ["gpt-5.6-luna"]}'
+                assert json.loads(identity_body) == {"models": ["gpt-5.6-luna"]}
+
+                for encoding, expected in response_bodies.items():
+                    response = await client.get(
+                        f"http://127.0.0.1:{proxy_port}/backend-api/codex/models",
+                        headers={"Accept-Encoding": encoding},
+                    )
+                    assert response.status == 200
+                    assert response.headers["Content-Encoding"] == encoding
+                    assert await response.read() == expected
+        finally:
+            await proxy_runner.cleanup()
+            await upstream_runner.cleanup()
+
+        assert seen_accept_encoding == [None, "gzip", "br"]
 
     asyncio.run(scenario())
 

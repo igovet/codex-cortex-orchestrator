@@ -8,6 +8,7 @@
     "scripts/cortex_runtime/__init__.py",
     "scripts/cortex_runtime/cleanup.py",
     "scripts/cortex_runtime/contracts.py",
+    "scripts/cortex_runtime/execution_boundary.py",
     "scripts/cortex_runtime/gateway/__init__.py",
     "scripts/cortex_runtime/gateway/classifier.py",
     "scripts/cortex_runtime/gateway/compression.py",

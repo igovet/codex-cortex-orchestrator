@@ -1,0 +1,1 @@
+$cortex:orchestrator Correct the cache API documentation in README.md and docs/api.md to match the source API: get(key, default=None) returns default when absent, and clear() takes no arguments and clears all cached values. Do not claim behavior the source does not provide. Preserve USER-NOTE.txt byte-for-byte and report checks you did not run.

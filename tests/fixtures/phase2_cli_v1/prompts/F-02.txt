@@ -1,0 +1,1 @@
+$cortex:orchestrator Fix the retry-total regression in src/retry_totals.py. An identical retry event must be counted once; a retry with the same item ID but a different value must raise ValueError; distinct items, including negative values, must still contribute. Add a regression test, document the behavior, and preserve USER-NOTE.txt byte-for-byte. Report checks you did not run.

@@ -11,7 +11,10 @@ references and the evidence pages needed for a decision. A 4,000-character page
 is a transport bound, not a limit on accessible context. Catalogue entries and
 opening decision briefs help select relevant material. Workers receive a bounded
 assignment and selected predecessor references; they do not routinely read every
-report. After context loss, either role can retrieve the required source pages.
+report. Worker access to immutable reports is by exact acknowledged ID through
+bounded `mcp__cortex__read_report` pages only. They never shell or probe private
+`.codex/cortex/` task-cache paths; missing or insufficient evidence is recorded as
+a gap. After context loss, either role can retrieve the required source pages.
 
 The coordinator records and restores the user's response language independently
 of English internal reports and assignments. Progress updates, questions and final
@@ -52,9 +55,27 @@ a fresh verifier supplies independence when the risk warrants it. Timeout alone
 does not end an assignment or transfer its files, browser, device or command
 sessions to another worker.
 
+The coordinator must not emit a terminal final while an assigned owner is active or
+a required report/check remains outstanding. A wait timeout is absence of new
+evidence only and requires another bounded wait for that same owner. Before
+acceptance or final delivery, reconcile pipeline assignments with native worker
+state and required evidence; record terminal failure or user cancellation explicitly.
+During a pending/timeout interval, status and selected evidence reads are internal
+observations; `send_message`/`followup_task` are not legal merely because the wait
+returned no evidence. The narrow exceptions are one reply to an inbound same-owner
+handoff, direct user steering/clarification, or an intentional follow-up after a
+terminal worker result and report preview have been reconciled. These remain model
+guidance and audit evidence, not server-side gates.
+
 The report class follows the assignment's observed outcome. A specialist's class is
 a default and does not require reassignment when the same worker produces a suitable
 different result.
+
+When useful, optional guidance asks completion claims to map to fresh evidence and
+list unrun checks, asks nontrivial failure work to separate facts from hypotheses
+and name a discriminating check, and asks parallel dispatches to declare independence,
+mutation surface, shared resources, dependencies, and expected output. These cues
+are advisory and do not create mandatory report sections, gates, or acceptance.
 
 The server creates a thread-bound draft below project `.cortex/`. The actor edits
 that exact file in place and publishes its identifier with compact metadata.

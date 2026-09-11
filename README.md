@@ -13,7 +13,7 @@
         evidence assessment, user steering, and completion.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-1.15.8-7c3aed" alt="Cortex 1.15.8" />
+        <img src="https://img.shields.io/badge/Cortex-1.15.9-7c3aed" alt="Cortex 1.15.9" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -210,7 +210,7 @@ Python versions and launch environments. Bundled lifecycle hooks use the host’
 ### Required Codex configuration
 
 > [!IMPORTANT]
-> Configure Codex before the first Cortex 1.15.8 orchestration, then start a **new task**.
+> Configure Codex before the first Cortex 1.15.9 orchestration, then start a **new task**.
 > Cortex requires available native subagents. It does not require Luna or a
 > change to the user's global default subagent model.
 
@@ -400,7 +400,7 @@ CLI, use `$cortex:orchestrator` or `/skills`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.15.8 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
+| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.15.9 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
 | `$cortex:orchestrator help` | Show read-only help without changing the project or task storage | `$cortex:orchestrator help` |
 | `$cortex:orchestrator harvest` | Update missing or stale source-backed project knowledge | `$cortex:orchestrator harvest` |
 | `$cortex:orchestrator harvest-refresh` | Re-audit and rebuild project knowledge documentation | `$cortex:orchestrator harvest-refresh` |
@@ -426,7 +426,7 @@ $cortex:orchestrator harvest-refresh
 > ### Knowledge maintenance is an explicit route, not a lifecycle prerequisite
 >
 > Run `$cortex:orchestrator harvest` when an existing repository needs a
-> source-backed knowledge baseline. Cortex 1.15.8 never blocks ordinary coordination
+> source-backed knowledge baseline. Cortex 1.15.9 never blocks ordinary coordination
 > because harvest has not run or project documentation is incomplete.
 
 Start the knowledge update with:
@@ -480,6 +480,13 @@ the host's native parent/subagent channel. They never use
 `codex_app.send_message_to_thread` or other app task-messaging tools, including for
 messages addressed to their coordinator. Completed work returns through the automatic
 native final handoff; no app-message approval is needed for worker updates.
+
+The coordinator tracks native workers spawned through `collaboration.spawn_agent`
+only with `collaboration.wait_agent`, `collaboration.list_agents`,
+`collaboration.send_message` and `collaboration.followup_task`. Codex app thread
+tools such as `create_thread`, `read_thread`, `wait_threads` and
+`send_message_to_thread` are reserved for explicit user-owned task management,
+never for orchestration-worker tracking.
 
 For an active Cortex task, the bundled `PreToolUse` hook denies both the canonical
 `mcp__codex_app__send_message_to_thread` call and its direct alias before dispatch.
@@ -569,9 +576,70 @@ Cortex storage capability. Its absence allows one bounded safe fallback; only
 inability to establish the assigned surface after that fallback is a worker
 blocker. Reports can preserve that limitation and support an honest final answer.
 
+The live observer records Codebase Memory calls as ordinary worker tooling. A
+successful or failed external provider call, Git/rg diagnostic, or other
+non-Cortex command is not an orchestration violation by tool name or exit status.
+Workers have a separate private-Cortex boundary: they never shell, search or
+probe `.codex/cortex/` task-cache paths. Assignment-relevant immutable reports
+are selected by exact acknowledged ID and read only through bounded
+`mcp__cortex__read_report` pages (at most 4,000 characters, continuing only with
+the returned cursor). Missing or insufficient evidence is reported as a gap; it
+is never filled by scanning the private cache. The observer keeps this cache
+hard stop fail-closed. For a literal `rg`/`grep` command, a quoted search
+pattern or glob containing `.codex/cortex/` is a static mention, while a path
+operand, direct reader, or shell-ambiguous form remains an unauthorized hard
+stop; unquoted filename globs (`*`, `?`, `[]`) and brace expansion (`{}`) are
+ambiguous, while quoted literals remain static. Path-policy findings retain only safe provenance and target classes; only
+an explicitly classified unauthorized target,
+Cortex/transport contract breach, or task-impacting failure can enter the
+orchestration acceptance gate.
+
+The trusted `PreToolUse` hook provides a deny-only execution guard for this
+boundary. It rejects worker shell, file, and patch operands that resolve inside
+the confirmed task-private root before dispatch, including relative paths,
+`cd`/variable-expansion forms, and existing symlink routes. The guard emits only
+a sanitized denial and does not open or log the target. It intentionally leaves
+bounded `mcp__cortex__read_report` reads and ordinary workspace, Git, Codebase
+Memory, and external MCP diagnostics available. This preflight is defense in
+depth; the observer's fail-closed hard stop remains authoritative for any
+observed unauthorized event.
+When a tool event omits `agent_id`, worker scope is established only from a
+matching child-thread/parent-session provenance receipt validated against the
+durable binding. Running worker command receipts retain their effective working
+directory and command-session ID, allowing a later `write_stdin` to apply the
+same guard. Unproven session-scoped events remain compatible with coordinator and
+system tooling rather than being globally denied.
+
 ---
 
 ## How orchestration works
+
+### Optional context-selected guidance
+
+When relevant, the coordinator may use three advisory cues: map each fresh
+completion claim to relevant evidence and list unrun checks; separate facts from
+hypotheses and name one discriminating check before a nontrivial repair; and, before
+parallel dispatch, declare independence, mutation surface, shared resources,
+dependencies, and expected output. These cues are optional and do not create
+mandatory stages, approval gates, fixed report sections, or automatic acceptance.
+
+At a work transition, it may also consider one bounded senior consultation only
+when both a consequence trigger and an uncertainty trigger apply. Consequences
+include material architecture/public-tool/storage/security/release/migration or
+multi-owner decisions, hard-to-reverse external/scope/compatibility choices,
+contradictory repair-to-acceptance evidence or broad claims, and replanning after
+repeated failure or surprise. Uncertainty includes material alternatives,
+fact/hypothesis conflict or an untested critical assumption, no discriminating
+check/evidence boundary, or a fresh view likely to change the decision. Routine,
+reversible/deterministic work, ordinary tests, already-decided detail,
+phase/time/report existence, executor-evidence requests, unchanged packets,
+consultation chains/sign-off/fixed counts and active incident recovery are
+excluded. The advice is optional, may run concurrently when safe and never blocks
+by rule or transfers planning, steering, evidence, acceptance or communication.
+The compact packet and coordinator record contain only the bounded question,
+context, selected report/artifact identities, alternatives, facts/hypotheses,
+attempts, ownership, decision and next check; no copied bodies or private data.
+Quality and overhead are evaluated against the unchanged baseline.
 
 Select `$cortex:orchestrator` explicitly. Cortex then retains a task through ordinary
 follow-ups; `normal` leaves coordination and source capture without deleting its
@@ -634,6 +702,14 @@ a bounded continuation; use a fresh context when independent evidence is warrant
 A confirmed terminal failure permits recovery from saved reports, unfinished drafts
 and actual project state. Missing results are not completion.
 
+The coordinator never emits a terminal final answer while an assigned owner is
+active or a required report/check remains outstanding. A wait timeout means only
+that no new evidence arrived, so the same owner receives another bounded native
+wait. Before acceptance or a final answer, the coordinator reconciles pipeline
+assignments with native worker state and required evidence; terminal failure or
+user cancellation must be explicit and recorded. Interim updates must say clearly
+that work remains active.
+
 ### Storage, receipts and Markdown files
 
 The seven MCP operations remain `create_task`, `set_governance`, `create_draft`,
@@ -653,9 +729,18 @@ New drafts default to server-generated delivery identities, so a worker's later
 assignment does not depend on remembering earlier report keys. An uncertain
 unkeyed creation is recovered through the caller's unfinished-draft catalogue;
 repeating it creates another draft. Explicit keys retain exact-retry protection.
+Only the bound coordinator can create a `pipeline` draft; worker pipeline requests
+are rejected before allocation, while ordinary worker report drafts remain allowed.
 Worker report creation still supplies the required `template` argument explicitly;
 ordinary worker reports use `general`, and an empty draft-creation argument object
 is invalid.
+The coordinator treats the `create_draft` Markdown and its exact
+`replaceable_markers` list as authoritative: every listed marker is replaced in
+the same draft before `write_report`, and document kind matches ownership
+(`pipeline` for the coordinator, non-pipeline report for a worker). A
+`draft_guidance_remaining` rejection is corrected in place and retried once with
+the same request key and metadata; it does not create a competing draft or replay
+an acknowledged publication. This is workflow guidance, not an approval gate.
 When a coordinator must provide `request_key`, it uses a literal valid UUID or
 stable literal key in the tool arguments. Runtime expressions such as
 `crypto.randomUUID()` are not used inside wrappers because the host may not expose
@@ -810,6 +895,40 @@ directly requested that override; the exact request is recorded and preserved.
 The `review` label records work kind and does not select a model; absent an
 explicit complexity or security classification, it follows the ordinary route.
 
+The isolated Desktop live-test launcher makes this provenance concrete: every
+`spawn_agent` call must include `model`, `reasoning_effort`, and `fork_turns`
+explicitly (`gpt-5.6-luna` with `medium`/`high` and `none` for ordinary workers;
+the selected consultant route records its own permitted values). The observer
+retains strict matching whenever requested fields are visible. If both are
+unavailable because the assignment carries the exact
+`assignment_content_unavailable=true` marker, it can verify only a complete,
+unique native child/path/parent-edge/Luna/effort/fork/skill join; it never fills
+missing fields from host defaults. Missing, conflicting or duplicate evidence
+remains unverified. Native `SubAgentActivity` evidence coalesces one `started`
+and one `completed` lifecycle record for that same child/path; repeated phases
+or a path resolving to different children remain ambiguous and fail closed.
+Valid declared Markdown-reference reads do not count as a second complete
+worker-skill receipt. The observer also recognizes a quoted `rg`/`grep` exclusion
+marker in a simple discovery pipeline as a static mention; direct private paths,
+unquoted globs, and opaque shell syntax remain unauthorized.
+Exact Python `-c` and quoted-heredoc audit comparisons may likewise contain a
+private marker only as a direct literal comparison operand; Python assignments,
+file/process calls, comments, interpolation, malformed programs and private
+working directories remain denied. A worker's native final names only its own
+assignment publication; input and predecessor report IDs stay in the report body.
+Desktop calls, MCP events, hooks, open resources, and usage are attributed only to
+the submitted coordinator and its native descendants. Every present native
+thread/parent identity must agree with that tree; mixed identities fail closed.
+A second recent root, duplicate edge, self-parent, cycle, or malformed recent edge
+is reported as an overlap/topology failure rather than merging or hiding sessions.
+Usage accounting consumes that same validated inventory and returns an explicit
+`invalid_topology` result instead of silently dropping a multiply-owned child.
+The coordinator cache exception covers only the exact advertised orchestrator
+`SKILL.md`; worker skills, other skills, and references remain forbidden to it.
+The c4 follow-up parity experiment uses a fresh `mktemp -d` directory initialized
+with `git init` for both hosts, avoiding historical task roots without turning the
+clean-project setup into a general product stage.
+
 Obtain missing facts and tools directly; model escalation does not repair their
 absence. Never change a worker merely for a slow response or one timeout. Compare
 full task cost, including all participants, retries and cached input separately.
@@ -873,7 +992,10 @@ launching Electron.
 ./cortex-dev
 ```
 
-The interactive CLI driver exposes the same complete observation gates:
+The interactive CLI driver exposes the same complete observation gates. Its
+ordinary graph-disabled mode suppresses an inherited complete optional
+`codebase_memory` entry in the disposable profile; it leaves absent or incomplete
+entries untouched and never changes the stable profile:
 `./scripts/cortex-live-smoke calls` and `./scripts/cortex-live-smoke audit`.
 Run both before accepting or stopping a live session.
 
@@ -910,6 +1032,14 @@ Inspect the visible result too. CLI and
 Desktop qualification requires consecutive successful scenarios on one unchanged
 payload. Any installable edit invalidates earlier live results.
 
+When xdotool `windowactivate --sync` returns the exact
+`XGetWindowProperty[_NET_WM_DESKTOP] failed (code=1)` warning, `send` records the
+bounded warning and uses one `windowfocus --sync` fallback only after rechecking
+the launched PID. It then requires `getactivewindow` to name that same window and
+rechecks its PID before any click or `Ctrl+Enter`. Other activation errors,
+ownership changes, failed focus, or an active-window mismatch fail closed; the
+existing composer and exactly-one-receipt gates still decide delivery.
+
 ### Recommended development loop
 
 ```bash
@@ -942,11 +1072,18 @@ SQLite and task directories together while storage access is stopped.
 
 ### Versioning
 
-This release uses semantic version **1.15.8** per the current release instruction. The manifest
-and MCP server advertise `1.15.8+codex.sha256.<digest-prefix>`, computed from the
+This release uses semantic version **1.15.9** per the current release instruction. The manifest
+and MCP server advertise `1.15.9+codex.sha256.<digest-prefix>`, computed from the
 complete installable payload. Regenerate the suffix whenever that payload changes.
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
+
+The stable release candidate is `1.15.9+codex.sha256.e4f332d43bf38024`.
+Final consecutive real CLI and Desktop qualification passed on this unchanged
+candidate (`r_648c4f40dcf9`), alongside the recorded offline tests and independent
+reviews. The user cancelled the Phase 2 outcome comparison; it is non-blocking
+and non-scoring, and Cortex makes no efficacy-comparison claim for this release.
+Earlier failed or superseded candidates remain historical diagnostics only.
 
 ### Development agreements
 
@@ -999,6 +1136,12 @@ model choices, reasoning effort and unrelated configuration. It selects the
 remote summary compactor with `remote_compaction_v2 = true` and
 `context_management = false`; both feature edits are journaled and reversible.
 No proxy variables, local CA certificate or special product launcher are needed.
+The proxy has no request-count or connection-slot admission limit: active-request
+tracking exists only for controlled drain, and a full historical 32-request count
+does not produce a capacity 503, `Retry-After`, or an admission queue. Body,
+timeout, protocol, policy, and cancellation checks remain in force. Candidate
+preparation uses the isolated listener (normally 18787) and never changes the
+stable 8787 runtime.
 Provider backups are
 published create-only so concurrent configuration cannot overwrite the first
 recovery point. Gateway configuration and its control directory are private
@@ -1119,7 +1262,11 @@ all non-authority header pairs; it rewrites only the local incoming `Host`
 authority to the configured upstream authority on the upstream wire so
 Cloudflare virtual-host routing succeeds. This is transport metadata, not a
 semantic body rewrite. Compaction alone rewrites `model` and
-`reasoning.effort`.
+`reasoning.effort`. The outbound HTTP client does not inject an
+`Accept-Encoding` header when the caller omitted it, preventing an unsolicited
+encoded model catalogue; an explicit caller value is forwarded unchanged.
+Automatic response decompression remains disabled, so upstream response headers
+and body bytes are streamed to the caller as received.
 
 Run release-sensitive checks sequentially on one stamped checkout:
 
@@ -1138,46 +1285,249 @@ transcripts outside repository documentation.
 
 ### Interactive tmux live-dev workflow
 
+> **Phase 2 status (2026-09-11): CANCELLED by the user.** The outcome/efficiency
+> comparison is non-blocking and non-scoring for the stable 1.15.9 release. Do
+> not start a Phase 2 comparison or claim efficacy, scoring, or promotion; the
+> adapter details below are retained as historical/offline reference.
+
 Use only `./scripts/cortex-live-smoke start --workdir PATH` for the exact
 `cortex-markdown-smoke` session on the default tmux server. Inspect `capture` and
 `status`, visibly confirm trust before one explicit `enter`, and confirm the
 composer. Compare the passive initialization receipt with the isolated candidate
 and seven-tool catalogue. Workloads begin with `$cortex:orchestrator` followed by
 ordinary product work. `send --prompt-file FILE` pastes once, waits five real
-seconds and sends one named Enter; it requires a native input receipt.
+seconds and sends one named Enter; it requires an ordinary before/after native input
+receipt but no Phase 2 control, session, or trust receipt. The sealed Phase 2 adapter
+injects an explicit control marker and selects the stricter trust/send protocol;
+incidental or missing session fields never switch or weaken either mode.
+Ordinary `send` is also single-use: a non-null first-submission timestamp refuses
+before any composer/receipt inspection, state write, paste, or Enter. A resumed
+session observes and continues its existing task without replaying that request.
 
 Each new CLI smoke run uses the exact project-local store at
 `PATH/.codex/cortex/cortex.sqlite3`. A `--resume-last` run reuses that same
 canonical project store and rejects a missing or mismatched store. `stop` keeps the
 project store for resume and removes only the session and observation streams.
-The CLI helper initializes an empty workdir with `git init` before launching so
-worker Git probes have the expected repository shape. A worker Git probe in an
-uninitialized workspace is advisory observer noise, not a coordinator boundary
-failure.
+For a new evaluation cell, add `--evaluation-fresh-store`: the opt-in Linux-only
+CLI guard requires a supported architecture/syscall and same-filesystem staging,
+builds the complete owner-private `.codex/cortex` hierarchy in an external
+same-filesystem stage, and installs it once as the project `.codex` destination
+with no-replace semantics. Unsupported, unavailable, raced, or otherwise
+unproven conditions fail closed before canonical project mutation; uncertain
+loser stages are retained outside the project rather than removed by pathname.
+Git/config readiness is completed before that commit. It requires the
+project-local SQLite target to be absent and non-redirected, leaves database
+creation to the normal initializer, and records only privacy-safe path/check/digest
+provenance. It never deletes, truncates, migrates, overwrites, or accepts an
+existing store. The flag does not alter ordinary starts or explicit
+`--resume-last` behavior.
+The sealed Phase 2 compatibility adapter additionally passes that exact empty
+project directory as `CORTEX_DATA_DIR` to both frozen launchers after removing any
+ambient value. This lets the format-10 baseline use the same isolated path that the
+format-11 candidate resolves from native project state; it does not expose or reuse
+the isolated home's unrelated Cortex database.
+The adapter also revalidates the selected archive's full normalized payload digest
+and exact embedded plugin version before every command. Preflight success cannot be
+reused after archive rebuild or mutation drift; an identity contradiction stops the
+cell before the launcher or fresh-store commit.
+Phase 2 cell evidence is collected through the adapter's single sealed
+`collect-evidence --evidence-dir PATH` command. It owns the bounded observer
+arguments, atomically records status, capture, events, calls, usage, and audit, and
+creates a final bundle receipt only after validation. Adapter-mediated `stop`
+requires that matching complete bundle, preventing partial capture from deleting
+the transient streams. The exact invocation is documented in
+[`docs/project/phase2-external-evaluator.md`](docs/project/phase2-external-evaluator.md).
+
+The control also seals one common `cortex-desktop-dev` observer beside
+the common harness and applies it to both archived arms. Its minimal runtime
+bundle contains the exact `profiles.json` plus the complete dynamically addressable
+`skills/` tree; the control records every canonical relative path and file hash as
+one trusted aggregate. Preparation, independent audit, and adapter preflight reject
+missing, changed, extra, symlinked, non-private, or relocated dependencies before
+live transport. Participant usage is
+content-free and scoped to the single observed coordinator root; an unavailable
+usage status remains availability evidence and is never converted into a quality
+score. Compound command failures name the executable identified by the shell's
+command-not-found receipt, rather than the first command in the compound string.
+The observer preserves the raw exit-1 receipt while classifying only a simple
+`rg`/`grep` search, or an exactly proven `pwd && rg/grep` search, with empty stderr
+and empty search output as semantic `no_match`. That expected search absence is
+excluded from host-failure and tool-error quality gates. Exit 2+, stderr, extra
+shell segments, mismatched `pwd` output, and every other failure remain blocking;
+only an exit-127 availability failure may be corrected by a later family success.
+The shared audit classifies evidence integrity before quality: truncated,
+unbound, assignment-unverified, contaminated, or topologically ambiguous rows
+make a cell unscoreable, while complete attributable failures remain visible as
+quality findings in an otherwise valid bundle. Raw failure and policy receipts
+are always preserved, and the same decision table applies to both arms and hosts.
+Every cell's sealed `start` owns a bounded trust/composer transition and returns
+`ready-for-begin` before `begin-cell --cell-id cell-NNN`. It waits through an early
+loading placeholder, sends at most one named Enter only while the exact trust
+prompt is active, seals the control/session result, and proves the exact empty
+composer before cell authorization can be issued. A separate `accept-trust` is
+idempotent receipt verification only and emits no input. Empty means the latest
+rendered `›` input row is the exact placeholder; a historical placeholder above
+active unsent text is never readiness evidence.
+Once tmux has returned the exact owned pane identity, start captures one immutable,
+control-scoped session-binding receipt and marks the lifecycle started. Begin-cell
+refuses before that transition or after receipt/pane-field rotation. Cell
+authorization files are scoped by both control digest and session receipt, so a
+fresh control cannot inherit a prior UID-global or cross-control authorization;
+an unconsumed authorization for the current session remains exclusive. That
+boundary issues a one-time nonce and binds the later submission, evidence
+bundle, and stop to the current workdir, store, session receipt, coordinator thread,
+control, and arm. Cross-cell replay, duplicate submission, and duplicate stop are
+refused even when control and arm are unchanged. The adapter durably changes the
+authorization from `issued` to `submitting` before transport. Only an observed exact
+root-thread native user-turn receipt can atomically promote it to `submitted`, with
+the prompt digest, thread ID, user-turn source/line hashes, finite submission
+timestamp, and nonce-bound receipt recorded together. The native source must be the
+single rollout file held open by the exact owned Codex descendant after tmux,
+pane-PID, and process-start revalidation. The harness reads the inode identified by
+that descriptor and requires a second identical descriptor/process/session snapshot
+immediately before acceptance; added, removed, retargeted, or ambiguous rollout FDs
+fail closed. Same-workdir/time rows alone cannot match.
+A bounded `resolve-send` can
+reconcile a delayed accepted receipt without sending input. Failed or uncertain
+sends remain non-resubmittable, and submitted-or-later reads
+revalidate timestamp/receipt and transport-state consistency before collection or
+cleanup.
+An unchanged pre-submit trust prompt or a proved empty composer after an unaccepted
+send has one separate abort route. The adapter
+requires the exact control/session binding, two stable owned process/activity
+snapshots, either a null request or the matching no-submit prompt digest, null
+submission receipts, and no task, worker, foreign call, or
+open exec state before persisting a one-time abort receipt and issuing exactly one
+exact-target interrupting stop. The cleanup helper receives the sealed tmux server
+PID, session name/ID/creation time, pane ID/PID/process-start identity, control
+digest, and session receipt; it revalidates them at the cleanup boundary and
+addresses only the sealed pane/session IDs. It is not orphan recovery; any uncertainty is non-retryable,
+and any submitted session is refused.
+The collected authorization also seals the canonical evidence-directory path and
+its device/inode, owner, and private mode. Stop refuses copied, renamed,
+symlink-aliased, or non-canonical directory paths even when bundle bytes match.
+Normal Phase 2 stop remains bundle-gated. Normal collection accepts a stable idle
+interactive composer only when its exact owned Codex process and task trees match,
+all workers and the coordinator are terminal, the final call/event join has the
+same owned report and draft identities, each independently validated as a nonempty
+typed `r_[0-9a-f]{12}` or `d_[0-9a-f]{12}` receipt before equality, the recognizable composer footer matches
+model, effort, and workdir, no tool/exec/wait/session activity remains, every wait
+has an explicit successful completion receipt, and repeated status, process, capture, events,
+calls, and audit snapshots are identical. This normal path needs no exit marker;
+bundle-authorized `stop --interrupt` then closes only that accepted idle session
+through the same exact-target helper. A replaced server, renamed/recreated session,
+replacement pane, or reused pane PID is refused before signaling, and a failed
+exact stop does not consume the cell authorization.
+The retained bash path still requires one successful `Cortex live-dev exit=N`
+marker and no descendants. The
+distinct `recover-orphan` route is
+limited to exact owned `issued`/`submitting` sessions with no submission receipt,
+requires explicit one-time authorization, and captures terminal status/output,
+calls, events, and audit. Every live pane is refused. A retained dead `bash` pane
+must have a matching `Cortex live-dev exit=N` marker, no active work, and the same
+session receipt, status, process snapshot, and marker capture at a final pre-stop
+recheck; both evidence generations are hashed. Submitted, receipt-less,
+repeated, raced, or foreign sessions are refused. It writes an external consumed
+cleanup receipt before a new disposable cell may start.
+If the whole tmux server is already gone, `gc-absent-runtime` is the only
+stale-state path. It inventories recognized control transactions, session
+bindings, authorizations, saved session state, and invalidation receipts; refuses
+unknown or foreign generations; proves tmux and every sealed process identity
+gone; and requires retained calls/audit evidence with no active task, tool, wait,
+or session; both audit open-state fields must be present as literal empty lists,
+and simultaneous saved-session files are refused. The strict state-root allowlist
+accepts only canonical filenames derived from the selected
+control/session/cell provenance; any extra JSON, backup, hidden/temp, case variant,
+alternate suffix, duplicate, or unrecognized entry refuses before mutation. The
+binding's exact `events` path must be the canonical direct child of the state
+root. After runtime loss it may be absent; if present it must be an owner-owned
+mode-0700 nonsymlink directory with stable device/inode identity and no children.
+A file, symlink, wrong owner/mode, opaque or valid-looking row, hidden file, nested
+entry, or any other content refuses. Event rows are never accepted as GC evidence.
+It repeats the complete
+tmux/session/PID/start-tick/activity/inventory/hash proof immediately before every
+archive rename and before consumption. A durable
+prepared-to-consumed receipt makes the same nonce idempotent and permits only a
+byte-identical, fully revalidated partial-archive resume. Existing or ambiguous runtimes are never
+garbage-collected.
+The same command has a distinct pre-binding failed-launch branch. Only paired
+`failed` transactions and paired `unusable` failure receipts with
+`session_cleanup: stopped` qualify, and their control/workdir identities must
+match canonical project markers. It proves the project store, binding,
+authorization, submission, and runtime events absent; accepts only an empty
+capture plus one sealed launcher-provenance row; and archives the seven exact
+kind/digest-sealed entries with full rechecks. Partial, successful, mixed, extra,
+malformed, active, or raced generations refuse.
+Validated consumed archives are inert history during classification, so a later
+bound stale generation routes to normal GC. An exact old nonce replays only its
+matching consumed receipt; simultaneous live bound and failed-launch markers
+remain an ambiguous refusal.
+The successful atomic hierarchy commit is the fresh-store acceptance boundary.
+Git-root and other rejection-prone launch checks run before it. A no-workload
+tmux preflight creates, verifies, configures, and removes the exact isolated
+session first, using the same sealed `new-session` arguments as the real launch
+except for its bounded command. Server/session/pane provenance comes from one
+exact-target `list-panes` result, avoiding target-type-dependent empty format
+values. Probe and launch configuration use the returned session ID, pipe and
+dispatch use the returned pane ID, and identity rechecks refuse recreation before
+mutation or cleanup. Before rename,
+independent control/workdir transaction journals are durably `prepared` outside
+the project and the same transaction is embedded as a `committing` marker in the
+staged hierarchy. A crash or failure writing later receipts therefore still leaves
+fail-closed reuse evidence. Post-commit failures are reported as the explicit
+non-qualifying `post_commit_launch_failure`; diagnostic failure receipts and an
+unusable marker are best-effort redundant records, not the sole guard. The sealed
+control and workdir cannot be resubmitted, and any newly created tmux session is
+stopped by its exact returned session ID. No evaluation acceptance is recorded;
+the next attempt requires a new control and a different disposable workdir.
+The CLI helper requires `--workdir` to already be the root of a Git repository and
+does not initialize it or write Git identity settings. For an isolated run, create
+a fresh empty directory with `mktemp -d` and run `git init` explicitly first. A
+worker Git probe in an uninitialized workspace remains advisory observer noise.
 
 Inspect complete `calls` and `events`, including after a discovered fault, and run
 `audit` before stopping. A command wrapper must expose its exit status or running
-session receipt. Capture `Cortex live-dev exit=0`, then use `stop` for that exact
-session; use `stop --interrupt` after a failed run. Never kill the tmux server.
+session receipt. Collect the sealed evidence bundle from either the proven idle
+composer or the owned idle bash with its successful exit marker, then stop only
+that exact session; use bundle-authorized `stop --interrupt` for the idle composer
+or after a failed run. Never kill the tmux server.
 Resume uses the same workdir and `--resume-last`, with the existing task confirmed.
 
 Real Desktop uses `scripts/cortex-desktop-dev start --workdir PATH --prompt-file FILE`
 and the same isolated candidate in a disposable Electron profile. Confirm the
 prepared composer, then `send` focuses that exact window, submits with Ctrl+Enter
 and requires one new task receipt. Review its `calls`, `events` and `audit` too.
-The Desktop helper applies the same empty-workdir `git init` setup and treats a
-worker Git probe without a repository as advisory.
+The Desktop helper applies the same existing-repository validation without
+initializing the directory or writing Git identity, and treats a worker Git probe
+without a repository as advisory.
 Use ordinary hook trust; never bypass it for qualification. CLI/Desktop parity
 requires consecutive successful runs on one unchanged payload. Unavailable hosts
 and unrun checks remain unverified.
+
+The offline Phase 5 adaptive overlay remains advisory and fail-closed: candidate
+evidence must join selected report metadata, malformed proposals retain the static
+baseline, and recommendation reason/JSON sizes are bounded.
 
 See [verification](docs/project/verification.md),
 [host compatibility](docs/project/host-compatibility.md),
 [lifecycle hooks](docs/features/lifecycle-hooks/index.md),
 [comparative evaluation](docs/project/quality-evaluation.md), and
+[Phase 4 telemetry](docs/project/phase4-telemetry.md), and
+[Phase 5 adaptive selection](docs/project/phase5-adaptive-selection.md), and
 [current release evidence](docs/release-readiness.md).
 
 Live development uses Luna/high for the coordinator and Luna at medium/high for
 native workers. The isolated helpers layer this user-requested test policy and audit
 actual participant/selector receipts. Heavy live-test models are rejected. This does
 not change stable settings or the plugin's general user-selected model policy.
+
+Workers keep routine checks non-destructive: Python checks use the inherited
+`PYTHONDONTWRITEBYTECODE=1` setting, and workers do not use recursive cache cleanup,
+`git clean`, reset/checkout, or similar commands just to remove residue. Existing
+residue is left in place and reported as a blocker when it prevents a check; host
+permissions remain native and no guidance auto-approves a destructive command.
+After a pending or timed-out `wait_agent`, the coordinator repeats a bounded wait for
+the same owner and may inspect status or selected evidence internally, but does not
+send `send_message`/`followup_task` solely because the wait produced no evidence.
+Only an inbound same-owner handoff reply, direct user steering/clarification, or an
+intentional follow-up after reconciling terminal worker evidence is a legal transition.

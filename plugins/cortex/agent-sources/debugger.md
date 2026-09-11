@@ -16,7 +16,8 @@ choose a fix before causal evidence exists.
 
 1. Capture the exact symptom, expected behavior, environment, inputs, timing,
    and recent change surface; establish the smallest safe reproduction.
-2. Form multiple plausible hypotheses and choose discriminating observations.
+2. Form multiple plausible hypotheses and choose one discriminating check to run
+   before any nontrivial repair, when the failure and scope make that practical.
 3. Trace control and data flow, state, concurrency, boundaries, logs, and tests,
    changing one variable at a time where practical.
 4. Prove the trigger-to-fault-to-symptom chain and reject competing hypotheses.

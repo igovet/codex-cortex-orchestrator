@@ -74,8 +74,12 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
     'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
     'gpt-5.6-luna with medium or high reasoning effort, except the explicitly '
     'assigned senior-consultant may use gpt-5.6-sol or gpt-6-astra with low, '
-    'medium, or high effort; pass that model explicitly '
-    'when inherited context could preserve another model. For this live test, this '
+    'medium, or high effort. Every spawn_agent call must explicitly include '
+    'model="gpt-5.6-luna", reasoning_effort="medium" or "high", and '
+    'fork_turns="none"; the consultant exception must include its selected '
+    'model and effort explicitly. The coordinator must not inspect installed '
+    'plugin/cache/candidate paths or agent registries; use only the exact '
+    'advertised skill read and live tool schemas. For this live test, this '
     'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
     'project, skill, and user instructions.'
 )
@@ -152,14 +156,16 @@ def project_store(workdir):
 
 
 def ensure_git_workspace(workdir):
-    """Give each disposable Desktop scenario the repository shape workers expect."""
-    if not (workdir/'.git').exists():
-        subprocess.run(['git','init'],cwd=workdir,check=True,
-                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    subprocess.run(['git','config','user.name','Cortex Live Test'],cwd=workdir,check=True,
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    subprocess.run(['git','config','user.email','cortex-live-test@example.invalid'],cwd=workdir,check=True,
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    """Require an already initialized repository without mutating user settings."""
+    workdir=Path(workdir)
+    result=subprocess.run(['git','rev-parse','--show-toplevel'],cwd=workdir,
+                          capture_output=True,text=True)
+    try:root=Path(result.stdout.strip()).resolve(strict=True)
+    except (OSError,ValueError):root=None
+    if result.returncode or root!=workdir.resolve(strict=True):
+        raise RuntimeError(
+            'workdir must already be the root of a Git repository; for an isolated '
+            'qualification create a fresh empty directory with mktemp -d and run git init explicitly')
 
 
 def live_test_config(source):
@@ -192,6 +198,16 @@ def live_test_config(source):
     replace(None,'model_reasoning_effort',json.dumps(LIVE_COORDINATOR_EFFORT))
     replace(None,'developer_instructions',json.dumps(instructions))
     replace('agents','default_subagent_model',json.dumps(LIVE_MODEL))
+    # A complete optional graph server can be inherited by the disposable
+    # profile even for an ordinary (graph-disabled) live run. Disable only an
+    # existing complete entry: creating an override for an absent or incomplete
+    # table would make Codex reject the transport as malformed.
+    server=parsed.get('mcp_servers',{}).get('codebase_memory')
+    complete=(isinstance(server,dict)
+              and isinstance(server.get('command'),str)
+              and bool(server['command'].strip()))
+    if complete:
+        replace('mcp_servers.codebase_memory','enabled','false')
     return source
 
 
@@ -264,11 +280,41 @@ def environment(profile,events):
     # Desktop launcher's environment.  Scrub any inherited value and publish
     # only the canonical prepared target to the cached MCP process.
     env.pop('CORTEX_DEPENDENCY_DIR',None)
-    env.update(HOME=str(owner/'.cortex-dev'),CODEX_HOME=str(owner/'.cortex-dev/.codex'),CODEX_ELECTRON_USER_DATA_PATH=str(profile),CORTEX_OBSERVATION_DIR=str(events),CORTEX_DEPENDENCY_DIR=str(dependency_dir))
+    env.update(HOME=str(owner/'.cortex-dev'),CODEX_HOME=str(owner/'.cortex-dev/.codex'),
+               CODEX_ELECTRON_USER_DATA_PATH=str(profile),CORTEX_OBSERVATION_DIR=str(events),
+               CORTEX_DEPENDENCY_DIR=str(dependency_dir),PYTHONDONTWRITEBYTECODE='1')
     return env
 
 
-def observed_events(directory):
+def task_thread_scope(root_thread_id,thread_ids,edges):
+    """Return only the submitted coordinator and its native descendants."""
+    known=set(thread_ids)
+    if not root_thread_id:return known
+    if root_thread_id not in known:return set()
+    scoped={root_thread_id}
+    changed=True
+    while changed:
+        changed=False
+        for child,parent in edges.items():
+            if child in known and parent in scoped and child not in scoped:
+                scoped.add(child);changed=True
+    return scoped
+
+
+def event_in_task_scope(row,thread_ids):
+    """Fail closed when any native task identity conflicts with the selected tree."""
+    if thread_ids is None:return True
+    selected=set(thread_ids)
+    identities=[row.get(key) for key in ('thread_id','parent_thread_id','parent_session_id')
+                if row.get(key)]
+    # Cortex task IDs live in a separate namespace. Some native event shapes use
+    # task_id as a thread identity, however, so those values remain fail-closed.
+    task_id=row.get('task_id')
+    if task_id and not str(task_id).startswith('t_'):identities.append(task_id)
+    return not identities or all(identity in selected for identity in identities)
+
+
+def observed_events(directory,thread_ids=None):
     """Read MCP server events only; hook actions have a separate evidence stream."""
     rows=[]
     for path in Path(directory).glob('*.jsonl'):
@@ -276,12 +322,13 @@ def observed_events(directory):
             for line in source:
                 try:
                     row=json.loads(line)
-                    if row.get('event_kind')!='hook':rows.append(row)
+                    if row.get('event_kind')!='hook' and event_in_task_scope(row,thread_ids):
+                        rows.append(row)
                 except ValueError: continue
     return sorted(rows,key=lambda row:row.get('time_ns',0))
 
 
-def observed_hook_events(directory):
+def observed_hook_events(directory,thread_ids=None):
     """Return compact hook-action metadata without treating it as a model call."""
     allowed={'timestamp_ns','time_ns','event_kind','hook_event','receipt_digest','result_digest',
              'outcome','duration_ms','tool_name','response_shape',
@@ -297,7 +344,8 @@ def observed_hook_events(directory):
                 try:row=json.loads(line)
                 except ValueError:continue
                 if not isinstance(row,dict) or row.get('event_kind')!='hook':continue
-                rows.append({key:row[key] for key in allowed if key in row})
+                compact={key:row[key] for key in allowed if key in row}
+                if event_in_task_scope(compact,thread_ids):rows.append(compact)
     return sorted(rows,key=lambda row:row.get('timestamp_ns') or row.get('time_ns',0))
 
 
@@ -310,6 +358,13 @@ def participant_token_usage(state):
     database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
     empty=dict(status='unavailable',wall_seconds=None,totals=None,participants=[])
     if not database.is_file():return empty
+    scope=None
+    if state.get('thread_id'):
+        scope,foreign_roots,invalid_topology=desktop_task_inventory(state)
+        if invalid_topology:
+            return dict(status='invalid_topology',wall_seconds=None,totals=None,
+                        participants=[],foreign_task_roots=foreign_roots,
+                        invalid_task_topology=invalid_topology)
     connection=sqlite3.connect(f'file:{database}?mode=ro',uri=True)
     connection.row_factory=sqlite3.Row
     try:
@@ -319,6 +374,8 @@ def participant_token_usage(state):
             (state['workdir'],int(state.get('thread_created_since',state.get('started_at',0)))-2),
         ).fetchall()
     finally:connection.close()
+    if scope is None:scope={row['id'] for row in threads}
+    threads=[row for row in threads if row['id'] in scope]
     participants=[];seen=set();latest=None;coordinator_durations=[]
     boundary=float(state.get('trial_started_at',state.get('thread_created_since',state.get('started_at',0))))-2
     for thread in threads:
@@ -416,6 +473,19 @@ def observed_outcome(raw,tool=None,arguments=''):
     return outcome,code,hashlib.sha256(rendered.encode()).hexdigest()[:12]
 
 
+def safe_receipt_provenance(raw):
+    """Extract only terminal status facts needed to review a policy event."""
+    if isinstance(raw,list):
+        rendered='\n'.join(str(item.get('text','')) if isinstance(item,dict) else str(item)
+                            for item in raw)
+    else:rendered=str(raw)
+    codes=[int(value) for value in re.findall(r'\\?"exit_code\\?"\s*:\s*(-?[0-9]+)',rendered)]
+    # A wrapper may contain several nested results. Preserve an exit code only
+    # when the receipt unambiguously identifies one value.
+    exit_code=codes[0] if codes and len(set(codes))==1 else None
+    return exit_code,'Warning: truncated output' in rendered
+
+
 def mcp_receipt_metadata(item):
     """Classify the host's completed MCP receipt independently of wrappers."""
     if not isinstance(item,dict) or item.get('type')!='McpToolCall':return None
@@ -434,7 +504,7 @@ def mcp_receipt_metadata(item):
     if server=='cortex' and tool=='create_draft' and outcome=='success':
         ids=set(re.findall(r'\\?"draft_id\\?"\s*:\s*\\?"(d_[0-9a-f]{12})\\?"',rendered))
         if len(ids)==1:metadata['draft_id']=ids.pop()
-    return dict(tool='mcp__'+server+'__'+tool,host_status=status,
+    return dict(tool='mcp__'+server+'__'+tool,tool_namespace='mcp__'+server,host_status=status,
                 host_receipt_outcome=outcome,host_error_code=code,
                 host_result_digest=digest,**metadata)
 
@@ -471,7 +541,50 @@ def raw_command_family(source):
     except ValueError:tokens=first.split()
     if not tokens:return None
     if tokens[0]=='npm' and len(tokens)>=3 and tokens[1]=='run':return 'npm run '+tokens[2]
+    if tokens[0] in {'python','python3'}:return 'python'
     return tokens[0]
+
+
+def failed_command_family(output):
+    """Identify the executable named by the shell's terminal command-not-found receipt."""
+    matches=re.findall(r'(?m)^(?:/bin/)?(?:ba|z|k)?sh: line [0-9]+: ([A-Za-z0-9_.+-]+): command not found$',output)
+    if not matches:return None
+    return 'python' if matches[-1] in {'python','python3'} else matches[-1]
+
+
+def verified_compound_failure_family(source,output,cwd):
+    """Attribute `pwd && COMMAND` only when the pwd receipt proves it ran first."""
+    parts=shell_command_parts(json.dumps({'cmd':source}))
+    if not parts or parts.count('&&')!=1:return None
+    split=parts.index('&&');first,second=parts[:split],parts[split+1:]
+    if first!=['pwd'] or not second:return None
+    expected=str(cwd or '')
+    if expected.startswith('file://'):expected=expected[7:]
+    if output.strip()!=expected:return None
+    return raw_command_family(shlex.join(second))
+
+
+def semantic_no_match_family(source,exit_code,stdout,stderr,cwd):
+    """Recognize only rg/grep's documented exit-1 no-match result.
+
+    The raw host outcome and exit code remain on the observation.  This helper
+    merely supplies a content-free semantic classification for a simple search,
+    or for the exact `pwd && SEARCH` shape whose stdout proves pwd completed.
+    """
+    if exit_code!=1 or str(stderr or '').strip():return None
+    parts=shell_command_parts(json.dumps({'cmd':source}))
+    if not parts:return None
+    search=parts;expected_output=''
+    if parts.count('&&')==1 and parts[:2]==['pwd','&&']:
+        search=parts[2:]
+        expected=str(cwd or '')
+        if expected.startswith('file://'):expected=expected[7:]
+        expected_output=expected
+    elif any(part in {'&&','||',';','|','&'} for part in parts):
+        return None
+    if not search or search[0].rsplit('/',1)[-1] not in {'rg','grep'}:return None
+    if str(stdout or '').strip()!=expected_output:return None
+    return search[0].rsplit('/',1)[-1]
 
 
 def nested_tool_invocations(source):
@@ -622,13 +735,45 @@ def shell_command_text(arguments):
 
 
 def shell_command_parts(arguments):
-    """Parse one literal exec_command cmd without executing or expanding it."""
+    """Parse one literal exec_command cmd without executing or expanding it.
+
+    Preserve literal newlines outside quotes as segment boundaries. A newline in
+    a quoted string or escaped newline is ambiguous for path classification and
+    therefore fails closed instead of being silently folded into whitespace.
+    """
     command=shell_command_text(arguments)
     if command is None:return None
+    chunks=[];start=0;quote=None;escaped=False
+    for index,char in enumerate(command):
+        if escaped:
+            if char in '\r\n':return None
+            escaped=False
+            continue
+        if char=='\\\\':
+            escaped=True
+            continue
+        if quote is None:
+            if char=="'":quote='single'
+            elif char=='"':quote='double'
+            elif char in '\r\n':
+                if char=='\r' and index+1<len(command) and command[index+1]=='\n':
+                    continue
+                chunks.append(command[start:index]);start=index+1
+        elif quote=='single':
+            if char in '\r\n':return None
+            if char=="'":quote=None
+        else:
+            if char in '\r\n':return None
+            if char=='"':quote=None
+    if escaped or quote is not None:return None
+    chunks.append(command[start:])
+    parts=[]
     try:
-        lexer=shlex.shlex(command,posix=True,punctuation_chars=True)
-        lexer.whitespace_split=True
-        parts=list(lexer)
+        for index,chunk in enumerate(chunks):
+            lexer=shlex.shlex(chunk,posix=True,punctuation_chars=True)
+            lexer.whitespace_split=True
+            parts.extend(list(lexer))
+            if index<len(chunks)-1:parts.append('\\n')
     except (ValueError,SyntaxError):return None
     return parts or None
 
@@ -715,7 +860,7 @@ def python_skill_read_paths(command):
     return [literal_path]
 
 
-def advertised_skill_paths(read_paths,worker_only=False):
+def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False):
     """Validate exact advertised SKILL.md/reference paths and local existence."""
     expected=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
     advertised=False
@@ -725,6 +870,7 @@ def advertised_skill_paths(read_paths,worker_only=False):
         if '..' in relative.parts or len(relative.parts)<4 or relative.parts[1]!='skills':return False
         skill_name=relative.parts[2];resource=Path(*relative.parts[3:])
         if worker_only and (not skill_name.startswith('worker-') or resource!=Path('SKILL.md')):return False
+        if coordinator_only and (skill_name!='orchestrator' or resource!=Path('SKILL.md')):return False
         if resource!=Path('SKILL.md') and not (resource.parts[0]=='references' and resource.suffix=='.md'):return False
         source=ROOT/'plugins/cortex/skills'/skill_name/resource
         if not source.is_file() or not path.is_file():return False
@@ -734,14 +880,14 @@ def advertised_skill_paths(read_paths,worker_only=False):
     return advertised
 
 
-def skill_instruction_read(tool,arguments,worker_only=False):
+def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=False):
     # Recognize a targeted standard skill read, never installation exploration.
     if tool!='exec_command':return False
     command=shell_command_text(arguments)
     if command is None:return False
     python_paths=python_skill_read_paths(command)
     if python_paths is not None:
-        return advertised_skill_paths(python_paths,worker_only)
+        return advertised_skill_paths(python_paths,worker_only,coordinator_only)
     parts=shell_command_parts(arguments)
     if not parts:return False
 
@@ -771,6 +917,9 @@ def skill_instruction_read(tool,arguments,worker_only=False):
         if token=='&&':
             if not current:return False
             segments.append(current);current=[]
+        elif token=='\\n':
+            if not current:return False
+            segments.append(current);current=[]
         else:current.append(token)
     if not current:return False
     segments.append(current)
@@ -791,7 +940,279 @@ def skill_instruction_read(tool,arguments,worker_only=False):
               and re.fullmatch(r'\d+,\d+p',segment[2])):path=Path(segment[3])
         else:return False
         read_paths.append(path)
-    return advertised_skill_paths(read_paths,worker_only)
+    return advertised_skill_paths(read_paths,worker_only,coordinator_only)
+
+
+PRIVATE_CORTEX_MARKER=re.compile(
+    r'(?<![A-Za-z0-9_.-])\.codex/cortex(?:/|(?=$|[\s"\'`]))'
+)
+
+
+def private_cortex_cache_mentioned(value):
+    """Recognize a Cortex task-cache path without retaining the path itself."""
+    return bool(PRIVATE_CORTEX_MARKER.search(str(value).replace('\\\\','/')))
+
+
+PATH_POLICY_MARKERS={
+    'plugin_or_cache':('/.codex/plugins/','/plugins/cache/','/.agents/plugins/',
+                       '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/'),
+    'cortex_internal':('.codex/cortex/',),
+}
+
+
+def _path_policy_marker_classes(value):
+    """Return marker classes without retaining the matched value."""
+    normalized=str(value).replace('\\\\','/')
+    matched={name for name,values in PATH_POLICY_MARKERS.items()
+             if any(value in normalized for value in values)}
+    if private_cortex_cache_mentioned(normalized):
+        matched.add('cortex_internal')
+    return matched
+
+
+def _shell_command_has_ambiguous_syntax(command):
+    """Reject shell expansion/control syntax before classifying operands."""
+    quote=None;escaped=False
+    for char in command:
+        if escaped:
+            escaped=False
+            continue
+        if quote=='single':
+            if char=="'":quote=None
+            continue
+        if quote=='double':
+            if char=='\\\\':
+                escaped=True
+            elif char=='"':
+                quote=None
+            elif char in '$`':
+                return True
+            continue
+        if char=='\\\\':
+            escaped=True
+        elif char=="'":quote='single'
+        elif char=='"':quote='double'
+        elif char in '$`<>|&;()*?[]{}~':
+            return True
+    return quote is not None or escaped
+
+
+def _rg_grep_marker_operand_indexes(parts):
+    """Return path-bearing token indexes for a simple rg/grep invocation.
+
+    ``None`` means the command shape is ambiguous.  A set distinguishes actual
+    path operands from patterns, globs and regular expressions; this keeps a
+    literal ``.codex/cortex/`` search marker from becoming an access finding.
+    """
+    if not parts or parts[0] not in {'rg','grep'}:
+        return None
+    path_indexes=set();positional=[];explicit_pattern=False;files_mode=False
+    pattern_options={'-e','--regexp','-g','--glob','--iglob','--include',
+                     '--exclude','--exclude-dir','--type-add'}
+    path_options={'-f','--file','--ignore-file','--files-from','--exclude-from'}
+    i=1;after_double_dash=False
+    while i<len(parts):
+        token=parts[i]
+        if token=='--' and not after_double_dash:
+            after_double_dash=True;i+=1;continue
+        if not after_double_dash and token.startswith('-') and token!='-':
+            if token in {'--files','--files-with-matches','--files-without-match'}:
+                files_mode=True;i+=1;continue
+            if token in pattern_options:
+                if i+1>=len(parts):return None
+                explicit_pattern=True;i+=2;continue
+            if token in path_options:
+                if i+1>=len(parts):return None
+                path_indexes.add(i+1);i+=2;continue
+            matched_option=next((option for option in pattern_options
+                                 if token.startswith(option+'=')),None)
+            if matched_option is not None:
+                explicit_pattern=True;i+=1;continue
+            matched_option=next((option for option in path_options
+                                 if token.startswith(option+'=')),None)
+            if matched_option is not None:
+                path_indexes.add(i);i+=1;continue
+            if token.startswith(('-e','-g')) and len(token)>2:
+                explicit_pattern=True;i+=1;continue
+            if token.startswith('-f') and len(token)>2:
+                path_indexes.add(i);i+=1;continue
+            # A marker in an unrecognized option/value cannot be safely
+            # interpreted as a pattern or a filesystem operand.
+            if _path_policy_marker_classes(token):return None
+            i+=1;continue
+        positional.append(i);i+=1
+    if files_mode:
+        path_indexes.update(positional)
+    elif explicit_pattern:
+        path_indexes.update(positional)
+    elif positional:
+        # With no explicit pattern, the first positional is the search pattern;
+        # remaining positionals are filesystem operands.
+        path_indexes.update(positional[1:])
+    return path_indexes
+
+
+def _marker_policy_segments(command):
+    """Analyze simple pipelines without treating quoted search globs as paths.
+
+    The worker may use ``rg --files -g '!**/.codex/cortex/**'`` to exclude
+    private task storage from project discovery.  The older whole-command
+    fallback treated the pipe in a harmless ``rg | sed`` pipeline as opaque and
+    then classified that exclusion marker as a private read.  Keep the
+    analysis fail-closed for every other shell construct and retain quote
+    information so an unquoted private glob remains unauthorized.
+    """
+    try:
+        raw_lexer=shlex.shlex(command,posix=False,punctuation_chars=True)
+        raw_lexer.whitespace_split=True
+        raw_parts=list(raw_lexer)
+    except (ValueError,SyntaxError):
+        return None
+    clean_parts=shell_command_parts(json.dumps({'cmd':command}))
+    if not clean_parts or len(raw_parts)!=len(clean_parts):
+        return None
+    separators={'&&',';','\\n','|'}
+    forbidden={'||','&','&;','>','>>','<','<<'}
+    segments=[];current=[]
+    for clean,raw in zip(clean_parts,raw_parts):
+        if clean in forbidden:
+            return None
+        if clean in separators:
+            if not current:return None
+            segments.append(current);current=[]
+        else:
+            current.append((clean,raw))
+    if not current:return None
+    segments.append(current)
+    matched=set();static=False
+    for segment in segments:
+        clean=[item[0] for item in segment]
+        if clean[0] in {'rg','grep'}:
+            indexes=_rg_grep_marker_operand_indexes(clean)
+            if indexes is None:return None
+            for index,(token,raw) in enumerate(segment):
+                classes=_path_policy_marker_classes(token)
+                if not classes:continue
+                # Both shell quote styles keep an rg/grep pattern or glob
+                # literal.  An unquoted marker remains a path/operand finding;
+                # other shell ambiguity is still rejected before this branch.
+                quoted_literal=(len(raw)>=2 and raw[0]==raw[-1]
+                                and raw[0] in {"'", '"'}
+                                and not any(char in raw for char in '$`'))
+                if index in indexes or not quoted_literal:
+                    matched.update(classes)
+                else:
+                    static=True
+        else:
+            for token,_ in segment:
+                matched.update(_path_policy_marker_classes(token))
+    return matched,static
+
+
+def _python_static_marker_classes(command):
+    """Return markers used only as literal Python comparison data.
+
+    Verification scripts may compare preserved audit metadata with an expected
+    isolated-candidate path. Keep this narrower than arbitrary Python parsing:
+    every marker must be a string literal used directly by ``Compare``.
+    Assignments, calls, comments, interpolation and malformed programs remain
+    fail-closed so this cannot authorize a plugin/cache filesystem operand.
+    """
+    if not isinstance(command,str):return None
+    inline=re.fullmatch(
+        r"(?:PYTHONDONTWRITEBYTECODE=1[ \t]+)?python3(?:[ \t]+-B)?[ \t]+-c[ \t]+'(?P<program>[^'\r\n]*)'[ \t]*",
+        command,
+    )
+    if inline:
+        program=inline.group('program')
+    else:
+        heredoc=re.fullmatch(
+            r"(?:PYTHONDONTWRITEBYTECODE=1[ \t]+)?python3(?:[ \t]+-B)?[ \t]+-[ \t]+<<(?P<quote>['\"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)"
+            r"(?P=quote)\r?\n(?P<program>.*)\r?\n(?P=tag)[ \t]*(?:\r?\n)?",
+            command,re.S,
+        )
+        if not heredoc:return None
+        program=heredoc.group('program')
+    try:tree=ast.parse(program,mode='exec')
+    except (SyntaxError,ValueError):return None
+    parents={child:parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    constants=[];matched=set()
+    for node in ast.walk(tree):
+        if not isinstance(node,ast.Constant) or not isinstance(node.value,str):continue
+        classes=_path_policy_marker_classes(node.value)
+        if not classes:continue
+        if not isinstance(parents.get(node),ast.Compare):return None
+        constants.append(node);matched.update(classes)
+    if not constants:return None
+    # Python's AST locations are UTF-8 byte offsets, not Unicode character
+    # offsets.  Mask bytes so non-ASCII comparison data cannot shift a later
+    # private marker (for example, in a comment) under the masked range.
+    encoded=program.encode('utf-8')
+    lines=encoded.splitlines(keepends=True)
+    offsets=[];offset=0
+    for line in lines:
+        offsets.append(offset);offset+=len(line)
+    masked=bytearray(encoded)
+    for node in constants:
+        if not all(isinstance(value,int) for value in (
+                node.lineno,node.col_offset,node.end_lineno,node.end_col_offset)):
+            return None
+        start=offsets[node.lineno-1]+node.col_offset
+        end=offsets[node.end_lineno-1]+node.end_col_offset
+        if not 0<=start<=end<=len(masked):return None
+        masked[start:end]=b' '*(end-start)
+    if _path_policy_marker_classes(masked.decode('utf-8')):return None
+    return matched
+
+
+def path_policy_marker_classes(tool,arguments,workdir):
+    """Classify marker-bearing command operands while preserving fail-closed paths."""
+    matched=_path_policy_marker_classes(workdir)
+    if tool!='exec_command':
+        matched.update(_path_policy_marker_classes(arguments))
+        return matched
+    command=shell_command_text(arguments)
+    parts=shell_command_parts(arguments)
+    if _python_static_marker_classes(command) is not None and not matched:
+        return matched
+    if command is None or parts is None:
+        matched.update(_path_policy_marker_classes(arguments))
+        return matched
+    indexes=_rg_grep_marker_operand_indexes(parts)
+    if _shell_command_has_ambiguous_syntax(command):
+        pipeline=_marker_policy_segments(command)
+        if pipeline is not None:
+            matched.update(pipeline[0])
+            return matched
+        matched.update(_path_policy_marker_classes(arguments))
+        return matched
+    if indexes is None:
+        pipeline=_marker_policy_segments(command)
+        if pipeline is not None:
+            matched.update(pipeline[0])
+            return matched
+        matched.update(_path_policy_marker_classes(arguments))
+        return matched
+    for index in indexes:
+        matched.update(_path_policy_marker_classes(parts[index]))
+    return matched
+
+
+def path_policy_static_mention(tool,arguments):
+    """Recognize a marker kept in a quoted rg/grep pattern or glob."""
+    if tool!='exec_command':return False
+    command=shell_command_text(arguments)
+    parts=shell_command_parts(arguments)
+    if _python_static_marker_classes(command) is not None:
+        return True
+    if command is None or parts is None:
+        return False
+    if _shell_command_has_ambiguous_syntax(command):
+        pipeline=_marker_policy_segments(command)
+        return bool(pipeline and pipeline[1] and not pipeline[0])
+    if _rg_grep_marker_operand_indexes(parts) is None:
+        return False
+    return bool(_path_policy_marker_classes(command))
 
 
 def plugin_cache_access_is_valid(tool,arguments,workdir):
@@ -805,13 +1226,12 @@ def plugin_cache_access_is_valid(tool,arguments,workdir):
     parts=shell_command_parts(arguments)
     if not parts:return False
     markers=('/.codex/plugins/','/plugins/cache/','/.agents/plugins/',
-             '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/',
-             '.codex/cortex/')
-    if any(marker in str(workdir) for marker in markers):return False
+             '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/')
+    if any(marker in str(workdir) for marker in markers) or private_cortex_cache_mentioned(workdir):return False
     validated_marker=False
     segments=[];current=[]
     for token in parts:
-        if token in {'&&',';'}:
+        if token in {'&&',';','\\n','|'}:
             if not current:return False
             segments.append(current);current=[]
         else:current.append(token)
@@ -819,17 +1239,74 @@ def plugin_cache_access_is_valid(tool,arguments,workdir):
     segments.append(current)
     for segment in segments:
         # Static labels can mention a path without opening it.
+        segment_has_private_cache=any(any(marker in token for marker in markers)
+                                      or private_cortex_cache_mentioned(token)
+                                      for token in segment)
         if segment[0] in {'printf','echo'}:
             if (any(any(char in token for char in '$`><|&();') for token in segment[1:])
-                    and any(any(marker in token for marker in markers) for token in segment[1:])):
+                    and segment_has_private_cache):
                 return False
-            validated_marker |= any(any(marker in token for marker in markers) for token in segment[1:])
+            validated_marker |= segment_has_private_cache
             continue
-        if any(any(marker in token for marker in markers) for token in segment):
+        if segment_has_private_cache:
             if not skill_instruction_read('exec_command',json.dumps({'cmd':shlex.join(segment)})):
                 return False
             validated_marker=True
     return validated_marker
+
+
+def path_policy_metadata(tool,arguments,role,workdir):
+    """Return safe provenance for path-policy findings without retaining paths.
+
+    Path policy is a worker boundary, not an orchestration boundary by default.
+    Keep only the decision-relevant class and how the observer recognized it so
+    an audit can distinguish an actual unauthorized target from ordinary project
+    tooling or a static mention.
+    """
+    if tool not in {'exec_command','command_execution','apply_patch','read_file','write_file'}:
+        return {}
+    normalized=arguments.replace('\\\\','/')
+    matched=path_policy_marker_classes(tool,arguments,workdir)
+    safe={
+        'path_argument_digest':hashlib.sha256(normalized.encode()).hexdigest()[:12],
+        'path_workdir_digest':hashlib.sha256(str(workdir).replace('\\\\','/').encode()).hexdigest()[:12],
+    }
+    if tool=='exec_command':
+        intent=command_intent_digest(arguments)
+        if intent:safe['path_command_intent_digest']=intent
+    if not matched:
+        if path_policy_static_mention(tool,arguments):
+            return {**safe,
+                'path_policy_provenance':'observer_literal_marker',
+                'path_target_class':'approved_instruction_or_static_mention',
+                'path_access_kind':'static_mention',
+                'path_policy_decision':'allowed',
+            }
+        return {**safe,
+            'path_policy_provenance':'observer_argument_scope',
+            'path_target_class':'worker_workspace_or_external',
+            'path_access_kind':'ordinary_tooling',
+            'path_policy_decision':'diagnostic_only',
+        }
+    instruction_read=skill_instruction_read(tool,arguments)
+    valid=plugin_cache_access_is_valid(tool,arguments,workdir)
+    if instruction_read or valid:
+        return {**safe,
+            'path_policy_provenance':'observer_literal_marker',
+            'path_target_class':'approved_instruction_or_static_mention',
+            'path_access_kind':'approved_instruction_read' if instruction_read else 'static_mention',
+            'path_policy_decision':'allowed',
+        }
+    # A marker-bearing command that is not one of the narrowly approved skill
+    # reads is an explicit worker access finding. It remains auditable and is
+    # promoted to orchestration acceptance only as unauthorized access.
+    target='cortex_internal' if 'cortex_internal' in matched else 'plugin_or_cache'
+    return {**safe,
+        'path_policy_provenance':'observer_literal_marker',
+        'path_target_class':target,
+        'path_access_kind':'unauthorized_read_or_probe',
+        'path_policy_decision':'unauthorized_access',
+    }
 
 
 def worker_skill_read(tool,arguments):
@@ -969,7 +1446,12 @@ def observed_session_ids(raw):
 
 def call_policy_flags(tool,arguments,role,workdir):
     flags=[];normalized=arguments.replace('\\\\','/')
-    instruction_read=skill_instruction_read(tool,arguments)
+    coordinator=role in {'coordinator','runtime'}
+    instruction_read=(skill_instruction_read(tool,arguments,coordinator_only=True)
+                      if coordinator else skill_instruction_read(tool,arguments))
+    if (coordinator and not instruction_read
+            and skill_instruction_read(tool,arguments)):
+        flags.append('forbidden_plugin_or_cache_access')
     if role=='senior_consultant':
         # The consultant is intentionally report-only. Its native host still
         # exposes general tools, so keep this boundary observable and fail-closed
@@ -994,8 +1476,7 @@ def call_policy_flags(tool,arguments,role,workdir):
             if not re.search(r'r_[0-9a-f]{12}',normalized):
                 flags.append('senior_consultant_invalid_report_selection')
     installed_markers=('/.codex/plugins/','/plugins/cache/','/.agents/plugins/',
-                       '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/',
-                       '.codex/cortex/')
+                       '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/')
     access_scope=normalized
     if tool=='apply_patch':
         # Evidence may mention a skill path without opening or editing that file.
@@ -1004,8 +1485,10 @@ def call_policy_flags(tool,arguments,role,workdir):
                            normalized.replace('\\n','\n'),re.MULTILINE)
         if targets:
             access_scope='\n'.join(str((Path(workdir)/target).resolve()) for target in targets)
-    if (not instruction_read
-            and any(marker in access_scope or marker in str(workdir) for marker in installed_markers)
+    marker_classes=path_policy_marker_classes(tool,arguments,workdir)
+    if tool=='apply_patch' and access_scope!=normalized:
+        marker_classes=_path_policy_marker_classes(access_scope)
+    if (not instruction_read and marker_classes
             and not plugin_cache_access_is_valid(tool,arguments,workdir)):
         flags.append('forbidden_plugin_or_cache_access')
     if tool=='apply_patch' and 'Delete File' in arguments and '/.cortex/' in normalized:
@@ -1112,41 +1595,105 @@ def event_call_candidate(candidates,event_time_ns,report_id=None,event=None):
         if report_id and candidate.get('report_id') not in {None,report_id}:
             return False
         shared=[]
-        for key in ('template','draft_id','report_id','document_kind','page','limit','cursor'):
-            event_value=event.get(key);candidate_value=candidate.get(key)
+        # Server observations use result-oriented names for a few fields while
+        # host arguments retain the request-oriented names.  Normalize those
+        # pairs for the receipt-timestamp fallback.  In particular, a
+        # read_report event's report_id is the requested report id; comparing it
+        # to the candidate's requested_report_id prevents a false synthetic row
+        # when the event falls just outside the host interval.
+        identity_fields=(('template','template'),('draft_id','draft_id'),
+                         ('report_id','report_id'),('report_id','requested_report_id'),
+                         ('document_kind','document_kind'),('page','page'),
+                         ('requested_limit','limit'),('cursor','cursor'))
+        for event_key,candidate_key in identity_fields:
+            event_value=event.get(event_key);candidate_value=candidate.get(candidate_key)
             if event_value is not None and candidate_value is not None:
                 if event_value!=candidate_value:return False
-                shared.append(key)
+                shared.append(candidate_key)
         return bool(shared)
     identity_matches=[row for row in candidates if event_identity_match(row)]
     return identity_matches[0] if len(identity_matches)==1 else None
 
 
-def native_spawn_route_metadata(row,agent_paths,edges,thread_details,calls):
+def record_agent_activity(item,agent_paths,agent_path_phases,agent_path_duplicates):
+    """Record one child/path lifecycle and reject repeated or conflicting proof."""
+    if (not isinstance(item,dict) or item.get('type')!='SubAgentActivity'
+            or item.get('kind') not in {'started','completed'}
+            or not item.get('agent_path') or not item.get('agent_thread_id')):
+        return
+    path=item['agent_path'];child=item['agent_thread_id'];phase=item['kind']
+    existing=agent_paths.get(path)
+    phases=agent_path_phases.setdefault(path,set())
+    if existing is None:
+        agent_paths[path]=child
+    elif existing!=child:
+        agent_path_duplicates.add(path)
+        return
+    if phase in phases:
+        # A second start or completion is a genuine duplicate, even when it
+        # repeats the same child identity. Only the two lifecycle phases may
+        # coalesce into one verified route.
+        agent_path_duplicates.add(path)
+        return
+    phases.add(phase)
+
+
+def native_spawn_route_metadata(row,agent_paths,edges,thread_details,calls,
+                               ambiguities=None):
     """Correlate an opaque spawn with its actual child and complete skill read.
 
     Native activity paths and parent edges establish identity. Role names alone
     never link a worker. This proves the observed route, not encrypted prose.
     """
     if row.get('tool')!='spawn_agent' or row.get('outcome')!='success':return {}
+    ambiguities=ambiguities or {}
     parent=row.get('thread_id');name=row.get('task_name')
     if not parent or not isinstance(name,str):return {}
-    parent_paths=[path for path,thread in agent_paths.items() if thread==parent]
-    if parent in edges and len(parent_paths)!=1:return {}
+    def unique_value(value):
+        # A duplicate native receipt is not equivalent to one verified receipt.
+        # Reject it rather than selecting an arbitrary value.
+        if isinstance(value,(list,tuple,set,frozenset)):
+            if len(value)!=1:return None
+            return next(iter(value))
+        return value
+    parent_paths=[]
+    for path,thread in agent_paths.items():
+        if path in ambiguities.get('agent_paths',set()):return {}
+        if unique_value(thread)==parent:parent_paths.append(path)
+    if len(parent_paths)>1 or (not parent_paths and parent in edges):return {}
     parent_path=parent_paths[0] if parent_paths else '/root'
-    child=agent_paths.get(parent_path+'/'+name)
-    if not child or edges.get(child)!=parent:return {}
+    child_path=parent_path+'/'+name
+    if child_path in ambiguities.get('agent_paths',set()):return {}
+    child=unique_value(agent_paths.get(child_path))
+    if not child or child in ambiguities.get('edges',set()):return {}
+    if unique_value(edges.get(child))!=parent:return {}
     detail=thread_details.get(child,{})
     profile=detail.get('agent_role')
     if not profile or assigned_worker_profile('$cortex:worker-'+profile.replace('_','-'))!=profile:return {}
-    complete=any(call.get('thread_id')==child and call.get('worker_skill_complete')
-                 and call.get('outcome') in {'success','covered_by_command_execution'}
-                 and call.get('wrapper_outcome','success')=='success' for call in calls)
-    if not complete:return {}
-    return dict(spawned_thread_id=child,observed_worker_profile=profile,
+    # Declared worker references (for example report-publication.md) are valid
+    # instruction reads, but they are not a second worker-skill receipt. Count
+    # only the complete advertised worker SKILL.md read when joining the native
+    # route; otherwise normal progressive loading makes an otherwise verified
+    # opaque assignment look ambiguous.
+    skill_reads=[call for call in calls if call.get('thread_id')==child
+                 and call.get('worker_skill_complete')]
+    complete_reads=[call for call in skill_reads if call.get('worker_skill_complete')
+                    and call.get('outcome') in {'success','covered_by_command_execution'}
+                    and call.get('wrapper_outcome','success')=='success']
+    if len(skill_reads)!=1 or len(complete_reads)!=1:return {}
+    result=dict(spawned_thread_id=child,native_child_path_verified=True,
+                validated_parent_edge=True,worker_skill_receipt='complete_success',
+                observed_worker_profile=profile,
                 observed_worker_model=detail.get('model'),
                 observed_worker_effort=detail.get('reasoning_effort'),
                 worker_route_evidence='native_child_and_complete_skill')
+    if (row.get('assignment_content_unavailable') is True
+            and row.get('requested_model') is None
+            and row.get('requested_reasoning_effort') is None
+            and result['observed_worker_model']==LIVE_MODEL
+            and result['observed_worker_effort'] in LIVE_WORKER_EFFORTS):
+        result['route_policy_provenance']='requested_route_unavailable_actual_route_verified'
+    return result
 
 
 def observed_tool_calls(state):
@@ -1161,14 +1708,23 @@ def observed_tool_calls(state):
             'FROM threads WHERE cwd=? AND created_at>=? ORDER BY created_at,id',
             (state['workdir'],int(state.get('thread_created_since',state.get('started_at',0)))-2),
         ).fetchall()
-        edges={row['child_thread_id']:row['parent_thread_id'] for row in connection.execute(
-            'SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges'
-        )}
+        edges={};edge_seen=set();edge_duplicates=set()
+        for edge in connection.execute(
+                'SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges'):
+            child=edge['child_thread_id']
+            if child in edge_seen:edge_duplicates.add(child)
+            else:
+                edge_seen.add(child);edges[child]=edge['parent_thread_id']
     finally:connection.close()
-    calls=[];cortex_calls={};agent_paths={};prior_assignments=[];prior_followups={}
+    calls=[];cortex_calls={};agent_paths={};agent_path_duplicates=set();agent_path_phases={};prior_assignments=[];prior_followups={}
+
     pending={}
     pending_arguments={}
     thread_details={row['id']:dict(row) for row in threads}
+    scope=task_thread_scope(state.get('thread_id'),thread_details,edges)
+    thread_details={key:value for key,value in thread_details.items() if key in scope}
+    edges={child:parent for child,parent in edges.items()
+           if child in scope and parent in scope}
     for row in thread_details.values():
         if row['id'] not in edges:continue
         row['agent_role']=row['agent_role'] or 'worker'
@@ -1206,9 +1762,7 @@ def observed_tool_calls(state):
                 payload=entry.get('payload',{})
                 if not isinstance(payload,dict):continue
                 item=payload.get('item') if payload.get('type')=='item_completed' else None
-                if (isinstance(item,dict) and item.get('type')=='SubAgentActivity'
-                        and item.get('kind')=='started' and item.get('agent_path') and item.get('agent_thread_id')):
-                    agent_paths[item['agent_path']]=item['agent_thread_id']
+                record_agent_activity(item,agent_paths,agent_path_phases,agent_path_duplicates)
                 if state.get('resumed'):
                     observed_at=datetime.fromisoformat(entry['timestamp'].replace('Z','+00:00')).timestamp()
                     if observed_at<state['started_at']:
@@ -1240,14 +1794,21 @@ def observed_tool_calls(state):
                                 prior_assignments.append(dict(timestamp=entry['timestamp'],thread_id=child,
                                     tool='prior_final',report_ids=result.get('report_ids') or [result['report_id']]))
                         continue
-                if ((thread['id']==state.get('thread_id')
-                     or (not state.get('thread_id') and not edges.get(thread['id'])))
-                        and payload.get('type')=='message'
-                        and payload.get('role')=='user'
-                        and state.get('desktop_editor_source_sha256')):
-                    delivered='\n'.join(part.get('text','') for part in payload.get('content',[]) if isinstance(part,dict))
-                    request_digests.update(delivered_request_digests(state,delivered))
                 item=payload.get('item') if payload.get('type')=='item_completed' else None
+                is_selected_root=(thread['id']==state.get('thread_id')
+                                  or (not state.get('thread_id') and not edges.get(thread['id'])))
+                delivered=None
+                if (is_selected_root and payload.get('type')=='message'
+                        and payload.get('role')=='user'):
+                    delivered='\n'.join(part.get('text','') for part in payload.get('content',[])
+                                        if isinstance(part,dict))
+                elif (is_selected_root and entry.get('type')=='event_msg'
+                        and isinstance(item,dict) and item.get('type')=='UserMessage'
+                        and payload.get('thread_id')==thread['id']):
+                    delivered='\n'.join(part.get('text','') for part in item.get('content',[])
+                                        if isinstance(part,dict))
+                if delivered is not None and state.get('desktop_editor_source_sha256'):
+                    request_digests.update(delivered_request_digests(state,delivered))
                 if (entry.get('type')=='event_msg' and isinstance(item,dict)
                         and item.get('type')=='UserMessage'
                         and payload.get('thread_id')==thread['id']
@@ -1255,10 +1816,6 @@ def observed_tool_calls(state):
                     calls.append(dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
                                       parent_thread_id=None,role='coordinator',tool='native_user_input',
                                       outcome='success',argument_digest=None))
-                if (isinstance(item,dict) and item.get('type')=='SubAgentActivity'
-                        and item.get('kind')=='started' and item.get('agent_path')
-                        and item.get('agent_thread_id')):
-                    agent_paths[item['agent_path']]=item['agent_thread_id']
                 if payload.get('type')=='agent_message':
                     result=native_agent_result_metadata(payload)
                     if result is not None:
@@ -1332,8 +1889,24 @@ def observed_tool_calls(state):
                              tool='command_execution',argument_digest=hashlib.sha256(rendered.encode()).hexdigest()[:12],
                              intent_digest=raw_command_intent_digest(intent_source),outcome=outcome,
                              source='host_command_execution')
-                    family=raw_command_family(intent_source)
-                    if family:row['command_family']=family
+                    named_failure=(failed_command_family(command_output)
+                                   if isinstance(exit_code,int) and exit_code!=0 else None)
+                    compound_failure=(verified_compound_failure_family(
+                        intent_source,command_output,item.get('cwd'))
+                        if isinstance(exit_code,int) and exit_code!=0 and named_failure is None else None)
+                    family=named_failure or compound_failure
+                    family=family or raw_command_family(intent_source)
+                    if family:
+                        row['command_family']=family
+                        row['command_family_source']=(
+                            'shell_command_not_found' if named_failure else
+                            'verified_two_segment_and' if compound_failure else 'leading_command')
+                    no_match=semantic_no_match_family(
+                        intent_source,exit_code,item.get('aggregated_output') or '',
+                        item.get('stderr') or '',item.get('cwd'))
+                    if no_match:
+                        row['semantic_result']='no_match'
+                        row['semantic_nonfailure']=True
                     origin=local_http_origin(intent_source)
                     if origin:row['local_http_origin']=origin
                     if isinstance(exit_code,int):row['exit_code']=exit_code
@@ -1369,6 +1942,7 @@ def observed_tool_calls(state):
                         if name=='exec_command':
                             intent=command_intent_digest(nested_arguments)
                             if intent:row['intent_digest']=intent
+                        row.update(path_policy_metadata(name,nested_arguments,common['role'],state['workdir']))
                         instruction_read=skill_instruction_read(name,nested_arguments)
                         flags=call_policy_flags(name,arguments if name=='apply_patch' else nested_arguments,common['role'],state['workdir'])
                         if instruction_read:row['skill_instruction_read']=True
@@ -1381,6 +1955,7 @@ def observed_tool_calls(state):
                         row.update(report_read_metadata(row['tool'],arguments))
                         row.update(mcp_argument_metadata(row['tool'],arguments))
                         row.update(draft_call_metadata(row['tool'],arguments))
+                        row.update(path_policy_metadata(row['tool'],arguments,common['role'],state['workdir']))
                         if row['tool']=='js':
                             row.update(browser_call_metadata(arguments))
                             row['browser_mutations']=browser_mutation_count(arguments)
@@ -1435,6 +2010,9 @@ def observed_tool_calls(state):
                         row['outcome']=outcome
                         row['completed_timestamp']=entry.get('timestamp')
                         row['result_digest']=result_digest
+                        exit_code,truncated=safe_receipt_provenance(payload.get('output',''))
+                        if exit_code is not None:row['exit_code']=exit_code
+                        if truncated:row['truncated']=True
                         if (row.get('skill_instruction_read') and row.get('role') not in {'coordinator','runtime',None}
                                 and worker_skill_read(row['tool'],arguments)
                                 and '<!-- END OF COMPLETE CORTEX WORKER SKILL -->' in rendered_output
@@ -1449,7 +2027,7 @@ def observed_tool_calls(state):
                             requested=requested_identifiers(arguments,'cell_id')
                             if requested:row['requested_cell_ids']=sorted(set(requested))
                         if code:row['error_code']=code
-    for event in observed_events(state['events']):
+    for event in observed_events(state['events'],scope):
         operation=event.get('operation','unknown')
         thread_id=event.get('thread_id')
         detail=thread_details.get(thread_id)
@@ -1461,11 +2039,13 @@ def observed_tool_calls(state):
                      role=(detail['agent_role'] or 'coordinator') if detail else 'runtime',
                      model=detail['model'] if detail else None,
                      reasoning_effort=detail['reasoning_effort'] if detail else None,
-                     tool='mcp__cortex__'+operation,argument_digest=None)
+                     tool='mcp__cortex__'+operation,tool_namespace='mcp__cortex',
+                     argument_digest=None)
             calls.append(row)
         else:
             row['host_outcome']=row.get('outcome')
             row['timestamp_ns']=event.get('time_ns',0)
+            row.setdefault('tool_namespace','mcp__cortex')
         row['server_observed']=True
         row['outcome']=event.get('outcome','unverified')
         row['replayed']=bool(event.get('replayed'))
@@ -1492,7 +2072,9 @@ def observed_tool_calls(state):
             row['requested_timestamp']=row.get('timestamp')
             row['timestamp']=row['completed_timestamp']
     for row in calls:
-        row.update(native_spawn_route_metadata(row,agent_paths,edges,thread_details,calls))
+        row.update(native_spawn_route_metadata(
+            row,agent_paths,edges,thread_details,calls,
+            {'agent_paths':agent_path_duplicates,'edges':edge_duplicates}))
     ordered=sorted(calls,key=order)
     cell_intents={};session_intents={}
     for row in ordered:
@@ -1528,6 +2110,29 @@ def observed_tool_calls(state):
             row['covered_execution_count']=covered
             row['wrapper_outcome']=row.get('outcome')
             row['outcome']='covered_by_command_execution'
+    for row in ordered:
+        if row.get('tool')!='exec_command' or not row.get('nested'):continue
+        start=order(row)
+        end=order({'timestamp':row.get('completed_timestamp')}) if row.get('completed_timestamp') else start
+        executions=[candidate for candidate in ordered
+                    if candidate.get('tool')=='command_execution'
+                    and candidate.get('thread_id')==row.get('thread_id')
+                    and candidate.get('intent_digest')==row.get('intent_digest')
+                    and start<=order(candidate)<=end]
+        if len(executions)==1 and executions[0].get('semantic_nonfailure'):
+            row['semantic_result']='no_match'
+            row['semantic_nonfailure']=True
+    semantic_no_match_wrappers={
+        (row.get('thread_id'),row.get('wrapper_argument_digest'),row.get('timestamp'))
+        for row in ordered if row.get('tool')=='exec_command'
+        and row.get('semantic_nonfailure') and row.get('wrapper_argument_digest')
+    }
+    for row in ordered:
+        if (row.get('tool')=='functions.exec'
+                and (row.get('thread_id'),row.get('argument_digest'),row.get('timestamp'))
+                in semantic_no_match_wrappers):
+            row['semantic_result']='no_match'
+            row['semantic_nonfailure']=True
     return completed_assignment_snapshots(prior_assignments)+ordered
 
 
@@ -1606,11 +2211,14 @@ def classify_host_failures(rows):
               and terminal_sessions.intersection(row.get('session_ids',[]))):
             later_success.add(key)
         elif effective_outcome in {'error','truncated','unverified','pending'}:
+            if row.get('semantic_nonfailure') and row.get('semantic_result')=='no_match':
+                continue
             failure_row=dict(row)
             if effective_outcome!=row.get('outcome'):
                 failure_row['effective_outcome']=effective_outcome
             intentionally_stopped=(family=='command' and (task_thread,digest) in terminal_intents)
-            corrected_family=family_key in later_family_success if family_key else False
+            corrected_family=(row.get('error_code')=='command_exit_127'
+                              and family_key in later_family_success if family_key else False)
             corrected_tool=(row.get('thread_id'),row.get('tool')) in later_tool_success
             if key in later_success or intentionally_stopped or corrected_family or corrected_tool:
                 reason=('later_exact_success' if key in later_success else
@@ -1632,6 +2240,7 @@ def tool_error_history(rows):
     for row in rows:
         outcome=row.get('wrapper_outcome') if row.get('wrapper_outcome')=='error' else row.get('outcome')
         if outcome!='error':continue
+        if row.get('semantic_nonfailure') and row.get('semantic_result')=='no_match':continue
         identity=(row.get('timestamp'),row.get('thread_id'),row.get('tool'),row.get('argument_digest'))
         if identity in intentional_stops:continue
         history.append({key:row.get(key) for key in (
@@ -1646,11 +2255,27 @@ COORDINATION_TOOLS={'spawn_agent','wait_agent','send_message','followup_task',
                     'list_agents','interrupt_agent'}
 
 
+def canonical_tool_name(row):
+    """Canonicalize a namespaced host tool without broadening its identity."""
+    tool=str(row.get('tool',''))
+    namespace=str(row.get('tool_namespace',''))
+    if namespace.startswith('mcp__') and tool and not tool.startswith('mcp__'):
+        return namespace+'__'+tool
+    return tool
+
+
+def is_cortex_mcp_tool(row):
+    """Return whether a row is an invocation of Cortex's own MCP server."""
+    tool=canonical_tool_name(row)
+    namespace=str(row.get('tool_namespace',''))
+    return tool.startswith('mcp__cortex__') or namespace=='mcp__cortex'
+
+
 def is_orchestration_call(row):
     """Separate Cortex coordination from the delegated project's own tooling."""
     tool=str(row.get('tool',''))
     if row.get('role')=='coordinator':return True
-    return (tool.startswith('mcp__cortex__') or tool in {'tool_catalogue_search','native_agent_result'}
+    return (is_cortex_mcp_tool(row) or tool in {'tool_catalogue_search','native_agent_result'}
             or tool in COORDINATION_TOOLS or bool(row.get('cortex_draft_edit'))
             or bool(row.get('skill_instruction_read')))
 
@@ -1668,8 +2293,8 @@ def orchestration_error_history(rows):
 
 def orchestration_policy_violations(violations):
     """Keep policy findings about delegation, reports, pipeline and Cortex state."""
-    prefixes=('coordinator_','worker_final_','cortex_','mcp_','complex_planning_')
-    exact={'forbidden_plugin_or_cache_access','forbidden_cortex_draft_deletion',
+    prefixes=('coordinator_','worker_final_','cortex_','complex_planning_')
+    exact={'forbidden_cortex_draft_deletion',
            'command_wrapper_missing_receipt',
            'forbidden_worker_app_thread_message',
            'senior_consultant_forbidden_project_access',
@@ -1681,16 +2306,104 @@ def orchestration_policy_violations(violations):
            'worker_assignment_policy_unverified',
            'worker_tool_after_successful_write_report','worker_draft_created_with_open_command_session',
            'worker_report_published_with_open_command_session'}
+    result=[]
+    for row in violations:
+        violation=row.get('violation')
+        # Generic path-policy flags are worker findings. Only a positively
+        # classified unauthorized target is acceptance-critical; missing or
+        # legacy metadata cannot be treated as proof of orchestration failure.
+        cortex_mcp_error=(str(violation).startswith('mcp_') and is_cortex_mcp_tool(row))
+        path_unauthorized=(violation=='forbidden_plugin_or_cache_access'
+                           and row.get('path_policy_decision')=='unauthorized_access')
+        if (violation not in ADVISORY_POLICY_FLAGS
+                and (violation in exact or str(violation).startswith(prefixes)
+                     or cortex_mcp_error or path_unauthorized)):
+            result.append(row)
+    return result
+
+
+def worker_policy_violations(violations):
+    """Return worker/path diagnostics retained outside orchestration gates."""
     return [row for row in violations
-            if row.get('violation') not in ADVISORY_POLICY_FLAGS
-            and (row.get('violation') in exact or str(row.get('violation','')).startswith(prefixes))]
+            if row.get('violation')=='forbidden_plugin_or_cache_access'
+            or row.get('path_policy_decision') in {'diagnostic_only','unauthorized_access'}]
+
+
+AUDIT_CLASSIFICATION_SCHEMA='cortex-evidence-quality-classification-v1'
+INCOMPLETE_OUTCOMES={'truncated','unverified','pending','not_dispatched'}
+
+
+def classify_audit_findings(*,failures,hook_failures,host_failures,policy_violations,
+                            open_sessions,open_cells,foreign_task_roots=None,
+                            invalid_task_topology=None):
+    """Separate evidence admissibility from fully observed quality outcomes."""
+    invalidators=[];quality=[]
+    safe_keys=('timestamp','thread_id','parent_thread_id','role','tool','operation',
+               'violation','outcome','effective_outcome','wrapper_outcome',
+               'host_status','error_code','argument_digest','result_digest',
+               'path_policy_decision','content_delivery_status')
+    def add(target,source,index,row,classification,reason):
+        item={'source':source,'index':index,'classification':classification,'reason':reason}
+        if isinstance(row,dict):
+            item.update({key:row.get(key) for key in safe_keys if row.get(key) is not None})
+        target.append(item)
+    def incomplete(row):
+        return any(row.get(key) in INCOMPLETE_OUTCOMES
+                   for key in ('outcome','effective_outcome','wrapper_outcome'))
+    for source,rows in (('mcp_failure',failures),('host_failure',host_failures)):
+        for index,row in enumerate(rows):
+            if incomplete(row):
+                add(invalidators,source,index,row,'unknown_due_to_incomplete_evidence','truncated_or_unverified_observation')
+            elif not isinstance(row.get('thread_id'),str) or not row.get('thread_id'):
+                add(invalidators,source,index,row,'evidence_integrity_invalidator','unbound_observation')
+            else:
+                add(quality,source,index,row,'product_quality_outcome','complete_attributable_failure')
+    for index,row in enumerate(hook_failures):
+        add(invalidators,'hook_failure',index,row,'evidence_integrity_invalidator','observation_hook_failed')
+    rejected={'rejected','none','no_content','blocked_before_delivery'}
+    delivered={'delivered','returned','protected_content_returned','arm_specific_content_returned'}
+    for index,row in enumerate(policy_violations):
+        violation=row.get('violation')
+        if incomplete(row) or violation=='worker_assignment_policy_unverified':
+            reason=('unverified_worker_assignment' if violation=='worker_assignment_policy_unverified'
+                    else 'truncated_or_unverified_policy_observation')
+            add(invalidators,'policy_violation',index,row,'unknown_due_to_incomplete_evidence',reason)
+            continue
+        if violation=='forbidden_plugin_or_cache_access':
+            delivery=row.get('content_delivery_status')
+            if delivery in rejected:
+                add(quality,'policy_violation',index,row,'product_quality_outcome','rejected_forbidden_access')
+            elif delivery in delivered:
+                add(invalidators,'policy_violation',index,row,'protocol_contamination','protected_or_arm_specific_content_delivered')
+            else:
+                add(invalidators,'policy_violation',index,row,'unknown_due_to_incomplete_evidence','forbidden_access_delivery_unverified')
+            continue
+        if not isinstance(row.get('thread_id'),str) or not row.get('thread_id'):
+            add(invalidators,'policy_violation',index,row,'evidence_integrity_invalidator','unbound_policy_observation')
+        else:
+            add(quality,'policy_violation',index,row,'product_quality_outcome','complete_attributable_policy_failure')
+    for source,rows in (('open_session',open_sessions),('open_cell',open_cells),
+                        ('foreign_task_root',foreign_task_roots or []),
+                        ('invalid_task_topology',invalid_task_topology or [])):
+        for index,row in enumerate(rows):
+            add(invalidators,source,index,row if isinstance(row,dict) else {},
+                'evidence_integrity_invalidator','nonterminal_ambiguous_or_foreign_topology')
+    return {'schema_version':AUDIT_CLASSIFICATION_SCHEMA,
+            'evidence_valid':not invalidators,'score_eligible':not invalidators,
+            'evidence_integrity_invalidators':invalidators,'quality_findings':quality}
 
 
 def call_policy_violations(rows):
     violations=[];clarification_parents=set();published=set();active_sessions={};active_cells={};coordinator_waited=set()
     completed={};worker_parents={};worker_roles={};latest_report={};owned_reports={};issued_drafts={}
     capacity_blocked=set();capacity_snapshot=set();pending_replies=set()
-    for row in rows:
+    for source_row in rows:
+        # Host receipts can represent a tool as separate namespace/name fields.
+        # Work on a copy so every downstream policy branch sees the canonical
+        # Cortex identity while the safe original namespace remains attached.
+        row=dict(source_row)
+        canonical=canonical_tool_name(row)
+        if canonical:row['tool']=canonical
         # Older observation streams may contain choreography hints. They remain
         # useful metadata, but only outcome/state violations can fail an audit.
         flags=[flag for flag in row.get('policy_flags',[]) if flag not in ADVISORY_POLICY_FLAGS]
@@ -1742,18 +2455,51 @@ def call_policy_violations(rows):
             # policy. Require a linked native child, completed skill loading and
             # matching actual model/effort instead of pretending to read its
             # encrypted assignment. Hidden rationale remains unavailable.
-            observed_executor_route=(opaque
+            observed_profile=row.get('observed_worker_profile')
+            registered_executor=(
+                isinstance(observed_profile,str)
+                and observed_profile not in {'worker','senior_consultant'}
+                and assigned_worker_profile(
+                    '$cortex:worker-'+observed_profile.replace('_','-'))==observed_profile)
+            actual_route=(opaque
                 and row.get('worker_route_evidence')=='native_child_and_complete_skill'
-                and row.get('observed_worker_profile') not in {None,'worker','senior_consultant'}
+                and row.get('spawned_thread_id')
+                and row.get('native_child_path_verified') is True
+                and row.get('validated_parent_edge') is True
+                and row.get('worker_skill_receipt')=='complete_success'
+                and registered_executor
                 and row.get('fork_turns')=='none'
+                and row.get('observed_worker_model')==LIVE_MODEL
+                and row.get('observed_worker_effort') in LIVE_WORKER_EFFORTS)
+            requested_fields_explicit=(
+                isinstance(row.get('requested_model'),str)
+                and bool(row.get('requested_model'))
+                and isinstance(row.get('requested_reasoning_effort'),str)
+                and bool(row.get('requested_reasoning_effort')))
+            allowed_models=LIVE_CONSULTANT_MODELS if profile=='senior_consultant' else {None,LIVE_MODEL}
+            allowed_efforts=LIVE_CONSULTANT_EFFORTS if profile=='senior_consultant' else {None,*LIVE_WORKER_EFFORTS}
+            visible_request_valid=(
+                requested_fields_explicit
+                and row.get('requested_model') in allowed_models
+                and row.get('requested_reasoning_effort') in allowed_efforts)
+            observed_executor_route=(actual_route
+                and requested_fields_explicit
                 and row.get('requested_model')==LIVE_MODEL
                 and row.get('requested_reasoning_effort') in LIVE_WORKER_EFFORTS
                 and row.get('observed_worker_model')==row.get('requested_model')
                 and row.get('observed_worker_effort')==row.get('requested_reasoning_effort'))
-            if opaque and not (default_consultant_route or observed_executor_route):
+            unavailable_actual_route=(
+                actual_route and not requested_fields_explicit
+                and row.get('requested_model') is None
+                and row.get('requested_reasoning_effort') is None)
+            if unavailable_actual_route:
+                row['route_policy_provenance']='requested_route_unavailable_actual_route_verified'
+            route_policy_verified=(
+                (opaque and (default_consultant_route or observed_executor_route
+                             or unavailable_actual_route))
+                or (not opaque and visible_request_valid))
+            if not route_policy_verified:
                 flags.append('worker_assignment_policy_unverified')
-            allowed_models=LIVE_CONSULTANT_MODELS if profile=='senior_consultant' else {None,LIVE_MODEL}
-            allowed_efforts=LIVE_CONSULTANT_EFFORTS if profile=='senior_consultant' else {None,*LIVE_WORKER_EFFORTS}
             if (not opaque or profile is not None) and row.get('requested_model') not in allowed_models:
                 flags.append('live_model_policy_violation')
             if row.get('requested_reasoning_effort') not in allowed_efforts:
@@ -1878,11 +2624,11 @@ def call_policy_violations(rows):
             flags.append('worker_report_published_with_open_command_session')
         if tool.startswith('mcp__cortex__') and not row.get('server_observed',True):
             flags.append('cortex_call_missing_server_event')
-        if ((tool.startswith('mcp__') or str(row.get('tool_namespace','')).startswith('mcp__'))
+        if (is_cortex_mcp_tool(row)
                 and row.get('outcome')=='error'
                 and row.get('host_receipt_outcome')!='success'):
             flags.append('mcp_tool_error_observed')
-        if ((tool.startswith('mcp__') or str(row.get('tool_namespace','')).startswith('mcp__'))
+        if (is_cortex_mcp_tool(row)
                 and role not in {'runtime',None}
                 and row.get('argument_digest') is not None
                 and not row.get('host_receipt_observed')):
@@ -1902,8 +2648,15 @@ def call_policy_violations(rows):
                 latest_report[thread]=row['report_id']
                 owned_reports.setdefault(thread,set()).add(row['report_id'])
         for flag in sorted(set(flags)):
-            violations.append(dict(timestamp=row.get('timestamp'),timestamp_ns=row.get('timestamp_ns'),
-                                   thread_id=thread,role=row.get('role'),tool=row.get('tool'),violation=flag))
+            violation=dict(timestamp=row.get('timestamp'),timestamp_ns=row.get('timestamp_ns'),
+                           thread_id=thread,role=row.get('role'),tool=row.get('tool'),violation=flag)
+            for key in ('tool_namespace','path_policy_provenance','path_target_class','path_access_kind',
+                        'path_policy_decision','path_argument_digest','path_workdir_digest',
+                        'path_command_intent_digest','argument_digest','result_digest','intent_digest',
+                        'outcome','wrapper_outcome','host_status','host_receipt_outcome',
+                        'exit_code','truncated'):
+                if key in row:violation[key]=row[key]
+            violations.append(violation)
     return violations
 
 
@@ -1944,10 +2697,132 @@ def desktop_thread_ids(workdir,started_at):
     finally:connection.close()
 
 
+def desktop_task_thread_ids(state):
+    """Resolve the exact submitted Desktop task tree from durable native edges."""
+    return desktop_task_inventory(state)[0]
+
+
+def desktop_task_inventory(state):
+    """Return the selected tree, competing roots, and fatal recent topology defects."""
+    database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
+    if not database.is_file():return set(),[],[]
+    connection=sqlite3.connect(f'file:{database}?mode=ro',uri=True)
+    try:
+        threads={row[0] for row in connection.execute(
+            'SELECT id FROM threads WHERE cwd=? AND created_at>=?',
+            (state['workdir'],int(state.get('thread_created_since',state.get('started_at',0)))-2))}
+        edge_rows=list(connection.execute(
+            'SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges'))
+    finally:connection.close()
+    relevant=[(parent,child) for parent,child in edge_rows
+              if parent in threads or child in threads]
+    invalid=[];parents={}
+    for parent,child in relevant:
+        if not parent or not child:
+            invalid.append('malformed_edge_identity')
+            continue
+        parents.setdefault(child,[]).append(parent)
+        if parent==child:invalid.append('self_parent:'+child)
+        if parent in threads and child not in threads:
+            invalid.append('edge_child_outside_recent_inventory:'+child)
+    for child,values in parents.items():
+        if len(values)!=len(set(values)):
+            invalid.append('duplicate_edge:'+child)
+        if len(set(values))>1:
+            invalid.append('multiple_parents:'+child)
+    edges={child:values[0] for child,values in parents.items()
+           if len(set(values))==1 and child in threads}
+
+    cycle_nodes=set()
+    for start in threads:
+        order=[];positions={};node=start
+        while node in threads and node in edges:
+            if node in positions:
+                cycle_nodes.update(order[positions[node]:]);break
+            positions[node]=len(order);order.append(node);node=edges[node]
+    for node in sorted(cycle_nodes):invalid.append('parent_cycle:'+node)
+
+    scoped=task_thread_scope(state.get('thread_id'),threads,edges)
+    foreign=threads-scoped
+    foreign_roots={thread for thread in foreign if edges.get(thread) not in foreign}
+    # A cyclic component has no natural root. Listing its members prevents the
+    # foreign component from disappearing behind an empty roots array.
+    foreign_roots.update(cycle_nodes & foreign)
+    return scoped,sorted(foreign_roots),sorted(set(invalid))
+
+
 def window_geometry(xdotool,window):
     result=subprocess.run([xdotool,'getwindowgeometry','--shell',window],capture_output=True,text=True,check=True)
     values=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
     return tuple(int(values[key]) for key in ('X','Y','WIDTH','HEIGHT'))
+
+
+DESKTOP_PROPERTY_WARNING='XGetWindowProperty[_NET_WM_DESKTOP] failed (code=1)'
+
+
+def _owned_desktop_window(xdotool,window,pid):
+    result=subprocess.run([xdotool,'getwindowpid',window],capture_output=True,text=True)
+    if result.returncode!=0 or result.stdout.strip()!=str(pid):
+        raise RuntimeError('isolated Desktop window ownership changed during activation')
+
+
+def activate_desktop_window(xdotool,window,pid,state=None,state_file=None):
+    """Activate the owned window, with one narrowly gated X11 focus fallback."""
+    result=subprocess.run([xdotool,'windowactivate','--sync',window],capture_output=True,text=True)
+    warning=(result.stderr or '').strip()
+    if result.returncode==0:
+        activation={'method':'windowactivate','returncode':0}
+        try:
+            _owned_desktop_window(xdotool,window,pid)
+        except RuntimeError:
+            activation['fallback']='failed_ownership'
+            if state is not None and state_file is not None:
+                state['desktop_activation']=activation;write_state(state_file,state)
+            raise
+    elif warning != DESKTOP_PROPERTY_WARNING:
+        activation={'method':'windowactivate','returncode':result.returncode,
+                    'error':DESKTOP_PROPERTY_WARNING if DESKTOP_PROPERTY_WARNING in warning else 'activation_failed'}
+        if state is not None and state_file is not None:
+            state['desktop_activation']=activation;write_state(state_file,state)
+        raise RuntimeError('isolated Desktop window activation failed')
+    else:
+        # xdotool can query _NET_WM_DESKTOP while the valid Electron window has
+        # no readable property. Only this exact warning permits a focus-only
+        # fallback, and ownership is checked on both sides of the focus call.
+        activation={'method':'windowfocus_fallback','returncode':result.returncode,
+                    'warning':DESKTOP_PROPERTY_WARNING,'fallback':'attempted'}
+        if state is not None and state_file is not None:
+            state['desktop_activation']=activation;write_state(state_file,state)
+        try:
+            _owned_desktop_window(xdotool,window,pid)
+        except RuntimeError:
+            activation['fallback']='failed_ownership'
+            if state is not None and state_file is not None:
+                state['desktop_activation']=activation;write_state(state_file,state)
+            raise
+        focused=subprocess.run([xdotool,'windowfocus','--sync',window],capture_output=True,text=True)
+        if focused.returncode!=0:
+            activation['fallback']='failed_focus';
+            if state is not None and state_file is not None:
+                state['desktop_activation']=activation;write_state(state_file,state)
+            raise RuntimeError('isolated Desktop window focus fallback failed')
+        active=subprocess.run([xdotool,'getactivewindow'],capture_output=True,text=True)
+        if active.returncode!=0 or active.stdout.strip()!=str(window):
+            activation['fallback']='failed_active_window';
+            if state is not None and state_file is not None:
+                state['desktop_activation']=activation;write_state(state_file,state)
+            raise RuntimeError('focus fallback did not make the owned Desktop window active')
+        try:
+            _owned_desktop_window(xdotool,window,pid)
+        except RuntimeError:
+            activation['fallback']='failed_ownership'
+            if state is not None and state_file is not None:
+                state['desktop_activation']=activation;write_state(state_file,state)
+            raise
+        activation['fallback']='succeeded'
+    if state is not None and state_file is not None:
+        state['desktop_activation']=activation;write_state(state_file,state)
+    return activation
 
 
 def desktop_prompt_receipts(state,prompt):
@@ -2066,9 +2941,7 @@ def main():
             if state.get('prompt_sent'):raise RuntimeError('prepared Desktop prompt was already sent')
             xdotool,window=wait_desktop_window(state['pid'])
             before=desktop_thread_ids(state['workdir'],state['started_at'])
-            subprocess.run([xdotool,'windowactivate','--sync',window],check=True)
-            if subprocess.run([xdotool,'getwindowpid',window],capture_output=True,text=True,check=True).stdout.strip()!=str(state['pid']):
-                raise RuntimeError('isolated Desktop window ownership changed before submission')
+            activate_desktop_window(xdotool,window,state['pid'],state,state_file)
             x,y,width,height=window_geometry(xdotool,window)
             subprocess.run([xdotool,'mousemove',str(x+width//2),str(y+height-120),'click','1'],check=True)
             submitted_at=time.time();subprocess.run([xdotool,'key','--window',window,'ctrl+Return'],check=True)
@@ -2084,22 +2957,25 @@ def main():
             print('Submitted the prepared prompt to the exact isolated Desktop window and observed one new task receipt; pid='+str(state['pid']))
         elif args.action=='events':
             if args.limit is not None and (args.limit<1 or args.limit>5000):raise RuntimeError('events limit must be from 1 through 5000')
-            rows=observed_events(state['events']);rows=rows[-args.limit:] if args.limit is not None else rows
+            rows=observed_events(state['events'],desktop_task_thread_ids(state));rows=rows[-args.limit:] if args.limit is not None else rows
             for row in rows:print(json.dumps(row))
         elif args.action=='hooks':
             if args.limit is not None and (args.limit<1 or args.limit>5000):raise RuntimeError('hooks limit must be from 1 through 5000')
-            rows=observed_hook_events(state['events']);rows=rows[-args.limit:] if args.limit is not None else rows
+            rows=observed_hook_events(state['events'],desktop_task_thread_ids(state));rows=rows[-args.limit:] if args.limit is not None else rows
             for row in rows:print(json.dumps(row))
         elif args.action=='usage':
-            print(json.dumps(participant_token_usage(state)))
+            usage=participant_token_usage(state);print(json.dumps(usage))
+            if usage.get('status')=='invalid_topology':
+                raise RuntimeError('Desktop usage accounting found invalid task topology')
         elif args.action=='calls':
             if args.limit is not None and (args.limit<1 or args.limit>10000):raise RuntimeError('calls limit must be from 1 through 10000')
             rows=observed_tool_calls(state);rows=rows[-args.limit:] if args.limit is not None else rows
             for row in rows:print(json.dumps(row))
         elif args.action=='audit':
-            rows=observed_events(state['events'])
+            task_threads,foreign_task_roots,invalid_task_topology=desktop_task_inventory(state)
+            rows=observed_events(state['events'],task_threads)
             failures=[row for row in rows if row.get('operation')!='initialize' and row.get('outcome')!='success']
-            hook_rows=observed_hook_events(state['events'])
+            hook_rows=observed_hook_events(state['events'],task_threads)
             hook_failures=[row for row in hook_rows if row.get('outcome')!='success']
             host_rows=observed_tool_calls(state)
             host_failures,resolved_host_failures=classify_host_failures(host_rows)
@@ -2109,10 +2985,16 @@ def main():
             open_cells=open_exec_cells(host_rows)
             policy_violations=call_policy_violations(host_rows)
             orchestration_policies=orchestration_policy_violations(policy_violations)
+            worker_policies=worker_policy_violations(policy_violations)
             orchestration_host_failures=[row for row in host_failures if is_orchestration_call(row)]
             threads={(row.get('thread_id'),row.get('parent_thread_id')) for row in rows if row.get('thread_id')}
-            print(json.dumps(dict(mcp_events=len(rows),hook_actions=len(hook_rows),host_calls=len(host_rows),threads=len(threads),operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,hook_failures=hook_failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=policy_violations,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells)))
-            if failures or hook_failures or orchestration_errors or orchestration_host_failures or orchestration_policies or open_sessions or open_cells:raise RuntimeError('Desktop orchestration audit found unsuccessful, forbidden, or non-terminal orchestration outcomes')
+            classification=classify_audit_findings(failures=failures,hook_failures=hook_failures,
+                host_failures=host_failures,policy_violations=policy_violations,
+                open_sessions=open_sessions,open_cells=open_cells,
+                foreign_task_roots=foreign_task_roots,invalid_task_topology=invalid_task_topology)
+            print(json.dumps(dict(mcp_events=len(rows),hook_actions=len(hook_rows),host_calls=len(host_rows),threads=len(threads),foreign_task_roots=foreign_task_roots,invalid_task_topology=invalid_task_topology,operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,hook_failures=hook_failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=policy_violations,worker_policy_violations=worker_policies,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells,**classification)))
+            if classification['evidence_integrity_invalidators']:
+                raise RuntimeError('Desktop audit found incomplete, unbound, contaminated, or non-terminal evidence')
         else:
             if alive:
                 os.killpg(state['pid'],signal.SIGTERM)

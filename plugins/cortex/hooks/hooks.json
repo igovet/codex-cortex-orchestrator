@@ -1,5 +1,5 @@
 {
-  "description": "Local Cortex source capture, recovery hints, compact receipts, exact registered-file integrity checks and pre-dispatch app-thread message denial. Requires ordinary Codex hook trust.",
+  "description": "Local Cortex source capture, recovery hints, compact receipts, exact registered-file integrity checks and deny-only pre-dispatch boundaries. Requires ordinary Codex hook trust.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -68,7 +68,7 @@
             "timeout": 3
           }
         ],
-        "matcher": "^(Bash|apply_patch|spawn_agent|Agent|mcp__cortex__.*|mcp__cortex_.*)$"
+        "matcher": "^(Bash|exec_command|write_stdin|terminal|read_file|write_file|apply_patch|spawn_agent|Agent|mcp__cortex__.*|mcp__cortex_.*)$"
       }
     ],
     "PreToolUse": [
@@ -80,7 +80,7 @@
             "timeout": 3
           }
         ],
-        "matcher": "^(apply_patch|mcp__codex_app__send_message_to_thread|send_message_to_thread)$"
+        "matcher": "^(Bash|exec_command|write_stdin|terminal|read_file|write_file|apply_patch|mcp__codex_app__send_message_to_thread|send_message_to_thread)$"
       }
     ],
     "SubagentStop": [

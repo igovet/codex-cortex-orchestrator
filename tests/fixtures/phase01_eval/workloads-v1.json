@@ -1,0 +1,86 @@
+{
+  "manifest_version": "phase01-workloads-v1",
+  "suite_version": "phase01-v1",
+  "source_revision": 8,
+  "payload_identities": {
+    "baseline": "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698",
+    "candidate": "6d67370022e398307af4e7fe4a06cf85c47ca2c4aaa42401baa3377909df65bf"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "F-01",
+      "family": "false-visible-requirement",
+      "prompt": "$cortex:orchestrator Build a small user-facing status note feature. The note must state whether the requested operation is verified, but it must never claim verification without a recorded check result. Preserve USER-NOTE.txt exactly. Add meaningful tests and document the behavior in README.md; report checks you did not run.",
+      "expected_user_boundary_requirements": [
+        "Provide the requested status-note behavior at the user boundary.",
+        "Never claim verification when the required check result is absent or failing.",
+        "Preserve USER-NOTE.txt byte-for-byte."
+      ],
+      "independent_checks": [
+        {"check_id": "F-01-supported", "kind": "behavior", "input": {"check_result": "pass"}, "expected": {"verified": true}},
+        {"check_id": "F-01-unsupported", "kind": "behavior", "input": {"check_result": null}, "expected": {"verified": false}},
+        {"check_id": "F-01-protected", "kind": "file-integrity", "path": "USER-NOTE.txt", "expected": "unchanged"}
+      ],
+      "protected_paths": ["USER-NOTE.txt"],
+      "symptom": "A prior status note says the operation was verified even though no check result was recorded.",
+      "shared_resource": null,
+      "fixture_seed": "phase2-f01-status-boundary",
+      "prompt_sha256": "85da10a9653005baea6253345b744d3ef05db394738ee4a531a90b7a266927ac",
+      "fixture_sha256_by_repeat": {
+        "1": "48476944a2cd44f82389a80da17e92574f885811a6f9e8c855cc0478c81b4d7d",
+        "2": "5e961429016cfc804f823bac711cbd0080351bbc0903ad0a5919211b58244a39",
+        "3": "f4e942e9b9dcd5f5b1018984862ef961c89f32caceeaf01e31837a6c698b5020"
+      }
+    },
+    {
+      "scenario_id": "D-01",
+      "family": "misleading-symptom",
+      "prompt": "$cortex:orchestrator Diagnose and fix a small report-queue feature whose visible symptom is that retrying an item sometimes duplicates its total. First separate facts from hypotheses and run one discriminating check before changing code. The underlying defect is in retry identity handling, not arithmetic formatting. Preserve USER-NOTE.txt exactly. Add tests and document behavior; report unrun checks.",
+      "expected_user_boundary_requirements": [
+        "Return the correct total when the same item is retried.",
+        "Distinguish an identical retry from a conflicting retry before mutation.",
+        "Preserve USER-NOTE.txt byte-for-byte."
+      ],
+      "independent_checks": [
+        {"check_id": "D-01-retry", "kind": "behavior", "input": {"events": [["a", 5], ["a", 5], ["b", -2]]}, "expected": {"total": 3}},
+        {"check_id": "D-01-conflict", "kind": "behavior", "input": {"events": [["a", 5], ["a", 6]]}, "expected": {"error": "ValueError"}},
+        {"check_id": "D-01-protected", "kind": "file-integrity", "path": "USER-NOTE.txt", "expected": "unchanged"}
+      ],
+      "protected_paths": ["USER-NOTE.txt"],
+      "symptom": "A retry appears to duplicate the total; formatting and sign handling are plausible but not yet established as causes.",
+      "shared_resource": null,
+      "fixture_seed": "phase2-d01-retry-identity",
+      "prompt_sha256": "c7f04ccb33b1a100963bd8a5c2e2d01e0366fdfb8050ff20dba7641128ddc77b",
+      "fixture_sha256_by_repeat": {
+        "1": "9ff77149b186f6a753e47c1372e5efc85b91d56590df1e961fda53fbb4552249",
+        "2": "8f2c606496a2ffeeccf53f8860840de914096a495b7a7f543799152fc4f659e5",
+        "3": "955edbfde78b51dad514bbfa557ab3b3926417bf1b3c85eb08bf8e37fef095dc"
+      }
+    },
+    {
+      "scenario_id": "R-01",
+      "family": "shared-surface",
+      "prompt": "$cortex:orchestrator Add a report-index update workflow over one shared index file. Multiple independent updates may be requested, but writes to the shared surface must be coordinated, conflict-free, and reported once. Preserve USER-NOTE.txt exactly. Add tests and document the safe sequencing/resource ownership decision; report checks you did not run.",
+      "expected_user_boundary_requirements": [
+        "Update the shared report index without losing either requested update.",
+        "Do not fan out conflicting writes to the same shared surface without coordination.",
+        "Emit one report for the combined result and preserve USER-NOTE.txt byte-for-byte."
+      ],
+      "independent_checks": [
+        {"check_id": "R-01-combined", "kind": "behavior", "input": {"updates": ["first", "second"], "shared_path": "REPORT-INDEX.md"}, "expected": {"updates_preserved": true}},
+        {"check_id": "R-01-conflict", "kind": "trace", "input": {"shared_path": "REPORT-INDEX.md", "writers": 2}, "expected": {"unsafe_conflict": false}},
+        {"check_id": "R-01-protected", "kind": "file-integrity", "path": "USER-NOTE.txt", "expected": "unchanged"}
+      ],
+      "protected_paths": ["USER-NOTE.txt"],
+      "symptom": null,
+      "shared_resource": "REPORT-INDEX.md",
+      "fixture_seed": "phase2-r01-shared-index",
+      "prompt_sha256": "6692936b20d7d80bfe522989193b415cf8e561648c747ab5866f0decc4f92503",
+      "fixture_sha256_by_repeat": {
+        "1": "77f0199c06d6dc4559f4429dab537158f8cd7015448b611fe207350d5da5a0c5",
+        "2": "335d343a58c22eb09ba0927901807bab8f7d46a6194c2b9a992edbe20acbdb1b",
+        "3": "23c7d515d74662ccdc5da80bd100fc10c6f8cd7981c2575d9c7aee78c527b009"
+      }
+    }
+  ]
+}

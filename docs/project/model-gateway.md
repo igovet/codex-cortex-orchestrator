@@ -76,6 +76,15 @@ uninstallation. The first MCP startup can occur after the client loaded its
 configuration: a new task or Desktop restart may be needed. No hot migration of
 existing clients is claimed. See the official [custom provider documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers).
 
+The proxy does not impose a request-count or connection-slot admission limit.
+`active_requests` is bookkeeping used only to let a controlled drain observe
+in-flight work; it cannot produce a capacity 503, `Retry-After`, or an admission
+queue. The outbound connector is likewise configured without a fixed total
+connection ceiling. Existing body, timeout, protocol, policy, and cancellation
+checks remain transport and security boundaries, not concurrency slots. This
+semantics applies to the isolated candidate runtime; the stable listener on
+port 8787 is not modified by candidate preparation or verification.
+
 When `gateway.enabled` changes from true to false, `ensure` drains and waits for
 the positively owned child to remove its runtime state, then reports `stopped`;
 it does not leave a healthy proxy running under a disabled configuration.
@@ -171,4 +180,8 @@ compaction model/effort policy and the recognized HTTP compaction compatibility
 fields described above; representation metadata changes only as required for
 those rewritten bytes. Redirects are not followed, so forwarded credentials cannot cross the
 fixed upstream boundary. Response header multiplicity and streamed body chunks
-are retained; client cancellation cancels only that request's upstream task.
+are retained; client cancellation cancels only that request's upstream task. The
+outbound HTTP client suppresses only aiohttp's implicit `Accept-Encoding` header,
+so an omitted caller header stays omitted while explicit values such as `gzip`
+or `br` are forwarded unchanged. Automatic response decompression is disabled,
+preserving raw upstream response bytes.

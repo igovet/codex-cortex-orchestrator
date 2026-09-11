@@ -167,3 +167,110 @@ def test_opaque_executor_route_requires_linked_child_and_complete_skill():
                    {'fork_turns':'all'}, {'requested_model':'gpt-5.6-sol'}):
         assert 'worker_assignment_policy_unverified' in {
             flag['violation'] for flag in check([{**row,**observed,**change}])}
+
+
+def test_opaque_executor_route_fallback_accepts_only_complete_actual_route():
+    request={'message':'gAAAAA'+'x'*100,'task_name':'author_spec',
+             'fork_turns':'none'}
+    row={'thread_id':'parent','role':'coordinator','tool':'spawn_agent','outcome':'success',
+         **OBSERVER['safe_call_metadata']('spawn_agent',json.dumps(request))}
+    paths={'/root/author_spec':'child'};edges={'child':'parent'}
+    details={'child':{'agent_role':'technical_writer','model':'gpt-5.6-luna','reasoning_effort':'medium'}}
+    read={'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
+          'wrapper_outcome':'success','worker_skill_complete':True}
+    evidence=OBSERVER['native_spawn_route_metadata']
+    observed=evidence(row,paths,edges,details,[read])
+    assert observed['route_policy_provenance']=='requested_route_unavailable_actual_route_verified'
+    assert OBSERVER['call_policy_violations']([{**row,**observed}])==[]
+
+    negatives=(
+        ({**observed,'spawned_thread_id':None},),
+        ({**observed,'native_child_path_verified':False},),
+        ({**observed,'validated_parent_edge':False},),
+        ({**observed,'worker_skill_receipt':'partial'},),
+        ({**observed,'observed_worker_profile':'senior_consultant'},),
+        ({**observed,'observed_worker_model':'gpt-5.6-terra'},),
+        ({**observed,'observed_worker_effort':'low'},),
+        ({**observed,'fork_turns':'all'},),
+        ({**observed,'worker_route_evidence':'ambiguous'},),
+    )
+    for (change,) in negatives:
+        assert 'worker_assignment_policy_unverified' in {
+            item['violation'] for item in OBSERVER['call_policy_violations']([{**row,**change}])}
+
+    assert 'worker_assignment_policy_unverified' in {
+        item['violation'] for item in OBSERVER['call_policy_violations'](
+            [{**row,**observed,'requested_model':'gpt-5.6-luna'}])}
+    duplicate_reads=[read,dict(read)]
+    assert evidence(row,paths,edges,details,duplicate_reads)=={}
+    assert evidence(row,{'/root/author_spec':['child','other']},edges,details,[read])=={}
+    assert evidence(row,paths,{'child':['parent','other']},details,[read])=={}
+
+
+def test_opaque_route_ignores_validated_reference_reads_when_joining_skill_receipt():
+    request={'message':'gAAAAA'+'x'*100,'task_name':'author_spec','fork_turns':'none'}
+    row={'thread_id':'parent','role':'coordinator','tool':'spawn_agent','outcome':'success',
+         **OBSERVER['safe_call_metadata']('spawn_agent',json.dumps(request))}
+    paths={'/root/author_spec':'child'};edges={'child':'parent'}
+    details={'child':{'agent_role':'technical_writer','model':'gpt-5.6-luna',
+                      'reasoning_effort':'medium'}}
+    reads=[
+        {'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
+         'wrapper_outcome':'success','worker_skill_complete':True},
+        {'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
+         'wrapper_outcome':'success','skill_instruction_read':True},
+    ]
+    observed=OBSERVER['native_spawn_route_metadata'](row,paths,edges,details,reads)
+    assert observed['worker_skill_receipt']=='complete_success'
+    assert OBSERVER['call_policy_violations']([{**row,**observed}])==[]
+
+
+def test_native_route_coalesces_started_completed_lifecycle_only():
+    recorder=OBSERVER['record_agent_activity']
+    evidence=OBSERVER['native_spawn_route_metadata']
+    request={'message':'gAAAAA'+'x'*100,'task_name':'author_spec','fork_turns':'none'}
+    row={'thread_id':'parent','role':'coordinator','tool':'spawn_agent','outcome':'success',
+         **OBSERVER['safe_call_metadata']('spawn_agent',json.dumps(request))}
+    edges={'child':'parent'}
+    details={'child':{'agent_role':'technical_writer','model':'gpt-5.6-luna','reasoning_effort':'medium'}}
+    read={'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
+          'wrapper_outcome':'success','worker_skill_complete':True}
+
+    def route(kinds,child_ids=None):
+        paths={};phases={};duplicates=set()
+        child_ids=child_ids or ['child']*len(kinds)
+        for kind,child in zip(kinds,child_ids):
+            recorder({'type':'SubAgentActivity','kind':kind,'agent_path':'/root/author_spec',
+                      'agent_thread_id':child},paths,phases,duplicates)
+        return paths,duplicates
+
+    paths,duplicates=route(['started','completed'])
+    assert paths=={'/root/author_spec':'child'}
+    assert duplicates==set()
+    assert evidence(row,paths,edges,details,[read])['spawned_thread_id']=='child'
+
+    for kinds,child_ids in ((['started','started'],None),
+                            (['completed','completed'],None),
+                            (['started','completed'],['child','other'])):
+        paths,duplicates=route(kinds,child_ids)
+        assert duplicates=={'/root/author_spec'}
+        assert evidence(row,paths,edges,details,[read],
+                        {'agent_paths':duplicates,'edges':set()})=={}
+
+
+def test_marker_false_or_nonboolean_missing_route_fields_fail_closed():
+    base={'thread_id':'parent','role':'coordinator','tool':'spawn_agent','outcome':'success',
+          'task_name':'author_spec','fork_turns':'none',
+          'observed_worker_profile':'technical_writer',
+          'observed_worker_model':'gpt-5.6-luna','observed_worker_effort':'high',
+          'spawned_thread_id':'child','native_child_path_verified':True,
+          'validated_parent_edge':True,'worker_skill_receipt':'complete_success',
+          'worker_route_evidence':'native_child_and_complete_skill'}
+    check=OBSERVER['call_policy_violations']
+    for marker in (False,None,'true',1):
+        rows=check([{**base,'assignment_content_unavailable':marker}])
+        assert 'worker_assignment_policy_unverified' in {row['violation'] for row in rows}
+
+    valid=check([{**base,'assignment_content_unavailable':False,
+                  'requested_model':'gpt-5.6-luna','requested_reasoning_effort':'high'}])
+    assert 'worker_assignment_policy_unverified' not in {row['violation'] for row in valid}

@@ -1,0 +1,33 @@
+{
+  "suite_version": "phase3-consultation-v1",
+  "manifest_version": "phase3-consultation-manifest-v1",
+  "phase": 3,
+  "purpose": "Offline consultation-effect protocol freeze; no live execution or quality claim.",
+  "case_count": 5,
+  "paired_repeats": 3,
+  "cases": [
+    {"case_id": "T-01", "family": "material-consequential-decision", "kind": "qualifying"},
+    {"case_id": "T-02", "family": "contradictory-hypothesis-bound-evidence", "kind": "qualifying"},
+    {"case_id": "T-03", "family": "repeated-failure-surprise-replanning", "kind": "qualifying"},
+    {"case_id": "N-01", "family": "routine-reversible-work", "kind": "negative-control"},
+    {"case_id": "N-02", "family": "active-incident-recovery", "kind": "negative-control"}
+  ],
+  "condition_independent_identity": ["suite_version", "case_id", "repeat", "prompt_sha256", "fixture_sha256", "oracle_sha256", "reset_sha256", "dependency_envelope_sha256", "payload_identity"],
+  "payload_identities": {"baseline": "coordinator-supplied-unchanged-payload", "consultation_candidate": "coordinator-supplied-candidate-payload"},
+  "model_envelope": {"coordinator": {"model": "gpt-5.6-luna", "reasoning_effort": "high"}, "workers": {"allowed_models": ["gpt-5.6-luna"], "allowed_reasoning_efforts": ["medium", "high"]}, "inherited_conversation": false, "astra_allowed": false},
+  "dependency_envelope": "python3-standard-library-only; host, gateway, provider, Codebase Memory and dependency availability are recorded separately",
+  "randomization": {"seed": "phase3-consultation-v1-fixed-seed-20260910", "assignment_custody": "coordinator", "mapping_storage": "coordinator-only; never in blinded rows or scorer input"},
+  "blind_scoring": {"join_key": "blind_pair_id", "scorer_inputs": ["suite_version", "case_id", "family", "kind", "repeat", "task_identity", "terminal_receipt", "quality", "consultation"], "excluded_from_scorer_inputs": ["run_id", "arm", "condition", "payload_mapping", "diagnostics", "cost", "latency"], "no_condition_mapping": true, "scorer_blind": true, "reveal_authority": "coordinator"},
+  "scorecard": {"quality": ["critical_decision_defects", "requirement_coverage", "discriminating_check_use", "false_consultation_activation", "missed_qualifying_transition", "protocol_pass", "acceptance_regression", "protected_content_preserved"], "overhead": ["consultations_per_transition", "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens", "wall_seconds", "report_bytes", "duplicate_evidence", "recovery_delay_seconds"]},
+  "negative_controls": {"case_ids": ["N-01", "N-02"], "specificity_target": 0.80, "expected_consultation_count": 0},
+  "promotion": {"coordinator_owned": true, "runtime_gate": false, "automatic_acceptance": false, "criteria": ["fewer critical decision defects than unchanged baseline", "no acceptance or protocol regression", "at least 80% specificity on negative controls", "median no more than one consultation per qualifying transition"], "decision_values": ["promote_candidate", "revise_or_replicate", "unverified"]},
+  "stop_conditions": ["identity_or_control_asymmetry", "arm_leakage", "missing_terminal_or_audit_evidence", "raw_or_private_content_exposure", "required_receipt_unavailable", "external_availability_prevents_comparable_cell"],
+  "null_reasons": ["host_unavailable", "provider_unavailable", "gateway_unavailable", "dependency_unavailable", "codebase_memory_unavailable", "required_receipt_unavailable", "not_observed"],
+  "availability_policy": "Unavailable observations are excluded cells with null quality, cost and latency; availability is never a consultation-quality score, adaptive outcome, rank, gate or acceptance decision.",
+  "execution_status": "offline-only; live cells, reveal, consultation-effect claims and adaptive activation are prohibited until coordinator-owned prerequisites are accepted",
+  "workloads_sha256": "f0d687f5e29f45c3ceac51a7ff4b576c81871c65d7bcf6d7870fa8932e18e720",
+  "workloads_canonical_sha256": "4a466836bc3894e6f6645f0b0a9761909210a8f3ce7ccace7bc74c130828b6a0",
+  "ledger_schema_sha256": "828bdc37faf5f269052951ff1079bfcf08ea761bb200922845b8403bc977bae4",
+  "reset_sha256": "a247d15f29f93ebb0d72400ebef115d249d81334487f1c5467caf3ff4badd54e",
+  "oracle_sha256": "4ef3fe5fceb5c9a85e4bf875309577e2fbd90b52c731855b0dc59936aeb40a06"
+}

@@ -1,0 +1,1 @@
+$cortex:orchestrator Investigate the configuration source of truth and write FACTS.md. Record the exact DEFAULT_TIMEOUT_SECONDS, RETRY_LIMIT, and MODE values, with references to the source files. Do not infer values from examples. Preserve USER-NOTE.txt byte-for-byte. Add or update tests only if useful, and report checks you did not run.
